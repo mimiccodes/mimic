@@ -19,7 +19,7 @@ use targets::Target;
     long_about = "Mimic: an array-based, massively parallel, memory-safe compiled language.\n\n\
                   Every primitive has a glyph and a word: `⍳ 10 ▷ +/` is `iota 10 |> sum`.\n\
                   Run `mimic glyphs` for the full table.",
-    after_help = "Examples:\n  mimic create hello && cd hello && mimic run\n  mimic run script.mim --release\n  mimic build --release --target x86_64-linux-gnu\n  mimic install github.com/harcorp/ai.git"
+    after_help = "Examples:\n  mimic create hello && cd hello && mimic run\n  mimic run script.mim --release\n  mimic build                     # fastest binary (release is the default)\n  mimic build --target x86_64-linux-gnu\n  mimic install github.com/harcorp/ai.git"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,10 +28,12 @@ struct Cli {
 
 #[derive(Args, Clone, Copy)]
 struct ProfileArgs {
-    /// Build with the debug profile (default): no optimisation, leak check on exit
+    /// Debug profile: no optimisation, debug info, leak check on exit
+    /// (default for `run`)
     #[arg(long, conflicts_with = "release")]
     debug: bool,
-    /// Build with the release profile: optimised (-O3)
+    /// Release profile: fastest code — -O3, host CPU features, nets on
+    /// (default for `build`)
     #[arg(long)]
     release: bool,
     /// Do not compile pure functions to interaction nets (everything native)
@@ -39,8 +41,11 @@ struct ProfileArgs {
     no_net: bool,
 }
 
-fn profile_of(input: &Input, args: ProfileArgs) -> Profile {
-    let mut p = Profile::for_input(input, args.release);
+/// `default_release`: `build` produces the fastest binary unless told otherwise;
+/// `run` defaults to debug for quick iteration with the leak check.
+fn profile_of(input: &Input, args: ProfileArgs, default_release: bool) -> Profile {
+    let release = args.release || (default_release && !args.debug);
+    let mut p = Profile::for_input(input, release);
     p.net = !args.no_net;
     p
 }
@@ -233,7 +238,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net } => {
             let input = driver::input_from(file.as_deref())?;
-            let prof = profile_of(&input, profile);
+            let prof = profile_of(&input, profile, true);
             let mut targets = vec![match &target {
                 Some(t) => Target::parse(t)?,
                 None => Target::host(),
@@ -256,7 +261,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             if !input.is_bin() {
                 return Err("this is a library project; there is nothing to run (add `bin` to `kind` in mim.mim)".into());
             }
-            let prof = profile_of(&input, profile);
+            let prof = profile_of(&input, profile, false);
             let a = driver::build(&input, &prof, &Target::host(), false, false)?;
             status("Running", shown(&a.path));
             let st = std::process::Command::new(&a.path).args(&args).status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;

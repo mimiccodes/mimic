@@ -235,7 +235,11 @@ pub fn runtime_object(target: &Target, release: bool) -> Result<PathBuf, String>
     fs::write(dir.join("mimic_rt.h"), RUNTIME_H).map_err(|e| e.to_string())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = cc(target)?;
-    c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]).arg(&src).arg("-o").arg(&tmp);
+    c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);
+    if release && target.zig.is_none() {
+        c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
+    }
+    c.arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
     fs::rename(&tmp, &obj).map_err(|e| e.to_string())?;
     Ok(obj)

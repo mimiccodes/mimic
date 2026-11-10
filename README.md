@@ -44,6 +44,7 @@ The roadmap is in [docs/design.md](docs/design.md).
 | [docs/ffi.md](docs/ffi.md) | C FFI |
 | [docs/cli.md](docs/cli.md) | every `mimic` command |
 | [docs/net.md](docs/net.md) | the interaction-net runtime and `.mnet` format |
+| [BENCHMARK.md](BENCHMARK.md) | how speed is measured, current numbers, targets |
 
 ## Building mimic
 

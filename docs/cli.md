@@ -23,7 +23,9 @@
 
 ## Profiles
 
-* **`--debug`** is the default. It builds at `opt = 0`, includes debug info, and checks for leaks at exit.
+* **`mimic build` produces the fastest binary by default** (the release profile). It uses `opt = 3`, the host CPU's full instruction set for both the program and the runtime, and interaction nets for parallelism. Pass `--debug` for a debug build.
+* **`mimic run` defaults to `--debug`**, for fast compiles and the leak check at exit. Pass `--release` to run the fast build.
+* **`--debug`** builds at `opt = 0`, includes debug info, and checks for leaks at exit.
 * **`--release`** builds at `opt = 3`.
 
 Native builds target the host CPU in both profiles; cross builds (`--target`) use a generic CPU for that triple.

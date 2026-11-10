@@ -85,6 +85,10 @@ fn create_build_cross() {
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "[0 1 2 3 4 5 6 7 8 9]\n45\n[9 8 7]\n285\nhello from demo\n");
+    // `mimic build` with no flags produces the fastest (release) binary
+    let out = mimic().current_dir(&proj).arg("build").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(proj.join("target/release/demo").is_file(), "build must default to the release profile");
     let out = mimic().current_dir(&proj).args(["build", "--release", "--target", "x86_64-linux-gnu"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let elf = std::fs::read(proj.join("target/release/x86_64-linux-gnu/demo")).unwrap();
