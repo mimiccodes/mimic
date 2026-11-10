@@ -44,6 +44,9 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 |---|---|---|
 | C1–C4 | Stable error codes, `mimic explain`, `check/build/run --emit-json` ([diagnostics.md](diagnostics.md)), fix suggestions with exact edits, `check --fix`, type errors reported at the call site | ✅ |
 | C5–C7 | `--json` for `mod list` and `targets`, inferred types per span (`--types`), LSP server | |
+| A1, A2, A5 | Embedded LLD and Clang (`mimic cc`, `mimic ld.lld`), in-process archive writer; native macOS builds without Zig | ✅ |
+| A3 (musl), A4, A6 | 30 of the 33 `*-linux-musl*` targets self-contained (bundled musl 1.2.5 and compiler-rt, built on first use); every Zig target parses (`mimic targets`, `--cpus`); Mimic code uses Clang's CPU/ABI per target | ✅ |
+| A (rest) | glibc stubs, mingw-w64, wasi-libc, BSD stubs, macOS SDK stubs; `--cpu`; own static LLVM build (no Homebrew z3/zstd) | |
 | A | No Zig: embedded LLD, Clang and LLVM, bundled libc for every target (musl, glibc stubs 2.0–2.44, mingw-w64, macOS stubs, wasi-libc, BSD stubs), compiler-rt; every Zig target via `--target arch-os-abi[.version]` and `--cpu`; one static `mimic` binary | |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |

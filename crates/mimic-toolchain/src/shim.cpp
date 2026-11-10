@@ -70,3 +70,31 @@ extern "C" int mimic_write_archive(const char *out, int kind, int n, const char 
         return fail(std::move(e));
     return 0;
 }
+
+#include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/Triple.h"
+
+// List the CPU models (what = 0) or features (what = 1) LLVM knows for a triple.
+extern "C" int mimic_list_cpus(const char *triple, int what, void (*cb)(const char *, const char *, void *), void *ud) {
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    std::string err;
+    llvm::Triple tt(triple);
+    const llvm::Target *t = llvm::TargetRegistry::lookupTarget(tt, err);
+    if (!t)
+        return 1;
+    std::unique_ptr<llvm::MCSubtargetInfo> sti(t->createMCSubtargetInfo(tt, "", ""));
+    if (!sti)
+        return 1;
+    if (what == 0) {
+        for (const auto &d : sti->getAllProcessorDescriptions())
+            cb(d.key(), "", ud);
+    } else {
+        for (const auto &f : sti->getAllProcessorFeatures())
+            cb(f.key(), f.desc(), ud);
+    }
+    return 0;
+}

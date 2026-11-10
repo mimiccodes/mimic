@@ -55,6 +55,12 @@ pub struct Settings {
     pub export_pub: bool,
     /// Compile pure functions to interaction nets (parallel by default).
     pub use_net: bool,
+    /// CPU model; `None` = the host CPU for native builds, `generic` otherwise.
+    pub cpu: Option<String>,
+    /// LLVM feature string (`+d,+m,-sse4.2`); `None` = the CPU's defaults.
+    pub features: Option<String>,
+    /// Target ABI name (`lp64d`, `ilp32f`, `elfv2`…), as Clang chooses it.
+    pub abi: Option<String>,
 }
 
 type R<T> = Result<T, String>;
@@ -84,19 +90,37 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         None => TargetMachine::get_default_triple(),
     };
     let target = Target::from_triple(&triple).s()?;
-    let (cpu, features) = if settings.triple.is_none() {
+    let (mut cpu, mut features) = if settings.triple.is_none() {
         (TargetMachine::get_host_cpu_name().to_string(), TargetMachine::get_host_cpu_features().to_string())
     } else {
         ("generic".to_string(), String::new())
     };
+    if let Some(c) = &settings.cpu {
+        cpu = c.clone();
+        if settings.features.is_none() && settings.triple.is_none() {
+            features.clear(); // an explicit CPU replaces the host's feature list
+        }
+    }
+    if let Some(f) = &settings.features {
+        features = f.clone();
+    }
     let level = match settings.opt_level {
         0 => OptimizationLevel::None,
         1 => OptimizationLevel::Less,
         2 => OptimizationLevel::Default,
         _ => OptimizationLevel::Aggressive,
     };
+    let mut opts = inkwell::targets::TargetMachineOptions::new()
+        .set_cpu(&cpu)
+        .set_features(&features)
+        .set_level(level)
+        .set_reloc_mode(RelocMode::PIC)
+        .set_code_model(CodeModel::Default);
+    if let Some(abi) = &settings.abi {
+        opts = opts.set_abi(abi);
+    }
     let tm = target
-        .create_target_machine(&triple, &cpu, &features, level, RelocMode::PIC, CodeModel::Default)
+        .create_target_machine_from_options(&triple, opts)
         .ok_or_else(|| format!("LLVM cannot create a target machine for `{}`", triple.as_str().to_string_lossy()))?;
 
     let ctx = Context::create();

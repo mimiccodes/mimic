@@ -23,11 +23,13 @@ pub enum Toolchain {
 pub enum Sysroot {
     /// macOS: an SDK (headers and libSystem stubs).
     Darwin { sdk: PathBuf, min_os: String, sdk_version: String },
+    /// Linux with musl, built from the bundled sources: fully static executables.
+    Musl { triple: String, root: PathBuf, compiler_rt: PathBuf },
 }
 
 pub fn select(target: &Target) -> Result<Toolchain, String> {
     let forced = std::env::var("MIMIC_TOOLCHAIN").ok();
-    if forced.as_deref() != Some("zig") && mimic_toolchain::EMBEDDED && let Some(s) = embedded_sysroot(target) {
+    if forced.as_deref() != Some("zig") && mimic_toolchain::EMBEDDED && let Some(s) = embedded_sysroot(target)? {
         return Ok(Toolchain::Embedded(s));
     }
     if let Some(z) = zig() {
@@ -42,16 +44,33 @@ pub fn select(target: &Target) -> Result<Toolchain, String> {
     ))
 }
 
-fn embedded_sysroot(target: &Target) -> Option<Sysroot> {
-    // Phase A step 1: native macOS builds. Linux (musl), Windows, WASI and the
-    // BSDs follow as their libcs are bundled.
+fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
     if target.zig.is_none() && cfg!(target_os = "macos") {
-        let sdk = macos_sdk()?;
+        let Some(sdk) = macos_sdk() else { return Ok(None) };
         let sdk_version = tool_output("xcrun", &["--sdk", "macosx", "--show-sdk-version"]).unwrap_or_else(|| "11.0".into());
         let min_os = tool_output("sw_vers", &["-productVersion"]).unwrap_or_else(|| "11.0".into());
-        return Some(Sysroot::Darwin { sdk, min_os, sdk_version });
+        return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version }));
     }
-    None
+    if let Some(triple) = &target.llvm
+        && target.os == "linux"
+        && triple.rsplit('-').next().is_some_and(|abi| abi.starts_with("musl"))
+        && mimic_toolchain::musl::arch(triple).is_some()
+    {
+        let cache = libc_cache();
+        let musl = mimic_toolchain::musl::ensure(&cache, triple)?;
+        let mut flags = mimic_toolchain::musl::target_flags(triple);
+        flags.push(format!("--sysroot={}", musl.root.display()));
+        flags.push("-resource-dir".into());
+        flags.push(mimic_toolchain::resource_dir(&cache)?.display().to_string());
+        let compiler_rt = mimic_toolchain::compiler_rt::ensure(&cache, triple, &flags)?;
+        return Ok(Some(Sysroot::Musl { triple: triple.clone(), root: musl.root, compiler_rt }));
+    }
+    Ok(None)
+}
+
+/// Where target libraries (libc, compiler-rt, headers) are built and kept.
+fn libc_cache() -> PathBuf {
+    mimic_project::packages::cache_dir().join("libc")
 }
 
 fn tool_output(cmd: &str, args: &[&str]) -> Option<String> {
@@ -79,13 +98,13 @@ fn self_exe() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mimic"))
 }
 
-/// Clang's own headers (stddef.h, stdarg.h, arm_neon.h, …).
+/// Clang's own headers (stddef.h, stdarg.h, arm_neon.h, …), bundled in the binary.
 fn resource_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("MIMIC_CLANG_RESOURCE_DIR") {
         return PathBuf::from(d);
     }
-    // until the headers are bundled (Phase A3): the LLVM the compiler was built with
-    PathBuf::from(mimic_toolchain::LLVM_PREFIX).join("lib/clang").join(mimic_toolchain::LLVM_MAJOR)
+    mimic_toolchain::resource_dir(&libc_cache())
+        .unwrap_or_else(|_| PathBuf::from(mimic_toolchain::LLVM_PREFIX).join("lib/clang").join(mimic_toolchain::LLVM_MAJOR))
 }
 
 /// A C compiler command for `target`, ready for `-c src -o obj` and flags.
@@ -94,12 +113,17 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
         Toolchain::Embedded(sys) => {
             let mut c = Command::new(self_exe());
             c.arg("cc").arg("-resource-dir").arg(resource_dir());
-            if let Some(t) = &target.llvm {
+            if let Some(t) = &target.llvm
+                && !matches!(sys, Sysroot::Musl { .. })
+            {
                 c.arg(format!("--target={t}"));
             }
             match sys {
                 Sysroot::Darwin { sdk, min_os, .. } => {
                     c.arg("-isysroot").arg(sdk).arg(format!("-mmacosx-version-min={min_os}"));
+                }
+                Sysroot::Musl { triple, root, .. } => {
+                    c.args(mimic_toolchain::musl::target_flags(triple)).arg(format!("--sysroot={}", root.display()));
                 }
             }
             c
@@ -152,6 +176,23 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
                 c.arg(format!("-l{l}"));
             }
             c.arg("-lSystem");
+            c
+        }
+        Toolchain::Embedded(Sysroot::Musl { root, compiler_rt, .. }) => {
+            let lib = root.join("usr/lib");
+            let mut c = Command::new(self_exe());
+            c.arg("ld.lld").arg("-static").arg("--gc-sections").arg("-o").arg(job.output);
+            c.arg(lib.join("crt1.o")).arg(lib.join("crti.o")).args(job.objects);
+            c.arg(format!("-L{}", lib.display()));
+            for s in &job.search {
+                c.arg(format!("-L{}", s.display()));
+            }
+            c.arg("--start-group");
+            for l in &job.libs {
+                c.arg(format!("-l{l}"));
+            }
+            c.arg(lib.join("libc.a")).arg(compiler_rt).arg("--end-group");
+            c.arg(lib.join("crtn.o"));
             c
         }
         Toolchain::Zig(_) | Toolchain::System => {
@@ -211,4 +252,48 @@ pub fn describe(tc: &Toolchain) -> &'static str {
         Toolchain::Zig(_) => "zig",
         Toolchain::System => "system",
     }
+}
+
+/// The CPU, features and ABI Clang uses for `triple` by default, so Mimic code
+/// matches the C code (runtime, libc) it is linked with. Cached per triple.
+pub fn clang_defaults(triple: &str) -> Option<(String, String, Option<String>)> {
+    if !mimic_toolchain::EMBEDDED {
+        return None;
+    }
+    let cache = libc_cache().join("targets");
+    let file = cache.join(format!("{triple}.txt"));
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(_) => {
+            let out = Command::new(self_exe())
+                .args(["cc", &format!("--target={triple}"), "-###", "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
+                .output()
+                .ok()?;
+            let all = String::from_utf8_lossy(&out.stderr).into_owned();
+            let line = all.lines().rev().find(|l| l.contains("\"-cc1\""))?.to_string();
+            let words: Vec<String> = line.split("\" \"").map(|w| w.trim_matches([' ', '"']).to_string()).collect();
+            let mut cpu = String::from("generic");
+            let mut feats = Vec::new();
+            let mut abi = String::new();
+            for w in words.windows(2) {
+                match w[0].as_str() {
+                    "-target-cpu" => cpu = w[1].clone(),
+                    // clang-only pseudo-feature; the float ABI comes from the triple
+                    "-target-feature" if w[1] == "+soft-float-abi" => {}
+                    "-target-feature" => feats.push(w[1].clone()),
+                    "-target-abi" => abi = w[1].clone(),
+                    _ => {}
+                }
+            }
+            let t = format!("{cpu}\n{}\n{abi}\n", feats.join(","));
+            let _ = std::fs::create_dir_all(&cache);
+            let _ = mimic_toolchain::jobs::write_atomic(&file, t.as_bytes());
+            t
+        }
+    };
+    let mut l = text.lines();
+    let cpu = l.next()?.to_string();
+    let features = l.next().unwrap_or("").to_string();
+    let abi = l.next().filter(|a| !a.is_empty()).map(String::from);
+    Some((cpu, features, abi))
 }

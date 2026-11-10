@@ -19,6 +19,9 @@
 | `mimic update [library]` | Fast-forward every installed library, or just one. |
 | `mimic uninstall <library>` | Remove an installed library. |
 | `mimic glyphs` | Print the glyph ↔ word ↔ digraph table. |
+| `mimic targets [--cpus ARCH] [--features ARCH] [--json]` | List every target (61 architectures, 48 OSes, 30 ABIs, 108 libc targets) and whether it builds with the embedded toolchain. See [targets.md](targets.md). |
+| `mimic cc …`, `mimic c++ …` | The embedded Clang C/C++ compiler. |
+| `mimic ld.lld …`, `mimic ld64.lld …`, `mimic lld-link …`, `mimic wasm-ld …` | The embedded LLD linker, in its ELF, Mach-O, COFF and WebAssembly flavours. |
 | `mimic net run <file.mnet> [--release] [--stats] [--threads N]` | Reduce a raw interaction net and print the value of `@main`. This is a runtime developer tool; see [net.md](net.md). |
 | `mimic net fmt <file.mnet>` | Print a net back in canonical form. |
 

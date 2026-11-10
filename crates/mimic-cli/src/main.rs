@@ -132,6 +132,18 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
+    /// List every target: architectures, OSes, ABIs, libc targets and their status
+    Targets {
+        /// List the CPU models of an architecture (e.g. `--cpus aarch64`), for `--cpu`
+        #[arg(long, value_name = "ARCH")]
+        cpus: Option<String>,
+        /// List the CPU features of an architecture
+        #[arg(long, value_name = "ARCH")]
+        features: Option<String>,
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Explain an error code (`mimic explain E0401`), or list them all
     Explain {
         /// A code (E0401) or its name (type-mismatch); omit to list every code
@@ -366,6 +378,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Targets { cpus, features, json } => targets_cmd(cpus.as_deref(), features.as_deref(), json),
         Cmd::Run { file, profile, emit_json, args } => {
             let built = (|| -> Result<driver::Artifact, Report> {
                 let input = driver::input_from(file.as_deref())?;
@@ -443,6 +456,70 @@ fn fail(r: Report, json: bool, command: &str, json_to_stderr: bool) -> Result<Ex
         println!("{v}");
     }
     Ok(ExitCode::FAILURE)
+}
+
+fn targets_cmd(cpus: Option<&str>, features: Option<&str>, json: bool) -> Result<ExitCode, String> {
+    use serde_json::json;
+    use targets::{ABIS, ARCHES, Backend, LIBC_TARGETS, OSES};
+    if let Some(arch) = cpus.or(features) {
+        let t = Target::parse(&format!("{arch}-freestanding"))?;
+        let triple = t.llvm.unwrap();
+        let list = mimic_toolchain::cpus(&triple, features.is_some()).ok_or_else(|| format!("no CPU list for `{arch}`"))?;
+        if json {
+            let v: Vec<_> = list.iter().map(|(k, d)| if d.is_empty() { json!(k) } else { json!({"name": k, "description": d}) }).collect();
+            println!("{}", serde_json::Value::Array(v));
+        } else {
+            for (k, d) in list {
+                if d.is_empty() { println!("{k}") } else { println!("{k:<32} {d}") }
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let status = |t: &str| -> &'static str {
+        match Target::parse(t) {
+            Err(_) => "no code generator",
+            Ok(tg) => {
+                let triple = tg.llvm.clone().unwrap_or_default();
+                if tg.os == "linux" && tg.abi.starts_with("musl") && mimic_toolchain::musl::arch(&triple).is_some() {
+                    "embedded"
+                } else if tg.os == "macos" && cfg!(target_os = "macos") {
+                    "embedded (macOS SDK)"
+                } else {
+                    "zig fallback"
+                }
+            }
+        }
+    };
+    if json {
+        let v = json!({
+            "arches": ARCHES.iter().map(|(n, l, b)| json!({"name": n, "llvm": l, "backend": b.as_str()})).collect::<Vec<_>>(),
+            "oses": OSES.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
+            "abis": ABIS,
+            "libc": LIBC_TARGETS.iter().map(|t| json!({"target": t, "status": status(t)})).collect::<Vec<_>>(),
+            "native": Target::host().arch + "-" + std::env::consts::OS,
+        });
+        println!("{v}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let with_backend = ARCHES.iter().filter(|a| a.2 == Backend::Yes).count();
+    println!("Architectures ({}, {with_backend} with a code generator in this build):", ARCHES.len());
+    for (n, _, b) in ARCHES {
+        let mark = match b {
+            Backend::Yes => "",
+            Backend::Experimental => "  (LLVM experimental: not in this build)",
+            Backend::None => "  (no LLVM backend)",
+        };
+        println!("  {n}{mark}");
+    }
+    println!("\nOperating systems ({}):\n  {}", OSES.len(), OSES.iter().map(|o| o.0).collect::<Vec<_>>().join(" "));
+    println!("\nABIs ({}):\n  {}", ABIS.len(), ABIS.join(" "));
+    println!("\nTargets with a libc, buildable as complete executables ({}):", LIBC_TARGETS.len());
+    for t in LIBC_TARGETS {
+        println!("  {t:<28} {}", status(t));
+    }
+    println!("\nWrite targets as <arch>-<os>[-<abi>][.<version>], e.g. x86_64-linux-musl, x86_64-linux-gnu.2.17, aarch64-macos.13.0");
+    println!("`embedded` = built with the tools inside mimic; `zig fallback` = needs Zig until its libc is bundled.");
+    Ok(ExitCode::SUCCESS)
 }
 
 fn explain(code: Option<&str>, json: bool) -> Result<ExitCode, String> {

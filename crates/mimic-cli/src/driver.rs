@@ -200,7 +200,13 @@ use crate::toolchain::{self, LinkJob, Toolchain};
 /// Compile (and cache) the C runtime for a target.
 pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<PathBuf, String> {
     let key = mimic_syntax::fnv1a(
-        format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}", target.name(), toolchain::describe(tc)).as_bytes(),
+        format!(
+            "{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}{:?}",
+            target.name(),
+            toolchain::describe(tc),
+            target.llvm,
+        )
+        .as_bytes(),
     );
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -271,6 +277,14 @@ fn codegen_and_link(
     let ir = dir.join(format!("{name}.ll"));
     let net = dir.join(format!("{name}.mnet"));
     let is_exe = input.is_bin();
+    // cross targets: the same CPU/features/ABI as Clang uses for the C side
+    let (cpu, features, abi) = match &target.llvm {
+        Some(t) => match toolchain::clang_defaults(t) {
+            Some((c, f, a)) => (Some(c), Some(f), a),
+            None => (None, None, None),
+        },
+        None => (None, None, None),
+    };
     mimic_codegen::compile(
         program,
         &mimic_codegen::Settings {
@@ -280,6 +294,9 @@ fn codegen_and_link(
             emit_main: is_exe,
             export_pub: !is_exe,
             use_net: profile.net,
+            cpu: cpu.clone(),
+            features: features.clone(),
+            abi: abi.clone(),
         },
         &obj,
         emit_ir.then_some(ir.as_path()),

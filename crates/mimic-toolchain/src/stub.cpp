@@ -16,3 +16,4 @@ extern "C" int mimic_write_archive(const char *, int, int, const char **, char *
     err[i] = 0;
     return 1;
 }
+extern "C" int mimic_list_cpus(const char *, int, void (*)(const char *, const char *, void *), void *) { return 1; }

@@ -5,12 +5,21 @@
 //! global state and signal handlers never touch the compiler's.
 
 pub mod bundle;
+pub mod compiler_rt;
+pub mod jobs;
+pub mod musl;
 
 use std::ffi::{CString, c_char, c_int};
 
 unsafe extern "C" {
     fn mimic_lld_main(argc: c_int, argv: *const *const c_char) -> c_int;
     fn mimic_write_archive(out: *const c_char, kind: c_int, n: c_int, members: *const *const c_char, err: *mut c_char, errlen: usize) -> c_int;
+    fn mimic_list_cpus(
+        triple: *const c_char,
+        what: c_int,
+        cb: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void),
+        ud: *mut std::ffi::c_void,
+    ) -> c_int;
     fn mimic_clang_main(argc: c_int, argv: *const *mut c_char, self_path: *const c_char) -> c_int;
 }
 
@@ -18,6 +27,11 @@ unsafe extern "C" {
 pub const LLVM_PREFIX: &str = env!("MIMIC_LLVM_PREFIX");
 /// Clang's major version, which names its resource directory.
 pub const LLVM_MAJOR: &str = env!("MIMIC_LLVM_MAJOR");
+
+/// Clang's resource directory (its own headers), unpacked from the binary.
+pub fn resource_dir(cache: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    bundle::unpack(bundle::CLANG_INCLUDE, &cache.join(format!("clang-{LLVM_MAJOR}")))
+}
 
 /// True when this binary contains the real tools (not the stubs).
 pub const EMBEDDED: bool = cfg!(mimic_toolchain_embedded);
@@ -76,4 +90,18 @@ pub fn write_archive(out: &std::path::Path, kind: ArchiveKind, members: &[std::p
         let msg = unsafe { std::ffi::CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
         Err(format!("cannot write {}: {msg}", out.display()))
     }
+}
+
+/// CPU models (`features = false`) or (feature, description) pairs that LLVM
+/// knows for `triple`; `None` if there is no backend for it.
+pub fn cpus(triple: &str, features: bool) -> Option<Vec<(String, String)>> {
+    extern "C" fn push(k: *const c_char, d: *const c_char, ud: *mut std::ffi::c_void) {
+        let v = unsafe { &mut *(ud as *mut Vec<(String, String)>) };
+        let s = |p: *const c_char| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        v.push((s(k), s(d)));
+    }
+    let t = CString::new(triple).ok()?;
+    let mut v: Vec<(String, String)> = Vec::new();
+    let rc = unsafe { mimic_list_cpus(t.as_ptr(), c_int::from(features), push, &mut v as *mut _ as *mut std::ffi::c_void) };
+    (rc == 0).then_some(v)
 }

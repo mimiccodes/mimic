@@ -171,6 +171,20 @@ fn create_build_cross() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let elf = std::fs::read(proj.join("target/release/x86_64-linux-gnu/demo")).unwrap();
     assert_eq!(&elf[..4], b"\x7fELF");
+    // musl targets need nothing but mimic: no Zig on PATH
+    let no_zig: String = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .filter(|d| !d.join("zig").is_file())
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    for (t, machine) in [("aarch64-linux-musl", 183u16), ("x86_64-linux-musl", 62)] {
+        let out = mimic().current_dir(&proj).env("PATH", &no_zig).env_remove("MIMIC_ZIG").args(["build", "--target", t]).output().unwrap();
+        assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stderr));
+        let elf = std::fs::read(proj.join(format!("target/release/{t}/demo"))).unwrap();
+        assert_eq!(&elf[..4], b"\x7fELF", "{t}");
+        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), machine, "{t}: e_machine");
+        assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2, "{t}: ET_EXEC (static)");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -215,4 +229,22 @@ fn net_parallel_stress() {
         }
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn targets_listing() {
+    let out = mimic().args(["targets", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["arches"].as_array().unwrap().len(), 61);
+    assert_eq!(v["oses"].as_array().unwrap().len(), 48);
+    assert_eq!(v["abis"].as_array().unwrap().len(), 30);
+    let libc = v["libc"].as_array().unwrap();
+    assert_eq!(libc.len(), 108);
+    assert!(libc.iter().any(|t| t["target"] == "x86_64-linux-musl" && t["status"] == "embedded"));
+    let out = mimic().args(["targets", "--cpus", "x86_64"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).lines().any(|l| l == "znver4"));
+    let f = fixtures("run").into_iter().next().unwrap();
+    let out = mimic().arg("build").arg(&f).args(["--target", "m68k-linux-musl"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no code generator"));
 }
