@@ -1,0 +1,8 @@
+[package]
+name = "mimic-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mimic-syntax.workspace = true

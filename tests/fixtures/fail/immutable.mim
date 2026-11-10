@@ -1,0 +1,6 @@
+// expect-error: cannot assign twice to immutable variable `x`
+module main
+fn main() {
+    let x = 1
+    x = 2
+}

@@ -1,0 +1,20 @@
+module main
+
+fn main() {
+    mut xs ← ⍳ 5
+    let frozen = xs
+    xs[0] = 100        // copy-on-write: `frozen` keeps the old buffer
+    xs[1] ↩ 2.5        // promotes to f64
+    print(xs)
+    print(frozen)
+    let mut total = 0
+    total = total + (xs ▷ +/)
+    print(total)
+    let mut n = 3
+    n ↩ count_down(n)
+    print(n)
+}
+
+fn count_down(n: i64) -> i64 {
+    if n == 0 { 0 } else { count_down(n - 1) }
+}

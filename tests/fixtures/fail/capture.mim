@@ -1,0 +1,6 @@
+// expect-error: lambdas cannot capture variables yet
+module main
+fn main() {
+    let k = 3
+    print(⍳ 3 ¨ (x => x + k))
+}

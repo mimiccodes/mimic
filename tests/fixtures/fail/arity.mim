@@ -1,0 +1,4 @@
+// expect-error: takes 2 argument(s) but 1 were supplied
+module main
+fn main() { add(1) }
+fn add(a, b) { a + b }

@@ -1,0 +1,17 @@
+[package]
+name = "mimic-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The mimic compiler, project manager, checker and package manager"
+
+[[bin]]
+name = "mimic"
+path = "src/main.rs"
+
+[dependencies]
+mimic-syntax.workspace = true
+mimic-check.workspace = true
+mimic-codegen.workspace = true
+mimic-project.workspace = true
+clap.workspace = true

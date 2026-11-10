@@ -1,0 +1,17 @@
+§ main
+
+ƒ main() {
+    // each pair must print the same thing
+    print(⍳ 10 ⌽ ↑ 3 ▷ +/)
+    print(iota 10 |> reverse |> take(3) |> sum)
+    print([1 2 3] ¨ (x => x × x))
+    print(each([1 2 3], x => x * x))
+    print(⍳ 6 ⌿ [1 0 1 0 1 0])
+    print(keep(iota(6), [1 0 1 0 1 0]))
+    print(⍳ 4 ▷ ≢)
+    print(len(iota(4)))
+    x ← 5
+    let y = 5
+    print(x == y)
+    print(\i 3 \> \o)
+}

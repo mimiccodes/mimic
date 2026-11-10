@@ -1,0 +1,6 @@
+// expect-error: Mimic does not allow shadowing
+module main
+fn main() {
+    let a = 1
+    if true { let a = 2 }
+}

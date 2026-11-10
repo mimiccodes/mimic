@@ -1,0 +1,2 @@
+// expect-error: the first line of every .mim file must be `module <name>`
+fn main() {}

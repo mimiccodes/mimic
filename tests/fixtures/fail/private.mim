@@ -1,0 +1,8 @@
+// expect-error: function `private::main::inner::hidden` is private
+module main
+fn main() {
+    inner::hidden()
+}
+module inner {
+    fn hidden() { 1 }
+}

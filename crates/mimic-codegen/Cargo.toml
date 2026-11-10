@@ -1,0 +1,10 @@
+[package]
+name = "mimic-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mimic-syntax.workspace = true
+mimic-check.workspace = true
+inkwell.workspace = true

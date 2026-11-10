@@ -1,0 +1,42 @@
+module main
+use geometry::area as area_of
+
+fn main() {
+    print(geometry::area(3, 4))
+    print(area_of(2, 2))
+    print(geometry::shapes::unit())
+    print(classify(¯3))
+    print(classify(0))
+    print(classify(8))
+    print(fib(25))
+    print(geometry::shapes::twice(21))
+    print(5 ▷ (x ⇒ x + 1))
+}
+
+fn classify(n: i64) {
+    if n < 0 {
+        "negative"
+    } else if n == 0 {
+        "zero"
+    } else {
+        "positive"
+    }
+}
+
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n
+    }
+    fib(n - 1) + fib(n - 2)
+}
+
+fn double(n) { n × 2 }
+
+module geometry {
+    pub fn area(w, h) { w × h }
+
+    pub module shapes {
+        pub fn unit() { geometry::area(1, 1) }
+        pub fn twice(n) { super::super::double(n) }
+    }
+}

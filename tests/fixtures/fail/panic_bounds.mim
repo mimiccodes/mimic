@@ -1,0 +1,6 @@
+// expect-panic: index 5 out of bounds for length 3
+module main
+fn main() {
+    let xs = [1 2 3]
+    print(xs[5])
+}
