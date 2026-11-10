@@ -1,0 +1,15 @@
+§ main
+// `§` is the glyph for `module`, `ƒ` the glyph for `fn`.
+
+use showcase::banner          // `module lib` is this project's library: `showcase::…`
+
+ƒ main() {
+    print(banner("Mimic showcase v{showcase::version()}"))
+    arrays::demo()
+    compute::demo()
+    ffi::demo()
+    shapes::demo()
+    shop::demo()
+    web::demo()
+    print(banner("done"))
+}

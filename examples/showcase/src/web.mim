@@ -1,0 +1,75 @@
+module web
+
+// The syntax for networking and interfaces: route patterns in `match`,
+// errors without exceptions (`let … else`), durations, and a UI-style
+// state/message/view loop.
+type Request = { method: str, path: str }
+type User = { id: i64, name: str }
+type Msg = Inc | Dec | Reset | Add(i64)
+type State = { count: i64, label: str }
+
+pub fn demo() {
+    print(showcase::banner("web: routes, errors, durations, UI state"))
+    let reqs = [
+        Request { method: "GET", path: "/" }
+        Request { method: "GET", path: "/users/42" }
+        Request { method: "GET", path: "/users/7/posts/hello-world" }
+        Request { method: "POST", path: "/users" }
+        Request { method: "GET", path: "/users/abc" }
+    ]
+    print(reqs ¨ handle)
+    print(lookup(1))
+    print(lookup(9))
+    print(age_of("42"))
+    print(age_of("forty"))
+    let timeout = 250ms + 2s
+    print("timeout = {timeout div 1ms} ms")
+    let s = State { count: 0, label: "clicks" }
+    let s2 = update(update(update(s, Inc), Add(10)), Dec)
+    print(view(s2))
+    print(view(update(s2, Reset)))
+}
+
+// routes: string patterns with typed captures, matched together with the method
+fn handle(req: Request) -> str {
+    match (req.method, req.path) {
+        ("GET", "/") => "200 home"
+        ("GET", "/users/{id: i64}") => "200 user #{id}"
+        ("GET", "/users/{id: i64}/posts/{slug}") => "200 post {slug} by #{id}"
+        ("POST", "/users") => "201 created"
+        _ => "404 not found"
+    }
+}
+
+fn find(id: i64) {
+    if id == 1 { Some(User { id: 1, name: "ada" }) } else { None }
+}
+
+fn lookup(id: i64) -> str {
+    let u: User = find(id) else { return "user {id}: not found" }
+    "user {id}: {u.name}"
+}
+
+fn parse_int(s: str) {
+    match s {
+        "{n: i64}" => Ok(n)
+        _ => Err("not a number")
+    }
+}
+
+fn age_of(s: str) -> str {
+    let n: i64 = parse_int(s) else { return "invalid age `{s}`" }
+    "age {n}, next year {n + 1}"
+}
+
+// a UI-style update: a new state from the old one and a message
+fn update(s: State, msg: Msg) -> State {
+    match msg {
+        Inc => { s with count: s.count + 1 }
+        Dec => { s with count: s.count - 1 }
+        Reset => { s with count: 0 }
+        Add(n) => { s with count: s.count + n }
+    }
+}
+
+fn view(s: State) -> str { "[{s.label}: {s.count}]" }

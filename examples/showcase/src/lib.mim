@@ -1,0 +1,12 @@
+module lib
+
+// Everything in `module lib` is the library's public API, reachable from
+// any file (or any project depending on this one) as `showcase::name`.
+
+pub fn banner(title: str) -> str {
+    "== {title} =="
+}
+
+pub fn version() -> str {
+    "0.1.0"
+}

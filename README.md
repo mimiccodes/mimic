@@ -49,6 +49,16 @@ The roadmap is in [docs/design.md](docs/design.md).
 | [BENCHMARK.md](BENCHMARK.md) | how speed is measured, current numbers, targets |
 | [docs/roadmap.md](docs/roadmap.md) | what's done, what's next, and the syntax plan for loops, UI and networking |
 
+## Example project
+
+[`examples/showcase`](examples/showcase) is a tour of every feature built so far: glyphs, arrays, parallel recursion, FFI, unions and `match`, records, tuples, routes, `let … else` and more. Its README has step-by-step instructions:
+
+```sh
+cd examples/showcase
+make compiler   # builds mimic from this repository
+make run        # runs the tour
+```
+
 ## Building mimic
 
 Requirements:

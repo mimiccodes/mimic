@@ -1,0 +1,36 @@
+module arrays
+
+// Every primitive has a glyph and a word. They mix freely, and trains read
+// left to right: `⍳ 10 ⌽ ↑ 3` = iota 10, reversed, take 3.
+pub fn demo() {
+    print(showcase::banner("arrays: glyphs and words"))
+    let xs = ⍳ 10
+    print(xs)
+    print(xs ▷ +/)                    // sum
+    print(iota 10 |> sum)             // the same thing, in words
+    print(xs ⌽ ↑ 3)                   // reverse, then take 3
+    print(xs ↓ 7)                     // drop the first 7
+    print(xs ≢)                       // length
+    print(xs ⍴)                       // shape
+    print(1 ‥ 6 ×/)                   // product of 1..5
+    print([4 9 1 7] ⌈/)               // maximum
+    print([4 9 1 7] ⌊/)               // minimum
+    print(xs ⌿ (xs % 2 == 0))         // keep the even numbers
+    print(xs ¨ (x => x × x))          // each, with a lambda
+    print([1 8 3] ⌈ [6 2 4])          // elementwise max (⌊ is min)
+    print(∣ [¯3 2 ¯1])                // abs; ¯ writes a negative literal
+    print(17 div 5)                   // integer division, floored like %
+    print(¯17 ⫽ 5)
+    print(7 ÷ 2)                      // ÷ always gives f64
+    print(\i 4 \> \o)                 // ASCII digraphs for ⍳ 4 ▷ ⌽
+
+    // immutable by default; `mut` opts in, and writes are copy-on-write
+    mut ys ← ⍳ 5                      // ← is `let`
+    let snapshot = ys
+    ys[0] = 100
+    ys ↩ ys ¨ double                  // ↩ reassigns a mut binding
+    print(ys)
+    print(snapshot)                   // unchanged: the write copied
+}
+
+fn double(x: i64) -> i64 { x × 2 }

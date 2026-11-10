@@ -1,0 +1,36 @@
+module shop
+
+// Records, `with` updates, lists of records, tuples, string interpolation,
+// and named / default arguments.
+type Item = { name: str, price: f64, qty: i64 }
+
+pub fn demo() {
+    print(showcase::banner("shop: records, tuples, named arguments"))
+    let apple = Item { name: "apple", price: 0.5, qty: 10 }
+    let pear = Item { qty: 4, name: "pear", price: 0.75 }      // fields in any order
+    let more = { apple with qty: apple.qty + 5 }               // `apple` is unchanged
+    print(apple)
+    print(more.qty)
+    let cart = [apple, pear, more]
+    print(cart ¨ total ▷ +/)
+    print(cart[1].name)
+    print(line(pear))
+    print(line(pear, currency: "€"))
+    print(line(currency: "£", item: apple, width: 3))
+    let (count, value) = summary(cart)
+    print("{count} items worth {value}")
+    let names = cart ¨ name_of
+    print(names)
+    print(names[0] == "apple")                                 // strings compare whole
+}
+
+fn total(i: Item) -> f64 { i.price × i.qty }
+
+fn name_of(i: Item) -> str { i.name }
+
+fn line(item: Item, currency: str = "$", width: i64 = 1) -> str {
+    "{item.name}: {item.qty} × {currency}{item.price} (w{width})"
+}
+
+// tuples return several values at once
+fn summary(items: [Item]) { (items ≢, items ¨ total ▷ +/) }

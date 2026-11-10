@@ -92,7 +92,7 @@ pub fn listing(p: &Program, all: bool) -> Vec<(String, &'static str, bool, Strin
     let mut rows = Vec::new();
     for (mid, m) in p.mods.iter().enumerate() {
         let Some(file) = m.file else { continue };
-        if !all && m.package != p.root_package {
+        if m.package == "std" || (!all && m.package != p.root_package) {
             continue;
         }
         rows.push((p.mod_path(mid).join("::"), "module", m.is_pub, format!("{}:{}", p.files[file].display, m.span.line)));
