@@ -1,0 +1,8 @@
+// ARR handles flow through the net; DUP retains, kernels run on arrays.
+// mean(iota 1000000) = 499999.5
+@main = r
+  & #1000000 ~ $iota(* xs)
+  & xs ~ {a b}
+  & a ~ $sum(* s)
+  & b ~ $len(* n)
+  & s ~ $/(n r)

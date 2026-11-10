@@ -113,6 +113,29 @@ enum Cmd {
     Uninstall { library: String },
     /// Show the glyph ↔ word ↔ digraph table
     Glyphs,
+    /// Interaction-net tools (runtime development)
+    Net {
+        #[command(subcommand)]
+        cmd: NetCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetCmd {
+    /// Reduce a raw interaction-net file (.mnet) and print the value of @main
+    Run {
+        file: PathBuf,
+        #[command(flatten)]
+        profile: ProfileArgs,
+        /// Print interaction count and speed
+        #[arg(long)]
+        stats: bool,
+        /// Worker threads (default: all CPUs)
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+    /// Parse a .mnet file and print it back in canonical form
+    Fmt { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -264,6 +287,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             status("Removed", format!("{library} ({})", dir.display()));
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Net { cmd } => net_cmd(cmd),
         Cmd::Glyphs => {
             print!("{}", mimic_syntax::glyphs::table());
             Ok(ExitCode::SUCCESS)
@@ -378,4 +402,27 @@ fn mod_cmd(cmd: ModCmd) -> Result<ExitCode, String> {
 
 fn line_at(src: &str, byte: usize) -> usize {
     src[..byte.min(src.len())].matches('\n').count() + 1
+}
+
+fn net_cmd(cmd: NetCmd) -> Result<ExitCode, String> {
+    match cmd {
+        NetCmd::Fmt { file } => {
+            let src = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let book = mimic_net::parse(&src).map_err(|e| format!("{}:{e}", file.display()))?;
+            print!("{book}");
+            Ok(ExitCode::SUCCESS)
+        }
+        NetCmd::Run { file, profile, stats, threads } => {
+            let exe = driver::build_net(&file, profile.release)?;
+            let mut c = std::process::Command::new(&exe);
+            if stats {
+                c.env("MIMIC_NET_STATS", "1");
+            }
+            if let Some(t) = threads {
+                c.env("MIMIC_THREADS", t.to_string());
+            }
+            let st = c.status().map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
+            Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
+        }
+    }
 }

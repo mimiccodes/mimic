@@ -12,6 +12,7 @@ mimic-syntax = { path = "crates/mimic-syntax" }
 mimic-check = { path = "crates/mimic-check" }
 mimic-codegen = { path = "crates/mimic-codegen" }
 mimic-project = { path = "crates/mimic-project" }
+mimic-net = { path = "crates/mimic-net" }
 clap = { version = "4.6", features = ["derive"] }
 inkwell = { version = "0.11", default-features = false, features = ["llvm23-1", "target-all"] }
 

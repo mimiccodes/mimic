@@ -23,6 +23,7 @@
 #else
 #define MIM_THREADS 1
 #include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 #endif
 
@@ -73,6 +74,7 @@ typedef CONDITION_VARIABLE mim_cond;
 #define mutex_init(m) InitializeSRWLock(m)
 #define mutex_lock(m) AcquireSRWLockExclusive(m)
 #define mutex_unlock(m) ReleaseSRWLockExclusive(m)
+#define mutex_trylock(m) TryAcquireSRWLockExclusive(m)
 #define cond_init(c) InitializeConditionVariable(c)
 #define cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, 0)
 #define cond_broadcast(c) WakeAllConditionVariable(c)
@@ -82,6 +84,7 @@ typedef pthread_cond_t mim_cond;
 #define mutex_init(m) pthread_mutex_init(m, NULL)
 #define mutex_lock(m) pthread_mutex_lock(m)
 #define mutex_unlock(m) pthread_mutex_unlock(m)
+#define mutex_trylock(m) (pthread_mutex_trylock(m) == 0)
 #define cond_init(c) pthread_cond_init(c, NULL)
 #define cond_wait(c, m) pthread_cond_wait(c, m)
 #define cond_broadcast(c) pthread_cond_broadcast(c)
@@ -164,6 +167,12 @@ static void start_pool(void) {
     }
     g_started = 1;
 }
+#else /* no threads: locks are no-ops */
+typedef int mim_mutex;
+#define mutex_init(m) ((void)(m))
+#define mutex_lock(m) ((void)(m))
+#define mutex_unlock(m) ((void)(m))
+#define mutex_trylock(m) ((void)(m), 1)
 #endif /* MIM_THREADS */
 
 /* Run fn over [0, n) in chunks of `grain`, in parallel when worthwhile.
@@ -248,7 +257,8 @@ static size_t elsize(int dt) {
 #define FREE_LIST_CAP 4096
 #define MAX_SLOTS 257
 
-typedef struct { int64_t n; char pad[120]; } padded_count; /* 128-byte lines on Apple Silicon */
+/* per-thread counters, padded to 128-byte lines (Apple Silicon) */
+typedef struct { int64_t n; int64_t nodes; int64_t itrs; char pad[104]; } padded_count;
 static padded_count g_live_slots[MAX_SLOTS];
 static int g_next_slot = 0;
 static _Thread_local int t_slot = -1;
@@ -364,6 +374,12 @@ int32_t mim_rt_shutdown(int32_t leak_check) {
     for (int i = 0; i < MAX_SLOTS; i++) live += __atomic_load_n(&g_live_slots[i].n, __ATOMIC_ACQUIRE);
     if (leak_check && live != 0) {
         fprintf(stderr, "mimic: leak check failed: %lld array(s) still alive at exit\n", (long long)live);
+        return 102;
+    }
+    int64_t nodes = 0;
+    for (int i = 0; i < MAX_SLOTS; i++) nodes += __atomic_load_n(&g_live_slots[i].nodes, __ATOMIC_ACQUIRE);
+    if (leak_check && nodes != 0) {
+        fprintf(stderr, "mimic: leak check failed: %lld interaction-net node(s) still alive at exit\n", (long long)nodes);
         return 102;
     }
     return 0;
@@ -994,3 +1010,9 @@ void *mim_dataptr(mim_val *v) {
     need(v, "FFI argument");
     return v->data;
 }
+
+/* The interaction-net layer lives in its own file but is compiled as part of
+ * this translation unit so it can use the allocator and kernels directly. */
+#ifndef MIMIC_NO_NET
+#include "mimic_net.c"
+#endif

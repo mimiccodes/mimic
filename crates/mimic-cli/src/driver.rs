@@ -12,6 +12,7 @@ use std::process::Command;
 
 pub const RUNTIME_C: &str = include_str!("../../../runtime/mimic_rt.c");
 pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
+pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -191,7 +192,7 @@ fn zig() -> Option<PathBuf> {
 }
 
 /// The C driver: `zig cc` (cross-capable) or the system `cc` for native builds.
-fn cc(target: &Target) -> Result<Command, String> {
+pub fn cc(target: &Target) -> Result<Command, String> {
     match zig() {
         Some(z) => {
             let mut c = Command::new(z);
@@ -206,7 +207,7 @@ fn cc(target: &Target) -> Result<Command, String> {
     }
 }
 
-fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
+pub fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
     let out = c.output().map_err(|e| format!("cannot run {what}: {e}"))?;
     if !out.status.success() {
         return Err(format!("{what} failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
@@ -215,16 +216,20 @@ fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
 }
 
 /// Compile (and cache) the C runtime for a target.
-fn runtime_object(target: &Target, release: bool) -> Result<PathBuf, String> {
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{}{release}", target.name()).as_bytes());
+pub fn runtime_object(target: &Target, release: bool) -> Result<PathBuf, String> {
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
     if obj.is_file() {
         return Ok(obj);
     }
-    let src = dir.join(format!("mimic_rt-{key:016x}.c"));
+    // each runtime version gets its own directory: mimic_rt.c #includes mimic_net.c
+    let src_dir = dir.join(format!("src-{key:016x}"));
+    fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
+    let src = src_dir.join("mimic_rt.c");
     fs::write(&src, RUNTIME_C).map_err(|e| e.to_string())?;
+    fs::write(src_dir.join("mimic_net.c"), RUNTIME_NET_C).map_err(|e| e.to_string())?;
     fs::write(dir.join("mimic_rt.h"), RUNTIME_H).map_err(|e| e.to_string())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = cc(target)?;
@@ -333,4 +338,29 @@ pub fn input_from(file: Option<&Path>) -> Result<Input, String> {
         format!("error: could not find `{MANIFEST}` in {} or any parent directory\n  = help: create a project with `mimic create <name>` or `mimic init`, or pass a file: `mimic run file.mim`", cwd.display())
     })?;
     Ok(Input::Project(Box::new(Project::load(&root)?)))
+}
+
+/// Compile a raw `.mnet` interaction-net file into an executable that reduces `@main`.
+pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
+    let src = fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+    let book = mimic_net::parse(&src).map_err(|e| format!("error: {}:{e}", file.display()))?;
+    let enc = mimic_net::encode(&book).map_err(|e| format!("error: {}: {e}", file.display()))?;
+    let entry = enc.id("main").ok_or_else(|| format!("error: {}: no @main definition", file.display()))?;
+    let target = Target::host();
+    let abs = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let h = mimic_syntax::fnv1a(abs.to_string_lossy().as_bytes());
+    let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "net".into());
+    let dir = packages::cache_dir().join("net").join(format!("{stem}-{h:08x}")).join(if release { "release" } else { "debug" });
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let c_src = dir.join("main.c");
+    fs::write(&c_src, mimic_net::emit_c_main(&enc, entry, !release)).map_err(|e| e.to_string())?;
+    let rt = runtime_object(&target, release)?;
+    let exe = dir.join(&stem);
+    let mut c = cc(&target)?;
+    c.arg(if release { "-O2" } else { "-O0" }).arg(&c_src).arg(&rt).arg("-o").arg(&exe);
+    if target.needs_libm() {
+        c.arg("-lm");
+    }
+    run_tool(c, "compiling the net")?;
+    Ok(exe)
 }

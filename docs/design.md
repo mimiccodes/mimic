@@ -73,6 +73,18 @@ Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Wha
   * `true`, `false`, small integers and every literal in the program are **immortal**: they are created once and never refcounted or freed.
 * **Panics.** If several threads panic, only the first one reports.
 
+## Milestone 2, phase 2 (implemented): interaction-net core
+
+The parallel reducer for interaction nets is described in [net.md](net.md). It has:
+* nodes CON, DUP, ERA, REF, NUM, OPR, SWI and ARR;
+* lock-free linking;
+* per-worker private stacks with work stealing;
+* unboxed numbers;
+* array handles whose kernels run on the array layer;
+* lazy `REF` expansion, so untaken branches are never computed.
+
+Nets are written in a text format (`.mnet`) and run with `mimic net run`. Phase 3 compiles pure Mimic functions to this form.
+
 **Known bottleneck:** scalars are still boxed (one allocation per scalar result). Unboxed scalars arrive with NUM nodes in the net layer and static types in M4.
 
 ## Roadmap

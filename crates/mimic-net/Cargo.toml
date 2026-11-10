@@ -1,0 +1,9 @@
+[package]
+name = "mimic-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interaction-net IR, text format and encoder for the mimic runtime"
+
+[dependencies]
+mimic-syntax.workspace = true

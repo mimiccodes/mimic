@@ -1,0 +1,11 @@
+// array ⊕ scalar, take, reverse — then reduce to a scalar
+// reverse(take(iota(10) * 3, 4)) = [9 6 3 0]  →  max = 9, sum = 18 → 9 + 18 = 27
+@main = r
+  & #10 ~ $iota(* xs)
+  & xs ~ $*(#3 ys)
+  & ys ~ $take(#4 zs)
+  & zs ~ $reverse(* ws)
+  & ws ~ {w1 w2}
+  & w1 ~ $maximum(* m)
+  & w2 ~ $sum(* s)
+  & m ~ $+(s r)

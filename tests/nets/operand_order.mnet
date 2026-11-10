@@ -1,0 +1,4 @@
+// The right operand (@three) is not ready when the left (#10) arrives:
+// OPR must hold #10, wait for @three and still compute 10 - 3 (flip path).
+@three = #3
+@main  = r & #10 ~ $-(x r) & @three ~ x

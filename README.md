@@ -29,7 +29,12 @@ Milestone 1 is a working vertical slice:
 * calls into C;
 * cross-compilation to any target Zig supports.
 
-The interaction-net parallel runtime is Milestone 2. The roadmap is in [docs/design.md](docs/design.md).
+Milestone 2 is in progress:
+* **Phase 1, done:** the array layer runs on all cores automatically.
+* **Phase 2, done:** the interaction-net parallel reducer.
+* **Phase 3, next:** compiling Mimic code to nets.
+
+The roadmap is in [docs/design.md](docs/design.md).
 
 | Doc | Contents |
 |---|---|
@@ -38,6 +43,7 @@ The interaction-net parallel runtime is Milestone 2. The roadmap is in [docs/des
 | [docs/manifest.md](docs/manifest.md) | `mim.mim`, `build.mim`, `mod.mim` |
 | [docs/ffi.md](docs/ffi.md) | C FFI |
 | [docs/cli.md](docs/cli.md) | every `mimic` command |
+| [docs/net.md](docs/net.md) | the interaction-net runtime and `.mnet` format |
 
 ## Building mimic
 
@@ -59,6 +65,8 @@ crates/mimic-syntax    lexer, parser, AST, glyph table, config format
 crates/mimic-check     module tree, name resolution, visibility, mutability, FFI rules
 crates/mimic-codegen   LLVM codegen (inkwell)
 crates/mimic-project   mim.mim / build.mim, scaffolding, ~/.mimic/libraries
-runtime/               C array runtime (embedded into mimic, compiled per target by zig cc)
+crates/mimic-net       interaction-net IR, .mnet parser, encoder to the runtime book
+runtime/               C runtime: array layer + interaction-net reducer (embedded, compiled per target by zig cc)
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
+tests/nets             interaction-net programs (*.mnet + .out)
 ```

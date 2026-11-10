@@ -18,6 +18,8 @@
 | `mimic update [library]` | Fast-forward every installed library, or just one. |
 | `mimic uninstall <library>` | Remove an installed library. |
 | `mimic glyphs` | Print the glyph ↔ word ↔ digraph table. |
+| `mimic net run <file.mnet> [--release] [--stats] [--threads N]` | Reduce a raw interaction net and print the value of `@main`. This is a runtime developer tool; see [net.md](net.md). |
+| `mimic net fmt <file.mnet>` | Print a net back in canonical form. |
 
 ## Profiles
 
@@ -47,6 +49,7 @@ LLVM generates the object for that triple. The C runtime is then compiled for th
 | `MIMIC_ZIG` | The path to the `zig` binary. Without Zig, native builds fall back to `cc`. |
 | `MIMIC_THREADS` | **Runtime:** the number of worker threads (default: all CPUs; `1` runs sequentially). |
 | `MIMIC_PAR_GRAIN` | **Runtime:** the number of elements per parallel chunk (default 16384). |
+| `MIMIC_NET_NODES` | **Runtime:** the interaction-net capacity in nodes (default 16M). |
 
 ## Planned commands
 

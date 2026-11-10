@@ -202,6 +202,7 @@ dependencies = [
  "clap",
  "mimic-check",
  "mimic-codegen",
+ "mimic-net",
  "mimic-project",
  "mimic-syntax",
 ]
@@ -212,6 +213,13 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "mimic-check",
+ "mimic-syntax",
+]
+
+[[package]]
+name = "mimic-net"
+version = "0.1.0"
+dependencies = [
  "mimic-syntax",
 ]
 

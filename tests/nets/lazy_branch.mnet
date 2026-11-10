@@ -1,0 +1,4 @@
+// The untaken branch (@loop, infinite recursion) is erased unexpanded.
+@yes  = #42
+@loop = r & @loop ~ (* r)
+@main = r & #1 ~ ?((@yes @loop) r)

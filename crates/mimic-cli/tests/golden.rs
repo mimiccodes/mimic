@@ -86,3 +86,46 @@ fn create_build_cross() {
     assert_eq!(&elf[..4], b"\x7fELF");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn nets() -> Vec<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/nets");
+    let mut v: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "mnet")).collect();
+    v.sort();
+    v
+}
+
+/// Every `tests/nets/*.mnet` reduces to the value in its `.out` file:
+/// sequentially, in parallel (with the node/array leak check on), and optimised.
+#[test]
+fn net_fixtures() {
+    let mut failures = Vec::new();
+    for f in nets() {
+        let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
+        for args in [&["--debug", "--threads", "1"][..], &["--debug", "--threads", "8"], &["--release"]] {
+            let out = mimic().args(["net", "run"]).arg(&f).args(args).output().unwrap();
+            let got = String::from_utf8_lossy(&out.stdout);
+            if !out.status.success() || got != want {
+                failures.push(format!("{} {args:?}: want {want:?} got {got:?}\n{}", f.display(), String::from_utf8_lossy(&out.stderr)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Hammer the lock-free reducer: many parallel runs must all agree and leak nothing.
+#[test]
+fn net_parallel_stress() {
+    let dir = std::env::temp_dir().join(format!("mimic-net-stress-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/nets/fib.mnet")).unwrap();
+    let f = dir.join("fib24.mnet");
+    std::fs::write(&f, src.replace("#20 r", "#24 r")).unwrap();
+    for threads in ["2", "5", "12"] {
+        for _ in 0..8 {
+            let out = mimic().args(["net", "run", "--debug", "--threads", threads]).arg(&f).output().unwrap();
+            assert!(out.status.success(), "threads={threads}: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "46368\n", "threads={threads}");
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
