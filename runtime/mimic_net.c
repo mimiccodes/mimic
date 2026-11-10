@@ -234,7 +234,7 @@ static Port num_make(NetAlloc *al, numv v) {
 /* borrowed mim_val → owned port */
 static Port port_from_val(NetAlloc *al, mim_val *v) {
     if (!v) mim_panic("interaction net: unit value `()` is not a number");
-    if (v->rank == 0) {
+    if (v->rank == 0 && !IS_HANDLES(v)) { /* numbers travel unboxed; records stay handles */
         numv n = {v->dtype, geti(v, 0), getf(v, 0)};
         return num_make(al, n);
     }
@@ -263,7 +263,7 @@ static mim_val *val_from_port(NetAlloc *al, Port p) {
 /* owned mim_val → owned port (scalars are unboxed back into the net) */
 static Port port_from_owned_val(NetAlloc *al, mim_val *v) {
     if (!v) mim_panic("interaction net: unit value `()` is not a number");
-    if (v->rank == 0) {
+    if (v->rank == 0 && !IS_HANDLES(v)) {
         Port p = port_from_val(al, v);
         mim_release(v);
         return p;

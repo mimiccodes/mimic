@@ -20,8 +20,97 @@
 
 use crate::ast::*;
 use crate::glyphs::Prim;
-use crate::lexer::{Tok, Token, lex};
+use crate::lexer::{StrPart, Tok, Token, lex};
 use crate::{Diag, Span};
+
+/// Type and variant names start with an uppercase letter; that one rule keeps
+/// `Inc` (a variant) apart from `x` (a variable) and `User { … }` (a record)
+/// apart from `if flag { … }` (a block).
+pub fn is_upper(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
+/// Give every node of a parsed `{…}` interpolation the span of its string.
+fn respan(e: &mut Expr, span: Span) {
+    e.span = span;
+    fn blk(b: &mut Block, span: Span) {
+        b.span = span;
+        for s in &mut b.stmts {
+            match s {
+                Stmt::Let { value, span: sp, .. } => {
+                    *sp = span;
+                    respan(value, span);
+                }
+                Stmt::Assign { index, value, span: sp, .. } => {
+                    *sp = span;
+                    if let Some(i) = index {
+                        respan(i, span);
+                    }
+                    respan(value, span);
+                }
+                Stmt::Expr(x) => respan(x, span),
+                Stmt::Return(x, sp) => {
+                    *sp = span;
+                    if let Some(x) = x {
+                        respan(x, span);
+                    }
+                }
+            }
+        }
+        if let Some(t) = &mut b.tail {
+            respan(t, span);
+        }
+    }
+    match &mut e.kind {
+        ExprKind::Array(xs) => xs.iter_mut().for_each(|x| respan(x, span)),
+        ExprKind::Call { callee, args } => {
+            respan(callee, span);
+            args.iter_mut().for_each(|x| respan(x, span));
+        }
+        ExprKind::Index { base, index } => {
+            respan(base, span);
+            respan(index, span);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Lambda { body: expr, .. } | ExprKind::Field { base: expr, .. } | ExprKind::Named { value: expr, .. } => respan(expr, span),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            respan(lhs, span);
+            respan(rhs, span);
+        }
+        ExprKind::Prim { args, .. } => args.iter_mut().for_each(|x| respan(x, span)),
+        ExprKind::If { cond, then, els } => {
+            respan(cond, span);
+            blk(then, span);
+            if let Some(x) = els {
+                respan(x, span);
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => blk(b, span),
+        ExprKind::Record { fields, .. } => fields.iter_mut().for_each(|(_, x, sp)| {
+            *sp = span;
+            respan(x, span)
+        }),
+        ExprKind::With { base, fields } => {
+            respan(base, span);
+            fields.iter_mut().for_each(|(_, x, sp)| {
+                *sp = span;
+                respan(x, span)
+            });
+        }
+        ExprKind::Match { scrut, arms } => {
+            respan(scrut, span);
+            arms.iter_mut().for_each(|a| {
+                a.span = span;
+                respan(&mut a.body, span)
+            });
+        }
+        ExprKind::Interp(parts) => parts.iter_mut().for_each(|p| {
+            if let InterpPart::Expr(x) = p {
+                respan(x, span)
+            }
+        }),
+        _ => {}
+    }
+}
 
 /// Build a primitive application. `max`, `min` and `abs` are ordinary
 /// operators underneath, so they stay unboxed fast paths everywhere.
@@ -54,6 +143,14 @@ pub fn parse_expr(src: &str) -> Result<Expr, Diag> {
     p.skip_newlines();
     p.expect(&Tok::Eof)?;
     Ok(e)
+}
+
+fn upper_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 pub(crate) struct Parser {
@@ -181,6 +278,7 @@ impl Parser {
         let start = self.span();
         let is_pub = self.eat(&Tok::Pub);
         match self.peek().clone() {
+            Tok::Type => Ok(Item::Type(self.type_decl(is_pub, start)?)),
             Tok::Fn => Ok(Item::Fn(self.fn_decl(is_pub, start)?)),
             Tok::Module => {
                 self.next();
@@ -248,6 +346,85 @@ impl Parser {
         }
     }
 
+    fn type_decl(&mut self, is_pub: bool, start: Span) -> PResult<TypeDecl> {
+        self.expect(&Tok::Type)?;
+        let (name, nspan) = self.ident()?;
+        if !is_upper(&name) {
+            return Err(Diag::new(format!("type names start with an uppercase letter: `{}`", upper_first(&name)), nspan));
+        }
+        self.expect(&Tok::Assign)?;
+        // record: `{ field: Type, … }`
+        if self.at(&Tok::LBrace) {
+            self.next();
+            self.nl_ignore += 1;
+            let r = (|| {
+                let mut fields = Vec::new();
+                while !self.at(&Tok::RBrace) {
+                    let (f, fs) = self.name_or_word()?;
+                    self.expect(&Tok::Colon)?;
+                    let t = self.ty()?;
+                    if fields.iter().any(|(n, _, _): &(String, Type, Span)| *n == f) {
+                        return Err(Diag::new(format!("field `{f}` is declared twice"), fs));
+                    }
+                    fields.push((f, t, fs));
+                    self.eat(&Tok::Comma);
+                }
+                Ok(fields)
+            })();
+            self.nl_ignore -= 1;
+            let fields = r?;
+            self.expect(&Tok::RBrace)?;
+            return Ok(TypeDecl { name, is_pub, kind: TypeKind::Record(fields), span: start });
+        }
+        // union: `A | B(T, T) | C`, one variant per line allowed
+        let mut variants = Vec::new();
+        let skip_to_bar = |p: &mut Self| {
+            let save = p.pos;
+            while p.toks[p.pos].tok == Tok::Newline {
+                p.pos += 1;
+            }
+            if p.toks[p.pos].tok == Tok::Bar {
+                p.pos += 1;
+                true
+            } else {
+                p.pos = save;
+                false
+            }
+        };
+        skip_to_bar(self);
+        loop {
+            let (v, vs) = self.ident()?;
+            if !is_upper(&v) {
+                return Err(Diag::new(format!("variant names start with an uppercase letter: `{}`", upper_first(&v)), vs));
+            }
+            let mut fields = Vec::new();
+            if self.at(&Tok::LParen) {
+                self.next();
+                self.nl_ignore += 1;
+                let r = (|| {
+                    while !self.at(&Tok::RParen) {
+                        fields.push(self.ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.nl_ignore -= 1;
+                r?;
+                self.expect(&Tok::RParen)?;
+            }
+            if variants.iter().any(|x: &Variant| x.name == v) {
+                return Err(Diag::new(format!("variant `{v}` is declared twice"), vs));
+            }
+            variants.push(Variant { name: v, fields, span: vs });
+            if !skip_to_bar(self) {
+                break;
+            }
+        }
+        Ok(TypeDecl { name, is_pub, kind: TypeKind::Union(variants), span: start })
+    }
+
     fn fn_decl(&mut self, is_pub: bool, start: Span) -> PResult<FnDecl> {
         self.expect(&Tok::Fn)?;
         let (name, _) = self.ident()?;
@@ -262,7 +439,12 @@ impl Parser {
             }
             let (pn, ps) = self.ident()?;
             let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
-            params.push(Param { name: pn, ty, span: ps });
+            let default = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
+            if default.is_none() && params.iter().any(|p: &Param| p.default.is_some()) {
+                self.nl_ignore -= 1;
+                return Err(Diag::new("parameters without a default must come before those with one", ps));
+            }
+            params.push(Param { name: pn, ty, default, span: ps });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -604,6 +786,11 @@ impl Parser {
                 let args = self.call_args()?;
                 let span = e.span.to(self.prev_span());
                 e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
+            } else if self.at(&Tok::Dot) {
+                self.next();
+                let (name, _) = self.name_or_word()?;
+                let span = e.span.to(self.prev_span());
+                e = Expr { kind: ExprKind::Field { base: Box::new(e), name }, span };
             } else if self.at(&Tok::LBracket) && self.adjacent() {
                 self.next();
                 self.nl_ignore += 1;
@@ -626,7 +813,17 @@ impl Parser {
         let r = (|| {
             let mut args = Vec::new();
             while !self.at(&Tok::RParen) {
-                args.push(self.expr()?);
+                // `name: value`
+                let named = matches!(self.peek(), Tok::Ident(_)) && self.toks.get(self.pos + 1).is_some_and(|t| t.tok == Tok::Colon);
+                if named {
+                    let (name, ns) = self.ident()?;
+                    self.next();
+                    let value = self.expr()?;
+                    let span = ns.to(value.span);
+                    args.push(Expr { kind: ExprKind::Named { name, value: Box::new(value) }, span });
+                } else {
+                    args.push(self.expr()?);
+                }
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -660,6 +857,10 @@ impl Parser {
                     self.next();
                     segs.push(self.name_or_word()?.0);
                 }
+                if is_upper(segs.last().unwrap()) && self.at_record_body() {
+                    let fields = self.field_inits()?;
+                    return Ok(Expr { kind: ExprKind::Record { path: segs, fields }, span: span.to(self.prev_span()) });
+                }
                 ExprKind::Path(segs)
             }
             Tok::LParen => {
@@ -687,9 +888,35 @@ impl Parser {
             }
             Tok::If => return self.if_rest(span),
             Tok::LBrace => {
-                self.pos -= 1;
+                // `{ base with field: value, … }` — otherwise a block
+                let save = (self.pos, self.nl_ignore);
+                self.nl_ignore += 1;
+                let base = self.expr();
+                let is_with = base.is_ok() && self.at(&Tok::With);
+                self.nl_ignore = save.1;
+                if is_with {
+                    self.next();
+                    let fields = self.field_list()?;
+                    return Ok(Expr { kind: ExprKind::With { base: Box::new(base?), fields }, span: span.to(self.prev_span()) });
+                }
+                self.pos = save.0 - 1;
                 let b = self.block()?;
                 ExprKind::Block(b)
+            }
+            Tok::Match => return self.match_rest(span),
+            Tok::Interp(parts) => {
+                let mut out = Vec::new();
+                for p in parts {
+                    match p {
+                        StrPart::Text(t) => out.push(InterpPart::Text(t)),
+                        StrPart::Code(c) => {
+                            let mut e = parse_expr(&c).map_err(|d| Diag::new(format!("in `{{{c}}}`: {}", d.msg), span))?;
+                            respan(&mut e, span);
+                            out.push(InterpPart::Expr(e));
+                        }
+                    }
+                }
+                ExprKind::Interp(out)
             }
             Tok::Unsafe => {
                 let b = self.block()?;
@@ -700,6 +927,133 @@ impl Parser {
             }
         };
         Ok(Expr { kind, span: span.to(self.prev_span()) })
+    }
+
+    /// After an uppercase name: `{ }` or `{ field: …`.
+    fn at_record_body(&mut self) -> bool {
+        if !self.at(&Tok::LBrace) {
+            return false;
+        }
+        let mut i = self.pos + 1;
+        while self.toks[i].tok == Tok::Newline {
+            i += 1;
+        }
+        match &self.toks[i].tok {
+            Tok::RBrace => true,
+            Tok::Ident(_) | Tok::Prim(_) => self.toks.get(i + 1).is_some_and(|t| t.tok == Tok::Colon),
+            _ => false,
+        }
+    }
+
+    /// `{ name: expr, name: expr … }` (commas or newlines between fields).
+    fn field_inits(&mut self) -> PResult<Vec<(String, Expr, Span)>> {
+        self.expect(&Tok::LBrace)?;
+        self.field_list()
+    }
+
+    /// The fields after an opening `{` (or after `with`), through the closing `}`.
+    fn field_list(&mut self) -> PResult<Vec<(String, Expr, Span)>> {
+        self.nl_ignore += 1;
+        let r = (|| {
+            let mut fields = Vec::new();
+            while !self.at(&Tok::RBrace) {
+                let (f, fs) = self.name_or_word()?;
+                self.expect(&Tok::Colon)?;
+                let v = self.expr()?;
+                if fields.iter().any(|(n, _, _): &(String, Expr, Span)| *n == f) {
+                    return Err(Diag::new(format!("field `{f}` is given twice"), fs));
+                }
+                fields.push((f, v, fs));
+                self.eat(&Tok::Comma);
+            }
+            Ok(fields)
+        })();
+        self.nl_ignore -= 1;
+        let fields = r?;
+        self.expect(&Tok::RBrace)?;
+        Ok(fields)
+    }
+
+    fn match_rest(&mut self, start: Span) -> PResult<Expr> {
+        let saved = std::mem::replace(&mut self.nl_ignore, 0);
+        let scrut = self.expr();
+        self.nl_ignore = saved;
+        let scrut = scrut?;
+        self.expect(&Tok::LBrace)?;
+        let saved = std::mem::replace(&mut self.nl_ignore, 0);
+        let r = (|| {
+            let mut arms = Vec::new();
+            loop {
+                self.skip_newlines();
+                while self.eat(&Tok::Comma) {
+                    self.skip_newlines();
+                }
+                if self.at(&Tok::RBrace) {
+                    break;
+                }
+                let pat = self.pattern()?;
+                self.expect(&Tok::FatArrow)?;
+                let body = self.expr()?;
+                let span = pat.span().to(body.span);
+                arms.push(Arm { pat, body, span });
+                if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Comma | Tok::RBrace) {
+                    let s = self.span();
+                    return Err(Diag::new("expected a new line, `,` or `}` after a match arm", s));
+                }
+            }
+            Ok(arms)
+        })();
+        self.nl_ignore = saved;
+        let arms = r?;
+        let end = self.expect(&Tok::RBrace)?;
+        if arms.is_empty() {
+            return Err(Diag::new("`match` needs at least one arm", start));
+        }
+        Ok(Expr { kind: ExprKind::Match { scrut: Box::new(scrut), arms }, span: start.to(end) })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let t = self.peek_tok().clone();
+        match t.tok {
+            Tok::Ident(n) if n == "_" => {
+                self.next();
+                Ok(Pattern::Wild(t.span))
+            }
+            Tok::Int(_) | Tok::Float(_) | Tok::True | Tok::False | Tok::Str(_) | Tok::Minus => {
+                let e = self.unary()?;
+                Ok(Pattern::Lit(e))
+            }
+            Tok::Interp(_) => Err(Diag::new("route patterns like \"/users/{id}\" are not supported yet", t.span)),
+            Tok::Ident(n) => {
+                self.next();
+                let mut path = vec![n];
+                while self.eat(&Tok::PathSep) {
+                    path.push(self.name_or_word()?.0);
+                }
+                if path.len() == 1 && !is_upper(&path[0]) {
+                    return Ok(Pattern::Bind(path.pop().unwrap(), t.span));
+                }
+                let mut args = Vec::new();
+                if self.at(&Tok::LParen) {
+                    self.next();
+                    self.nl_ignore += 1;
+                    let r = (|| {
+                        while !self.at(&Tok::RParen) {
+                            args.push(self.pattern()?);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    self.nl_ignore -= 1;
+                    r?;
+                    self.expect(&Tok::RParen)?;
+                }
+                Ok(Pattern::Variant { path, args, span: t.span.to(self.prev_span()) })
+            }
+            other => Err(Diag::new(format!("expected a pattern, found {}", other.describe()), t.span)),
+        }
     }
 
     fn if_rest(&mut self, start: Span) -> PResult<Expr> {
@@ -759,6 +1113,12 @@ mod tests {
             ExprKind::If { cond, .. } => format!("(if {})", sx(cond)),
             ExprKind::Block(_) => "{}".into(),
             ExprKind::Unsafe(_) => "unsafe{}".into(),
+            ExprKind::Field { base, name } => format!("(. {} {name})", sx(base)),
+            ExprKind::Record { path, .. } => format!("(rec {})", path.join("::")),
+            ExprKind::With { base, .. } => format!("(with {})", sx(base)),
+            ExprKind::Match { scrut, arms } => format!("(match {} {})", sx(scrut), arms.len()),
+            ExprKind::Interp(parts) => format!("(interp {})", parts.len()),
+            ExprKind::Named { name, value } => format!("({name}: {})", sx(value)),
         }
     }
 
@@ -818,5 +1178,50 @@ mod tests {
     #[test]
     fn header_is_required() {
         assert!(parse_file("fn main() {}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod step3_tests {
+    use super::*;
+
+    #[test]
+    fn types_records_match_interp_named() {
+        let f = parse_file(
+            "module main
+type User = { name: str, age: i64 }
+type Shape =
+    | Circle(f64)
+    | Rect(f64, f64)
+    | Dot
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.0 × r × r
+        Rect(w, h) => w × h
+        Dot => 0.0
+    }
+}
+fn label(text: str, size: i64 = 16) { text }
+fn main() {
+    let u = User { name: \"ada\", age: 36 }
+    let v = { u with age: 37 }
+    print(\"hi {u.name}, next year {v.age}\")
+    print(label(\"x\", size: 24))
+    if u.age > 30 { print(1) }
+}
+",
+        )
+        .unwrap_or_else(|d| panic!("{}", d.msg));
+        let items = &f.module.items;
+        assert!(matches!(&items[0], Item::Type(TypeDecl { kind: TypeKind::Record(fs), .. }) if fs.len() == 2));
+        assert!(matches!(&items[1], Item::Type(TypeDecl { kind: TypeKind::Union(vs), .. }) if vs.len() == 3 && vs[1].fields.len() == 2));
+        let Item::Fn(label) = &items[3] else { panic!() };
+        assert!(label.params[1].default.is_some());
+    }
+
+    #[test]
+    fn naming_rules() {
+        assert!(parse_file("module main\ntype user = { a: i64 }\n").unwrap_err().msg.contains("`User`"));
+        assert!(parse_file("module main\ntype T = a | B\n").unwrap_err().msg.contains("uppercase"));
     }
 }

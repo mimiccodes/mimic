@@ -27,7 +27,18 @@
 #include <unistd.h>
 #endif
 
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3 } mim_dtype;
+/* BOXED: a vector of handles (nested arrays, lists of strings/records).
+ * OBJ: a record or union variant — `len` field handles plus a descriptor. */
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5 } mim_dtype;
+
+/* Emitted by the compiler, one per record type / union variant. */
+typedef struct {
+    const char *type_name;
+    const char *variant; /* NULL for records */
+    int32_t tag;         /* variant index */
+    int32_t nfields;
+    const char *const *fields; /* record field names (NULL for variants) */
+} mim_desc;
 
 typedef struct mim_val {
     int64_t rc; /* atomic; >= MIM_IMMORTAL means never freed */
@@ -35,8 +46,11 @@ typedef struct mim_val {
     int32_t rank;
     int64_t len;
     void *data; /* points at `inl` (one allocation per value) */
+    const mim_desc *desc; /* MIM_OBJ only */
     int64_t inl[];
 } mim_val;
+
+#define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ)
 
 #define MIM_IMMORTAL ((int64_t)1 << 62)
 
@@ -261,6 +275,8 @@ static size_t elsize(int dt) {
     switch (dt) {
     case MIM_I64: return 8;
     case MIM_F64: return 8;
+    case MIM_BOXED:
+    case MIM_OBJ: return sizeof(void *);
     default: return 1;
     }
 }
@@ -301,12 +317,19 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
     v->rank = rank;
     v->len = len;
     v->data = v->inl;
+    v->desc = NULL;
     ((char *)v->data)[bytes - 1] = 0;
     __atomic_store_n(&live_slot()->n, live_slot()->n + 1, __ATOMIC_RELAXED);
     return v;
 }
 
+void mim_release(mim_val *v);
+
 static void dealloc(mim_val *v) {
+    if (IS_HANDLES(v)) { /* release children */
+        mim_val **h = (mim_val **)v->data;
+        for (int64_t i = 0; i < v->len; i++) mim_release(h[i]);
+    }
     size_t bytes = (size_t)v->len * elsize(v->dtype) + 1;
     __atomic_store_n(&live_slot()->n, live_slot()->n - 1, __ATOMIC_RELAXED);
     if (bytes <= SMALL_BYTES && t_free_len < FREE_LIST_CAP) {
@@ -436,6 +459,8 @@ static const char *dtname(const mim_val *v) {
     static const char *s[] = {"i64", "f64", "bool", "char"};
     static const char *vs[] = {"[i64]", "[f64]", "[bool]", "str"};
     if (!v) return "()";
+    if (v->dtype == MIM_OBJ) return v->desc && v->desc->type_name ? v->desc->type_name : "record";
+    if (v->dtype == MIM_BOXED) return "list";
     return v->rank == 0 ? s[v->dtype] : vs[v->dtype];
 }
 
@@ -520,13 +545,27 @@ static int join_dtype(int a, int b) {
     return (a == MIM_F64 || b == MIM_F64) ? MIM_F64 : MIM_I64;
 }
 
+static void retain_children(mim_val *v) {
+    if (!IS_HANDLES(v)) return;
+    mim_val **h = (mim_val **)v->data;
+    for (int64_t i = 0; i < v->len; i++) mim_retain(h[i]);
+}
+
 mim_val *mim_array_lit(int64_t n, mim_val **elems) {
     if (n == 0) return alloc(MIM_I64, 1, 0);
-    int dt = -1;
+    int dt = -1, boxed = 0;
     for (int64_t i = 0; i < n; i++) {
         need(elems[i], "array literal");
-        if (elems[i]->rank != 0) mim_panic("nested arrays are not supported yet (array literal elements must be scalars)");
-        dt = dt == -1 ? elems[i]->dtype : join_dtype(dt, elems[i]->dtype);
+        if (elems[i]->rank != 0 || IS_HANDLES(elems[i])) boxed = 1;
+        else dt = dt == -1 ? elems[i]->dtype : join_dtype(dt, elems[i]->dtype);
+    }
+    if (boxed) { /* strings, arrays, records: a vector of handles */
+        mim_val *v = alloc(MIM_BOXED, 1, n);
+        for (int64_t i = 0; i < n; i++) {
+            mim_retain(elems[i]);
+            ((mim_val **)v->data)[i] = elems[i];
+        }
+        return v;
     }
     mim_val *v = alloc(dt, 1, n);
     for (int64_t i = 0; i < n; i++) {
@@ -640,6 +679,7 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     need(a, "operator");
     need(b, "operator");
+    if (IS_HANDLES(a) || IS_HANDLES(b)) mim_panic("arithmetic is not defined on records or lists of values");
     int64_t n;
     int rank;
     if (a->rank == 0 && b->rank == 0) { n = 1; rank = 0; }
@@ -688,32 +728,184 @@ mim_val *mim_unop(int32_t op, mim_val *a) {
 
 /* ==== printing =========================================================== */
 
-static void print_elem(const mim_val *v, int64_t i) {
+/* A growable byte buffer: values are formatted into it, then printed or
+ * turned into a string (interpolation). */
+typedef struct { char *p; size_t n, cap; } sbuf;
+
+static void sb_put(sbuf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        b->cap = (b->n + n + 1) * 2;
+        b->p = (char *)realloc(b->p, b->cap);
+        if (!b->p) mim_panic("out of memory");
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+}
+static void sb_str(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }
+
+static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
+    char buf[64];
     switch (v->dtype) {
-    case MIM_I64: printf("%lld", (long long)geti(v, i)); break;
-    case MIM_BOOL: printf("%s", geti(v, i) ? "true" : "false"); break;
-    case MIM_CHAR: putchar((int)geti(v, i)); break;
+    case MIM_I64: snprintf(buf, sizeof buf, "%lld", (long long)geti(v, i)); sb_str(b, buf); break;
+    case MIM_BOOL: sb_str(b, geti(v, i) ? "true" : "false"); break;
+    case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
-        char buf[64];
         double x = getf(v, i);
         snprintf(buf, sizeof buf, "%.15g", x);
-        fputs(buf, stdout);
-        if (isfinite(x) && !strpbrk(buf, ".e")) fputs(".0", stdout);
+        sb_str(b, buf);
+        if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
         break;
     }
     }
 }
 
-static void print_val(const mim_val *v) {
-    if (!v) { fputs("()", stdout); return; }
-    if (v->rank == 0) { print_elem(v, 0); return; }
-    if (v->dtype == MIM_CHAR) { fwrite(v->data, 1, (size_t)v->len, stdout); return; }
-    putchar('[');
-    for (int64_t i = 0; i < v->len; i++) {
-        if (i) putchar(' ');
-        print_elem(v, i);
+/* `quoted`: strings nested inside lists/records print with quotes */
+static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
+    if (!v) { sb_str(b, "()"); return; }
+    if (v->dtype == MIM_OBJ) {
+        const mim_desc *d = v->desc;
+        mim_val **h = (mim_val **)v->data;
+        if (d->variant) {
+            sb_str(b, d->variant);
+            if (v->len) {
+                sb_str(b, "(");
+                for (int64_t i = 0; i < v->len; i++) {
+                    if (i) sb_str(b, ", ");
+                    fmt_val(b, h[i], 1);
+                }
+                sb_str(b, ")");
+            }
+        } else {
+            sb_str(b, d->type_name);
+            sb_str(b, " { ");
+            for (int64_t i = 0; i < v->len; i++) {
+                if (i) sb_str(b, ", ");
+                sb_str(b, d->fields[i]);
+                sb_str(b, ": ");
+                fmt_val(b, h[i], 1);
+            }
+            sb_str(b, " }");
+        }
+        return;
     }
-    putchar(']');
+    if (v->rank == 0) { fmt_elem(b, v, 0); return; }
+    if (v->dtype == MIM_CHAR) {
+        if (quoted) sb_str(b, "\"");
+        sb_put(b, (const char *)v->data, (size_t)v->len);
+        if (quoted) sb_str(b, "\"");
+        return;
+    }
+    sb_str(b, "[");
+    for (int64_t i = 0; i < v->len; i++) {
+        if (i) sb_str(b, " ");
+        if (v->dtype == MIM_BOXED) fmt_val(b, ((mim_val **)v->data)[i], 1);
+        else fmt_elem(b, v, i);
+    }
+    sb_str(b, "]");
+}
+
+static void print_val(const mim_val *v) {
+    sbuf b = {0};
+    fmt_val(&b, v, 0);
+    if (b.n) fwrite(b.p, 1, b.n, stdout);
+    free(b.p);
+}
+
+/* ==== strings, records and variants ===================================== */
+
+/* The text of a value, as `print` would show it (strings unquoted). */
+mim_val *mim_format(mim_val *v) {
+    if (v && v->dtype == MIM_CHAR && v->rank == 1) { mim_retain(v); return v; }
+    sbuf b = {0};
+    fmt_val(&b, v, 0);
+    mim_val *r = mim_str(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return r;
+}
+
+/* Concatenate `n` strings (interpolation). */
+mim_val *mim_concat(int64_t n, mim_val **parts) {
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) total += parts[i]->len;
+    mim_val *r = alloc(MIM_CHAR, 1, total);
+    int64_t o = 0;
+    for (int64_t i = 0; i < n; i++) {
+        memcpy((char *)r->data + o, parts[i]->data, (size_t)parts[i]->len);
+        o += parts[i]->len;
+    }
+    return r;
+}
+
+int64_t mim_str_eq(mim_val *a, mim_val *b) {
+    need(a, "string comparison");
+    need(b, "string comparison");
+    return a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+}
+
+/* A record or variant from `n` borrowed field values. */
+mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields) {
+    mim_val *v = alloc(MIM_OBJ, 0, n);
+    v->desc = d;
+    for (int64_t i = 0; i < n; i++) {
+        need(fields[i], "record field");
+        mim_retain(fields[i]);
+        ((mim_val **)v->data)[i] = fields[i];
+    }
+    return v;
+}
+
+static mim_val *obj_check(mim_val *o, const char *what) {
+    need(o, what);
+    if (o->dtype != MIM_OBJ) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%s: expected a record or variant, found %s", what, dtname(o));
+        mim_panic(buf);
+    }
+    return o;
+}
+
+int64_t mim_obj_tag(mim_val *o) { return obj_check(o, "match")->desc->tag; }
+
+/* Field `i` (owned). */
+mim_val *mim_obj_get(mim_val *o, int64_t i) {
+    obj_check(o, "field access");
+    if (i < 0 || i >= o->len) mim_panic("field index out of range");
+    mim_val *f = ((mim_val **)o->data)[i];
+    mim_retain(f);
+    return f;
+}
+
+/* Field by name, when the record type is only known at run time (owned). */
+mim_val *mim_obj_get_named(mim_val *o, const char *name) {
+    obj_check(o, "field access");
+    const mim_desc *d = o->desc;
+    if (d->fields)
+        for (int32_t i = 0; i < d->nfields; i++)
+            if (strcmp(d->fields[i], name) == 0) return mim_obj_get(o, i);
+    char buf[160];
+    snprintf(buf, sizeof buf, "`%s` has no field `%s`", d->variant ? d->variant : d->type_name, name);
+    mim_panic(buf);
+    return NULL;
+}
+
+/* `{ o with field_i: v }`. CONSUMES `o` (borrows `v`): when the caller held
+ * the only reference the record is updated in place, otherwise it is copied. */
+mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v) {
+    obj_check(o, "record update");
+    need(v, "record update");
+    if (i < 0 || i >= o->len) mim_panic("field index out of range");
+    mim_val *r;
+    if (__atomic_load_n(&o->rc, __ATOMIC_ACQUIRE) == 1) {
+        r = o;
+    } else {
+        r = mim_obj(o->desc, o->len, (mim_val **)o->data);
+        mim_release(o);
+    }
+    mim_val **h = (mim_val **)r->data;
+    mim_retain(v);
+    mim_release(h[i]);
+    h[i] = v;
+    return r;
 }
 
 /* ==== reductions ========================================================= */
@@ -756,6 +948,7 @@ static void reduce_range(void *vc, int64_t lo, int64_t hi) {
 }
 
 static mim_val *reduce(int prim, mim_val *a) {
+    if (IS_HANDLES(a)) mim_panic("cannot reduce a list of records/strings/lists with an arithmetic primitive");
     if (a->rank == 0) { mim_retain(a); return a; }
     if (a->len == 0) {
         if (prim == P_SUM) return mim_int(0);
@@ -804,6 +997,7 @@ static mim_val *reduce(int prim, mim_val *a) {
 static mim_val *slice(mim_val *a, int64_t from, int64_t n) {
     mim_val *r = alloc(a->dtype, 1, n);
     memcpy(r->data, (char *)a->data + from * elsize(a->dtype), (size_t)n * elsize(a->dtype));
+    retain_children(r);
     return r;
 }
 
@@ -840,6 +1034,7 @@ mim_val *mim_prim1(int32_t prim, mim_val *a) {
         size_t es = elsize(a->dtype);
         for (int64_t i = 0; i < a->len; i++)
             memcpy((char *)r->data + i * es, (char *)a->data + (a->len - 1 - i) * es, es);
+        retain_children(r);
         return r;
     }
     case P_SUM:
@@ -889,6 +1084,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
         for (int64_t i = 0; i < a->len; i++)
             for (int64_t c = geti(b, i); c > 0; c--, o++)
                 memcpy((char *)r->data + o * es, (char *)a->data + i * es, es);
+        retain_children(r);
         return r;
     }
     }
@@ -900,6 +1096,12 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
 
 static mim_val *scalar_at(const mim_val *xs, int64_t i) {
     switch (xs->dtype) {
+    case MIM_BOXED:
+    case MIM_OBJ: {
+        mim_val *e = ((mim_val **)xs->data)[i];
+        mim_retain(e);
+        return e;
+    }
     case MIM_F64: return mim_float(getf(xs, i));
     case MIM_BOOL: return mim_bool(geti(xs, i));
     case MIM_CHAR: {
@@ -924,7 +1126,6 @@ static void each_range(void *vc, int64_t lo, int64_t hi) {
         mim_val *r = c->f(e);
         mim_release(e);
         need(r, "¨ (each) function result");
-        if (r->rank != 0) mim_panic("¨ (each): the function must return a scalar (nested arrays come later)");
         c->out[i] = r;
     }
 }
@@ -971,7 +1172,19 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     mim_val *xs = *slot;
     int64_t k = check_index(xs, i);
     need(v, "indexed assignment");
-    if (v->rank != 0) mim_panic("indexed assignment: value must be a scalar");
+    if (xs->dtype == MIM_BOXED) { /* a list of handles: replace one (copy-on-write) */
+        if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
+            mim_val *c = slice(xs, 0, xs->len);
+            mim_release(xs);
+            *slot = xs = c;
+        }
+        mim_val **h = (mim_val **)xs->data;
+        mim_retain(v);
+        mim_release(h[k]);
+        h[k] = v;
+        return;
+    }
+    if (v->rank != 0 || IS_HANDLES(v)) mim_panic("indexed assignment: a numeric array can only hold scalars");
     int newdt = xs->dtype;
     if (v->dtype == MIM_F64 && xs->dtype != MIM_F64) newdt = MIM_F64;
     if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
@@ -989,6 +1202,7 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
 
 int64_t mim_truthy(mim_val *v) {
     need(v, "condition");
+    if (IS_HANDLES(v)) mim_panic("condition must be a number or bool, found a record or list");
     if (v->rank != 0) mim_panic("condition must be a scalar, found an array (reduce it first, e.g. with ⌈/)");
     return getf(v, 0) != 0;
 }

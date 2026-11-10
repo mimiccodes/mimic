@@ -30,8 +30,9 @@ use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Tar
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, PointerType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
-use mimic_check::types::{self, Key, Spec, Ty, id};
-use mimic_check::{FnKind, ModId, Program, Resolved};
+use inkwell::basic_block::BasicBlock;
+use mimic_check::types::{self, El, Key, Spec, Ty, id};
+use mimic_check::{FnKind, ModId, Program, Resolved, TypeId};
 use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
 use std::collections::HashMap;
@@ -160,6 +161,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         native_frame: false,
         cur_depth: None,
         lambdas: 0,
+        descs: HashMap::new(),
     };
     if !cg.plan.book.defs.is_empty() {
         let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
@@ -231,6 +233,8 @@ struct Cg<'ctx, 'p> {
     /// Recursion depth (hidden `i32` argument of `Native` bodies).
     cur_depth: Option<IntValue<'ctx>>,
     lambdas: usize,
+    /// Runtime descriptors of record types / union variants.
+    descs: HashMap<(TypeId, Option<usize>), PointerValue<'ctx>>,
 }
 
 /// Native recursion is bounded: deeper calls go to the heap-allocated net.
@@ -417,6 +421,14 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
             "mim_deep_enter" | "mim_deep_leave" => void.fn_type(&[], false),
             "mim_net_call" => ptr.fn_type(&[i32t, i32t, p], false),
+            "mim_obj" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_obj_tag" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_obj_get" => ptr.fn_type(&[p, i64t], false),
+            "mim_obj_get_named" => ptr.fn_type(&[p, p], false),
+            "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_format" => ptr.fn_type(&[p], false),
+            "mim_concat" => ptr.fn_type(&[i64t, p], false),
+            "mim_str_eq" => self.ctx.i64_type().fn_type(&[p, p], false),
             other => panic!("unknown runtime function {other}"),
         };
         self.module.add_function(name, ty, Some(Linkage::External))
@@ -1046,7 +1058,188 @@ impl<'ctx> Cg<'ctx, '_> {
     fn resolve_fn(&self, path: &[String]) -> R<usize> {
         match self.p.resolve(self.cur_mod, path)? {
             Resolved::Fn(f) => Ok(f),
-            Resolved::Mod(_) => Err(format!("`{}` is a module", path.join("::"))),
+            r => Err(format!("`{}` is not a function ({r:?})", path.join("::"))),
+        }
+    }
+
+    // ---- records, variants, strings ---------------------------------------
+
+    /// A NUL-terminated string constant that needs no builder position.
+    fn global_cstr(&self, s: &str) -> PointerValue<'ctx> {
+        let bytes = self.ctx.const_string(s.as_bytes(), true);
+        let g = self.module.add_global(bytes.get_type(), None, "cstr");
+        g.set_initializer(&bytes);
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        g.as_pointer_value()
+    }
+
+    /// The runtime descriptor (`mim_desc`) of a record type or union variant.
+    fn desc(&mut self, t: TypeId, variant: Option<usize>) -> PointerValue<'ctx> {
+        if let Some(d) = self.descs.get(&(t, variant)) {
+            return *d;
+        }
+        let td = &self.p.types[t];
+        let i32t = self.ctx.i32_type();
+        let tname = self.global_cstr(&td.name);
+        let (vname, tag, n, fields) = match variant {
+            Some(v) => {
+                let var = &td.variants()[v];
+                (self.global_cstr(&var.name), v as u64, var.fields.len() as u64, self.ptr.const_null())
+            }
+            None => {
+                let names: Vec<String> = match &td.decl.kind {
+                    mimic_syntax::ast::TypeKind::Record(fs) => fs.iter().map(|(n, _, _)| n.clone()).collect(),
+                    _ => vec![],
+                };
+                let ptrs: Vec<PointerValue> = names.iter().map(|n| self.global_cstr(n)).collect();
+                let arr = self.ptr.const_array(&ptrs);
+                let g = self.module.add_global(arr.get_type(), None, "fields");
+                g.set_initializer(&arr);
+                g.set_constant(true);
+                g.set_linkage(Linkage::Private);
+                (self.ptr.const_null(), 0, names.len() as u64, g.as_pointer_value())
+            }
+        };
+        let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
+        let val = st.const_named_struct(&[tname.into(), vname.into(), i32t.const_int(tag, false).into(), i32t.const_int(n, false).into(), fields.into()]);
+        let g = self.module.add_global(st, None, "desc");
+        g.set_initializer(&val);
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        let p = g.as_pointer_value();
+        self.descs.insert((t, variant), p);
+        p
+    }
+
+    /// Build a record or variant from field values (in field order).
+    fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let n = vals.len() as u32;
+        let arr_ty = self.ptr.array_type(n.max(1));
+        let arr = self.entry_array(arr_ty)?;
+        let mut boxed = Vec::new();
+        for (i, v) in vals.into_iter().enumerate() {
+            let b = self.boxed(v)?;
+            let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+            self.b.build_store(slot, self.basic(b)).s()?;
+            boxed.push(b);
+        }
+        let d = self.desc(t, variant);
+        let r = self.call_rt_ptr("mim_obj", &[d.into(), i64t.const_int(n as u64, false).into(), arr.into()])?;
+        for b in boxed {
+            self.drop_tmp(b)?;
+        }
+        Ok(r)
+    }
+
+    fn entry_array(&self, ty: inkwell::types::ArrayType<'ctx>) -> R<PointerValue<'ctx>> {
+        let f = self.cur_fn.unwrap();
+        let entry = f.get_first_basic_block().unwrap();
+        let tmp = self.ctx.create_builder();
+        match entry.get_first_instruction() {
+            Some(i) => tmp.position_before(&i),
+            None => tmp.position_at_end(entry),
+        }
+        tmp.build_alloca(ty, "arr").s()
+    }
+
+    fn field_tys(&self, t: TypeId, v: usize) -> Vec<Ty> {
+        let td = &self.p.types[t];
+        td.variants()[v].fields.iter().map(|f| types::ann_in(self.p, td.module, f).unwrap_or(Ty::Dyn)).collect()
+    }
+
+    /// Emit the tests of a pattern against `val`; on failure jump to `fail`.
+    /// The builder is left in the success path.
+    fn pattern_test(&mut self, pat: &Pattern, val: V<'ctx>, fail: BasicBlock<'ctx>) -> R<()> {
+        let f = self.cur_fn.unwrap();
+        match pat {
+            Pattern::Wild(_) | Pattern::Bind(..) => Ok(()),
+            Pattern::Lit(e) => {
+                let lv = self.expr(e)?;
+                let cond = if matches!(e.kind, ExprKind::Str(_)) {
+                    let b = self.boxed(val)?;
+                    let r = self.call_rt("mim_str_eq", &[self.basic(b).into(), self.basic(lv).into()])?.unwrap().into_int_value();
+                    self.b.build_int_compare(IntPredicate::NE, r, self.ctx.i64_type().const_zero(), "").s()?
+                } else if Self::is_unboxed(&val) {
+                    let V::B(c) = self.scalar_binary(BinOp::Eq, val, lv)? else { unreachable!() };
+                    c
+                } else {
+                    let lb = self.boxed(lv)?;
+                    let r = self.call_rt_ptr("mim_binop", &[self.i32c(BinOp::Eq as i32), self.basic(val).into(), self.basic(lb).into()])?;
+                    self.drop_tmp(lb)?;
+                    self.truth(r)?
+                };
+                let ok = self.ctx.append_basic_block(f, "pat_ok");
+                self.b.build_conditional_branch(cond, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::Variant { path, args, .. } => {
+                let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) else { return Err("not a variant".into()) };
+                let b = self.boxed(val)?;
+                let tag = self.call_rt("mim_obj_tag", &[self.basic(b).into()])?.unwrap().into_int_value();
+                let eq = self.b.build_int_compare(IntPredicate::EQ, tag, self.ctx.i64_type().const_int(v as u64, false), "").s()?;
+                let ok = self.ctx.append_basic_block(f, "variant_ok");
+                self.b.build_conditional_branch(eq, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                let ftys = self.field_tys(t, v);
+                for (i, a) in args.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
+                        continue;
+                    }
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.as_ty(fv, ftys[i], "field")?;
+                    // release the field on both outcomes
+                    let fail_k = self.ctx.append_basic_block(f, "pat_fail");
+                    self.pattern_test(a, fv, fail_k)?;
+                    self.drop_tmp(fv)?;
+                    let cont = self.b.get_insert_block().unwrap();
+                    self.b.position_at_end(fail_k);
+                    self.drop_tmp(fv)?;
+                    self.b.build_unconditional_branch(fail).s()?;
+                    self.b.position_at_end(cont);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Bind the variables of a pattern that matched `val`.
+    fn pattern_bind(&mut self, pat: &Pattern, val: V<'ctx>) -> R<()> {
+        match pat {
+            Pattern::Wild(_) | Pattern::Lit(_) => Ok(()),
+            Pattern::Bind(n, _) => {
+                let t = self.cur_spec.as_ref().and_then(|s| s.binds.get(&id(pat)).copied()).unwrap_or(Ty::Dyn);
+                let v = match val {
+                    V::P(p, _) => {
+                        self.call_rt("mim_retain", &[p.into()])?;
+                        V::P(p, true)
+                    }
+                    other => other,
+                };
+                let v = self.as_ty(v, t, &format!("`{n}`"))?;
+                let slot = self.entry_alloca(t, n)?;
+                self.b.build_store(slot, self.basic(v)).s()?;
+                let owned = matches!(v, V::P(..));
+                self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false });
+                Ok(())
+            }
+            Pattern::Variant { path, args, .. } => {
+                let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) else { return Ok(()) };
+                let ftys = self.field_tys(t, v);
+                let b = self.boxed(val)?;
+                for (i, a) in args.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Lit(_)) {
+                        continue;
+                    }
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.as_ty(fv, ftys[i], "field")?;
+                    self.pattern_bind(a, fv)?;
+                    self.drop_tmp(fv)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1175,6 +1368,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 Ok(r)
             }
+            ExprKind::Path(path) if !(path.len() == 1 && self.lookup(&path[0]).is_some()) => match self.p.resolve(self.cur_mod, path)? {
+                Resolved::Variant(t, v) => self.construct(t, Some(v), vec![]),
+                _ => Err(format!("unknown variable `{}`", path.join("::"))),
+            },
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
                 let (slot, lt, mutable) = (l.slot, l.ty, l.mutable);
@@ -1192,6 +1389,15 @@ impl<'ctx> Cg<'ctx, '_> {
                     return Ok(self.val_of(r, rt, true));
                 }
                 let ExprKind::Path(path) = &callee.kind else { return Err("unsupported callee".into()) };
+                if let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) {
+                    let ftys = self.field_tys(t, v);
+                    let mut vals = Vec::new();
+                    for (i, a) in args.iter().enumerate() {
+                        let x = self.expr(a)?;
+                        vals.push(self.as_ty(x, ftys[i], "field")?);
+                    }
+                    return self.construct(t, Some(v), vals);
+                }
                 let fid = self.resolve_fn(path)?;
                 let mut vals = Vec::new();
                 for a in args {
@@ -1280,6 +1486,17 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(a)?;
                 self.as_ty(r, ty, "operator result")
             }
+            ExprKind::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Eq | BinOp::Ne) && self.ty_of(lhs) == Ty::Arr(El::Char) && self.ty_of(rhs) == Ty::Arr(El::Char) =>
+            {
+                let a = self.expr(lhs)?;
+                let b = self.expr(rhs)?;
+                let r = self.call_rt("mim_str_eq", &[self.basic(a).into(), self.basic(b).into()])?.unwrap().into_int_value();
+                self.drop_tmp(a)?;
+                self.drop_tmp(b)?;
+                let pred = if *op == BinOp::Eq { IntPredicate::NE } else { IntPredicate::EQ };
+                Ok(V::B(self.b.build_int_compare(pred, r, i64t.const_zero(), "").s()?))
+            }
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
@@ -1323,6 +1540,138 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.as_ty(r, ty, "primitive result")
             }
             ExprKind::Lambda { .. } => Err("lambdas can only be called or passed to ¨ (each)".into()),
+            ExprKind::Named { .. } => Err("named arguments are only allowed in calls to functions".into()),
+            ExprKind::Record { path, fields } => {
+                let Ok(Resolved::Type(t)) = self.p.resolve(self.cur_mod, path) else { return Err("not a record type".into()) };
+                let order: Vec<String> = match &self.p.types[t].decl.kind {
+                    mimic_syntax::ast::TypeKind::Record(fs) => fs.iter().map(|(n, _, _)| n.clone()).collect(),
+                    _ => vec![],
+                };
+                let ftys: Vec<Ty> = match &self.p.types[t].decl.kind {
+                    mimic_syntax::ast::TypeKind::Record(fs) => fs.iter().map(|(_, ft, _)| types::ann_in(self.p, self.p.types[t].module, ft).unwrap_or(Ty::Dyn)).collect(),
+                    _ => vec![],
+                };
+                // evaluate in source order, store in declaration order
+                let mut slots: Vec<Option<V>> = vec![None; order.len()];
+                for (n, x, _) in fields {
+                    let i = order.iter().position(|o| o == n).ok_or("unknown field")?;
+                    let v = self.expr(x)?;
+                    slots[i] = Some(self.as_ty(v, ftys[i], &format!("field `{n}`"))?);
+                }
+                let vals: Vec<V> = slots.into_iter().map(|s| s.ok_or("missing field")).collect::<Result<_, _>>()?;
+                self.construct(t, None, vals)
+            }
+            ExprKind::Field { base, name } => {
+                let b = self.expr(base)?;
+                let b = self.boxed(b)?;
+                let r = match self.ty_of(base) {
+                    Ty::Obj(t) => {
+                        let i = self.p.types[t as usize].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                        self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?
+                    }
+                    _ => {
+                        let n = self.global_cstr(name);
+                        self.call_rt_ptr("mim_obj_get_named", &[self.basic(b).into(), n.into()])?
+                    }
+                };
+                self.drop_tmp(b)?;
+                self.as_ty(r, ty, &format!("field `{name}`"))
+            }
+            ExprKind::With { base, fields } => {
+                let Ty::Obj(t) = self.ty_of(base) else { return Err("`with` needs a record".into()) };
+                let b = self.expr(base)?;
+                // mim_obj_with consumes its record: hand it an owned reference
+                let mut cur = self.own(self.boxed(b)?)?;
+                for (n, x, _) in fields {
+                    let i = self.p.types[t as usize].field_index(n).ok_or("unknown field")?;
+                    let v = self.expr(x)?;
+                    let v = self.boxed(v)?;
+                    cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(i as u64, false).into(), self.basic(v).into()])?;
+                    self.drop_tmp(v)?;
+                }
+                Ok(cur)
+            }
+            ExprKind::Interp(parts) => {
+                let n = parts.len() as u32;
+                let arr_ty = self.ptr.array_type(n.max(1));
+                let arr = self.entry_array(arr_ty)?;
+                let mut temps = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    let s = match part {
+                        InterpPart::Text(t) => {
+                            let g = self.module.add_global(self.ptr, None, "lit");
+                            g.set_linkage(Linkage::Internal);
+                            g.set_initializer(&self.ptr.const_null());
+                            let p = self.cstring(t)?;
+                            let V::P(x, _) = self.call_rt_ptr("mim_lit_str", &[g.as_pointer_value().into(), p.into(), i64t.const_int(t.len() as u64, false).into()])? else { unreachable!() };
+                            V::P(x, false)
+                        }
+                        InterpPart::Expr(x) => {
+                            let v = self.expr(x)?;
+                            let v = self.boxed(v)?;
+                            let s = self.call_rt_ptr("mim_format", &[self.basic(v).into()])?;
+                            self.drop_tmp(v)?;
+                            s
+                        }
+                    };
+                    let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                    self.b.build_store(slot, self.basic(s)).s()?;
+                    temps.push(s);
+                }
+                let r = self.call_rt_ptr("mim_concat", &[i64t.const_int(n as u64, false).into(), arr.into()])?;
+                for t in temps {
+                    self.drop_tmp(t)?;
+                }
+                Ok(r)
+            }
+            ExprKind::Match { scrut, arms } => {
+                let sv = self.expr(scrut)?;
+                let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
+                let f = self.cur_fn.unwrap();
+                // keep an owned scrutinee in a scope so early `return`s release it
+                self.scopes.push(Vec::new());
+                if let V::P(p, true) = sv {
+                    let slot = self.entry_alloca(Ty::Dyn, "scrutinee")?;
+                    self.b.build_store(slot, p).s()?;
+                    self.scopes.last_mut().unwrap().push(Local { name: "\u{0}scrutinee".into(), slot, ty: Ty::Dyn, owned: true, mutable: false });
+                }
+                let merge = self.ctx.append_basic_block(f, "match_end");
+                let mut incoming = Vec::new();
+                for arm in arms {
+                    let next = self.ctx.append_basic_block(f, "next_arm");
+                    self.pattern_test(&arm.pat, sv, next)?;
+                    self.scopes.push(Vec::new());
+                    self.pattern_bind(&arm.pat, sv)?;
+                    let v = self.expr(&arm.body)?;
+                    if !self.terminated() {
+                        let v = self.as_ty(v, rt, "match value")?;
+                        let v = self.own(v)?;
+                        let scope = self.scopes.pop().unwrap();
+                        self.release_scope(&scope)?;
+                        incoming.push((self.basic(v), self.b.get_insert_block().unwrap()));
+                        self.b.build_unconditional_branch(merge).s()?;
+                    } else {
+                        self.scopes.pop();
+                    }
+                    self.b.position_at_end(next);
+                }
+                let m = self.cstring("no `match` arm matched")?;
+                self.call_rt("mim_panic", &[m.into()])?;
+                self.b.build_unreachable().s()?;
+                self.b.position_at_end(merge);
+                let scope = self.scopes.pop().unwrap();
+                if incoming.is_empty() {
+                    self.b.build_unreachable().s()?;
+                    self.dead_block();
+                    return Ok(self.null());
+                }
+                let phi = self.b.build_phi(self.repr(rt), "matchv").s()?;
+                for (v, bb) in &incoming {
+                    phi.add_incoming(&[(v, *bb)]);
+                }
+                self.release_scope(&scope)?;
+                Ok(self.val_of(phi.as_basic_value(), rt, true))
+            }
             ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
             ExprKind::If { cond, then, els } => {
                 let c = self.expr(cond)?;

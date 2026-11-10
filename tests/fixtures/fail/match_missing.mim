@@ -1,0 +1,10 @@
+// expect-error: `match` does not cover every case: missing `Reset`
+module main
+type Msg = Inc | Dec | Reset
+fn main() { print(f(Inc)) }
+fn f(m: Msg) -> i64 {
+    match m {
+        Inc => 1
+        Dec => 2
+    }
+}

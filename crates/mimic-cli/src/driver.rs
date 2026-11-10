@@ -166,9 +166,14 @@ pub fn load(input: &Input) -> Result<Program, String> {
     if !errors.is_empty() {
         return Err(summarize(errors));
     }
-    let (program, diags) = Program::build(files, &pkg);
+    let (mut program, diags) = Program::build(files, &pkg);
     if !diags.is_empty() {
         return Err(summarize(render(&program, &diags)));
+    }
+    // named and default arguments become plain positional calls
+    let ndiags = mimic_check::normalize(&mut program);
+    if !ndiags.is_empty() {
+        return Err(summarize(render(&program, &ndiags)));
     }
     let diags = mimic_check::check(&program, &Options { require_main: input.is_bin() });
     if !diags.is_empty() {

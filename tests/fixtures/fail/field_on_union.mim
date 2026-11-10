@@ -1,0 +1,5 @@
+// expect-error: `Shape` is a union: use `match` to get at its fields
+module main
+type Shape = Circle(f64) | Dot
+fn main() { print(r(Circle(1.0))) }
+fn r(s: Shape) -> f64 { s.radius }

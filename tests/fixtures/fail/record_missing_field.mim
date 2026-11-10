@@ -1,0 +1,4 @@
+// expect-error: missing field(s) of `User`: age
+module main
+type User = { name: str, age: i64 }
+fn main() { print(User { name: "ada" }) }

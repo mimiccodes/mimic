@@ -1,0 +1,18 @@
+User { name: "ada", age: 36 }
+37
+36
+[3.0 6.0 0.0]
+["round" "rect" "point"]
+State { count: 10, label: "clicks" }
+0
+ada is 36, next year 37
+sum = 3, list = [0 1 2], shape = Rect(1.0, 2.0)
+111
+true
+true
+x@16
+x@24
+y@9
+["ada" "bob"]
+bob
+37

@@ -233,7 +233,8 @@ impl Eligible<'_> {
     fn expr(&mut self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
-            ExprKind::Path(p) => p.len() == 1,
+            // variables only: uppercase names are variants (not in the net subset yet)
+            ExprKind::Path(p) => p.len() == 1 && !mimic_syntax::parser::is_upper(&p[0]),
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),

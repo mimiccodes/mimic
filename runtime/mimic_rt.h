@@ -15,14 +15,25 @@
 #define MIMIC_RT_H
 #include <stdint.h>
 
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3 } mim_dtype;
+/* BOXED: vector of handles (nested arrays, lists of strings/records).
+ * OBJ: record or union variant — `len` field handles plus a descriptor. */
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5 } mim_dtype;
+
+typedef struct {
+    const char *type_name;
+    const char *variant;      /* NULL for records */
+    int32_t tag;              /* variant index */
+    int32_t nfields;
+    const char *const *fields; /* record field names */
+} mim_desc;
 
 typedef struct mim_val {
     int64_t rc;
     int32_t dtype;
     int32_t rank;   /* 0 = scalar, 1 = vector (higher ranks: M4) */
     int64_t len;    /* element count */
-    void *data;   /* points at inl: header and elements are one allocation */
+    void *data;     /* points at inl: header and elements are one allocation */
+    const mim_desc *desc; /* MIM_OBJ only */
     int64_t inl[];
 } mim_val;
 
@@ -58,6 +69,16 @@ mim_val *mim_index(mim_val *xs, mim_val *i);
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v);
 int64_t mim_truthy(mim_val *v);
 void mim_check_type(mim_val *v, int32_t ty, const char *what);
+
+/* strings, records, variants */
+mim_val *mim_format(mim_val *v);
+mim_val *mim_concat(int64_t n, mim_val **parts);
+int64_t mim_str_eq(mim_val *a, mim_val *b);
+mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields);
+int64_t mim_obj_tag(mim_val *o);
+mim_val *mim_obj_get(mim_val *o, int64_t i);
+mim_val *mim_obj_get_named(mim_val *o, const char *name);
+mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v);
 
 /* FFI marshalling */
 int64_t mim_as_i64(mim_val *v);

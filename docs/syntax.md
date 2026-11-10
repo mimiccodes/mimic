@@ -109,6 +109,64 @@ Arithmetic and comparison broadcast a scalar against a vector, and work elementw
 
 `pub`, `mut`, `if`, `else`, `use`, `extern`, `unsafe` and `return` only have word forms for now. Their glyphs are still to be designed.
 
+## Records, unions and `match`
+
+**Naming rule:** type and variant names start with an **uppercase** letter, and variables and functions start with lowercase. That one rule is what keeps these apart:
+* `Inc` (a variant) from `inc` (a variable);
+* `User { … }` (a record) from `if ready { … }` (a block).
+
+```mimic
+type User = { name: str, age: i64 }
+
+type Shape =
+    | Circle(f64)
+    | Rect(f64, f64)
+    | Dot
+
+let u = User { name: "ada", age: 36 }      // every field, in any order
+let older = { u with age: u.age + 1 }      // a new record; `u` is unchanged
+print(u.name)
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r)  => 3.14159 × r × r
+        Rect(w, h) => w × h
+        Dot        => 0.0
+    }
+}
+```
+
+* **Matching on a union must be exhaustive.** Every variant needs an arm, or there must be a final `_ =>`. The compiler names any missing variants.
+* **Matching on numbers or strings needs a final `_ =>` arm.**
+* **Patterns:**
+  * `_` matches anything;
+  * a lowercase name binds the value;
+  * literals (`1`, `"ada"`, `true`);
+  * variants with sub-patterns (`Rect(w, _)`).
+* **Strings compare as whole values** with `==` and `!=`.
+* **Under the hood:** records and variants are immutable, reference-counted values. `with` updates in place when nothing else shares the record, and copies otherwise.
+
+## Strings
+
+**Interpolation:** `"hi {u.name}, next year {u.age + 1}"`. Any expression can go inside `{ }`, and it is formatted the way `print` shows it. Write `\{` for a literal brace.
+
+## Named and default arguments
+
+```mimic
+fn label(text: str, size: i64 = 16) -> str { "{text}@{size}" }
+
+label("x")                  // size = 16
+label("x", size: 24)
+label(size: 9, text: "y")   // named arguments in any order
+```
+
+* Positional arguments come first.
+* Defaults must be constants: literals, operators on literals, arrays of literals, or unit variants.
+
+## Lists of anything
+
+Array literals can hold strings, records or other arrays: `["ada" "bob"]`, `[u, older]`. Indexing and `¨` work on them as usual, and their element types are tracked statically, so `users[0].age` is checked at compile time.
+
 ## Types (annotations)
 
 The annotation types are:

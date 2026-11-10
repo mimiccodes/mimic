@@ -1,0 +1,90 @@
+module main
+
+type User = { name: str, age: i64 }
+
+type Shape =
+    | Circle(f64)
+    | Rect(f64, f64)
+    | Dot
+
+type Msg = Inc | Dec | Reset | Add(i64)
+
+type State = { count: i64, label: str }
+
+fn main() {
+    // records, field access, `with`
+    let u = User { name: "ada", age: 36 }
+    let older = { u with age: u.age + 1 }
+    print(u)
+    print(older.age)
+    print(u.age)                          // u itself is unchanged
+
+    // unions and exhaustive match
+    let shapes = [Circle(1.0), Rect(2.0, 3.0), Dot]
+    print(shapes ¨ area)
+    print(shapes ¨ describe)
+
+    // a tiny UI-style update loop: state + messages
+    let s0 = State { count: 0, label: "clicks" }
+    let s1 = update(update(update(s0, Inc), Add(10)), Dec)
+    print(s1)
+    print(update(s1, Reset).count)
+
+    // string interpolation
+    print("{u.name} is {u.age}, next year {older.age}")
+    print("sum = {1 + 2}, list = {⍳ 3}, shape = {Rect(1.0, 2.0)}")
+
+    // strings: equality and match on literals
+    print(greet("ada") + greet("bob") + greet("zed"))
+    print("abc" == "abc")
+    print("abc" != "abd")
+
+    // named and default arguments
+    print(label("x"))
+    print(label("x", size: 24))
+    print(label(size: 9, text: "y"))
+
+    // lists of strings and records
+    let names = ["ada", "bob"]
+    print(names)
+    print(names[1])
+    let users = [u, older]
+    print(users[1].age)
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.0 × r × r
+        Rect(w, h) => w × h
+        Dot => 0.0
+    }
+}
+
+fn describe(s: Shape) -> str {
+    match s {
+        Circle(_) => "round"
+        Rect(w, h) => if w == h { "square" } else { "rect" }
+        _ => "point"
+    }
+}
+
+fn update(s: State, msg: Msg) -> State {
+    match msg {
+        Inc => { s with count: s.count + 1 }
+        Dec => { s with count: s.count - 1 }
+        Reset => { s with count: 0 }
+        Add(n) => { s with count: s.count + n }
+    }
+}
+
+fn greet(name: str) -> i64 {
+    match name {
+        "ada" => 1
+        "bob" => 10
+        _ => 100
+    }
+}
+
+fn label(text: str, size: i64 = 16) -> str {
+    "{text}@{size}"
+}

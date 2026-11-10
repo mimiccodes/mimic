@@ -4,8 +4,17 @@
 use crate::glyphs::{self, Prim};
 use crate::{Diag, Span};
 
+/// A piece of an interpolated string literal: text, or the source of an `{expression}`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StrPart {
+    Text(String),
+    Code(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
+    /// a string literal containing `{…}` expressions
+    Interp(Vec<StrPart>),
     Ident(String),
     Int(i64),
     Float(f64),
@@ -27,6 +36,11 @@ pub enum Tok {
     Trusted,
     True,
     False,
+    Type,
+    Match,
+    With,
+    Dot,
+    Bar,
     // punctuation
     LParen,
     RParen,
@@ -94,6 +108,11 @@ fn tok_text(t: &Tok) -> &'static str {
         Tok::Extern => "extern",
         Tok::Unsafe => "unsafe",
         Tok::Trusted => "trusted",
+        Tok::Type => "type",
+        Tok::Match => "match",
+        Tok::With => "with",
+        Tok::Dot => ".",
+        Tok::Bar => "|",
         Tok::True => "true",
         Tok::False => "false",
         Tok::LParen => "(",
@@ -168,6 +187,9 @@ fn keyword(w: &str) -> Option<Tok> {
         "extern" => Tok::Extern,
         "unsafe" => Tok::Unsafe,
         "trusted" => Tok::Trusted,
+        "type" => Tok::Type,
+        "match" => Tok::Match,
+        "with" => Tok::With,
         "true" => Tok::True,
         "false" => Tok::False,
         "and" => Tok::And,
@@ -314,6 +336,8 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::Pipe
             }
+            '|' => Tok::Bar,
+            '.' => Tok::Dot,
             '≠' => Tok::Ne,
             '≤' => Tok::Le,
             '≥' => Tok::Ge,
@@ -426,13 +450,42 @@ impl<'a> Lexer<'a> {
 
     fn string(&mut self, start: Span) -> Result<Tok, Diag> {
         let mut s = String::new();
+        let mut parts: Vec<StrPart> = Vec::new();
         loop {
             match self.bump() {
                 None | Some('\n') => return Err(Diag::new("unterminated string literal", start)),
                 Some('"') => break,
+                Some('{') => {
+                    // `{expression}` inside a string: capture its source text
+                    if !s.is_empty() {
+                        parts.push(StrPart::Text(std::mem::take(&mut s)));
+                    }
+                    let mut depth = 1;
+                    let mut code = String::new();
+                    loop {
+                        match self.bump() {
+                            None | Some('\n') => return Err(Diag::new("unterminated `{` in string literal", start)),
+                            Some('{') => {
+                                depth += 1;
+                                code.push('{');
+                            }
+                            Some('}') => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                code.push('}');
+                            }
+                            Some(c) => code.push(c),
+                        }
+                    }
+                    parts.push(StrPart::Code(code));
+                }
                 Some('\\') => {
                     let e = self.bump().ok_or_else(|| Diag::new("unterminated string literal", start))?;
                     s.push(match e {
+                        '{' => '{',
+                        '}' => '}',
                         'n' => '\n',
                         't' => '\t',
                         '0' => '\0',
@@ -444,7 +497,13 @@ impl<'a> Lexer<'a> {
                 Some(c) => s.push(c),
             }
         }
-        Ok(Tok::Str(s))
+        if parts.is_empty() {
+            return Ok(Tok::Str(s));
+        }
+        if !s.is_empty() {
+            parts.push(StrPart::Text(s));
+        }
+        Ok(Tok::Interp(parts))
     }
 }
 

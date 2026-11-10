@@ -23,6 +23,10 @@ pub enum El {
     F64,
     Bool,
     Char,
+    /// strings (a list of strings)
+    Str,
+    /// records / unions (a list of records)
+    Obj(u32),
     Dyn,
 }
 
@@ -38,6 +42,8 @@ pub enum Ty {
     Char,
     /// Array (vectors); `Arr(El::Char)` is a string.
     Arr(El),
+    /// A record or union value of a user-declared type.
+    Obj(u32),
     /// Unknown statically: a boxed runtime value.
     Dyn,
 }
@@ -56,6 +62,8 @@ impl Ty {
             Ty::F64 => El::F64,
             Ty::Bool => El::Bool,
             Ty::Char => El::Char,
+            Ty::Arr(El::Char) => El::Str,
+            Ty::Obj(t) => El::Obj(t),
             _ => El::Dyn,
         }
     }
@@ -65,6 +73,8 @@ impl Ty {
             El::F64 => Ty::F64,
             El::Bool => Ty::Bool,
             El::Char => Ty::Char,
+            El::Str => Ty::Arr(El::Char),
+            El::Obj(t) => Ty::Obj(t),
             El::Dyn => Ty::Dyn,
         }
     }
@@ -85,6 +95,8 @@ impl std::fmt::Display for Ty {
             El::F64 => "f64",
             El::Bool => "bool",
             El::Char => "char",
+            El::Str => "str",
+            El::Obj(_) => "record",
             El::Dyn => "?",
         };
         match self {
@@ -96,6 +108,7 @@ impl std::fmt::Display for Ty {
             Ty::Char => write!(f, "char"),
             Ty::Arr(El::Char) => write!(f, "str"),
             Ty::Arr(e) => write!(f, "[{}]", el(e)),
+            Ty::Obj(_) => write!(f, "record"),
             Ty::Dyn => write!(f, "dynamic"),
         }
     }
@@ -122,6 +135,8 @@ pub struct Spec {
     pub calls: HashMap<usize, Key>,
     /// Lambdas: (parameter type, result type) by lambda expression id.
     pub lambdas: HashMap<usize, (Ty, Ty)>,
+    /// Types of `match` pattern bindings (by pattern id).
+    pub binds: HashMap<usize, Ty>,
 }
 
 pub struct TypeInfo {
@@ -154,6 +169,45 @@ fn ann_ty(t: &Type) -> Option<Ty> {
         },
         Type::Ptr(..) => return None,
     })
+}
+
+/// An annotation's type, resolving record/union names from `module`.
+pub fn ann_in(p: &Program, module: ModId, t: &Type) -> Option<Ty> {
+    if let Some(x) = ann_ty(t) {
+        return Some(x);
+    }
+    match t {
+        Type::Named(n, _) => match p.resolve(module, std::slice::from_ref(n)) {
+            Ok(Resolved::Type(id)) => Some(Ty::Obj(id as u32)),
+            _ => None,
+        },
+        Type::Array(inner, _) => Some(Ty::Arr(ann_in(p, module, inner)?.el())),
+        Type::Ptr(..) => None,
+    }
+}
+
+/// Coerce a value of type `got` into a slot annotated `ann` (user types allowed).
+pub fn coerce_in(p: &Program, module: ModId, ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
+    let Some(t) = ann else { return Ok(got) };
+    match ann_in(p, module, t) {
+        Some(a @ (Ty::Obj(_) | Ty::Arr(El::Obj(_) | El::Str))) => match got {
+            Ty::Never | Ty::Dyn => Ok(a),
+            g if g == a => Ok(a),
+            Ty::Arr(El::Dyn) if matches!(a, Ty::Arr(_)) => Ok(a),
+            g => Err(format!("expected {}, found {}", show(p, a), show(p, g))),
+        },
+        _ => coerce(ann, got),
+    }
+}
+
+/// A type for messages, naming user types.
+pub fn show(p: &Program, t: Ty) -> String {
+    match t {
+        Ty::Obj(id) => p.types[id as usize].name.clone(),
+        Ty::Arr(El::Obj(id)) => format!("[{}]", p.types[id as usize].name),
+        Ty::Arr(El::Str) => "[str]".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Coerce a value of type `got` into a slot annotated `ann`.
@@ -225,8 +279,11 @@ pub fn default_roots(p: &Program, library: bool) -> Vec<Key> {
     }
     for (fid, f) in p.fns.iter().enumerate() {
         let FnKind::User(d) = &f.kind else { continue };
-        if !d.params.is_empty() && d.params.iter().all(|prm| prm.ty.as_ref().and_then(ann_ty).is_some()) {
-            roots.push((fid, d.params.iter().map(|prm| ann_ty(prm.ty.as_ref().unwrap()).unwrap()).collect()));
+        let tys: Option<Vec<Ty>> = d.params.iter().map(|prm| prm.ty.as_ref().and_then(|t| ann_in(p, f.module, t))).collect();
+        if let Some(tys) = tys
+            && !tys.is_empty()
+        {
+            roots.push((fid, tys));
         }
         if library && f.is_pub && p.mods[f.module].package == p.root_package {
             roots.push((fid, vec![Ty::Dyn; d.params.len()]));
@@ -274,7 +331,7 @@ impl Infer<'_> {
             };
             // parameters (annotation coercion)
             for (prm, arg) in d.params.iter().zip(&k.1) {
-                let t = match coerce(prm.ty.as_ref(), *arg) {
+                let t = match coerce_in(p, module, prm.ty.as_ref(), *arg) {
                     Ok(t) => t,
                     Err(m) => {
                         w.err(Diag::new(format!("argument `{}` of `{path}`: {m}", prm.name), prm.span));
@@ -287,7 +344,7 @@ impl Infer<'_> {
             let body = w.block(&d.body);
             let mut ret = body.join(w.ret);
             if let Some(rt) = &d.ret {
-                match coerce(Some(rt), ret) {
+                match coerce_in(p, module, Some(rt), ret) {
                     Ok(t) => ret = t,
                     Err(m) => w.err(Diag::new(format!("return value of `{path}`: {m}"), d.span)),
                 }
@@ -332,7 +389,7 @@ impl Walk<'_, '_> {
             match s {
                 Stmt::Let { name, ty, value, span, .. } => {
                     let v = self.expr(value);
-                    let mut t = match coerce(ty.as_ref(), v) {
+                    let mut t = match coerce_in(self.inf.p, self.module, ty.as_ref(), v) {
                         Ok(t) => t,
                         Err(m) => {
                             self.err(Diag::new(format!("`let {name}`: {m}"), *span));
@@ -450,13 +507,15 @@ impl Walk<'_, '_> {
                 match el {
                     Ty::Never if xs.is_empty() => Ty::Arr(El::I64),
                     Ty::Never => Ty::Never,
-                    t if t.is_scalar() => Ty::Arr(t.el()),
-                    _ => Ty::Arr(El::Dyn),
+                    t => Ty::Arr(t.el()), // numbers, strings and records; anything else is dynamic
                 }
             }
             ExprKind::Path(path) => match self.lookup(&path[0]) {
                 Some((_, t)) if path.len() == 1 => t,
-                _ => Ty::Dyn,
+                _ => match self.inf.p.resolve(self.module, path) {
+                    Ok(Resolved::Variant(t, _)) => Ty::Obj(t as u32),
+                    _ => Ty::Dyn,
+                },
             },
             ExprKind::Call { callee, args } => {
                 let argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
@@ -464,6 +523,16 @@ impl Walk<'_, '_> {
                     ExprKind::Lambda { .. } => self.lambda(callee, argt.first().copied().unwrap_or(Ty::Dyn)),
                     ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
                         Ok(Resolved::Fn(f)) => self.call_user(id(e), f, argt),
+                        Ok(Resolved::Variant(t, v)) => {
+                            let td = &self.inf.p.types[t];
+                            let (fields, tm, vname) = (td.variants()[v].fields.clone(), td.module, td.variants()[v].name.clone());
+                            for (i, (ft, at)) in fields.iter().zip(&argt).enumerate() {
+                                if let Err(m) = coerce_in(self.inf.p, tm, Some(ft), *at) {
+                                    self.err(Diag::new(format!("field {} of `{vname}`: {m}", i + 1), args[i].span));
+                                }
+                            }
+                            Ty::Obj(t as u32)
+                        }
                         _ => Ty::Dyn,
                     },
                     _ => Ty::Dyn,
@@ -496,7 +565,82 @@ impl Walk<'_, '_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
+                if matches!(a, Ty::Obj(_)) || matches!(b, Ty::Obj(_)) {
+                    self.err(Diag::new(format!("operator `{op:?}` is not defined for records and variants (use `match`)"), e.span));
+                    return Ty::Dyn;
+                }
                 binary_ty(*op, a, b)
+            }
+            ExprKind::Interp(parts) => {
+                for part in parts {
+                    if let InterpPart::Expr(x) = part {
+                        self.expr(x);
+                    }
+                }
+                Ty::Arr(El::Char)
+            }
+            ExprKind::Named { value, .. } => {
+                self.expr(value);
+                Ty::Dyn
+            }
+            ExprKind::Record { path, fields } => {
+                let p = self.inf.p;
+                let Ok(Resolved::Type(t)) = p.resolve(self.module, path) else { return Ty::Dyn };
+                let td = &p.types[t];
+                let TypeKind::Record(decl) = &td.decl.kind else { return Ty::Dyn };
+                for (n, v, sp) in fields {
+                    let vt = self.expr(v);
+                    if let Some((_, ft, _)) = decl.iter().find(|(d, _, _)| d == n)
+                        && let Err(m) = coerce_in(p, td.module, Some(ft), vt)
+                    {
+                        self.err(Diag::new(format!("field `{n}` of `{}`: {m}", td.name), *sp));
+                    }
+                }
+                Ty::Obj(t as u32)
+            }
+            ExprKind::Field { base, name } => {
+                let b = self.expr(base);
+                self.field_ty(b, name, e.span)
+            }
+            ExprKind::With { base, fields } => {
+                let b = self.expr(base);
+                for (n, v, sp) in fields {
+                    let vt = self.expr(v);
+                    if let Ty::Obj(t) = b {
+                        let p = self.inf.p;
+                        let td = &p.types[t as usize];
+                        match &td.decl.kind {
+                            TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == n) {
+                                Some((_, ft, _)) => {
+                                    if let Err(m) = coerce_in(p, td.module, Some(ft), vt) {
+                                        self.err(Diag::new(format!("field `{n}` of `{}`: {m}", td.name), *sp));
+                                    }
+                                }
+                                None => self.err(Diag::new(format!("`{}` has no field `{n}`", td.name), *sp)),
+                            },
+                            TypeKind::Union(_) => self.err(Diag::new(format!("`{}` is a union; `with` works on records", td.name), e.span)),
+                        }
+                    }
+                }
+                match b {
+                    Ty::Obj(_) | Ty::Never => b,
+                    _ => {
+                        self.err(Diag::new("`with` needs a value whose record type is known here", base.span)
+                            .note("annotate the parameter or binding, e.g. `u: User`"));
+                        Ty::Dyn
+                    }
+                }
+            }
+            ExprKind::Match { scrut, arms } => {
+                let st = self.expr(scrut);
+                let mut out = Ty::Never;
+                for arm in arms {
+                    self.scopes.push(HashMap::new());
+                    self.bind_pattern(&arm.pat, st);
+                    out = out.join(self.expr(&arm.body));
+                    self.scopes.pop();
+                }
+                out
             }
             ExprKind::Prim { prim, args } => {
                 let a = self.expr(&args[0]);
@@ -516,8 +660,7 @@ impl Walk<'_, '_> {
                     };
                     return match (a, r) {
                         (_, Ty::Never) => Ty::Never,
-                        (Ty::Arr(_), r) if r.is_scalar() => Ty::Arr(r.el()),
-                        (Ty::Arr(_), _) => Ty::Arr(El::Dyn),
+                        (Ty::Arr(_), r) => Ty::Arr(r.el()),
                         (_, r) => r, // `¨` on a scalar applies f once
                     };
                 }
@@ -541,11 +684,77 @@ impl Walk<'_, '_> {
     }
 }
 
+impl Walk<'_, '_> {
+    /// The type of `base.name`.
+    fn field_ty(&mut self, base: Ty, name: &str, span: mimic_syntax::Span) -> Ty {
+        let p = self.inf.p;
+        match base {
+            Ty::Never => Ty::Never,
+            Ty::Dyn => Ty::Dyn, // looked up by name at run time
+            Ty::Obj(t) => {
+                let td = &p.types[t as usize];
+                match &td.decl.kind {
+                    TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == name) {
+                        Some((_, ft, _)) => ann_in(p, td.module, ft).unwrap_or(Ty::Dyn),
+                        None => {
+                            self.err(Diag::new(format!("`{}` has no field `{name}`", td.name), span));
+                            Ty::Dyn
+                        }
+                    },
+                    TypeKind::Union(_) => {
+                        self.err(Diag::new(format!("`{}` is a union: use `match` to get at its fields", td.name), span));
+                        Ty::Dyn
+                    }
+                }
+            }
+            other => {
+                self.err(Diag::new(format!("`.{name}`: a {} has no fields", show(p, other)), span));
+                Ty::Dyn
+            }
+        }
+    }
+
+    /// Bind the variables of a pattern matched against a value of type `t`.
+    fn bind_pattern(&mut self, pat: &Pattern, t: Ty) {
+        match pat {
+            Pattern::Wild(_) => {}
+            Pattern::Bind(n, _) => {
+                self.out.binds.insert(id(pat), t);
+                self.scopes.last_mut().unwrap().insert(n.clone(), (id(pat), t));
+            }
+            Pattern::Lit(e) => {
+                let lt = self.expr(e);
+                if t.is_scalar() && lt.is_scalar() && (t == Ty::Bool) != (lt == Ty::Bool) {
+                    self.err(Diag::new(format!("this pattern is a {lt}, but the value is a {t}"), e.span));
+                }
+            }
+            Pattern::Variant { path, args, .. } => {
+                let p = self.inf.p;
+                let Ok(Resolved::Variant(tid, v)) = p.resolve(self.module, path) else { return };
+                let td = &p.types[tid];
+                if let Ty::Obj(st) = t
+                    && st as usize != tid
+                {
+                    self.err(Diag::new(format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
+                }
+                let fts: Vec<Ty> = td.variants()[v].fields.iter().map(|f| ann_in(p, td.module, f).unwrap_or(Ty::Dyn)).collect();
+                for (a, ft) in args.iter().zip(fts) {
+                    self.bind_pattern(a, ft);
+                }
+            }
+        }
+    }
+}
+
 /// Result type of a binary operator.
 pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
     use BinOp::*;
     if a == Ty::Never || b == Ty::Never {
         return Ty::Never;
+    }
+    // strings compare as whole values
+    if matches!(op, Eq | Ne) && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
+        return Ty::Bool;
     }
     let scalar = |x: Ty, y: Ty| -> Ty {
         match op {

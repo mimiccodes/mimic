@@ -29,6 +29,9 @@ pub struct Module {
     pub is_pub: bool,
     pub children: BTreeMap<String, ModId>,
     pub fns: BTreeMap<String, FnId>,
+    pub types: BTreeMap<String, TypeId>,
+    /// union variant constructors: name → (type, variant index)
+    pub variants: BTreeMap<String, (TypeId, usize)>,
     pub uses: BTreeMap<String, UseDecl>,
     pub file: Option<usize>,
     pub span: Span,
@@ -87,6 +90,38 @@ impl Function {
 pub enum Resolved {
     Fn(FnId),
     Mod(ModId),
+    Type(TypeId),
+    Variant(TypeId, usize),
+}
+
+pub type TypeId = usize;
+
+/// A user-declared record or union type.
+pub struct TypeDef {
+    pub name: String,
+    pub module: ModId,
+    pub is_pub: bool,
+    pub decl: TypeDecl,
+    pub file: usize,
+}
+
+impl TypeDef {
+    pub fn is_record(&self) -> bool {
+        matches!(self.decl.kind, TypeKind::Record(_))
+    }
+    /// Record field names, in declaration order.
+    pub fn field_index(&self, name: &str) -> Option<usize> {
+        match &self.decl.kind {
+            TypeKind::Record(fs) => fs.iter().position(|(n, _, _)| n == name),
+            TypeKind::Union(_) => None,
+        }
+    }
+    pub fn variants(&self) -> &[Variant] {
+        match &self.decl.kind {
+            TypeKind::Union(v) => v,
+            TypeKind::Record(_) => &[],
+        }
+    }
 }
 
 /// A diagnostic with the index of the file it belongs to.
@@ -99,6 +134,7 @@ pub struct Program {
     pub files: Vec<SourceFile>,
     pub mods: Vec<Module>,
     pub fns: Vec<Function>,
+    pub types: Vec<TypeDef>,
     /// package name → root module
     pub roots: BTreeMap<String, ModId>,
     pub root_package: String,
@@ -116,7 +152,7 @@ impl Program {
     /// other packages are its dependencies.
     /// Module-tree errors (duplicates, collisions) are returned alongside the program.
     pub fn build(files: Vec<SourceFile>, root_package: &str) -> (Program, Vec<FileDiag>) {
-        let mut p = Program { files, mods: Vec::new(), fns: Vec::new(), roots: BTreeMap::new(), root_package: root_package.into() };
+        let mut p = Program { files, mods: Vec::new(), fns: Vec::new(), types: Vec::new(), roots: BTreeMap::new(), root_package: root_package.into() };
         let mut diags = Vec::new();
         for fi in 0..p.files.len() {
             let pkg = p.files[fi].package.clone();
@@ -143,6 +179,8 @@ impl Program {
             is_pub,
             children: BTreeMap::new(),
             fns: BTreeMap::new(),
+            types: BTreeMap::new(),
+            variants: BTreeMap::new(),
             uses: BTreeMap::new(),
             file,
             span,
@@ -195,6 +233,7 @@ impl Program {
                         self.register_fn(id, &ef.name, ef.is_pub, FnKind::Extern { decl: ef.clone(), trusted: b.trusted }, file, ef.span, diags);
                     }
                 }
+                Item::Type(t) => self.register_type(id, t, file, diags),
                 Item::Use(u) => {
                     let name = u.local_name().to_string();
                     if self.mods[id].uses.insert(name.clone(), u.clone()).is_some() {
@@ -216,6 +255,26 @@ impl Program {
         }
     }
 
+    fn register_type(&mut self, m: ModId, t: &TypeDecl, file: usize, diags: &mut Vec<FileDiag>) {
+        let taken = |s: &Self, n: &str| s.mods[m].fns.contains_key(n) || s.mods[m].children.contains_key(n) || s.mods[m].types.contains_key(n) || s.mods[m].variants.contains_key(n);
+        if taken(self, &t.name) {
+            diags.push(FileDiag { file, diag: Diag::new(format!("`{}` is already defined in this module", t.name), t.span) });
+            return;
+        }
+        self.types.push(TypeDef { name: t.name.clone(), module: m, is_pub: t.is_pub, decl: t.clone(), file });
+        let id = self.types.len() - 1;
+        self.mods[m].types.insert(t.name.clone(), id);
+        if let TypeKind::Union(vs) = &t.kind {
+            for (i, v) in vs.iter().enumerate() {
+                if taken(self, &v.name) {
+                    diags.push(FileDiag { file, diag: Diag::new(format!("variant `{}` collides with another name in this module", v.name), v.span) });
+                    continue;
+                }
+                self.mods[m].variants.insert(v.name.clone(), (id, i));
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn register_fn(&mut self, m: ModId, name: &str, is_pub: bool, kind: FnKind, file: usize, span: Span, diags: &mut Vec<FileDiag>) {
         if self.mods[m].fns.contains_key(name) {
@@ -224,6 +283,10 @@ impl Program {
         }
         if self.mods[m].children.contains_key(name) {
             diags.push(FileDiag { file, diag: Diag::new(format!("function `{name}` collides with a module of the same name"), span) });
+            return;
+        }
+        if self.mods[m].types.contains_key(name) || self.mods[m].variants.contains_key(name) {
+            diags.push(FileDiag { file, diag: Diag::new(format!("function `{name}` collides with a type or variant of the same name"), span) });
             return;
         }
         // strict: no shadowing of functions from enclosing modules
@@ -264,6 +327,7 @@ impl Program {
         let (parent, is_pub) = match r {
             Resolved::Fn(f) => (Some(self.fns[f].module), self.fns[f].is_pub),
             Resolved::Mod(m) => (self.mods[m].parent, self.mods[m].is_pub),
+            Resolved::Type(t) | Resolved::Variant(t, _) => (Some(self.types[t].module), self.types[t].is_pub),
         };
         match parent {
             None => true,
@@ -271,23 +335,27 @@ impl Program {
         }
     }
 
+    /// A name defined directly in module `m`.
+    fn local(&self, m: ModId, name: &str) -> Option<Resolved> {
+        let md = &self.mods[m];
+        md.fns
+            .get(name)
+            .map(|f| Resolved::Fn(*f))
+            .or_else(|| md.children.get(name).map(|x| Resolved::Mod(*x)))
+            .or_else(|| md.types.get(name).map(|t| Resolved::Type(*t)))
+            .or_else(|| md.variants.get(name).map(|(t, v)| Resolved::Variant(*t, *v)))
+    }
+
     fn member(&self, m: ModId, name: &str) -> Option<Resolved> {
-        if let Some(f) = self.mods[m].fns.get(name) {
-            return Some(Resolved::Fn(*f));
-        }
-        if let Some(c) = self.mods[m].children.get(name) {
-            return Some(Resolved::Mod(*c));
+        if let Some(r) = self.local(m, name) {
+            return Some(r);
         }
         // package roots expose the items of their `lib` module: `ai::get_mic` = `ai::lib::get_mic`
         if self.mods[m].parent.is_none()
-            && let Some(lib) = self.mods[m].children.get("lib") {
-                if let Some(f) = self.mods[*lib].fns.get(name) {
-                    return Some(Resolved::Fn(*f));
-                }
-                if let Some(c) = self.mods[*lib].children.get(name) {
-                    return Some(Resolved::Mod(*c));
-                }
-            }
+            && let Some(lib) = self.mods[m].children.get("lib")
+        {
+            return self.local(*lib, name);
+        }
         None
     }
 
@@ -295,6 +363,8 @@ impl Program {
         match r {
             Resolved::Fn(f) => format!("function `{}`", self.fn_path(f).join("::")),
             Resolved::Mod(m) => format!("module `{}`", self.mod_path(m).join("::")),
+            Resolved::Type(t) => format!("type `{}`", self.types[t].name),
+            Resolved::Variant(t, v) => format!("variant `{}::{}`", self.types[t].name, self.types[t].variants()[v].name),
         }
     }
 
@@ -317,7 +387,7 @@ impl Program {
             // lexical: this module, then enclosing modules
             let mut m = Some(from);
             while let Some(c) = m {
-                if let Some(r) = self.mods[c].fns.get(first).map(|f| Resolved::Fn(*f)).or_else(|| self.mods[c].children.get(first).map(|x| Resolved::Mod(*x))) {
+                if let Some(r) = self.local(c, first) {
                     cur = Some(r);
                     break;
                 }
@@ -501,19 +571,80 @@ impl Checker<'_> {
         self.scopes.last_mut().unwrap().insert(name.into(), Var { mutable });
     }
 
+    /// Annotations: built-in types, or record/union types in scope.
+    fn ann_result(&self, t: &Type) -> Result<(), Diag> {
+        if type_code(t).is_ok() {
+            return Ok(());
+        }
+        match t {
+            Type::Named(n, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
+                Ok(Resolved::Type(_)) => Ok(()),
+                _ if n == "str" => Ok(()),
+                _ => Err(Diag::new(format!("unknown type `{n}`"), *s)),
+            },
+            Type::Array(inner, _) => self.ann_result(inner),
+            Type::Ptr(_, s) => Err(Diag::new("`ptr[T]` is only allowed in `extern` declarations", *s)),
+        }
+    }
+
+    fn check_ann(&mut self, t: &Type) {
+        if let Err(e) = self.ann_result(t) {
+            self.err(e);
+        }
+    }
+
+    /// Declare the bindings of a pattern and track which variants it covers.
+    fn pattern(&mut self, pat: &Pattern, top: bool, union: &mut Option<TypeId>, covered: &mut Vec<usize>, catch_all: &mut bool) {
+        match pat {
+            Pattern::Wild(_) => *catch_all |= top,
+            Pattern::Bind(n, s) => {
+                self.declare(n, false, *s);
+                *catch_all |= top;
+            }
+            Pattern::Lit(e) => self.expr(e),
+            Pattern::Variant { path, args, span } => match self.p.resolve(self.module, path) {
+                Ok(Resolved::Variant(t, v)) => {
+                    let want = self.p.types[t].variants()[v].fields.len();
+                    if args.len() != want {
+                        self.err(Diag::new(format!("`{}` has {want} field(s), but the pattern has {}", path.join("::"), args.len()), *span));
+                    }
+                    if top {
+                        match union {
+                            Some(u) if *u != t => self.err(Diag::new(format!("this arm matches `{}`, but earlier arms match `{}`", self.p.types[t].name, self.p.types[*u].name), *span)),
+                            _ => *union = Some(t),
+                        }
+                        if args.iter().all(|a| matches!(a, Pattern::Wild(_) | Pattern::Bind(..))) {
+                            covered.push(v);
+                        }
+                    }
+                    let (mut u2, mut c2, mut a2) = (None, Vec::new(), false);
+                    for a in args {
+                        self.pattern(a, false, &mut u2, &mut c2, &mut a2);
+                    }
+                }
+                Ok(r) => self.err(Diag::new(format!("{} is not a variant", self.p.describe(r)), *span)),
+                Err(m) => self.err(Diag::new(m, *span)),
+            },
+        }
+    }
+
     fn check_fn(&mut self, d: &FnDecl) {
         self.scopes.push(HashMap::new());
         for prm in &d.params {
-            if let Some(t) = &prm.ty
-                && let Err(e) = type_code(t) {
-                    self.err(e);
-                }
+            if let Some(t) = &prm.ty {
+                self.check_ann(t);
+            }
+            if let Some(d) = &prm.default
+                && !is_constant(self.p, self.module, d)
+            {
+                self.err(Diag::new(format!("the default value of `{}` must be a constant", prm.name), d.span)
+                    .note("literals, operators on literals, arrays of them, and unit variants"));
+            }
             self.declare(&prm.name, false, prm.span);
         }
-        if let Some(t) = &d.ret
-            && let Err(e) = type_code(t) {
-                self.err(e);
-            }
+        if let Some(t) = &d.ret {
+            self.check_ann(t);
+        }
         self.block(&d.body, false);
         self.scopes.pop();
     }
@@ -527,7 +658,7 @@ impl Checker<'_> {
                 Stmt::Let { name, mutable, ty, value, span } => {
                     self.expr(value);
                     if let Some(t) = ty
-                        && let Err(e) = type_code(t) {
+                        && let Err(e) = self.ann_result(t) {
                             self.err(e);
                         }
                     self.declare(name, *mutable, *span);
@@ -604,6 +735,12 @@ impl Checker<'_> {
                         return;
                     }
                 match self.p.resolve(self.module, path) {
+                    Ok(Resolved::Variant(t, v)) => {
+                        let n = self.p.types[t].variants()[v].fields.len();
+                        if n > 0 {
+                            self.err(Diag::new(format!("variant `{}` has {n} field(s): write `{}(…)`", path.join("::"), path.join("::")), e.span));
+                        }
+                    }
                     Ok(r) => self.err(Diag::new(format!("{} used as a value", self.p.describe(r)), e.span)
                         .note("call functions with `f(x)` or a pipeline `x ▷ f`")),
                     Err(_) if path.len() == 1 => self.err(Diag::new(format!("cannot find variable `{}` in this scope", path[0]), e.span)),
@@ -627,6 +764,12 @@ impl Checker<'_> {
                             return;
                         }
                         match self.p.resolve(self.module, path) {
+                            Ok(Resolved::Variant(t, v)) => {
+                                let n = self.p.types[t].variants()[v].fields.len();
+                                if n != args.len() {
+                                    self.err(Diag::new(format!("variant `{}` has {n} field(s) but {} were given", path.join("::"), args.len()), e.span));
+                                }
+                            }
                             Ok(Resolved::Fn(f)) => {
                                 let func = &self.p.fns[f];
                                 if func.arity() != args.len() {
@@ -667,6 +810,72 @@ impl Checker<'_> {
                     self.fn_operand(&args[1], 1);
                 } else {
                     args.iter().for_each(|a| self.expr(a));
+                }
+            }
+            ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Interp(parts) => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        self.expr(x);
+                    }
+                }
+            }
+            ExprKind::Named { .. } => self.err(Diag::new("named arguments are only allowed in calls to functions", e.span)),
+            ExprKind::With { base, fields } => {
+                self.expr(base);
+                fields.iter().for_each(|(_, v, _)| self.expr(v));
+            }
+            ExprKind::Record { path, fields } => {
+                fields.iter().for_each(|(_, v, _)| self.expr(v));
+                match self.p.resolve(self.module, path) {
+                    Ok(Resolved::Type(t)) => {
+                        let td = &self.p.types[t];
+                        let TypeKind::Record(decl) = &td.decl.kind else {
+                            self.err(Diag::new(format!("`{}` is a union: construct one of its variants", td.name), e.span));
+                            return;
+                        };
+                        let mut errs = Vec::new();
+                        for (n, _, sp) in fields {
+                            if !decl.iter().any(|(d, _, _)| d == n) {
+                                errs.push(Diag::new(format!("`{}` has no field `{n}`", td.name), *sp));
+                            }
+                        }
+                        let missing: Vec<&str> = decl.iter().filter(|(d, _, _)| !fields.iter().any(|(n, _, _)| n == d)).map(|(d, _, _)| d.as_str()).collect();
+                        if !missing.is_empty() {
+                            errs.push(Diag::new(format!("missing field(s) of `{}`: {}", td.name, missing.join(", ")), e.span));
+                        }
+                        errs.into_iter().for_each(|d| self.err(d));
+                    }
+                    Ok(r) => self.err(Diag::new(format!("{} is not a record type", self.p.describe(r)), e.span)),
+                    Err(m) => self.err(Diag::new(m, e.span)),
+                }
+            }
+            ExprKind::Match { scrut, arms } => {
+                self.expr(scrut);
+                let (mut union, mut covered, mut catch_all) = (None, Vec::new(), false);
+                for arm in arms {
+                    self.scopes.push(HashMap::new());
+                    self.pattern(&arm.pat, true, &mut union, &mut covered, &mut catch_all);
+                    self.expr(&arm.body);
+                    self.scopes.pop();
+                }
+                if !catch_all {
+                    match union {
+                        Some(t) => {
+                            let missing: Vec<String> = self.p.types[t]
+                                .variants()
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| !covered.contains(i))
+                                .map(|(_, v)| format!("`{}`", v.name))
+                                .collect();
+                            if !missing.is_empty() {
+                                self.err(Diag::new(format!("`match` does not cover every case: missing {}", missing.join(", ")), e.span)
+                                    .note("add the missing arms, or a final `_ => …`"));
+                            }
+                        }
+                        None => self.err(Diag::new("`match` on values needs a final `_ => …` arm", e.span)),
+                    }
                 }
             }
             ExprKind::Lambda { .. } => self.err(
@@ -779,6 +988,176 @@ mod tests {
     }
 }
 
+// ---- named and default arguments ------------------------------------------
+
+/// Is `e` a constant (usable as a parameter default)?
+pub fn is_constant(p: &Program, module: ModId, e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => true,
+        ExprKind::Array(xs) => xs.iter().all(|x| is_constant(p, module, x)),
+        ExprKind::Unary { expr, .. } => is_constant(p, module, expr),
+        ExprKind::Binary { lhs, rhs, .. } => is_constant(p, module, lhs) && is_constant(p, module, rhs),
+        ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Variant(t, v)) if p.types[t].variants()[v].fields.is_empty()),
+        _ => false,
+    }
+}
+
+/// Per function: its parameters' names and default values (`None` for externs).
+type ParamInfo = Option<Vec<(String, Option<Expr>)>>;
+
+/// Rewrite calls with named and default arguments into plain positional
+/// calls, so every later phase sees one argument per parameter.
+pub fn normalize(p: &mut Program) -> Vec<FileDiag> {
+    let info: Vec<ParamInfo> = p
+        .fns
+        .iter()
+        .map(|f| match &f.kind {
+            FnKind::User(d) => Some(d.params.iter().map(|q| (q.name.clone(), q.default.clone())).collect()),
+            FnKind::Extern { .. } => None,
+        })
+        .collect();
+    let mut diags = Vec::new();
+    for fid in 0..p.fns.len() {
+        let (module, file) = (p.fns[fid].module, p.fns[fid].file);
+        let mut body = match &mut p.fns[fid].kind {
+            FnKind::User(d) => std::mem::take(&mut d.body),
+            FnKind::Extern { .. } => continue,
+        };
+        let mut n = Norm { p, module, file, info: &info, diags: &mut diags };
+        n.block(&mut body);
+        if let FnKind::User(d) = &mut p.fns[fid].kind {
+            d.body = body;
+        }
+    }
+    diags
+}
+
+struct Norm<'a> {
+    p: &'a Program,
+    module: ModId,
+    file: usize,
+    info: &'a [ParamInfo],
+    diags: &'a mut Vec<FileDiag>,
+}
+
+impl Norm<'_> {
+    fn err(&mut self, d: Diag) {
+        self.diags.push(FileDiag { file: self.file, diag: d });
+    }
+
+    fn block(&mut self, b: &mut Block) {
+        for s in &mut b.stmts {
+            match s {
+                Stmt::Let { value, .. } | Stmt::Expr(value) => self.expr(value),
+                Stmt::Assign { index, value, .. } => {
+                    if let Some(i) = index {
+                        self.expr(i);
+                    }
+                    self.expr(value);
+                }
+                Stmt::Return(Some(x), _) => self.expr(x),
+                Stmt::Return(None, _) => {}
+            }
+        }
+        if let Some(t) = &mut b.tail {
+            self.expr(t);
+        }
+    }
+
+    fn expr(&mut self, e: &mut Expr) {
+        match &mut e.kind {
+            ExprKind::Array(xs) => xs.iter_mut().for_each(|x| self.expr(x)),
+            ExprKind::Call { callee, args } => {
+                self.expr(callee);
+                args.iter_mut().for_each(|x| self.expr(x));
+            }
+            ExprKind::Index { base, index } => {
+                self.expr(base);
+                self.expr(index);
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::Lambda { body: expr, .. } | ExprKind::Field { base: expr, .. } | ExprKind::Named { value: expr, .. } => self.expr(expr),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            ExprKind::Prim { args, .. } => args.iter_mut().for_each(|x| self.expr(x)),
+            ExprKind::If { cond, then, els } => {
+                self.expr(cond);
+                self.block(then);
+                if let Some(x) = els {
+                    self.expr(x);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::Record { fields, .. } => fields.iter_mut().for_each(|(_, x, _)| self.expr(x)),
+            ExprKind::With { base, fields } => {
+                self.expr(base);
+                fields.iter_mut().for_each(|(_, x, _)| self.expr(x));
+            }
+            ExprKind::Match { scrut, arms } => {
+                self.expr(scrut);
+                arms.iter_mut().for_each(|a| self.expr(&mut a.body));
+            }
+            ExprKind::Interp(parts) => parts.iter_mut().for_each(|p| {
+                if let InterpPart::Expr(x) = p {
+                    self.expr(x)
+                }
+            }),
+            _ => {}
+        }
+        let span = e.span;
+        let ExprKind::Call { callee, args } = &mut e.kind else { return };
+        let ExprKind::Path(path) = &callee.kind else { return };
+        let Ok(Resolved::Fn(f)) = self.p.resolve(self.module, path) else { return };
+        let Some(params) = &self.info[f] else { return };
+        let named = args.iter().any(|a| matches!(a.kind, ExprKind::Named { .. }));
+        if !named && args.len() >= params.len() {
+            return; // already positional (arity errors are reported later)
+        }
+        let fname = path.join("::");
+        let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
+        let mut extra = Vec::new();
+        let (mut pos, mut seen_named) = (0, false);
+        for a in std::mem::take(args) {
+            match a.kind {
+                ExprKind::Named { name, value } => {
+                    seen_named = true;
+                    match params.iter().position(|(n, _)| *n == name) {
+                        Some(i) if slots[i].is_some() => self.err(Diag::new(format!("argument `{name}` is given twice"), a.span)),
+                        Some(i) => slots[i] = Some(*value),
+                        None => self.err(Diag::new(format!("`{fname}` has no parameter `{name}`"), a.span)),
+                    }
+                }
+                _ => {
+                    if seen_named {
+                        self.err(Diag::new("positional arguments must come before named ones", a.span));
+                    }
+                    if pos < slots.len() {
+                        slots[pos] = Some(a);
+                    } else {
+                        extra.push(a);
+                    }
+                    pos += 1;
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (i, s) in slots.into_iter().enumerate() {
+            match (s, &params[i].1) {
+                (Some(x), _) => out.push(x),
+                (None, Some(d)) => {
+                    let mut d = d.clone();
+                    d.span = span;
+                    out.push(d);
+                }
+                (None, None) => self.err(Diag::new(format!("missing argument `{}` in call to `{fname}`", params[i].0), span)),
+            }
+        }
+        out.extend(extra);
+        *args = out;
+    }
+}
+
 // ---- purity ---------------------------------------------------------------
 
 /// Which functions are free of side effects (no `print`, no FFI — transitively).
@@ -846,7 +1225,11 @@ impl PurityWalk<'_> {
                 args.iter().all(|a| self.expr(a))
                     && match &callee.kind {
                         ExprKind::Lambda { body, .. } => self.expr(body),
-                        ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+                        ExprKind::Path(path) => match self.p.resolve(self.module, path) {
+                            Ok(Resolved::Fn(f)) => self.pure[f],
+                            Ok(Resolved::Variant(..)) => true,
+                            _ => false,
+                        },
                         _ => false,
                     }
             }
@@ -869,6 +1252,15 @@ impl PurityWalk<'_> {
             ExprKind::Lambda { body, .. } => self.expr(body),
             ExprKind::If { cond, then, els } => self.expr(cond) && self.block(then) && els.as_ref().is_none_or(|e| self.expr(e)),
             ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Named { value, .. } => self.expr(value),
+            ExprKind::Record { fields, .. } => fields.iter().all(|(_, v, _)| self.expr(v)),
+            ExprKind::With { base, fields } => self.expr(base) && fields.iter().all(|(_, v, _)| self.expr(v)),
+            ExprKind::Match { scrut, arms } => self.expr(scrut) && arms.iter().all(|a| self.expr(&a.body)),
+            ExprKind::Interp(parts) => parts.iter().all(|p| match p {
+                InterpPart::Expr(x) => self.expr(x),
+                InterpPart::Text(_) => true,
+            }),
         }
     }
 }
