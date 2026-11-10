@@ -23,6 +23,22 @@ use crate::glyphs::Prim;
 use crate::lexer::{Tok, Token, lex};
 use crate::{Diag, Span};
 
+/// Build a primitive application. `max`, `min` and `abs` are ordinary
+/// operators underneath, so they stay unboxed fast paths everywhere.
+fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
+    let kind = match (prim, args.len()) {
+        (Prim::Max | Prim::Min, 2) => {
+            let rhs = args.pop().unwrap();
+            let lhs = args.pop().unwrap();
+            let op = if prim == Prim::Max { BinOp::Max } else { BinOp::Min };
+            ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
+        }
+        (Prim::Abs, 1) => ExprKind::Unary { op: UnOp::Abs, expr: Box::new(args.pop().unwrap()) },
+        _ => ExprKind::Prim { prim, args },
+    };
+    Expr { kind, span }
+}
+
 pub fn parse_file(src: &str) -> Result<File, Diag> {
     let toks = lex(src)?;
     let mut p = Parser { toks, pos: 0, nl_ignore: 0 };
@@ -108,6 +124,16 @@ impl Parser {
             other => Err(Diag::new(format!("expected identifier, found {}", other.describe()), t.span)),
         }
     }
+    /// A name where built-in words are allowed too: C function names in
+    /// `extern` blocks (`fn abs(…)`) and path segments after `::`.
+    fn name_or_word(&mut self) -> PResult<(String, Span)> {
+        if let Tok::Prim(p) = *self.peek() {
+            let t = self.next();
+            return Ok((p.info().word.to_string(), t.span));
+        }
+        self.ident()
+    }
+
     /// The next token is directly attached to the previous one (no whitespace).
     fn adjacent(&mut self) -> bool {
         !self.peek_tok().space_before
@@ -193,7 +219,7 @@ impl Parser {
                     let fstart = self.span();
                     let fpub = self.eat(&Tok::Pub) || is_pub;
                     self.expect(&Tok::Fn)?;
-                    let (name, _) = self.ident()?;
+                    let (name, _) = self.name_or_word()?;
                     self.expect(&Tok::LParen)?;
                     self.nl_ignore += 1;
                     let mut params = Vec::new();
@@ -268,7 +294,7 @@ impl Parser {
     fn path_segments(&mut self) -> PResult<Vec<String>> {
         let mut segs = vec![self.ident()?.0];
         while self.eat(&Tok::PathSep) {
-            segs.push(self.ident()?.0);
+            segs.push(self.name_or_word()?.0);
         }
         Ok(segs)
     }
@@ -415,7 +441,7 @@ impl Parser {
                     args.push(self.prim_rhs(p)?);
                 }
                 let span = start.to(self.prev_span());
-                Ok(Expr { kind: ExprKind::Prim { prim: p, args }, span })
+                Ok(prim_expr(p, args, span))
             }
             Tok::Ident(_) => {
                 let path = self.path_segments()?;
@@ -466,6 +492,7 @@ impl Parser {
                 Tok::Star => (BinOp::Mul, 5),
                 Tok::Slash => (BinOp::Div, 5),
                 Tok::Percent => (BinOp::Mod, 5),
+                Tok::IntDiv => (BinOp::IntDiv, 5),
                 _ => break,
             };
             if prec < min_prec {
@@ -515,7 +542,7 @@ impl Parser {
                 args.push(self.prim_rhs(p)?);
             }
             let span = args[0].span.to(self.prev_span());
-            e = Expr { kind: ExprKind::Prim { prim: p, args }, span };
+            e = prim_expr(p, args, span);
         }
         Ok(e)
     }
@@ -550,7 +577,7 @@ impl Parser {
                         start,
                     ));
                 }
-                return Ok(Expr { kind: ExprKind::Prim { prim: p, args }, span: start.to(self.prev_span()) });
+                return Ok(prim_expr(p, args, start.to(self.prev_span())));
             }
             if p.arity() != 1 {
                 return Err(Diag::new(
@@ -565,7 +592,7 @@ impl Parser {
             }
             let operand = self.prefix()?;
             let span = start.to(operand.span);
-            return Ok(Expr { kind: ExprKind::Prim { prim: p, args: vec![operand] }, span });
+            return Ok(prim_expr(p, vec![operand], span));
         }
         self.postfix()
     }
@@ -631,7 +658,7 @@ impl Parser {
                 let mut segs = vec![name];
                 while self.at(&Tok::PathSep) {
                     self.next();
-                    segs.push(self.ident()?.0);
+                    segs.push(self.name_or_word()?.0);
                 }
                 ExprKind::Path(segs)
             }
@@ -766,6 +793,11 @@ mod tests {
         assert_eq!(p("xs ▷ f(2) ▷ a::g"), "(a::g (f xs 2))");
         assert_eq!(p("xs\n  ▷ ⌽"), "(reverse xs)");
         assert_eq!(p("xs ▷ +/ ÷ 2"), "(Div (sum xs) 2)");
+        assert_eq!(p("a div 2 + 1"), "(Add (IntDiv a 2) 1)");
+        assert_eq!(p("max(a, b)"), "(Max a b)");
+        assert_eq!(p("a ⌈ b"), "(Max a b)");
+        assert_eq!(p("∣ x"), "(Abs x)");
+        assert_eq!(p("0 ‥ 5"), "(range 0 5)");
         assert_eq!(p("xs ▷ ⌽ ↑ 3 ▷ +/"), "(sum (take (reverse xs) 3))");
         assert_eq!(p("[1 2 ¯3, 4]"), "[1 2 -3 4]");
         assert_eq!(p("xs[0] + f(1, 2)"), "(Add (idx xs 0) (f 1 2))");

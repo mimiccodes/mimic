@@ -51,6 +51,7 @@ pub enum Tok {
     Star,
     Slash,
     Percent,
+    IntDiv,
     EqEq,
     Ne,
     Lt,
@@ -116,6 +117,7 @@ fn tok_text(t: &Tok) -> &'static str {
         Tok::Star => "×",
         Tok::Slash => "÷",
         Tok::Percent => "%",
+        Tok::IntDiv => "div",
         Tok::EqEq => "==",
         Tok::Ne => "≠",
         Tok::Lt => "<",
@@ -171,6 +173,7 @@ fn keyword(w: &str) -> Option<Tok> {
         "and" => Tok::And,
         "or" => Tok::Or,
         "not" => Tok::Not,
+        "div" => Tok::IntDiv,
         _ => return None,
     })
 }
@@ -283,6 +286,7 @@ impl<'a> Lexer<'a> {
             '*' | '×' => Tok::Star,
             '/' | '÷' => Tok::Slash,
             '%' => Tok::Percent,
+            '⫽' => Tok::IntDiv,
             '=' if next == Some('=') => {
                 self.bump();
                 Tok::EqEq
@@ -328,7 +332,7 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Tok::Prim(if c == '⌈' { Prim::Maximum } else { Prim::Minimum })
                 } else {
-                    return Err(Diag::new(format!("`{c}` must be followed by `/` (reduction) in this version"), start));
+                    Tok::Prim(if c == '⌈' { Prim::Max } else { Prim::Min })
                 }
             }
             '"' => self.string(start)?,
@@ -460,6 +464,7 @@ mod tests {
         assert_eq!(toks("§ main"), toks("module main"));
         assert_eq!(toks("\\i 3 \\> \\o"), toks("⍳ 3 ▷ ⌽"));
         assert_eq!(toks("xs ×/"), toks("xs product"));
+        assert_eq!(toks("a ⫽ b ⌈ c ⌊ d ‥ e ∣"), toks("a div b max c min d range e abs"));
     }
 
     #[test]

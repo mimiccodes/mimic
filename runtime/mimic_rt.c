@@ -42,9 +42,19 @@ typedef struct mim_val {
 
 typedef mim_val *(*mim_fn1)(mim_val *);
 
-enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR };
-enum { UOP_NEG, UOP_NOT };
-enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRINT, P_TAKE, P_DROP, P_KEEP, P_EACH };
+enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_IDIV, OP_MAX2, OP_MIN2 };
+enum { UOP_NEG, UOP_NOT, UOP_ABS };
+enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRINT, P_TAKE, P_DROP, P_KEEP, P_EACH, P_RANGE };
+
+void mim_panic(const char *msg);
+
+/* floored integer division (matches `%`): 7 div 2 = 3, -7 div 2 = -4 */
+static int64_t floordiv(int64_t x, int64_t y) {
+    if (y == 0) mim_panic("integer division by zero");
+    int64_t q = x / y;
+    if ((x % y != 0) && ((x < 0) != (y < 0))) q--;
+    return q;
+}
 enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC };
 
 static void park_forever(void);
@@ -581,7 +591,7 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
     for (int64_t i = lo; i < hi; i++) {
         int64_t ia = i * c->sa, ib = i * c->sb;
         mim_val *r = c->r;
-        if (floaty || op == OP_DIV) {
+        if (floaty || op == OP_DIV) { /* note: OP_IDIV on ints stays integer */
             double x = getf(c->a, ia), y = getf(c->b, ib);
             switch (op) {
             case OP_ADD: setf(r, i, x + y); break;
@@ -597,6 +607,9 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
             case OP_GE: seti(r, i, x >= y); break;
             case OP_AND: seti(r, i, x != 0 && y != 0); break;
             case OP_OR: seti(r, i, x != 0 || y != 0); break;
+            case OP_IDIV: setf(r, i, floor(x / y)); break;
+            case OP_MAX2: setf(r, i, x > y ? x : y); break;
+            case OP_MIN2: setf(r, i, x < y ? x : y); break;
             }
         } else {
             int64_t x = geti(c->a, ia), y = geti(c->b, ib);
@@ -616,6 +629,9 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
             case OP_GE: seti(r, i, x >= y); break;
             case OP_AND: seti(r, i, x && y); break;
             case OP_OR: seti(r, i, x || y); break;
+            case OP_IDIV: seti(r, i, floordiv(x, y)); break;
+            case OP_MAX2: seti(r, i, x > y ? x : y); break;
+            case OP_MIN2: seti(r, i, x < y ? x : y); break;
             }
         }
     }
@@ -653,6 +669,10 @@ static void unop_range(void *vc, int64_t lo, int64_t hi) {
     unop_ctx *c = (unop_ctx *)vc;
     for (int64_t i = lo; i < hi; i++) {
         if (c->op == UOP_NOT) seti(c->r, i, getf(c->a, i) == 0);
+        else if (c->op == UOP_ABS) {
+            if (c->a->dtype == MIM_F64) setf(c->r, i, fabs(getf(c->a, i)));
+            else { int64_t x = geti(c->a, i); seti(c->r, i, x < 0 ? -x : x); }
+        }
         else if (c->a->dtype == MIM_F64) setf(c->r, i, -getf(c->a, i));
         else seti(c->r, i, -geti(c->a, i));
     }
@@ -845,6 +865,14 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
         if (k > len) k = len;
         if (prim == P_TAKE) return n >= 0 ? slice(a, 0, k) : slice(a, len - k, k);
         return n >= 0 ? slice(a, k, len - k) : slice(a, 0, len - k);
+    }
+    case P_RANGE: {
+        if (a->rank != 0 || b->rank != 0 || a->dtype == MIM_F64 || b->dtype == MIM_F64)
+            mim_panic("‥ (range) expects two integer scalars");
+        int64_t lo = geti(a, 0), hi = geti(b, 0), n = hi > lo ? hi - lo : 0;
+        mim_val *r = alloc(MIM_I64, 1, n);
+        for (int64_t i = 0; i < n; i++) ((int64_t *)r->data)[i] = lo + i;
+        return r;
     }
     case P_KEEP: {
         if (a->rank == 0 || b->rank == 0) mim_panic("⌿ (keep) expects two vectors");

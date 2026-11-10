@@ -45,6 +45,7 @@ The roadmap is in [docs/design.md](docs/design.md).
 | [docs/cli.md](docs/cli.md) | every `mimic` command |
 | [docs/net.md](docs/net.md) | the interaction-net runtime and `.mnet` format |
 | [BENCHMARK.md](BENCHMARK.md) | how speed is measured, current numbers, targets |
+| [docs/roadmap.md](docs/roadmap.md) | what's done, what's next, and the syntax plan for loops, UI and networking |
 
 ## Building mimic
 

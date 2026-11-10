@@ -136,12 +136,16 @@ pub enum BinOp {
     Ge = 10,
     And = 11,
     Or = 12,
+    IntDiv = 13,
+    Max = 14,
+    Min = 15,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnOp {
     Neg = 0,
     Not = 1,
+    Abs = 2,
 }
 
 #[derive(Clone, Debug)]

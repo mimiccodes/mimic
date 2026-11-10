@@ -755,7 +755,7 @@ mod tests {
         let e = errors(&[(
             "app",
             "src/main.mim",
-            "module main\nextern \"C\" {\n  fn abs(x: i32) -> i32\n}\nfn main() {\n  let x = 1\n  x = 2\n  let x = 3\n  mut y ← 1\n  y ↩ y + 1\n  abs(1)\n  unsafe { abs(1) }\n}\n",
+            "module main\nextern \"C\" {\n  fn abs(x: i32) -> i32\n}\nfn main() {\n  let x = 1\n  x = 2\n  let x = 3\n  mut y ← 1\n  y ↩ y + 1\n  self::abs(1)\n  unsafe { self::abs(1) }\n}\n",
         )]);
         assert_eq!(e.len(), 3, "{e:?}");
         assert!(e[0].contains("immutable"));

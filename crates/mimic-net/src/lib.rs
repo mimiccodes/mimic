@@ -72,6 +72,7 @@ pub enum Op {
     Bin(BinOp),
     Neg,
     Not,
+    Abs,
     Prim1(Prim),
     Prim2(Prim),
     /// `xs[i]`
@@ -86,6 +87,7 @@ impl Op {
             Op::Bin(b) => b as u32,
             Op::Neg => 16,
             Op::Not => 17,
+            Op::Abs => 18,
             Op::Prim1(p) => 32 + p as u32,
             Op::Prim2(p) => 64 + p as u32,
             Op::Index => 96,
@@ -94,7 +96,7 @@ impl Op {
     }
 
     pub fn is_unary(self) -> bool {
-        matches!(self, Op::Neg | Op::Not | Op::Prim1(_) | Op::Check(..))
+        matches!(self, Op::Neg | Op::Not | Op::Abs | Op::Prim1(_) | Op::Check(..))
     }
 
     pub fn name(self) -> String {
@@ -102,6 +104,7 @@ impl Op {
             Op::Bin(b) => BIN_OPS.iter().find(|(_, o)| *o == b).map(|(n, _)| n.to_string()).unwrap(),
             Op::Neg => "neg".into(),
             Op::Not => "not".into(),
+            Op::Abs => "abs".into(),
             Op::Prim1(p) | Op::Prim2(p) => p.info().word.into(),
             Op::Index => "index".into(),
             Op::Check(ty, msg) => format!("check{ty}_{msg}"),
@@ -115,6 +118,7 @@ impl Op {
         match s {
             "neg" => return Some(Op::Neg),
             "not" => return Some(Op::Not),
+            "abs" => return Some(Op::Abs),
             "index" => return Some(Op::Index),
             c if c.starts_with("check") => {
                 let (ty, msg) = c[5..].split_once('_')?;
@@ -125,6 +129,7 @@ impl Op {
         let p = PRIMS.iter().find(|p| p.word == s)?;
         match (p.prim, p.arity) {
             (Prim::Print | Prim::Each, _) => None, // effects / higher-order: not net operators
+            (Prim::Max | Prim::Min | Prim::Abs, _) => None, // spelled as `$max` etc. (binary ops above)
             (prim, 1) => Some(Op::Prim1(prim)),
             (prim, _) => Some(Op::Prim2(prim)),
         }
@@ -145,6 +150,9 @@ const BIN_OPS: &[(&str, BinOp)] = &[
     (">=", BinOp::Ge),
     ("and", BinOp::And),
     ("or", BinOp::Or),
+    ("div", BinOp::IntDiv),
+    ("max", BinOp::Max),
+    ("min", BinOp::Min),
 ];
 
 // ---- printing ---------------------------------------------------------------

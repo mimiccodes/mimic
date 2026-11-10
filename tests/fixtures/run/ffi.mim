@@ -11,7 +11,7 @@ extern "C" {
 
 fn main() {
     print(sqrt(16.0))
-    print(abs(¯42))
+    print(self::abs(¯42))      // the C function; plain `abs` is the built-in
     print(unsafe { strlen("mimic") })
     print([1.0 4.0 9.0] ¨ root)
 }

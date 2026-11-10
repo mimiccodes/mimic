@@ -48,7 +48,7 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 | or / and | `∨` `or`, `∧` `and` (elementwise) |
 | compare | `==` `≠`/`!=` `<` `≤`/`<=` `>` `≥`/`>=` (not chainable) |
 | additive | `+` `-` |
-| multiplicative | `×`/`*` `÷`/`/` (always f64) `%` (floored mod) |
+| multiplicative | `×`/`*` `÷`/`/` (always f64) `div`/`⫽` (floored integer division) `%` (floored mod) |
 | unary | `-x`, `¬x`/`not x` |
 | **train** | postfix monadic prims `xs ⌽`, infix dyadic prims `xs ↑ 3`, `xs ¨ f` |
 | prefix | `⍳ 10`, `⌽ ⍳ 5`, call form `take(xs, 3)` |
@@ -78,6 +78,12 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 | `↓` | `drop` | 2 | drop first n (last n if negative) |
 | `⌿` | `keep` | 2 | replicate / filter by mask |
 | `¨` | `each` | 2 | map a function over elements |
+| `‥` | `range` | 2 | `lo ‥ hi` → `[lo … hi-1]` |
+| `⌈` | `max` | 2 | larger of two values (elementwise) |
+| `⌊` | `min` | 2 | smaller of two values (elementwise) |
+| `∣` | `abs` | 1 | absolute value (elementwise) |
+
+`⌈` and `⌊` on their own are max and min. Followed by `/` (`⌈/`, `⌊/`), they are the reductions.
 
 Arithmetic and comparison broadcast a scalar against a vector, and work elementwise on two vectors of equal length.
 
@@ -86,7 +92,11 @@ Arithmetic and comparison broadcast a scalar against a vector, and work elementw
 * `xs ¨ f` runs in parallel whenever `f` is pure, meaning it never reaches `print` or FFI.
 * Pure recursive functions compile to interaction nets, so independent calls run on different cores. In `fib(n - 1) + fib(n - 2)`, both calls proceed at once.
 
-**Known gap:** `÷` always produces `f64`, and there is no integer division operator yet.
+**Division:** `÷` always produces `f64`. `div` (glyph `⫽`) is integer division, floored to match `%`, so `(a div b) × b + a % b == a` always holds:
+* `7 div 2` is 3;
+* `¯7 div 2` is ¯4.
+
+**Loops** are replaced by words; the plan is in [roadmap.md](roadmap.md#loops-are-replaced-by-words).
 
 ## Keyword glyphs
 

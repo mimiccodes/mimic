@@ -20,6 +20,11 @@ pub enum Prim {
     Drop = 10,
     Keep = 11,
     Each = 12,
+    Range = 13,
+    /// Lowered by the parser to binary/unary operators (never reach the runtime as prims).
+    Max = 14,
+    Min = 15,
+    Abs = 16,
 }
 
 pub struct PrimInfo {
@@ -48,6 +53,10 @@ pub const PRIMS: &[PrimInfo] = &[
     PrimInfo { prim: Prim::Drop, glyph: "↓", word: "drop", digraph: Some("\\v"), ascii: None, arity: 2, doc: "xs ↓ n → drop first n (last n if n<0)" },
     PrimInfo { prim: Prim::Keep, glyph: "⌿", word: "keep", digraph: Some("\\k"), ascii: None, arity: 2, doc: "xs ⌿ counts → replicate/filter by mask" },
     PrimInfo { prim: Prim::Each, glyph: "¨", word: "each", digraph: Some("\\e"), ascii: None, arity: 2, doc: "xs ¨ f → apply f to every element" },
+    PrimInfo { prim: Prim::Range, glyph: "‥", word: "range", digraph: Some("\\."), ascii: None, arity: 2, doc: "lo ‥ hi → [lo lo+1 … hi-1]" },
+    PrimInfo { prim: Prim::Max, glyph: "⌈", word: "max", digraph: Some("\\u"), ascii: None, arity: 2, doc: "a ⌈ b → larger of a and b (elementwise)" },
+    PrimInfo { prim: Prim::Min, glyph: "⌊", word: "min", digraph: Some("\\d"), ascii: None, arity: 2, doc: "a ⌊ b → smaller of a and b (elementwise)" },
+    PrimInfo { prim: Prim::Abs, glyph: "∣", word: "abs", digraph: Some("\\a"), ascii: None, arity: 1, doc: "∣ x → absolute value (elementwise)" },
 ];
 
 impl Prim {
@@ -80,6 +89,7 @@ pub const SYNTAX_GLYPHS: &[SyntaxGlyph] = &[
     SyntaxGlyph { glyph: "⇒", word: "=>", digraph: None, doc: "lambda arrow" },
     SyntaxGlyph { glyph: "×", word: "*", digraph: Some("\\x"), doc: "multiply" },
     SyntaxGlyph { glyph: "÷", word: "/", digraph: Some("\\/"), doc: "divide (always f64)" },
+    SyntaxGlyph { glyph: "⫽", word: "div", digraph: Some("\\%"), doc: "integer division, floored (7 div 2 = 3, ¯7 div 2 = ¯4)" },
     SyntaxGlyph { glyph: "≠", word: "!=", digraph: None, doc: "not equal" },
     SyntaxGlyph { glyph: "≤", word: "<=", digraph: None, doc: "less or equal" },
     SyntaxGlyph { glyph: "≥", word: ">=", digraph: None, doc: "greater or equal" },

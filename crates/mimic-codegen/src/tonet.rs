@@ -565,7 +565,11 @@ impl Gen<'_> {
             }
             ExprKind::Unary { op, expr } => {
                 let a = self.expr(rg, expr);
-                let op = if *op == UnOp::Neg { Op::Neg } else { Op::Not };
+                let op = match op {
+                    UnOp::Neg => Op::Neg,
+                    UnOp::Not => Op::Not,
+                    UnOp::Abs => Op::Abs,
+                };
                 self.op_node(rg, op, a, Tree::Era)
             }
             ExprKind::Index { base, index } => {
