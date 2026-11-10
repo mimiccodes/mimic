@@ -26,6 +26,9 @@ pub fn render(project: &Project, p: &Program) -> String {
     let mut modules = Table::default();
     for (mid, m) in p.mods.iter().enumerate() {
         let Some(file) = m.file else { continue };
+        if m.package == "std" {
+            continue;
+        }
         let f = &p.files[file];
         let mut t = Table::default();
         t.entries.push(entry("file".into(), Value::Str(f.display.clone())));

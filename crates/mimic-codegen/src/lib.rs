@@ -429,6 +429,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
             "mim_str_eq" => self.ctx.i64_type().fn_type(&[p, p], false),
+            "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_route" => self.ctx.i64_type().fn_type(&[p, i64t, p, p, p], false),
             other => panic!("unknown runtime function {other}"),
         };
         self.module.add_function(name, ty, Some(Linkage::External))
@@ -1010,6 +1012,50 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.ret(v)?;
                 }
             }
+            Stmt::LetTuple { names, value, .. } => {
+                let v = self.expr(value)?;
+                let b = self.boxed(v)?;
+                for (i, n) in names.iter().enumerate() {
+                    if n == "_" {
+                        continue;
+                    }
+                    let t = self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn);
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.as_ty(fv, t, &format!("`{n}`"))?;
+                    let slot = self.entry_alloca(t, n)?;
+                    self.b.build_store(slot, self.basic(fv)).s()?;
+                    let owned = matches!(fv, V::P(..));
+                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false });
+                }
+                self.drop_tmp(b)?;
+            }
+            Stmt::LetElse { name, value, els, .. } => {
+                let v = self.expr(value)?;
+                let b = self.boxed(v)?;
+                let ok = self.call_rt("mim_unwrap_ok", &[self.basic(b).into()])?.unwrap().into_int_value();
+                let c = self.b.build_int_compare(IntPredicate::NE, ok, self.ctx.i64_type().const_zero(), "").s()?;
+                let f = self.cur_fn.unwrap();
+                let some_bb = self.ctx.append_basic_block(f, "some");
+                let none_bb = self.ctx.append_basic_block(f, "none");
+                self.b.build_conditional_branch(c, some_bb, none_bb).s()?;
+                // the `else` block runs (and returns) when there is no value
+                self.b.position_at_end(none_bb);
+                self.drop_tmp(b)?;
+                let ev = self.block(els)?;
+                if !self.terminated() {
+                    self.drop_tmp(ev)?;
+                    self.b.build_unreachable().s()?;
+                }
+                self.b.position_at_end(some_bb);
+                let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);
+                let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_zero().into()])?;
+                let fv = self.as_ty(fv, t, &format!("`{name}`"))?;
+                self.drop_tmp(b)?;
+                let slot = self.entry_alloca(t, name)?;
+                self.b.build_store(slot, self.basic(fv)).s()?;
+                let owned = matches!(fv, V::P(..));
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: false });
+            }
         }
         Ok(())
     }
@@ -1075,9 +1121,23 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// The runtime descriptor (`mim_desc`) of a record type or union variant.
+    /// `t == usize::MAX` is the shared tuple descriptor (prints as `(a, b)`).
     fn desc(&mut self, t: TypeId, variant: Option<usize>) -> PointerValue<'ctx> {
         if let Some(d) = self.descs.get(&(t, variant)) {
             return *d;
+        }
+        if t == usize::MAX {
+            let i32t = self.ctx.i32_type();
+            let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
+            let (tn, vn) = (self.global_cstr("tuple"), self.global_cstr(""));
+            let val = st.const_named_struct(&[tn.into(), vn.into(), i32t.const_zero().into(), i32t.const_zero().into(), self.ptr.const_null().into()]);
+            let g = self.module.add_global(st, None, "tuple_desc");
+            g.set_initializer(&val);
+            g.set_constant(true);
+            g.set_linkage(Linkage::Private);
+            let p = g.as_pointer_value();
+            self.descs.insert((t, variant), p);
+            return p;
         }
         let td = &self.p.types[t];
         let i32t = self.ctx.i32_type();
@@ -1114,6 +1174,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Build a record or variant from field values (in field order).
     fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
+        // (tuples use t = usize::MAX)
         let i64t = self.ctx.i64_type();
         let n = vals.len() as u32;
         let arr_ty = self.ptr.array_type(n.max(1));
@@ -1149,6 +1210,43 @@ impl<'ctx> Cg<'ctx, '_> {
         td.variants()[v].fields.iter().map(|f| types::ann_in(self.p, td.module, f).unwrap_or(Ty::Dyn)).collect()
     }
 
+    /// `kinds` and `texts` constant tables of a route pattern.
+    fn route_tables(&mut self, parts: &[RoutePart]) -> (u64, PointerValue<'ctx>, PointerValue<'ctx>, usize) {
+        let i64t = self.ctx.i64_type();
+        let mut kinds = Vec::new();
+        let mut texts = Vec::new();
+        let mut ncap = 0;
+        for p in parts {
+            match p {
+                RoutePart::Text(t) => {
+                    kinds.push(i64t.const_int(0, false));
+                    texts.push(self.global_cstr(t));
+                }
+                RoutePart::Capture { ty, .. } => {
+                    let k = match ty.as_deref() {
+                        Some("i64") => 2,
+                        Some("f64") => 3,
+                        _ => 1,
+                    };
+                    kinds.push(i64t.const_int(k, false));
+                    texts.push(self.ptr.const_null());
+                    ncap += 1;
+                }
+            }
+        }
+        let ka = i64t.const_array(&kinds);
+        let kg = self.module.add_global(ka.get_type(), None, "route_kinds");
+        kg.set_initializer(&ka);
+        kg.set_constant(true);
+        kg.set_linkage(Linkage::Private);
+        let ta = self.ptr.const_array(&texts);
+        let tg = self.module.add_global(ta.get_type(), None, "route_texts");
+        tg.set_initializer(&ta);
+        tg.set_constant(true);
+        tg.set_linkage(Linkage::Private);
+        (parts.len() as u64, kg.as_pointer_value(), tg.as_pointer_value(), ncap)
+    }
+
     /// Emit the tests of a pattern against `val`; on failure jump to `fail`.
     /// The builder is left in the success path.
     fn pattern_test(&mut self, pat: &Pattern, val: V<'ctx>, fail: BasicBlock<'ctx>) -> R<()> {
@@ -1173,6 +1271,38 @@ impl<'ctx> Cg<'ctx, '_> {
                 let ok = self.ctx.append_basic_block(f, "pat_ok");
                 self.b.build_conditional_branch(cond, ok, fail).s()?;
                 self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::Route(parts, _) => {
+                let (n, kinds, texts, _) = self.route_tables(parts);
+                let b = self.boxed(val)?;
+                let i64t = self.ctx.i64_type();
+                let r = self
+                    .call_rt("mim_route", &[self.basic(b).into(), i64t.const_int(n, false).into(), kinds.into(), texts.into(), self.ptr.const_null().into()])?
+                    .unwrap()
+                    .into_int_value();
+                let c = self.b.build_int_compare(IntPredicate::NE, r, i64t.const_zero(), "").s()?;
+                let ok = self.ctx.append_basic_block(f, "route_ok");
+                self.b.build_conditional_branch(c, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::Tuple(ps, _) => {
+                let b = self.boxed(val)?;
+                for (i, a) in ps.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
+                        continue;
+                    }
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fail_k = self.ctx.append_basic_block(f, "pat_fail");
+                    self.pattern_test(a, fv, fail_k)?;
+                    self.drop_tmp(fv)?;
+                    let cont = self.b.get_insert_block().unwrap();
+                    self.b.position_at_end(fail_k);
+                    self.drop_tmp(fv)?;
+                    self.b.build_unconditional_branch(fail).s()?;
+                    self.b.position_at_end(cont);
+                }
                 Ok(())
             }
             Pattern::Variant { path, args, .. } => {
@@ -1223,6 +1353,41 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.b.build_store(slot, self.basic(v)).s()?;
                 let owned = matches!(v, V::P(..));
                 self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false });
+                Ok(())
+            }
+            Pattern::Tuple(ps, _) => {
+                let b = self.boxed(val)?;
+                for (i, a) in ps.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Lit(_)) {
+                        continue;
+                    }
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    self.pattern_bind(a, fv)?;
+                    self.drop_tmp(fv)?;
+                }
+                Ok(())
+            }
+            Pattern::Route(parts, _) => {
+                let (n, kinds, texts, ncap) = self.route_tables(parts);
+                let i64t = self.ctx.i64_type();
+                let arr_ty = self.ptr.array_type(ncap.max(1) as u32);
+                let out = self.entry_array(arr_ty)?;
+                let b = self.boxed(val)?;
+                self.call_rt("mim_route", &[self.basic(b).into(), i64t.const_int(n, false).into(), kinds.into(), texts.into(), out.into()])?;
+                let mut k = 0;
+                for part in parts {
+                    if let RoutePart::Capture { name, .. } = part {
+                        let t = self.cur_spec.as_ref().and_then(|s| s.route_binds.get(&(id(pat), k)).copied()).unwrap_or(Ty::Dyn);
+                        let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, out, &[i64t.const_zero(), i64t.const_int(k as u64, false)], "").s()? };
+                        let cv = self.b.build_load(self.ptr, slot, "").s()?.into_pointer_value();
+                        let v = self.as_ty(V::P(cv, true), t, &format!("`{name}`"))?;
+                        let lslot = self.entry_alloca(t, name)?;
+                        self.b.build_store(lslot, self.basic(v)).s()?;
+                        let owned = matches!(v, V::P(..));
+                        self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot: lslot, ty: t, owned, mutable: false });
+                        k += 1;
+                    }
+                }
                 Ok(())
             }
             Pattern::Variant { path, args, .. } => {
@@ -1541,6 +1706,13 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Lambda { .. } => Err("lambdas can only be called or passed to ¨ (each)".into()),
             ExprKind::Named { .. } => Err("named arguments are only allowed in calls to functions".into()),
+            ExprKind::Tuple(xs) => {
+                let mut vals = Vec::new();
+                for x in xs {
+                    vals.push(self.expr(x)?);
+                }
+                self.construct(usize::MAX, None, vals)
+            }
             ExprKind::Record { path, fields } => {
                 let Ok(Resolved::Type(t)) = self.p.resolve(self.cur_mod, path) else { return Err("not a record type".into()) };
                 let order: Vec<String> = match &self.p.types[t].decl.kind {
@@ -1565,6 +1737,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 let b = self.expr(base)?;
                 let b = self.boxed(b)?;
                 let r = match self.ty_of(base) {
+                    Ty::Tup(_) => {
+                        let i: u64 = name.parse().map_err(|_| "bad tuple index")?;
+                        self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i, false).into()])?
+                    }
                     Ty::Obj(t) => {
                         let i = self.p.types[t as usize].field_index(name).ok_or_else(|| format!("no field {name}"))?;
                         self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?

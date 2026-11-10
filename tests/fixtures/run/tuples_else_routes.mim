@@ -1,0 +1,73 @@
+module main
+
+type User = { id: i64, name: str }
+
+fn main() {
+    // tuples
+    let pair = (3, "three")
+    print(pair)
+    print(pair.0 + 1)
+    let (q, r) = divmod(17, 5)
+    print("17 = 5 × {q} + {r}")
+    print(classify((0, 5)) + classify((2, 0)) + classify((1, 1)))
+
+    // let … else with Option / Result
+    print(name_of(1))
+    print(name_of(9))
+    print(parse_age("42"))
+    print(parse_age("old"))
+
+    // durations are i64 nanoseconds
+    print(2s)
+    print(250ms + 1s)
+    print(1.5min div 1s)
+
+    // route patterns
+    print(route("/"))
+    print(route("/users/42"))
+    print(route("/users/7/posts/hello-world"))
+    print(route("/users/abc"))
+    print(route("/price/2.5"))
+    print(route("/nowhere"))
+}
+
+fn divmod(a: i64, b: i64) { (a div b, a % b) }
+
+fn classify(p) -> i64 {
+    match p {
+        (0, _) => 1
+        (_, 0) => 10
+        _ => 100
+    }
+}
+
+fn find(id: i64) {
+    if id == 1 { Some(User { id: 1, name: "ada" }) } else { None }
+}
+
+fn name_of(id: i64) -> str {
+    let u: User = find(id) else { return "nobody" }
+    u.name
+}
+
+fn parse_age(s: str) -> str {
+    let n = to_int(s) else { return "not a number: {s}" }
+    "age {n}"
+}
+
+fn to_int(s: str) {
+    match s {
+        "{n: i64}" => Ok(n)
+        _ => Err("bad")
+    }
+}
+
+fn route(path: str) -> str {
+    match path {
+        "/" => "home"
+        "/users/{id: i64}" => "user #{id}"
+        "/users/{id: i64}/posts/{slug}" => "post {slug} by #{id}"
+        "/price/{p: f64}" => "price {p × 2.0}"
+        _ => "404"
+    }
+}

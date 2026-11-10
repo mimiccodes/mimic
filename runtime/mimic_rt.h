@@ -79,6 +79,8 @@ int64_t mim_obj_tag(mim_val *o);
 mim_val *mim_obj_get(mim_val *o, int64_t i);
 mim_val *mim_obj_get_named(mim_val *o, const char *name);
 mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v);
+int64_t mim_unwrap_ok(mim_val *v);
+int64_t mim_route(mim_val *str, int64_t n, const int64_t *kinds, const char *const *texts, mim_val **out);
 
 /* FFI marshalling */
 int64_t mim_as_i64(mim_val *v);

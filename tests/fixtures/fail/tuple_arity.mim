@@ -1,0 +1,6 @@
+// expect-error: this tuple has 2 elements, but 3 names are bound
+module main
+fn main() {
+    let (a, b, c) = (1, 2)
+    print(a)
+}

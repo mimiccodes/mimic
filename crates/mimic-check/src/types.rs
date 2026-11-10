@@ -15,6 +15,23 @@ use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
 use mimic_syntax::Diag;
 use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Tuple shapes, interned so a tuple type is a small copyable id.
+static TUPLES: Mutex<Vec<Vec<Ty>>> = Mutex::new(Vec::new());
+
+pub fn tuple_id(elems: &[Ty]) -> u32 {
+    let mut t = TUPLES.lock().unwrap();
+    if let Some(i) = t.iter().position(|e| e == elems) {
+        return i as u32;
+    }
+    t.push(elems.to_vec());
+    (t.len() - 1) as u32
+}
+
+pub fn tuple_elems(id: u32) -> Vec<Ty> {
+    TUPLES.lock().unwrap()[id as usize].clone()
+}
 
 /// Element type of an array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,6 +61,8 @@ pub enum Ty {
     Arr(El),
     /// A record or union value of a user-declared type.
     Obj(u32),
+    /// A tuple (interned element types, see [`tuple_elems`]).
+    Tup(u32),
     /// Unknown statically: a boxed runtime value.
     Dyn,
 }
@@ -83,6 +102,14 @@ impl Ty {
             (Ty::Never, x) | (x, Ty::Never) => x,
             (a, b) if a == b => a,
             (Ty::Arr(_), Ty::Arr(_)) => Ty::Arr(El::Dyn),
+            (Ty::Tup(a), Ty::Tup(b)) => {
+                let (x, y) = (tuple_elems(a), tuple_elems(b));
+                if x.len() != y.len() {
+                    return Ty::Dyn;
+                }
+                let j: Vec<Ty> = x.iter().zip(&y).map(|(p, q)| p.join(*q)).collect();
+                Ty::Tup(tuple_id(&j))
+            }
             _ => Ty::Dyn,
         }
     }
@@ -109,6 +136,10 @@ impl std::fmt::Display for Ty {
             Ty::Arr(El::Char) => write!(f, "str"),
             Ty::Arr(e) => write!(f, "[{}]", el(e)),
             Ty::Obj(_) => write!(f, "record"),
+            Ty::Tup(id) => {
+                let e: Vec<String> = tuple_elems(*id).iter().map(|t| t.to_string()).collect();
+                write!(f, "({})", e.join(", "))
+            }
             Ty::Dyn => write!(f, "dynamic"),
         }
     }
@@ -137,6 +168,10 @@ pub struct Spec {
     pub lambdas: HashMap<usize, (Ty, Ty)>,
     /// Types of `match` pattern bindings (by pattern id).
     pub binds: HashMap<usize, Ty>,
+    /// `let (a, b) = …` element types, by (statement id, position).
+    pub tuple_lets: HashMap<(usize, usize), Ty>,
+    /// Route-pattern capture types, by (pattern id, capture index).
+    pub route_binds: HashMap<(usize, usize), Ty>,
 }
 
 pub struct TypeInfo {
@@ -159,6 +194,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             "bool" => Ty::Bool,
             "char" | "c_char" => Ty::Char,
             "str" => Ty::Arr(El::Char),
+            "any" => Ty::Dyn,
             _ => return None,
         },
         Type::Array(inner, _) => match ann_ty(inner)? {
@@ -206,6 +242,7 @@ pub fn show(p: &Program, t: Ty) -> String {
         Ty::Obj(id) => p.types[id as usize].name.clone(),
         Ty::Arr(El::Obj(id)) => format!("[{}]", p.types[id as usize].name),
         Ty::Arr(El::Str) => "[str]".into(),
+        Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),
     }
 }
@@ -215,6 +252,9 @@ pub fn show(p: &Program, t: Ty) -> String {
 /// `Dyn` is accepted (checked at run time). Returns the slot's type.
 pub fn coerce(ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
     let Some(a) = ann.and_then(ann_ty) else { return Ok(got) };
+    if a == Ty::Dyn {
+        return Ok(Ty::Dyn); // `any` accepts every value (boxed)
+    }
     let ok = matches!(
         (a, got),
         (_, Ty::Never | Ty::Dyn)
@@ -442,6 +482,46 @@ impl Walk<'_, '_> {
                     self.ret = self.ret.join(t);
                     diverged = true;
                 }
+                Stmt::LetTuple { names, value, span } => {
+                    let vt = self.expr(value);
+                    let elems = match vt {
+                        Ty::Tup(id) => {
+                            let e = tuple_elems(id);
+                            if e.len() != names.len() {
+                                self.err(Diag::new(format!("this tuple has {} elements, but {} names are bound", e.len(), names.len()), *span));
+                            }
+                            e
+                        }
+                        Ty::Dyn | Ty::Never => vec![vt; names.len()],
+                        other => {
+                            self.err(Diag::new(format!("`let (…) =` needs a tuple, found {}", show(self.inf.p, other)), *span));
+                            vec![Ty::Dyn; names.len()]
+                        }
+                    };
+                    for (i, n) in names.iter().enumerate() {
+                        let t = elems.get(i).copied().unwrap_or(Ty::Dyn);
+                        self.out.tuple_lets.insert((id(s), i), t);
+                        if n != "_" {
+                            self.scopes.last_mut().unwrap().insert(n.clone(), (id(s) + 1 + i, t));
+                        }
+                    }
+                }
+                Stmt::LetElse { name, ty, value, els, span } => {
+                    let vt = self.expr(value);
+                    if let Ty::Obj(t) = vt {
+                        let tn = &self.inf.p.types[t as usize].name;
+                        if tn != "Option" && tn != "Result" {
+                            self.err(Diag::new(format!("`let … else` needs an Option or Result, found `{tn}`"), *span));
+                        }
+                    }
+                    self.block(els);
+                    let t = match coerce_in(self.inf.p, self.module, ty.as_ref(), Ty::Dyn) {
+                        Ok(t) => t,
+                        Err(_) => Ty::Dyn,
+                    };
+                    self.out.lets.insert(id(s), t);
+                    self.scopes.last_mut().unwrap().insert(name.clone(), (id(s), t));
+                }
             }
         }
         let t = match &b.tail {
@@ -571,6 +651,13 @@ impl Walk<'_, '_> {
                 }
                 binary_ty(*op, a, b)
             }
+            ExprKind::Tuple(xs) => {
+                let ts: Vec<Ty> = xs.iter().map(|x| self.expr(x)).collect();
+                if ts.contains(&Ty::Never) {
+                    return Ty::Never;
+                }
+                Ty::Tup(tuple_id(&ts))
+            }
             ExprKind::Interp(parts) => {
                 for part in parts {
                     if let InterpPart::Expr(x) = part {
@@ -690,6 +777,16 @@ impl Walk<'_, '_> {
         let p = self.inf.p;
         match base {
             Ty::Never => Ty::Never,
+            Ty::Tup(id) => {
+                let e = tuple_elems(id);
+                match name.parse::<usize>() {
+                    Ok(i) if i < e.len() => e[i],
+                    _ => {
+                        self.err(Diag::new(format!("this tuple has {} elements; `.{name}` is not one of them", e.len()), span));
+                        Ty::Dyn
+                    }
+                }
+            }
             Ty::Dyn => Ty::Dyn, // looked up by name at run time
             Ty::Obj(t) => {
                 let td = &p.types[t as usize];
@@ -726,6 +823,33 @@ impl Walk<'_, '_> {
                 let lt = self.expr(e);
                 if t.is_scalar() && lt.is_scalar() && (t == Ty::Bool) != (lt == Ty::Bool) {
                     self.err(Diag::new(format!("this pattern is a {lt}, but the value is a {t}"), e.span));
+                }
+            }
+            Pattern::Tuple(ps, _) => {
+                let elems = match t {
+                    Ty::Tup(id) => tuple_elems(id),
+                    _ => vec![Ty::Dyn; ps.len()],
+                };
+                for (i, a) in ps.iter().enumerate() {
+                    self.bind_pattern(a, elems.get(i).copied().unwrap_or(Ty::Dyn));
+                }
+            }
+            Pattern::Route(parts, span) => {
+                if !matches!(t, Ty::Arr(El::Char) | Ty::Dyn | Ty::Never) {
+                    self.err(Diag::new(format!("a route pattern matches a str, but the value is {}", show(self.inf.p, t)), *span));
+                }
+                let mut k = 0;
+                for part in parts {
+                    if let RoutePart::Capture { name, ty } = part {
+                        let ct = match ty.as_deref() {
+                            Some("i64") => Ty::I64,
+                            Some("f64") => Ty::F64,
+                            _ => Ty::Arr(El::Char),
+                        };
+                        self.out.route_binds.insert((id(pat), k), ct);
+                        self.scopes.last_mut().unwrap().insert(name.clone(), (id(pat) + 1 + k, ct));
+                        k += 1;
+                    }
                 }
             }
             Pattern::Variant { path, args, .. } => {

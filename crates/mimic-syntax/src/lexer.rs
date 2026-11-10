@@ -437,6 +437,29 @@ impl<'a> Lexer<'a> {
             }
         }
         let text: String = self.src[digits_start..self.pos].chars().filter(|c| *c != '_').collect();
+        // duration literals: 2s, 500ms, 1.5min, 10us, 3h → i64 nanoseconds
+        let rest = &self.src[self.pos..];
+        let unit_len = rest.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+        let unit = &rest[..unit_len];
+        let scale: Option<f64> = match unit {
+            "ns" => Some(1.0),
+            "us" => Some(1e3),
+            "ms" => Some(1e6),
+            "s" => Some(1e9),
+            "min" => Some(60e9),
+            "h" => Some(3600e9),
+            _ => None,
+        };
+        if let Some(sc) = scale {
+            for _ in 0..unit_len {
+                self.bump();
+            }
+            let mut span = start;
+            span.end = self.pos;
+            let v: f64 = text.parse().map_err(|_| Diag::new("invalid duration", span))?;
+            let ns = (v * sc).round();
+            return Ok(Tok::Int((if negative { -ns } else { ns }) as i64));
+        }
         let mut span = start;
         span.end = self.pos;
         if is_float {
@@ -529,6 +552,7 @@ mod tests {
     #[test]
     fn numbers() {
         assert_eq!(toks("¯3 2.5 1_000 1e3"), vec![Tok::Int(-3), Tok::Float(2.5), Tok::Int(1000), Tok::Float(1000.0), Tok::Eof]);
+        assert_eq!(toks("2s 500ms 1.5min"), vec![Tok::Int(2_000_000_000), Tok::Int(500_000_000), Tok::Int(90_000_000_000), Tok::Eof]);
     }
 
     #[test]

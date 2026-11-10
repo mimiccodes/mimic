@@ -138,7 +138,7 @@ fn contains_return(b: &Block) -> bool {
         Stmt::Return(..) => true,
         Stmt::Let { value, .. } => e(value),
         Stmt::Expr(x) => e(x),
-        Stmt::Assign { .. } => false,
+        _ => false,
     }) || b.tail.as_deref().is_some_and(e)
 }
 

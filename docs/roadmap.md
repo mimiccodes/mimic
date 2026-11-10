@@ -27,8 +27,8 @@ Mimic's goals:
 | 1 | `div`/`⫽` (floored integer division), `range`/`‥`, `max`/`⌈`, `min`/`⌊`, `abs`/`∣` | ✅ |
 | 2 | Static types and unboxed scalars. Inference, compile-time type errors, per-call-site specialisation. **Result:** `fib` runs at 1.42× of C on one core and 5.4× faster than C on 12 threads. | ✅ |
 | 3a | Records with `with`, tagged unions, exhaustive `match`, field access, string interpolation and equality, named and default arguments, lists of strings/records/lists | ✅ |
-| 3b (next) | `else` for errors, tuples, durations, route patterns in `match`, more string operations | |
-| 4 | Closures that capture, operators as values (`gather(+)`), function types | |
+| 3b | Tuples (typed) and tuple patterns, `Option`/`Result` prelude with `let … else`, duration literals, route patterns with typed captures | ✅ |
+| 4 (next) | Closures that capture, operators as values (`gather(+)`), function types | |
 | 5 | Loop words: `gather`, `trail`, `evolve`, `settle`, `arms`/`arm` | |
 | 6 | Concurrent I/O: values that wait automatically when used, streams, event loop | |
 | 7 | Performance: kernel fusion, compile-time reference-count elision, wider net subset, benchmark CI | |

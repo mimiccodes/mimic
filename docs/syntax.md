@@ -150,6 +150,61 @@ fn area(s: Shape) -> f64 {
 
 **Interpolation:** `"hi {u.name}, next year {u.age + 1}"`. Any expression can go inside `{ }`, and it is formatted the way `print` shows it. Write `\{` for a literal brace.
 
+## Tuples
+
+```mimic
+fn divmod(a: i64, b: i64) { (a div b, a % b) }
+
+let (q, r) = divmod(17, 5)     // `_` skips an element
+let pair = (3, "three")
+print(pair.0)
+
+match point {
+    (0, _) => "on the y axis"
+    (_, 0) => "on the x axis"
+    _      => "elsewhere"
+}
+```
+
+Tuple types are tracked statically: `(i64, str)` keeps its `i64` unboxed.
+
+## Errors without exceptions: `Option`, `Result` and `let … else`
+
+The prelude, available everywhere, defines `Option = Some(any) | None` and `Result = Ok(any) | Err(any)`.
+
+```mimic
+fn name_of(id: i64) -> str {
+    let u: User = find(id) else { return "nobody" }   // unwraps Some / Ok
+    u.name
+}
+```
+
+* The `else` block runs on `None` / `Err`, and must end with `return`.
+* Until generics arrive (M4), `Some` and `Ok` carry dynamically typed payloads. Annotate the binding (`let u: User = …`) to get a checked, statically typed value back.
+
+## Durations
+
+`2s`, `500ms`, `1.5min`, `10us`, `3h` are `i64` nanoseconds, so `250ms + 1s` and `timeout div 1s` just work.
+
+## Route patterns
+
+A string pattern can contain typed captures, which is how a server routes requests:
+
+```mimic
+fn route(path: str) -> str {
+    match path {
+        "/"                             => "home"
+        "/users/{id: i64}"              => "user #{id}"
+        "/users/{id: i64}/posts/{slug}" => "post {slug} by #{id}"
+        _                               => "404"
+    }
+}
+```
+
+* Captures are `str` (the default), `i64` or `f64`.
+* A capture is non-empty, never spans a `/`, and must parse as its type. `"/users/abc"` does not match `{id: i64}`.
+* Two captures need text between them.
+
 ## Named and default arguments
 
 ```mimic

@@ -1,0 +1,9 @@
+// expect-error: route captures are str, i64 or f64, found `bool`
+module main
+fn main() { print(f("/a/true")) }
+fn f(p: str) -> i64 {
+    match p {
+        "/a/{flag: bool}" => 1
+        _ => 0
+    }
+}

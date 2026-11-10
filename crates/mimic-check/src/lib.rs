@@ -403,6 +403,13 @@ impl Program {
             && let Some(r) = self.roots.get(first) {
                 cur = Some(Resolved::Mod(*r));
             }
+        // the standard prelude (Option, Result, …) is visible everywhere
+        if cur.is_none()
+            && let Some(std) = self.roots.get("std")
+            && let Some(pre) = self.mods[*std].children.get("prelude")
+        {
+            cur = self.local(*pre, first);
+        }
         let mut cur = cur.ok_or_else(|| format!("cannot find `{first}` in this scope"))?;
         for seg in &path[1..] {
             let Resolved::Mod(m) = cur else {
@@ -579,7 +586,7 @@ impl Checker<'_> {
         match t {
             Type::Named(n, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
                 Ok(Resolved::Type(_)) => Ok(()),
-                _ if n == "str" => Ok(()),
+                _ if n == "str" || n == "any" => Ok(()),
                 _ => Err(Diag::new(format!("unknown type `{n}`"), *s)),
             },
             Type::Array(inner, _) => self.ann_result(inner),
@@ -602,6 +609,22 @@ impl Checker<'_> {
                 *catch_all |= top;
             }
             Pattern::Lit(e) => self.expr(e),
+            Pattern::Tuple(ps, _) => {
+                if top && ps.iter().all(|a| matches!(a, Pattern::Wild(_) | Pattern::Bind(..))) {
+                    *catch_all = true;
+                }
+                let (mut u2, mut c2, mut a2) = (None, Vec::new(), false);
+                for a in ps {
+                    self.pattern(a, false, &mut u2, &mut c2, &mut a2);
+                }
+            }
+            Pattern::Route(parts, span) => {
+                for p in parts {
+                    if let RoutePart::Capture { name, .. } = p {
+                        self.declare(name, false, *span);
+                    }
+                }
+            }
             Pattern::Variant { path, args, span } => match self.p.resolve(self.module, path) {
                 Ok(Resolved::Variant(t, v)) => {
                     let want = self.p.types[t].variants()[v].fields.len();
@@ -685,6 +708,26 @@ impl Checker<'_> {
                     if let Some(e) = e {
                         self.expr(e)
                     }
+                }
+                Stmt::LetTuple { names, value, span } => {
+                    self.expr(value);
+                    for n in names {
+                        if n != "_" {
+                            self.declare(n, false, *span);
+                        }
+                    }
+                }
+                Stmt::LetElse { name, ty, value, els, span } => {
+                    self.expr(value);
+                    if let Some(t) = ty {
+                        self.check_ann(t);
+                    }
+                    self.block(els, true);
+                    if els.tail.is_some() || !matches!(els.stmts.last(), Some(Stmt::Return(..))) {
+                        self.err(Diag::new("the `else` block of `let … else` must end with `return`", els.span)
+                            .note("it runs when the value is `None` or `Err`, so the binding has no value"));
+                    }
+                    self.declare(name, false, *span);
                 }
             }
         }
@@ -813,6 +856,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Tuple(xs) => xs.iter().for_each(|x| self.expr(x)),
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
@@ -1057,6 +1101,11 @@ impl Norm<'_> {
                 }
                 Stmt::Return(Some(x), _) => self.expr(x),
                 Stmt::Return(None, _) => {}
+                Stmt::LetTuple { value, .. } => self.expr(value),
+                Stmt::LetElse { value, els, .. } => {
+                    self.expr(value);
+                    self.block(els);
+                }
             }
         }
         if let Some(t) = &mut b.tail {
@@ -1066,7 +1115,7 @@ impl Norm<'_> {
 
     fn expr(&mut self, e: &mut Expr) {
         match &mut e.kind {
-            ExprKind::Array(xs) => xs.iter_mut().for_each(|x| self.expr(x)),
+            ExprKind::Array(xs) | ExprKind::Tuple(xs) => xs.iter_mut().for_each(|x| self.expr(x)),
             ExprKind::Call { callee, args } => {
                 self.expr(callee);
                 args.iter_mut().for_each(|x| self.expr(x));
@@ -1214,6 +1263,8 @@ impl PurityWalk<'_> {
             Stmt::Assign { index, value, .. } => index.as_ref().is_none_or(|i| self.expr(i)) && self.expr(value),
             Stmt::Expr(e) => self.expr(e),
             Stmt::Return(e, _) => e.as_ref().is_none_or(|e| self.expr(e)),
+            Stmt::LetTuple { value, .. } => self.expr(value),
+            Stmt::LetElse { value, els, .. } => self.expr(value) && self.block(els),
         }) && b.tail.as_ref().is_none_or(|t| self.expr(t))
     }
 
@@ -1253,6 +1304,7 @@ impl PurityWalk<'_> {
             ExprKind::If { cond, then, els } => self.expr(cond) && self.block(then) && els.as_ref().is_none_or(|e| self.expr(e)),
             ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
             ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Tuple(xs) => xs.iter().all(|x| self.expr(x)),
             ExprKind::Named { value, .. } => self.expr(value),
             ExprKind::Record { fields, .. } => fields.iter().all(|(_, v, _)| self.expr(v)),
             ExprKind::With { base, fields } => self.expr(base) && fields.iter().all(|(_, v, _)| self.expr(v)),

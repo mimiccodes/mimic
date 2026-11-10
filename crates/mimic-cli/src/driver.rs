@@ -60,6 +60,21 @@ impl Profile {
     }
 }
 
+/// The standard prelude: compiled into every program, visible everywhere.
+pub const PRELUDE: &str = "module prelude
+
+// Optional values: `let x = find(…) else { return … }` unwraps Some.
+pub type Option = Some(any) | None
+
+// Results of operations that can fail: `else` unwraps Ok.
+pub type Result = Ok(any) | Err(any)
+";
+
+fn prelude_file() -> SourceFile {
+    let ast = parse_file(PRELUDE).expect("the prelude parses");
+    SourceFile { path: PathBuf::from("<prelude>"), display: "<prelude>".into(), src: PRELUDE.into(), ast, package: "std".into() }
+}
+
 fn display_path(root: Option<&Path>, p: &Path) -> String {
     root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string()
 }
@@ -166,6 +181,7 @@ pub fn load(input: &Input) -> Result<Program, String> {
     if !errors.is_empty() {
         return Err(summarize(errors));
     }
+    files.push(prelude_file());
     let (mut program, diags) = Program::build(files, &pkg);
     if !diags.is_empty() {
         return Err(summarize(render(&program, &diags)));

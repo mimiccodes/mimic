@@ -55,6 +55,15 @@ fn respan(e: &mut Expr, span: Span) {
                         respan(x, span);
                     }
                 }
+                Stmt::LetTuple { value, span: sp, .. } => {
+                    *sp = span;
+                    respan(value, span);
+                }
+                Stmt::LetElse { value, els, span: sp, .. } => {
+                    *sp = span;
+                    respan(value, span);
+                    blk(els, span);
+                }
             }
         }
         if let Some(t) = &mut b.tail {
@@ -62,7 +71,7 @@ fn respan(e: &mut Expr, span: Span) {
         }
     }
     match &mut e.kind {
-        ExprKind::Array(xs) => xs.iter_mut().for_each(|x| respan(x, span)),
+        ExprKind::Array(xs) | ExprKind::Tuple(xs) => xs.iter_mut().for_each(|x| respan(x, span)),
         ExprKind::Call { callee, args } => {
             respan(callee, span);
             args.iter_mut().for_each(|x| respan(x, span));
@@ -532,6 +541,24 @@ impl Parser {
         match self.peek().clone() {
             Tok::Let => {
                 self.next();
+                // `let (a, b) = value`
+                if self.at(&Tok::LParen) {
+                    self.next();
+                    let mut names = Vec::new();
+                    while !self.at(&Tok::RParen) {
+                        names.push(self.ident()?.0);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&Tok::RParen)?;
+                    if !self.eat(&Tok::Assign) && !self.eat(&Tok::Bind) {
+                        let s = self.span();
+                        return Err(Diag::new("expected `=` in let binding", s));
+                    }
+                    let value = self.expr()?;
+                    return Ok(Stmt::LetTuple { names, value, span: start });
+                }
                 let mutable = self.eat(&Tok::Mut);
                 let (name, _) = self.ident()?;
                 let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
@@ -540,6 +567,14 @@ impl Parser {
                     return Err(Diag::new("expected `=` in let binding", s));
                 }
                 let value = self.expr()?;
+                if self.at(&Tok::Else) {
+                    self.next();
+                    if mutable {
+                        return Err(Diag::new("`let … else` bindings cannot be `mut`", start));
+                    }
+                    let els = self.block()?;
+                    return Ok(Stmt::LetElse { name, ty, value, els, span: start });
+                }
                 Ok(Stmt::Let { name, mutable, ty, value, span: start })
             }
             Tok::Mut => {
@@ -788,7 +823,13 @@ impl Parser {
                 e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
             } else if self.at(&Tok::Dot) {
                 self.next();
-                let (name, _) = self.name_or_word()?;
+                // `t.0` selects a tuple element
+                let name = if let Tok::Int(i) = *self.peek() {
+                    self.next();
+                    i.to_string()
+                } else {
+                    self.name_or_word()?.0
+                };
                 let span = e.span.to(self.prev_span());
                 e = Expr { kind: ExprKind::Field { base: Box::new(e), name }, span };
             } else if self.at(&Tok::LBracket) && self.adjacent() {
@@ -865,11 +906,29 @@ impl Parser {
             }
             Tok::LParen => {
                 self.nl_ignore += 1;
-                let e = self.expr();
+                let r = (|| {
+                    let first = self.expr()?;
+                    if !self.at(&Tok::Comma) {
+                        return Ok((first, None));
+                    }
+                    // a tuple
+                    let mut xs = vec![first];
+                    while self.eat(&Tok::Comma) {
+                        if self.at(&Tok::RParen) {
+                            break;
+                        }
+                        xs.push(self.expr()?);
+                    }
+                    Ok((xs[0].clone(), Some(xs)))
+                })();
                 self.nl_ignore -= 1;
-                let e = e?;
+                let (e, tuple) = r?;
                 self.expect(&Tok::RParen)?;
-                return Ok(Expr { kind: e.kind, span: span.to(self.prev_span()) });
+                let span = span.to(self.prev_span());
+                return Ok(match tuple {
+                    Some(xs) => Expr { kind: ExprKind::Tuple(xs), span },
+                    None => Expr { kind: e.kind, span },
+                });
             }
             Tok::LBracket => {
                 self.nl_ignore += 1;
@@ -1023,7 +1082,52 @@ impl Parser {
                 let e = self.unary()?;
                 Ok(Pattern::Lit(e))
             }
-            Tok::Interp(_) => Err(Diag::new("route patterns like \"/users/{id}\" are not supported yet", t.span)),
+            Tok::Interp(parts) => {
+                self.next();
+                let mut out = Vec::new();
+                for p in parts {
+                    match p {
+                        StrPart::Text(x) => out.push(RoutePart::Text(x)),
+                        StrPart::Code(c) => {
+                            let (name, ty) = match c.split_once(':') {
+                                Some((n, t)) => (n.trim().to_string(), Some(t.trim().to_string())),
+                                None => (c.trim().to_string(), None),
+                            };
+                            if !name.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                                return Err(Diag::new(format!("a route capture is `{{name}}` or `{{name: i64}}`, found `{{{c}}}`"), t.span));
+                            }
+                            if let Some(ty) = &ty
+                                && !matches!(ty.as_str(), "str" | "i64" | "f64")
+                            {
+                                return Err(Diag::new(format!("route captures are str, i64 or f64, found `{ty}`"), t.span));
+                            }
+                            if matches!(out.last(), Some(RoutePart::Capture { .. })) {
+                                return Err(Diag::new("two route captures need text between them", t.span));
+                            }
+                            out.push(RoutePart::Capture { name, ty });
+                        }
+                    }
+                }
+                Ok(Pattern::Route(out, t.span))
+            }
+            Tok::LParen => {
+                self.next();
+                self.nl_ignore += 1;
+                let r = (|| {
+                    let mut ps = Vec::new();
+                    while !self.at(&Tok::RParen) {
+                        ps.push(self.pattern()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    Ok(ps)
+                })();
+                self.nl_ignore -= 1;
+                let ps = r?;
+                self.expect(&Tok::RParen)?;
+                Ok(Pattern::Tuple(ps, t.span.to(self.prev_span())))
+            }
             Tok::Ident(n) => {
                 self.next();
                 let mut path = vec![n];
@@ -1119,6 +1223,7 @@ mod tests {
             ExprKind::Match { scrut, arms } => format!("(match {} {})", sx(scrut), arms.len()),
             ExprKind::Interp(parts) => format!("(interp {})", parts.len()),
             ExprKind::Named { name, value } => format!("({name}: {})", sx(value)),
+            ExprKind::Tuple(xs) => format!("(tuple {})", xs.iter().map(sx).collect::<Vec<_>>().join(" ")),
         }
     }
 

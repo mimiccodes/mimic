@@ -92,12 +92,23 @@ pub enum Pattern {
     Lit(Expr),
     /// `Inc`, `Circle(r)`, `shapes::Rect(w, _)`
     Variant { path: Vec<String>, args: Vec<Pattern>, span: Span },
+    /// `(a, 0, _)`
+    Tuple(Vec<Pattern>, Span),
+    /// `"/users/{id: i64}/posts/{slug}"`: text must match, captures bind
+    Route(Vec<RoutePart>, Span),
+}
+
+#[derive(Clone, Debug)]
+pub enum RoutePart {
+    Text(String),
+    /// `{name}` (a string) or `{name: i64}` / `{name: f64}`
+    Capture { name: String, ty: Option<String> },
 }
 
 impl Pattern {
     pub fn span(&self) -> Span {
         match self {
-            Pattern::Wild(s) | Pattern::Bind(_, s) | Pattern::Variant { span: s, .. } => *s,
+            Pattern::Wild(s) | Pattern::Bind(_, s) | Pattern::Variant { span: s, .. } | Pattern::Tuple(_, s) | Pattern::Route(_, s) => *s,
             Pattern::Lit(e) => e.span,
         }
     }
@@ -172,6 +183,10 @@ pub enum Stmt {
     Assign { name: String, index: Option<Expr>, value: Expr, span: Span },
     Expr(Expr),
     Return(Option<Expr>, Span),
+    /// `let (a, b) = value` (`_` skips an element)
+    LetTuple { names: Vec<String>, value: Expr, span: Span },
+    /// `let x = value else { … }`: unwraps `Some`/`Ok`; otherwise the block runs and must leave
+    LetElse { name: String, ty: Option<Type>, value: Expr, els: Block, span: Span },
 }
 
 #[derive(Clone, Debug)]
@@ -233,6 +248,8 @@ pub enum ExprKind {
     Match { scrut: Box<Expr>, arms: Vec<Arm> },
     /// `"hi {name}"`
     Interp(Vec<InterpPart>),
+    /// `(a, b, c)`
+    Tuple(Vec<Expr>),
     /// `size: 24` in a call (rewritten to a positional argument before checking)
     Named { name: String, value: Box<Expr> },
     If { cond: Box<Expr>, then: Block, els: Option<Box<Expr>> },

@@ -888,6 +888,87 @@ mim_val *mim_obj_get_named(mim_val *o, const char *name) {
     return NULL;
 }
 
+/* `let x = v else { … }`: 1 for Some(_)/Ok(_), 0 for None/Err(_). */
+int64_t mim_unwrap_ok(mim_val *v) {
+    obj_check(v, "`let … else`");
+    const char *t = v->desc->type_name;
+    if (strcmp(t, "Option") != 0 && strcmp(t, "Result") != 0) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "`let … else` needs an Option or Result, found %s", t);
+        mim_panic(buf);
+    }
+    return v->desc->tag == 0;
+}
+
+/* ---- route patterns: "/users/{id: i64}/posts/{slug}" ---------------------
+ * kinds[i]: 0 = literal text (texts[i]), 1 = str capture, 2 = i64, 3 = f64.
+ * Captures are non-empty, never contain '/', and are matched shortest-first. */
+
+static int capture_ok(const char *s, int64_t n, int64_t kind) {
+    if (kind == 2) {
+        int64_t i = (s[0] == '-') ? 1 : 0;
+        if (i >= n) return 0;
+        for (; i < n; i++)
+            if (s[i] < '0' || s[i] > '9') return 0;
+        return 1;
+    }
+    if (kind == 3) {
+        char buf[64];
+        if (n >= (int64_t)sizeof buf) return 0;
+        memcpy(buf, s, (size_t)n);
+        buf[n] = 0;
+        char *end;
+        strtod(buf, &end);
+        return end == buf + n;
+    }
+    return 1;
+}
+
+static int route_rec(const char *s, int64_t len, int64_t si, int64_t pi, int64_t n, const int64_t *kinds,
+                     const char *const *texts, int64_t *cs, int64_t *ce, int ci) {
+    if (pi == n) return si == len;
+    if (kinds[pi] == 0) {
+        int64_t tl = (int64_t)strlen(texts[pi]);
+        if (si + tl > len || memcmp(s + si, texts[pi], (size_t)tl) != 0) return 0;
+        return route_rec(s, len, si + tl, pi + 1, n, kinds, texts, cs, ce, ci);
+    }
+    for (int64_t e = si + 1; e <= len; e++) {
+        if (s[e - 1] == '/') break;
+        if (pi + 1 == n && e != len) continue; /* the last part takes the rest */
+        if (!capture_ok(s + si, e - si, kinds[pi])) continue;
+        cs[ci] = si;
+        ce[ci] = e;
+        if (route_rec(s, len, e, pi + 1, n, kinds, texts, cs, ce, ci + 1)) return 1;
+    }
+    return 0;
+}
+
+/* Returns 1 on a match; when `out` is non-NULL it receives the captures (owned). */
+int64_t mim_route(mim_val *str, int64_t n, const int64_t *kinds, const char *const *texts, mim_val **out) {
+    need(str, "route pattern");
+    if (str->dtype != MIM_CHAR || str->rank != 1) return 0;
+    int64_t cs[32], ce[32];
+    if (n > 32) mim_panic("route pattern has too many parts");
+    if (!route_rec((const char *)str->data, str->len, 0, 0, n, kinds, texts, cs, ce, 0)) return 0;
+    if (out) {
+        const char *s = (const char *)str->data;
+        int k = 0;
+        for (int64_t i = 0; i < n; i++) {
+            if (kinds[i] == 0) continue;
+            int64_t a = cs[k], len = ce[k] - cs[k];
+            char buf[64];
+            if (kinds[i] == 1) out[k] = mim_str(s + a, len);
+            else {
+                memcpy(buf, s + a, (size_t)(len < 63 ? len : 63));
+                buf[len < 63 ? len : 63] = 0;
+                out[k] = kinds[i] == 2 ? mim_int(strtoll(buf, NULL, 10)) : mim_float(strtod(buf, NULL));
+            }
+            k++;
+        }
+    }
+    return 1;
+}
+
 /* `{ o with field_i: v }`. CONSUMES `o` (borrows `v`): when the caller held
  * the only reference the record is updated in place, otherwise it is copied. */
 mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v) {
