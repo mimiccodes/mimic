@@ -26,9 +26,10 @@ pub enum El {
     Dyn,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Ty {
     /// No information yet (fixpoint bottom) / does not return.
+    #[default]
     Never,
     Unit,
     I64,
@@ -123,12 +124,6 @@ pub struct Spec {
     pub lambdas: HashMap<usize, (Ty, Ty)>,
 }
 
-impl Default for Ty {
-    fn default() -> Self {
-        Ty::Never
-    }
-}
-
 pub struct TypeInfo {
     pub specs: HashMap<Key, Spec>,
     pub errors: Vec<FileDiag>,
@@ -166,19 +161,18 @@ fn ann_ty(t: &Type) -> Option<Ty> {
 /// `Dyn` is accepted (checked at run time). Returns the slot's type.
 pub fn coerce(ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
     let Some(a) = ann.and_then(ann_ty) else { return Ok(got) };
-    let ok = match (a, got) {
-        (_, Ty::Never) => true,
-        (_, Ty::Dyn) => true,
-        (Ty::I64, Ty::I64 | Ty::Bool) => true,
-        (Ty::F64, Ty::I64 | Ty::F64 | Ty::Bool) => true,
-        (Ty::Bool, Ty::Bool) => true,
-        (Ty::Char, Ty::Char) => true,
-        (Ty::Arr(El::Char), Ty::Arr(El::Char | El::Dyn)) => true,
-        (Ty::Arr(El::I64), Ty::Arr(El::I64 | El::Bool | El::Dyn)) => true,
-        (Ty::Arr(El::F64), Ty::Arr(El::I64 | El::F64 | El::Bool | El::Dyn)) => true,
-        (Ty::Arr(El::Bool), Ty::Arr(El::Bool | El::Dyn)) => true,
-        _ => false,
-    };
+    let ok = matches!(
+        (a, got),
+        (_, Ty::Never | Ty::Dyn)
+            | (Ty::I64, Ty::I64 | Ty::Bool)
+            | (Ty::F64, Ty::I64 | Ty::F64 | Ty::Bool)
+            | (Ty::Bool, Ty::Bool)
+            | (Ty::Char, Ty::Char)
+            | (Ty::Arr(El::Char), Ty::Arr(El::Char | El::Dyn))
+            | (Ty::Arr(El::I64), Ty::Arr(El::I64 | El::Bool | El::Dyn))
+            | (Ty::Arr(El::F64), Ty::Arr(El::I64 | El::F64 | El::Bool | El::Dyn))
+            | (Ty::Arr(El::Bool), Ty::Arr(El::Bool | El::Dyn))
+    );
     if !ok {
         return Err(format!("expected {a}, found {got}"));
     }
@@ -264,8 +258,9 @@ impl Infer<'_> {
         while i < self.order.len() {
             let k = self.order[i].clone();
             i += 1;
-            let FnKind::User(d) = &self.p.fns[k.0].kind else { continue };
-            let d = d.clone();
+            // walk the Program's own AST: expression ids are node addresses
+            let p = self.p;
+            let FnKind::User(d) = &p.fns[k.0].kind else { continue };
             let prev = self.specs[&k].clone();
             let (module, file) = (self.p.fns[k.0].module, self.p.fns[k.0].file);
             let path = self.p.fn_path(k.0).join("::");

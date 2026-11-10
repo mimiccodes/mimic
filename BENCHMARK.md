@@ -91,20 +91,49 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Structures (8, 9) | ≤ 2.0× | ≤ 1.0× |
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
-## Current baseline (measured)
+## Current results (measured)
 
-These were measured while M2 was being built. The machine was an Apple M3 Pro (6 performance + 6 efficiency cores) under background load (load average 7–14). Times are best of 3.
+### After M3 step 2: static types and unboxed scalars
 
-| Workload | Configuration | Time | vs C |
+Measured on an Apple M3 Pro (6 performance + 6 efficiency cores) under background load (load average 6–10). Times are best of 5. The code is unmodified Mimic with one annotation (`n: i64`):
+
+```mimic
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n
+    }
+    fib(n - 1) + fib(n - 2)
+}
+```
+
+| fib(38) | Time | vs C |
+|---|---|---|
+| C `-O3 -mcpu=native` | 0.65 s | 1.0× |
+| Mimic `--no-net`, 1 core | 0.92 s | **1.42×** (target ≤ 1.5× ✅) |
+| Mimic nets, 1 thread | 1.07 s | 1.65× |
+| Mimic nets, 2 threads | 0.69 s | 1.06× |
+| Mimic nets, 4 threads | 0.31 s | **0.48×** |
+| Mimic nets, 6 threads | 0.21 s | **0.32×** |
+| Mimic nets, 12 threads | 0.12 s | **0.18×, 5.4× faster than C** |
+
+The scalar group's targets, ≤ 1.5× of C on one core and < 1.0× on all cores, are both met for `fib`.
+
+### History
+
+| Milestone | fib(32), 1 core | fib(32), 12 threads | Main change |
 |---|---|---|---|
-| fib(32) | C `-O3 -mcpu=native` | 0.03 s | 1.0× |
-| fib(32) | Mimic `--no-net`, 1 core | 1.59 s | **~53× slower** |
-| fib(32) | Mimic nets, 1 thread | 1.80 s | ~60× slower |
-| fib(32) | Mimic nets, 12 threads | 0.38 s | **~13× slower** |
-| fib(32), raw net | `mimic net run`, 12 threads | 1.07 s | 47.7M interactions/s |
-| 50M-element f64 arithmetic plus sum | Mimic, 1 → 12 threads | 1.78 s → 0.59 s | not measured |
-| `¨` over a costly pure function | Mimic, 1 → 12 threads | 7.1 s → 2.1 s | not measured |
+| M2 phase 3 | 1.59 s | 0.38 s | every scalar boxed on the heap |
+| M3 step 2 | **0.05 s** | **0.02 s** | static types; scalars in registers; hidden native depth argument |
+| C reference | 0.03 s | 0.03 s (sequential) | |
 
-**What this shows:**
-* **Parallelism works.** Nets give 4.2× over Mimic's own native code with no annotations.
-* **Single-core code quality is the main gap.** Every scalar is still a heap-allocated, refcounted value. Static types and unboxed scalars (Step 3 above) are the fix, and they come before any further speed claims.
+### Earlier array-layer measurements (M2)
+
+| Workload | Configuration | Time |
+|---|---|---|
+| 50M-element f64 arithmetic plus sum | 1 → 12 threads | 1.78 s → 0.59 s |
+| `¨` over a costly pure function | 1 → 12 threads | 7.1 s → 2.1 s |
+
+### Gaps that remain
+* **Array kernels are not fused yet** (M3 step 7): each operation in a chain like `xs × xs + 1 ▷ +/` still makes a full pass over memory.
+* **Elements are boxed on the way in and out of arrays.** Indexing and `¨` callbacks box and unbox each element.
+* **Net-only overhead:** with 1 thread, nets cost about 16% more than plain native code.

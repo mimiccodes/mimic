@@ -1,29 +1,43 @@
-//! LLVM code generation (via inkwell).
+//! LLVM code generation (via inkwell), driven by static types.
 //!
-//! Milestone 1 lowering: every Mimic value is a `mim_val*` handle into the
-//! runtime array layer. Codegen inserts retain/release so that every value
-//! has exactly one owner:
+//! Every function is compiled once per *specialisation*: the argument types
+//! it is called with (see `mimic_check::types`). Within a specialisation,
+//! `i64`, `f64` and `bool` values live unboxed in registers (`i64`, `double`,
+//! `i1`); everything else — arrays, strings, values whose type is only known
+//! at run time (`Dyn`) — is a `mim_val*` handle into the runtime array layer.
 //!
-//! * runtime calls and Mimic functions **borrow** their arguments and return
-//!   an **owned** (+1) value;
-//! * `let` bindings own their value and release it at scope exit;
-//! * reads of immutable bindings are borrowed (no refcount traffic);
-//!   reads of `mut` bindings are retained, so reassignment can't dangle.
+//! Ownership of handles follows one rule: runtime calls and Mimic functions
+//! **borrow** their arguments and return an **owned** (+1) value. `let`
+//! bindings own their value and release it at scope exit; reads of immutable
+//! bindings are borrowed; reads of `mut` bindings are retained.
+//!
+//! Each specialisation comes in up to three kinds:
+//! * `Plain`   — ordinary typed native code;
+//! * `NetWrap` — the entry of a net-compiled function: runs it as an
+//!   interaction net (parallel by default);
+//! * `Native`  — depth-counted native body used by the runtime's native
+//!   fallback and by native-to-native recursion.
+//!
+//! Boxed-ABI thunks (`ptr f(ptr…)`) connect typed code to the runtime:
+//! `¨` callbacks, the net's native table, and library exports.
 
-use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::intrinsics::Intrinsic;
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, PointerType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
-use inkwell::{AddressSpace, IntPredicate, OptimizationLevel};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
+use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
+use mimic_check::types::{self, Key, Spec, Ty, id};
 use mimic_check::{FnKind, ModId, Program, Resolved};
 use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::Path;
+use std::rc::Rc;
 
 pub mod tonet;
 
@@ -50,6 +64,13 @@ impl<T, E: Display> OrStr<T> for Result<T, E> {
     fn s(self) -> R<T> {
         self.map_err(|e| e.to_string())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Kind {
+    Plain,
+    NetWrap,
+    Native,
 }
 
 /// Compile the checked program to a native object file (and optionally
@@ -86,31 +107,76 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if let Some(path) = net_out {
         std::fs::write(path, plan.book.to_string()).s()?;
     }
+
+    // Specialisations to infer: the entry point, library exports, and a fully
+    // dynamic version of every net-compiled function (the native table's fallback).
+    let mut roots: Vec<Key> = Vec::new();
+    if settings.emit_main
+        && let Some(e) = p.entry()
+    {
+        roots.push((e, vec![]));
+    }
+    let exports: Vec<usize> = if settings.export_pub {
+        p.fns
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.is_pub && !f.is_extern() && p.mods[f.module].package == p.root_package)
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for f in &exports {
+        roots.push((*f, vec![Ty::Dyn; p.fns[*f].arity()]));
+    }
+    for f in plan.def_index.keys() {
+        roots.push((*f, vec![Ty::Dyn; p.fns[*f].arity()]));
+    }
+    let tinfo = types::infer(p, &roots);
+    if let Some(e) = tinfo.errors.first() {
+        return Err(format!("type error: {}", e.diag.msg));
+    }
+    let specs: HashMap<Key, Rc<Spec>> = tinfo.specs.into_iter().map(|(k, s)| (k, Rc::new(s))).collect();
+
     let mut cg = Cg {
         ctx: &ctx,
         module,
         b: ctx.create_builder(),
         p,
         ptr: ctx.ptr_type(AddressSpace::default()),
-        fns: Vec::new(),
-        cur_fn: None,
-        cur_mod: 0,
-        cur_ret: None,
-        scopes: Vec::new(),
-        lambdas: 0,
+        specs,
+        fns: HashMap::new(),
+        thunks: HashMap::new(),
+        queue: Vec::new(),
         purity,
         plan,
         net_ensure: None,
-        natives: Vec::new(),
+        cur_fn: None,
+        cur_mod: 0,
+        cur_spec: None,
+        cur_ret: Ty::Unit,
+        ret_what: String::new(),
+        scopes: Vec::new(),
         native_frame: false,
+        cur_depth: None,
+        lambdas: 0,
     };
-    cg.declare_all(settings)?;
-    cg.emit_book()?;
-    for fid in 0..p.fns.len() {
-        cg.define(fid)?;
+    if !cg.plan.book.defs.is_empty() {
+        let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
+        cg.net_ensure = Some(f);
     }
-    if settings.emit_main {
-        cg.emit_main(settings.leak_check)?;
+    let entry_fn = match (settings.emit_main, p.entry()) {
+        (true, Some(e)) => Some(cg.request(&(e, vec![]), Kind::Plain)?),
+        _ => None,
+    };
+    for f in &exports {
+        cg.export(*f)?;
+    }
+    cg.drain()?;
+    cg.emit_book()?;
+    cg.drain()?;
+    if let Some(f) = entry_fn {
+        cg.emit_main(f, settings.leak_check)?;
     }
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
@@ -124,16 +190,19 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     tm.write_to_file(&cg.module, FileType::Object, obj).s()
 }
 
-/// A value produced by an expression: a handle plus whether we own a reference.
+/// A compiled value: an unboxed scalar, or a handle with an ownership flag.
 #[derive(Clone, Copy)]
-struct V<'ctx> {
-    v: PointerValue<'ctx>,
-    owned: bool,
+enum V<'ctx> {
+    P(PointerValue<'ctx>, bool),
+    I(IntValue<'ctx>),
+    F(FloatValue<'ctx>),
+    B(IntValue<'ctx>),
 }
 
 struct Local<'ctx> {
     name: String,
     slot: PointerValue<'ctx>,
+    ty: Ty,
     owned: bool,
     mutable: bool,
 }
@@ -144,24 +213,177 @@ struct Cg<'ctx, 'p> {
     b: Builder<'ctx>,
     p: &'p Program,
     ptr: PointerType<'ctx>,
-    fns: Vec<Option<FunctionValue<'ctx>>>,
-    cur_fn: Option<FunctionValue<'ctx>>,
-    cur_mod: ModId,
-    /// (runtime type code, description) of the current function's return annotation
-    cur_ret: Option<(i32, String)>,
-    scopes: Vec<Vec<Local<'ctx>>>,
-    lambdas: usize,
+    specs: HashMap<Key, Rc<Spec>>,
+    fns: HashMap<(Key, Kind), FunctionValue<'ctx>>,
+    thunks: HashMap<(Key, Kind), FunctionValue<'ctx>>,
+    queue: Vec<(Key, Kind)>,
     purity: mimic_check::Purity,
     plan: tonet::NetPlan,
-    /// `_mimic_net_ensure()`: registers the book once.
     net_ensure: Option<FunctionValue<'ctx>>,
-    /// Native bodies (`<symbol>.native`) of net-entered functions.
-    natives: Vec<Option<FunctionValue<'ctx>>>,
-    /// Compiling a native body: calls go to native versions, frames are counted.
+    // current function
+    cur_fn: Option<FunctionValue<'ctx>>,
+    cur_mod: ModId,
+    cur_spec: Option<Rc<Spec>>,
+    cur_ret: Ty,
+    ret_what: String,
+    scopes: Vec<Vec<Local<'ctx>>>,
     native_frame: bool,
+    /// Recursion depth (hidden `i32` argument of `Native` bodies).
+    cur_depth: Option<IntValue<'ctx>>,
+    lambdas: usize,
+}
+
+/// Native recursion is bounded: deeper calls go to the heap-allocated net.
+const NATIVE_LIMIT: u64 = 2048;
+
+/// Runtime type codes (`TY_*` in mimic_rt.c) for checked unboxing.
+fn type_code(t: Ty) -> i32 {
+    match t {
+        Ty::I64 => 1,
+        Ty::F64 => 2,
+        Ty::Bool => 3,
+        _ => 0,
+    }
+}
+
+fn ty_suffix(tys: &[Ty]) -> String {
+    tys.iter()
+        .map(|t| match t {
+            Ty::I64 => "i".to_string(),
+            Ty::F64 => "f".to_string(),
+            Ty::Bool => "b".to_string(),
+            Ty::Dyn => "d".to_string(),
+            other => format!("{other}").replace(['[', ']', '(', ')', '?'], "_"),
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 impl<'ctx> Cg<'ctx, '_> {
+    // ---- types & values -----------------------------------------------
+
+    fn repr(&self, t: Ty) -> BasicTypeEnum<'ctx> {
+        match t {
+            Ty::I64 => self.ctx.i64_type().into(),
+            Ty::F64 => self.ctx.f64_type().into(),
+            Ty::Bool => self.ctx.bool_type().into(),
+            _ => self.ptr.into(),
+        }
+    }
+
+    fn fn_type(&self, params: &[Ty], ret: Ty) -> inkwell::types::FunctionType<'ctx> {
+        let ps: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| self.repr(*t).into()).collect();
+        self.repr(ret).fn_type(&ps, false)
+    }
+
+    fn basic(&self, v: V<'ctx>) -> BasicValueEnum<'ctx> {
+        match v {
+            V::P(p, _) => p.into(),
+            V::I(i) | V::B(i) => i.into(),
+            V::F(f) => f.into(),
+        }
+    }
+
+    fn val_of(&self, bv: BasicValueEnum<'ctx>, t: Ty, owned: bool) -> V<'ctx> {
+        match t {
+            Ty::I64 => V::I(bv.into_int_value()),
+            Ty::F64 => V::F(bv.into_float_value()),
+            Ty::Bool => V::B(bv.into_int_value()),
+            _ => V::P(bv.into_pointer_value(), owned),
+        }
+    }
+
+    fn null(&self) -> V<'ctx> {
+        V::P(self.ptr.const_null(), true)
+    }
+
+    fn own(&self, v: V<'ctx>) -> R<V<'ctx>> {
+        if let V::P(p, false) = v {
+            self.call_rt("mim_retain", &[p.into()])?;
+            return Ok(V::P(p, true));
+        }
+        Ok(v)
+    }
+
+    fn drop_tmp(&self, v: V<'ctx>) -> R<()> {
+        if let V::P(p, true) = v {
+            self.call_rt("mim_release", &[p.into()])?;
+        }
+        Ok(())
+    }
+
+    /// Box a value into a runtime handle (owned for new boxes).
+    fn boxed(&self, v: V<'ctx>) -> R<V<'ctx>> {
+        Ok(match v {
+            V::P(..) => v,
+            V::I(i) => self.call_rt_ptr("mim_int", &[i.into()])?,
+            V::F(f) => self.call_rt_ptr("mim_float", &[f.into()])?,
+            V::B(b) => {
+                let i = self.b.build_int_z_extend(b, self.ctx.i64_type(), "").s()?;
+                self.call_rt_ptr("mim_bool", &[i.into()])?
+            }
+        })
+    }
+
+    fn to_i64(&self, v: V<'ctx>) -> R<IntValue<'ctx>> {
+        Ok(match v {
+            V::I(i) => i,
+            V::B(b) => self.b.build_int_z_extend(b, self.ctx.i64_type(), "").s()?,
+            V::F(f) => self.b.build_float_to_signed_int(f, self.ctx.i64_type(), "").s()?,
+            V::P(p, _) => self.call_rt("mim_as_i64", &[p.into()])?.unwrap().into_int_value(),
+        })
+    }
+
+    fn to_f64(&self, v: V<'ctx>) -> R<FloatValue<'ctx>> {
+        Ok(match v {
+            V::F(f) => f,
+            V::I(i) => self.b.build_signed_int_to_float(i, self.ctx.f64_type(), "").s()?,
+            V::B(b) => self.b.build_unsigned_int_to_float(b, self.ctx.f64_type(), "").s()?,
+            V::P(p, _) => self.call_rt("mim_as_f64", &[p.into()])?.unwrap().into_float_value(),
+        })
+    }
+
+    /// Truth of a condition (`i1`).
+    fn truth(&self, v: V<'ctx>) -> R<IntValue<'ctx>> {
+        Ok(match v {
+            V::B(b) => b,
+            V::I(i) => self.b.build_int_compare(IntPredicate::NE, i, self.ctx.i64_type().const_zero(), "").s()?,
+            V::F(f) => self.b.build_float_compare(FloatPredicate::UNE, f, self.ctx.f64_type().const_zero(), "").s()?,
+            V::P(p, _) => {
+                let t = self.call_rt("mim_truthy", &[p.into()])?.unwrap().into_int_value();
+                self.drop_tmp(v)?;
+                self.b.build_int_compare(IntPredicate::NE, t, self.ctx.i64_type().const_zero(), "").s()?
+            }
+        })
+    }
+
+    /// Convert a value to the representation of static type `t`. Unboxing a
+    /// handle checks its run-time type (`what` names the slot in the message).
+    fn as_ty(&self, v: V<'ctx>, t: Ty, what: &str) -> R<V<'ctx>> {
+        match (t, v) {
+            (Ty::I64, V::I(_)) | (Ty::F64, V::F(_)) | (Ty::Bool, V::B(_)) => Ok(v),
+            (Ty::I64, V::B(_)) => Ok(V::I(self.to_i64(v)?)),
+            (Ty::F64, V::I(_) | V::B(_)) => Ok(V::F(self.to_f64(v)?)),
+            (Ty::I64 | Ty::F64 | Ty::Bool, V::P(p, _)) => {
+                let w = self.cstring(what)?;
+                self.call_rt("mim_check_type", &[p.into(), self.i32c(type_code(t)), w.into()])?;
+                let r = match t {
+                    Ty::I64 => V::I(self.to_i64(v)?),
+                    Ty::F64 => V::F(self.to_f64(v)?),
+                    _ => {
+                        let i = self.call_rt("mim_as_i64", &[p.into()])?.unwrap().into_int_value();
+                        V::B(self.b.build_int_compare(IntPredicate::NE, i, self.ctx.i64_type().const_zero(), "").s()?)
+                    }
+                };
+                self.drop_tmp(v)?;
+                Ok(r)
+            }
+            (Ty::I64, V::F(_)) => Ok(V::I(self.to_i64(v)?)),
+            (Ty::Bool, V::I(_) | V::F(_)) => Ok(V::B(self.truth(v)?)),
+            _ => self.boxed(v),
+        }
+    }
+
     // ---- runtime declarations ---------------------------------------
 
     fn rt(&self, name: &str) -> FunctionValue<'ctx> {
@@ -177,12 +399,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = match name {
             "mim_int" | "mim_bool" => ptr.fn_type(&[i64t], false),
             "mim_float" => ptr.fn_type(&[f64t], false),
-            "mim_str" => ptr.fn_type(&[p, i64t], false),
-            "mim_lit_int" => ptr.fn_type(&[p, i64t], false),
-            "mim_lit_float" => ptr.fn_type(&[p, f64t], false),
             "mim_lit_str" => ptr.fn_type(&[p, p, i64t], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
-            "mim_retain" | "mim_release" => void.fn_type(&[p], false),
+            "mim_retain" | "mim_release" | "mim_panic" => void.fn_type(&[p], false),
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
             "mim_unop" | "mim_prim1" => ptr.fn_type(&[i32t, p], false),
             "mim_index" => ptr.fn_type(&[p, p], false),
@@ -192,11 +411,11 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
             "mim_cstr" | "mim_dataptr" | "mim_from_cstr" => ptr.fn_type(&[p], false),
             "mim_check_type" => void.fn_type(&[p, i32t, p], false),
+            "mim_is_type" => self.ctx.i32_type().fn_type(&[p, i32t], false),
             "mim_rt_init" => void.fn_type(&[i32t, p], false),
             "mim_rt_shutdown" => self.ctx.i32_type().fn_type(&[i32t], false),
             "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
-            "mim_native_enter" => self.ctx.i32_type().fn_type(&[], false),
-            "mim_native_leave" => void.fn_type(&[], false),
+            "mim_deep_enter" | "mim_deep_leave" => void.fn_type(&[], false),
             "mim_net_call" => ptr.fn_type(&[i32t, i32t, p], false),
             other => panic!("unknown runtime function {other}"),
         };
@@ -210,80 +429,395 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn call_rt_ptr(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> R<V<'ctx>> {
         let v = self.call_rt(name, args)?.ok_or("runtime call returned void")?.into_pointer_value();
-        Ok(V { v, owned: true })
-    }
-
-    /// A fresh `ptr` global (initially null) that caches one literal.
-    fn literal_slot(&self) -> PointerValue<'ctx> {
-        let g = self.module.add_global(self.ptr, None, "lit");
-        g.set_linkage(Linkage::Internal);
-        g.set_initializer(&self.ptr.const_null());
-        g.as_pointer_value()
-    }
-
-    /// Immortal values need no release.
-    fn borrowed(&self, v: V<'ctx>) -> R<V<'ctx>> {
-        Ok(V { v: v.v, owned: false })
+        Ok(V::P(v, true))
     }
 
     fn i32c(&self, x: i32) -> BasicMetadataValueEnum<'ctx> {
         self.ctx.i32_type().const_int(x as u64, true).into()
     }
 
-    fn null(&self) -> V<'ctx> {
-        V { v: self.ptr.const_null(), owned: true }
-    }
-
-    fn own(&self, v: V<'ctx>) -> R<V<'ctx>> {
-        if !v.owned {
-            self.call_rt("mim_retain", &[v.v.into()])?;
-        }
-        Ok(V { v: v.v, owned: true })
-    }
-
-    fn drop_tmp(&self, v: V<'ctx>) -> R<()> {
-        if v.owned {
-            self.call_rt("mim_release", &[v.v.into()])?;
-        }
-        Ok(())
-    }
-
     fn cstring(&self, s: &str) -> R<PointerValue<'ctx>> {
         Ok(self.b.build_global_string_ptr(s, "s").s()?.as_pointer_value())
     }
 
-    // ---- declarations -----------------------------------------------
+    fn intrinsic(&self, name: &str) -> R<FunctionValue<'ctx>> {
+        let i = Intrinsic::find(name).ok_or_else(|| format!("missing LLVM intrinsic {name}"))?;
+        i.get_declaration(&self.module, &[self.ctx.f64_type().into()]).ok_or_else(|| format!("cannot declare {name}"))
+    }
 
-    fn declare_all(&mut self, settings: &Settings) -> R<()> {
-        for (fid, f) in self.p.fns.iter().enumerate() {
-            let fv = match &f.kind {
-                FnKind::User(d) => {
-                    let params: Vec<BasicMetadataTypeEnum> = d.params.iter().map(|_| self.ptr.into()).collect();
-                    let linkage = if settings.export_pub && f.is_pub && self.p.mods[f.module].package == self.p.root_package {
-                        Linkage::External
-                    } else {
-                        Linkage::Internal
-                    };
-                    Some(self.module.add_function(&f.symbol, self.ptr.fn_type(&params, false), Some(linkage)))
-                }
-                FnKind::Extern { .. } => None,
-            };
-            // Net-entered functions also get a plain native body, used by the
-            // runtime's native fallback and by native-to-native calls.
-            let native = match (&fv, self.plan.entered.contains(&fid)) {
-                (Some(f), true) => Some(self.module.add_function(&format!("{}.native", f.get_name().to_str().unwrap()), f.get_type(), Some(Linkage::Internal))),
-                _ => None,
-            };
-            self.fns.push(fv);
-            self.natives.push(native);
+    /// Branch to a panic when `cond` holds; continue in a fresh block otherwise.
+    fn panic_if(&self, cond: IntValue<'ctx>, msg: &str) -> R<()> {
+        let f = self.cur_fn.unwrap();
+        let bad = self.ctx.append_basic_block(f, "panic");
+        let ok = self.ctx.append_basic_block(f, "ok");
+        self.b.build_conditional_branch(cond, bad, ok).s()?;
+        self.b.position_at_end(bad);
+        let m = self.cstring(msg)?;
+        self.call_rt("mim_panic", &[m.into()])?;
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(ok);
+        Ok(())
+    }
+
+    // ---- specialisations ----------------------------------------------
+
+    fn spec(&self, k: &Key) -> R<Rc<Spec>> {
+        self.specs.get(k).cloned().ok_or_else(|| format!("internal compiler error: no type information for {}", self.p.fn_path(k.0).join("::")))
+    }
+
+    /// The LLVM function for a specialisation, declared on first use.
+    fn request(&mut self, k: &Key, kind: Kind) -> R<FunctionValue<'ctx>> {
+        if let Some(f) = self.fns.get(&(k.clone(), kind)) {
+            return Ok(*f);
+        }
+        let s = self.spec(k)?;
+        let suffix = match kind {
+            Kind::Plain => "",
+            Kind::NetWrap => ".net",
+            Kind::Native => ".native",
+        };
+        let name = format!("{}${}{}", self.p.fns[k.0].symbol, ty_suffix(&k.1), suffix);
+        let mut ft = self.fn_type(&s.params, s.ret);
+        if kind == Kind::Native {
+            // hidden trailing argument: the native recursion depth
+            let mut ps: Vec<BasicMetadataTypeEnum> = s.params.iter().map(|t| self.repr(*t).into()).collect();
+            ps.push(self.ctx.i32_type().into());
+            ft = self.repr(s.ret).fn_type(&ps, false);
+        }
+        let f = self.module.add_function(&name, ft, Some(Linkage::Internal));
+        self.fns.insert((k.clone(), kind), f);
+        self.queue.push((k.clone(), kind));
+        Ok(f)
+    }
+
+    fn drain(&mut self) -> R<()> {
+        while let Some((k, kind)) = self.queue.pop() {
+            self.define(&k, kind)?;
         }
         Ok(())
     }
 
-    /// The function to call for `fid` from the current context.
-    fn callee(&self, fid: usize) -> Option<FunctionValue<'ctx>> {
-        if self.native_frame { self.natives[fid].or(self.fns[fid]) } else { self.fns[fid] }
+    /// Which kind of a callee to call from the current context.
+    fn kind_for(&self, fid: usize) -> Kind {
+        if self.plan.entered.contains(&fid) {
+            if self.native_frame { Kind::Native } else { Kind::NetWrap }
+        } else {
+            Kind::Plain
+        }
     }
+
+    fn entry_alloca(&self, t: Ty, name: &str) -> R<PointerValue<'ctx>> {
+        let f = self.cur_fn.unwrap();
+        let entry = f.get_first_basic_block().unwrap();
+        let tmp = self.ctx.create_builder();
+        match entry.get_first_instruction() {
+            Some(i) => tmp.position_before(&i),
+            None => tmp.position_at_end(entry),
+        }
+        tmp.build_alloca(self.repr(t), name).s()
+    }
+
+    fn define(&mut self, k: &Key, kind: Kind) -> R<()> {
+        let fv = self.fns[&(k.clone(), kind)];
+        let spec = self.spec(k)?;
+        // the Program's own AST: expression types are keyed by node address
+        let p = self.p;
+        let FnKind::User(decl) = &p.fns[k.0].kind else { return Ok(()) };
+        let path = self.p.fn_path(k.0).join("::");
+        self.cur_fn = Some(fv);
+        self.cur_mod = self.p.fns[k.0].module;
+        self.cur_spec = Some(spec.clone());
+        self.cur_ret = spec.ret;
+        self.ret_what = format!("return value of `{path}`");
+        self.native_frame = false;
+        let entry = self.ctx.append_basic_block(fv, "entry");
+        self.b.position_at_end(entry);
+        self.scopes = vec![Vec::new()];
+        for (i, prm) in decl.params.iter().enumerate() {
+            let t = spec.params[i];
+            let slot = self.entry_alloca(t, &prm.name)?;
+            self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
+            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: false, mutable: false });
+        }
+        match kind {
+            Kind::NetWrap => {
+                // Parallel by default: run this function as an interaction net.
+                let def = self.plan.def_index[&k.0];
+                self.b.build_call(self.net_ensure.unwrap(), &[], "").s()?;
+                let n = decl.params.len() as u32;
+                let arr_ty = self.ptr.array_type(n.max(1));
+                let arr = self.b.build_alloca(arr_ty, "args").s()?;
+                let i64t = self.ctx.i64_type();
+                let mut temps = Vec::new();
+                for i in 0..n {
+                    let v = self.val_of(fv.get_nth_param(i).unwrap(), spec.params[i as usize], false);
+                    let b = self.boxed(v)?;
+                    let V::P(bp, _) = b else { unreachable!() };
+                    let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                    self.b.build_store(slot, bp).s()?;
+                    temps.push(b);
+                }
+                let r = self.call_rt_ptr("mim_net_call", &[self.i32c(def as i32), self.i32c(n as i32), arr.into()])?;
+                for t in temps {
+                    self.drop_tmp(t)?;
+                }
+                self.ret(r)?;
+                self.scopes.clear();
+                return Ok(());
+            }
+            Kind::Native => {
+                // Bounded native recursion: past the limit, hand the call to the net.
+                let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
+                let limit = self.ctx.i32_type().const_int(NATIVE_LIMIT, false);
+                let is_deep = self.b.build_int_compare(IntPredicate::UGT, depth, limit, "deep").s()?;
+                let deep_bb = self.ctx.append_basic_block(fv, "deep");
+                let body_bb = self.ctx.append_basic_block(fv, "body");
+                self.b.build_conditional_branch(is_deep, deep_bb, body_bb).s()?;
+                self.b.position_at_end(deep_bb);
+                let wrap = self.request(k, Kind::NetWrap)?;
+                let args: Vec<BasicMetadataValueEnum> = (0..decl.params.len()).map(|i| fv.get_nth_param(i as u32).unwrap().into()).collect();
+                self.call_rt("mim_deep_enter", &[])?;
+                let r = self.b.build_call(wrap, &args, "").s()?.try_as_basic_value().basic().unwrap();
+                self.call_rt("mim_deep_leave", &[])?;
+                self.b.build_return(Some(&r)).s()?;
+                self.b.position_at_end(body_bb);
+                self.native_frame = true;
+                self.cur_depth = Some(depth);
+            }
+            Kind::Plain => {}
+        }
+        let v = self.block(&decl.body)?;
+        if !self.terminated() {
+            self.ret(v)?;
+        }
+        self.scopes.clear();
+        self.native_frame = false;
+        self.cur_depth = None;
+        Ok(())
+    }
+
+    fn terminated(&self) -> bool {
+        self.b.get_insert_block().and_then(|b| b.get_terminator()).is_some()
+    }
+
+    /// Convert to the return type, release every owned local, and return.
+    fn ret(&mut self, v: V<'ctx>) -> R<()> {
+        let v = match self.cur_ret {
+            Ty::Unit | Ty::Never => {
+                self.drop_tmp(v)?;
+                self.null()
+            }
+            t => {
+                let w = self.ret_what.clone();
+                let v = self.as_ty(v, t, &w)?;
+                self.own(v)?
+            }
+        };
+        for scope in self.scopes.iter().rev() {
+            self.release_scope(scope)?;
+        }
+        let bv = self.basic(v);
+        self.b.build_return(Some(&bv)).s()?;
+        Ok(())
+    }
+
+    // ---- boxed-ABI thunks ---------------------------------------------
+
+    /// Run `f` with the builder positioned in a fresh function, restoring the
+    /// current function state afterwards.
+    fn in_new_fn<T>(&mut self, fv: FunctionValue<'ctx>, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        let saved_bb = self.b.get_insert_block();
+        let saved_fn = self.cur_fn.replace(fv);
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_native = std::mem::replace(&mut self.native_frame, false);
+        let saved_depth = self.cur_depth.take();
+        let saved_ret = self.cur_ret;
+        let saved_what = std::mem::take(&mut self.ret_what);
+        let entry = self.ctx.append_basic_block(fv, "entry");
+        self.b.position_at_end(entry);
+        let r = f(self);
+        self.cur_fn = saved_fn;
+        self.scopes = saved_scopes;
+        self.native_frame = saved_native;
+        self.cur_depth = saved_depth;
+        self.cur_ret = saved_ret;
+        self.ret_what = saved_what;
+        if let Some(bb) = saved_bb {
+            self.b.position_at_end(bb);
+        }
+        r
+    }
+
+    /// `ptr thunk(ptr…)`: unbox arguments (checked), call the typed function, box the result.
+    fn thunk(&mut self, k: &Key, kind: Kind) -> R<FunctionValue<'ctx>> {
+        if let Some(f) = self.thunks.get(&(k.clone(), kind)) {
+            return Ok(*f);
+        }
+        let target = self.request(k, kind)?;
+        let spec = self.spec(k)?;
+        let n = spec.params.len();
+        let name = format!("{}$box", target.get_name().to_str().unwrap());
+        let ps: Vec<BasicMetadataTypeEnum> = (0..n).map(|_| self.ptr.into()).collect();
+        let f = self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::Internal));
+        self.thunks.insert((k.clone(), kind), f);
+        let path = self.p.fn_path(k.0).join("::");
+        let pnames: Vec<String> = match &self.p.fns[k.0].kind {
+            FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+            _ => vec![],
+        };
+        self.in_new_fn(f, |cg| {
+            let mut args = Vec::new();
+            for (i, pname) in pnames.iter().enumerate().take(n) {
+                let p = f.get_nth_param(i as u32).unwrap().into_pointer_value();
+                let v = cg.as_ty(V::P(p, false), spec.params[i], &format!("argument `{pname}` of `{path}`"))?;
+                args.push(cg.basic(v).into());
+            }
+            if kind == Kind::Native {
+                args.push(cg.ctx.i32_type().const_zero().into()); // a fresh native stack
+            }
+            let r = cg.b.build_call(target, &args, "").s()?.try_as_basic_value().basic().unwrap();
+            let v = cg.val_of(r, spec.ret, true);
+            let b = cg.boxed(v)?;
+            let bv = cg.basic(b);
+            cg.b.build_return(Some(&bv)).s()?;
+            Ok(())
+        })?;
+        Ok(f)
+    }
+
+    /// The native-table entry for a net definition: dispatch to the typed
+    /// specialisation when the run-time arguments fit it, else the dynamic one.
+    fn dispatch_thunk(&mut self, fid: usize) -> R<FunctionValue<'ctx>> {
+        let n = self.p.fns[fid].arity();
+        let dyn_key: Key = (fid, vec![Ty::Dyn; n]);
+        let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+        // the preferred typed specialisation: all-unboxed parameters, deterministic choice
+        let mut typed: Vec<&Key> = self.specs.keys().filter(|k| k.0 == fid && !k.1.is_empty() && k.1.iter().all(|t| t.is_unboxed())).collect();
+        typed.sort_by_key(|k| ty_suffix(&k.1));
+        let Some(tk) = typed.first().map(|k| (*k).clone()) else { return self.thunk(&dyn_key, kind) };
+        let typed_thunk = self.thunk(&tk, kind)?;
+        let dyn_thunk = self.thunk(&dyn_key, kind)?;
+        let name = format!("{}$dispatch", self.p.fns[fid].symbol);
+        let ps: Vec<BasicMetadataTypeEnum> = (0..n).map(|_| self.ptr.into()).collect();
+        let f = self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::Internal));
+        let tys = tk.1.clone();
+        self.in_new_fn(f, |cg| {
+            let mut ok = cg.ctx.bool_type().const_int(1, false);
+            for (i, t) in tys.iter().enumerate() {
+                let p = f.get_nth_param(i as u32).unwrap();
+                let r = cg.call_rt("mim_is_type", &[p.into(), cg.i32c(type_code(*t))])?.unwrap().into_int_value();
+                let b = cg.b.build_int_compare(IntPredicate::NE, r, cg.ctx.i32_type().const_zero(), "").s()?;
+                ok = cg.b.build_and(ok, b, "").s()?;
+            }
+            let yes = cg.ctx.append_basic_block(f, "typed");
+            let no = cg.ctx.append_basic_block(f, "dyn");
+            cg.b.build_conditional_branch(ok, yes, no).s()?;
+            let args: Vec<BasicMetadataValueEnum> = (0..n).map(|i| f.get_nth_param(i as u32).unwrap().into()).collect();
+            for (bb, t) in [(yes, typed_thunk), (no, dyn_thunk)] {
+                cg.b.position_at_end(bb);
+                let r = cg.b.build_call(t, &args, "").s()?.try_as_basic_value().basic().unwrap();
+                cg.b.build_return(Some(&r)).s()?;
+            }
+            Ok(())
+        })?;
+        Ok(f)
+    }
+
+    /// A library export: the boxed ABI under the function's public symbol.
+    fn export(&mut self, fid: usize) -> R<()> {
+        let n = self.p.fns[fid].arity();
+        let k: Key = (fid, vec![Ty::Dyn; n]);
+        let kind = self.kind_for(fid);
+        let inner = self.thunk(&k, kind)?;
+        let ps: Vec<BasicMetadataTypeEnum> = (0..n).map(|_| self.ptr.into()).collect();
+        let f = self.module.add_function(&self.p.fns[fid].symbol, self.ptr.fn_type(&ps, false), Some(Linkage::External));
+        self.in_new_fn(f, |cg| {
+            let args: Vec<BasicMetadataValueEnum> = (0..n).map(|i| f.get_nth_param(i as u32).unwrap().into()).collect();
+            let r = cg.b.build_call(inner, &args, "").s()?.try_as_basic_value().basic().unwrap();
+            cg.b.build_return(Some(&r)).s()?;
+            Ok(())
+        })
+    }
+
+    // ---- interaction-net book --------------------------------------------
+
+    fn emit_book(&mut self) -> R<()> {
+        let Some(ensure) = self.net_ensure else { return Ok(()) };
+        let enc = mimic_net::encode(&self.plan.book).map_err(|e| format!("internal compiler error: {e}"))?;
+        let i64t = self.ctx.i64_type();
+        let global = |m: &Module<'ctx>, name: &str, data: &[u64]| {
+            let vals: Vec<_> = data.iter().map(|w| i64t.const_int(*w, false)).collect();
+            let arr = i64t.const_array(&vals);
+            let g = m.add_global(arr.get_type(), None, name);
+            g.set_linkage(Linkage::Internal);
+            g.set_constant(true);
+            g.set_initializer(&arr);
+            g.as_pointer_value()
+        };
+        let words = global(&self.module, "mimic_net_words", &enc.words);
+        let offsets = global(&self.module, "mimic_net_offsets", &enc.offsets);
+        // def index → native function (boxed ABI) and arity, for native fallback
+        let ndefs = enc.offsets.len();
+        let mut fptrs = vec![self.ptr.const_null(); ndefs];
+        let mut arity = vec![0u64; ndefs];
+        let mut defs: Vec<(usize, u32)> = self.plan.def_index.iter().map(|(f, d)| (*f, *d)).collect();
+        defs.sort();
+        for (fid, def) in defs {
+            let n = self.p.fns[fid].arity();
+            if n <= 6 {
+                let f = self.dispatch_thunk(fid)?;
+                fptrs[def as usize] = f.as_global_value().as_pointer_value();
+                arity[def as usize] = n as u64;
+            }
+        }
+        let ftab = self.ptr.const_array(&fptrs);
+        let gf = self.module.add_global(ftab.get_type(), None, "mimic_net_natives");
+        gf.set_linkage(Linkage::Internal);
+        gf.set_constant(true);
+        gf.set_initializer(&ftab);
+        let i8t = self.ctx.i8_type();
+        let atab = i8t.const_array(&arity.iter().map(|a| i8t.const_int(*a, false)).collect::<Vec<_>>());
+        let ga = self.module.add_global(atab.get_type(), None, "mimic_net_arity");
+        ga.set_linkage(Linkage::Internal);
+        ga.set_constant(true);
+        ga.set_initializer(&atab);
+        let msgs_src = self.plan.check_msgs.clone();
+        self.in_new_fn(ensure, |cg| {
+            let msgs: Vec<PointerValue> = msgs_src.iter().map(|m| cg.cstring(m)).collect::<R<_>>()?;
+            let mtab = cg.ptr.const_array(&if msgs.is_empty() { vec![cg.ptr.const_null()] } else { msgs });
+            let gm = cg.module.add_global(mtab.get_type(), None, "mimic_net_check_msgs");
+            gm.set_linkage(Linkage::Internal);
+            gm.set_constant(true);
+            gm.set_initializer(&mtab);
+            let n = cg.i32c(ndefs as i32);
+            cg.call_rt(
+                "mim_net_book_once",
+                &[words.into(), offsets.into(), n, gf.as_pointer_value().into(), ga.as_pointer_value().into(), gm.as_pointer_value().into()],
+            )?;
+            cg.b.build_return(None).s()?;
+            Ok(())
+        })
+    }
+
+    fn emit_main(&mut self, entry: FunctionValue<'ctx>, leak_check: bool) -> R<()> {
+        let i32t = self.ctx.i32_type();
+        let ty = i32t.fn_type(&[i32t.into(), self.ptr.into()], false);
+        let main = self.module.add_function("main", ty, None);
+        let bb = self.ctx.append_basic_block(main, "entry");
+        self.b.position_at_end(bb);
+        let argc = main.get_nth_param(0).unwrap();
+        let argv = main.get_nth_param(1).unwrap();
+        self.call_rt("mim_rt_init", &[argc.into(), argv.into()])?;
+        let r = self.b.build_call(entry, &[], "").s()?.try_as_basic_value().basic().unwrap();
+        if r.is_pointer_value() {
+            self.call_rt("mim_release", &[r.into()])?;
+        }
+        let code = self.call_rt("mim_rt_shutdown", &[self.i32c(leak_check as i32)])?.unwrap();
+        self.b.build_return(Some(&code)).s()?;
+        Ok(())
+    }
+
+    // ---- FFI ------------------------------------------------------------
 
     fn extern_fn(&self, decl: &ExternFn) -> FunctionValue<'ctx> {
         if let Some(f) = self.module.get_function(&decl.name) {
@@ -307,52 +841,46 @@ impl<'ctx> Cg<'ctx, '_> {
                 "f64" => self.ctx.f64_type().into(),
                 "bool" => self.ctx.bool_type().into(),
                 "cstr" => self.ptr.into(),
-                _ => self.ctx.i64_type().into(), // i64 u64 isize usize
+                _ => self.ctx.i64_type().into(),
             },
             Type::Ptr(..) | Type::Array(..) => self.ptr.into(),
         }
     }
 
-    /// Mimic value → C argument.
-    fn mimic_to_c(&self, v: PointerValue<'ctx>, t: &Type) -> R<BasicMetadataValueEnum<'ctx>> {
-        let ty = self.ctype(t);
+    /// Mimic value → C argument (unboxed values go straight through).
+    fn mimic_to_c(&self, v: V<'ctx>, t: &Type) -> R<BasicMetadataValueEnum<'ctx>> {
         Ok(match t {
             Type::Named(n, _) if n == "f64" || n == "f32" => {
-                let f = self.call_rt("mim_as_f64", &[v.into()])?.unwrap().into_float_value();
+                let f = self.to_f64(v)?;
                 if n == "f32" { self.b.build_float_trunc(f, self.ctx.f32_type(), "").s()?.into() } else { f.into() }
             }
-            Type::Named(n, _) if n == "bool" => {
-                let i = self.call_rt("mim_as_i64", &[v.into()])?.unwrap().into_int_value();
-                self.b.build_int_compare(IntPredicate::NE, i, self.ctx.i64_type().const_zero(), "").s()?.into()
+            Type::Named(n, _) if n == "bool" => self.truth(v)?.into(),
+            Type::Named(n, _) if n == "cstr" => {
+                let V::P(p, _) = v else { return Err("FFI: cstr expects a string".into()) };
+                self.call_rt("mim_cstr", &[p.into()])?.unwrap().into()
             }
-            Type::Named(n, _) if n == "cstr" => self.call_rt("mim_cstr", &[v.into()])?.unwrap().into(),
-            Type::Ptr(..) => self.call_rt("mim_dataptr", &[v.into()])?.unwrap().into(),
+            Type::Ptr(..) => {
+                let V::P(p, _) = v else { return Err("FFI: ptr[T] expects an array".into()) };
+                self.call_rt("mim_dataptr", &[p.into()])?.unwrap().into()
+            }
             _ => {
-                let i = self.call_rt("mim_as_i64", &[v.into()])?.unwrap().into_int_value();
-                let it = ty.into_int_type();
+                let i = self.to_i64(v)?;
+                let it = self.ctype(t).into_int_type();
                 if it.get_bit_width() < 64 { self.b.build_int_truncate(i, it, "").s()?.into() } else { i.into() }
             }
         })
     }
 
-    /// C return value → owned Mimic value.
+    /// C return value → Mimic value.
     fn c_to_mimic(&self, r: BasicValueEnum<'ctx>, t: &Type) -> R<V<'ctx>> {
-        match t {
-            Type::Named(n, _) if n == "f64" || n == "f32" => {
-                let mut f = r.into_float_value();
-                if n == "f32" {
-                    f = self.b.build_float_ext(f, self.ctx.f64_type(), "").s()?;
-                }
-                self.call_rt_ptr("mim_float", &[f.into()])
-            }
-            Type::Named(n, _) if n == "bool" => {
-                let i = self.b.build_int_z_extend(r.into_int_value(), self.ctx.i64_type(), "").s()?;
-                self.call_rt_ptr("mim_bool", &[i.into()])
-            }
-            Type::Named(n, _) if n == "cstr" => self.call_rt_ptr("mim_from_cstr", &[r.into()]),
+        Ok(match t {
+            Type::Named(n, _) if n == "f64" => V::F(r.into_float_value()),
+            Type::Named(n, _) if n == "f32" => V::F(self.b.build_float_ext(r.into_float_value(), self.ctx.f64_type(), "").s()?),
+            Type::Named(n, _) if n == "bool" => V::B(r.into_int_value()),
+            Type::Named(n, _) if n == "cstr" => self.call_rt_ptr("mim_from_cstr", &[r.into()])?,
             Type::Named(n, _) => {
                 let i = r.into_int_value();
-                let i = if i.get_type().get_bit_width() < 64 {
+                V::I(if i.get_type().get_bit_width() < 64 {
                     if n.starts_with('u') {
                         self.b.build_int_z_extend(i, self.ctx.i64_type(), "").s()?
                     } else {
@@ -360,212 +888,35 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                 } else {
                     i
-                };
-                self.call_rt_ptr("mim_int", &[i.into()])
+                })
             }
-            _ => Err("unsupported FFI return type".into()),
-        }
+            _ => return Err("unsupported FFI return type".into()),
+        })
     }
 
-    // ---- interaction-net book --------------------------------------------
+    // ---- statements & blocks --------------------------------------------
 
-    fn emit_book(&mut self) -> R<()> {
-        if self.plan.book.defs.is_empty() {
-            return Ok(());
-        }
-        let enc = mimic_net::encode(&self.plan.book).map_err(|e| format!("internal compiler error: {e}"))?;
-        let i64t = self.ctx.i64_type();
-        let global = |name: &str, data: &[u64]| {
-            let vals: Vec<_> = data.iter().map(|w| i64t.const_int(*w, false)).collect();
-            let arr = i64t.const_array(&vals);
-            let g = self.module.add_global(arr.get_type(), None, name);
-            g.set_linkage(Linkage::Internal);
-            g.set_constant(true);
-            g.set_initializer(&arr);
-            g.as_pointer_value()
-        };
-        let words = global("mimic_net_words", &enc.words);
-        let offsets = global("mimic_net_offsets", &enc.offsets);
-        // def index → native function (and its arity) for the runtime's native fallback
-        let ndefs = enc.offsets.len();
-        let mut fptrs = vec![self.ptr.const_null(); ndefs];
-        let mut arity = vec![0u64; ndefs];
-        for (fid, def) in &self.plan.def_index {
-            let n = self.p.fns[*fid].arity();
-            if n <= 6
-                && let Some(f) = self.natives[*fid].or(self.fns[*fid]) {
-                    fptrs[*def as usize] = f.as_global_value().as_pointer_value();
-                    arity[*def as usize] = n as u64;
-                }
-        }
-        let ftab = self.ptr.const_array(&fptrs);
-        let gf = self.module.add_global(ftab.get_type(), None, "mimic_net_natives");
-        gf.set_linkage(Linkage::Internal);
-        gf.set_constant(true);
-        gf.set_initializer(&ftab);
-        let i8t = self.ctx.i8_type();
-        let atab = i8t.const_array(&arity.iter().map(|a| i8t.const_int(*a, false)).collect::<Vec<_>>());
-        let ga = self.module.add_global(atab.get_type(), None, "mimic_net_arity");
-        ga.set_linkage(Linkage::Internal);
-        ga.set_constant(true);
-        ga.set_initializer(&atab);
-        let f = self.module.add_function("_mimic_net_ensure", self.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
-        let bb = self.ctx.append_basic_block(f, "entry");
-        self.b.position_at_end(bb);
-        // type-check messages: an array of C strings
-        let msgs: Vec<_> = self.plan.check_msgs.clone().iter().map(|m| self.cstring(m)).collect::<R<Vec<_>>>()?;
-        let mtab = self.ptr.const_array(&if msgs.is_empty() { vec![self.ptr.const_null()] } else { msgs });
-        let gm = self.module.add_global(mtab.get_type(), None, "mimic_net_check_msgs");
-        gm.set_linkage(Linkage::Internal);
-        gm.set_constant(true);
-        gm.set_initializer(&mtab);
-        let n = self.i32c(enc.offsets.len() as i32);
-        self.call_rt(
-            "mim_net_book_once",
-            &[words.into(), offsets.into(), n, gf.as_pointer_value().into(), ga.as_pointer_value().into(), gm.as_pointer_value().into()],
-        )?;
-        self.b.build_return(None).s()?;
-        self.net_ensure = Some(f);
-        Ok(())
-    }
-
-    // ---- function bodies -----------------------------------------------
-
-    fn entry_alloca(&self, name: &str) -> R<PointerValue<'ctx>> {
-        let f = self.cur_fn.unwrap();
-        let entry = f.get_first_basic_block().unwrap();
-        let tmp = self.ctx.create_builder();
-        match entry.get_first_instruction() {
-            Some(i) => tmp.position_before(&i),
-            None => tmp.position_at_end(entry),
-        }
-        tmp.build_alloca(self.ptr, name).s()
-    }
-
-    fn define(&mut self, fid: usize) -> R<()> {
-        if !matches!(self.p.fns[fid].kind, FnKind::User(_)) {
-            return Ok(());
-        }
-        let entered = self.plan.entered.contains(&fid);
-        self.define_body(fid, self.fns[fid].unwrap(), entered, false)?;
-        if let Some(native) = self.natives[fid] {
-            self.define_body(fid, native, false, true)?;
-        }
-        Ok(())
-    }
-
-    /// Emit one body for `fid` into `fv`: the net wrapper, a counted native
-    /// body (for net-entered functions), or a plain native body.
-    fn define_body(&mut self, fid: usize, fv: FunctionValue<'ctx>, wrapper: bool, native: bool) -> R<()> {
-        let f = &self.p.fns[fid];
-        let FnKind::User(decl) = &f.kind else { return Ok(()) };
-        let path = self.p.fn_path(fid).join("::");
-        self.cur_fn = Some(fv);
-        self.cur_mod = f.module;
-        self.cur_ret = match &decl.ret {
-            Some(t) => Some((mimic_check::type_code(t).map_err(|d| d.msg)?, format!("return value of `{path}`"))),
-            None => None,
-        };
-        let entry = self.ctx.append_basic_block(fv, "entry");
-        self.b.position_at_end(entry);
-        self.scopes = vec![Vec::new()];
-        for (i, prm) in decl.params.iter().enumerate() {
-            let arg = fv.get_nth_param(i as u32).unwrap().into_pointer_value();
-            if let Some(t) = &prm.ty {
-                let code = mimic_check::type_code(t).map_err(|d| d.msg)?;
-                let what = self.cstring(&format!("argument `{}` of `{path}`", prm.name))?;
-                self.call_rt("mim_check_type", &[arg.into(), self.i32c(code), what.into()])?;
-            }
-            let slot = self.entry_alloca(&prm.name)?;
-            self.b.build_store(slot, arg).s()?;
-            self.scopes[0].push(Local { name: prm.name.clone(), slot, owned: false, mutable: false });
-        }
-        if native {
-            // Bounded native recursion: past the limit, hand the call to the net.
-            let deep = self.call_rt("mim_native_enter", &[])?.unwrap().into_int_value();
-            let is_deep = self.b.build_int_compare(IntPredicate::NE, deep, self.ctx.i32_type().const_zero(), "deep").s()?;
-            let deep_bb = self.ctx.append_basic_block(fv, "deep");
-            let body_bb = self.ctx.append_basic_block(fv, "body");
-            self.b.build_conditional_branch(is_deep, deep_bb, body_bb).s()?;
-            self.b.position_at_end(deep_bb);
-            let args: Vec<BasicMetadataValueEnum> = (0..decl.params.len()).map(|i| fv.get_nth_param(i as u32).unwrap().into()).collect();
-            let r = self.b.build_call(self.fns[fid].unwrap(), &args, "").s()?.try_as_basic_value().basic().unwrap();
-            self.call_rt("mim_native_leave", &[])?;
-            self.b.build_return(Some(&r)).s()?;
-            self.b.position_at_end(body_bb);
-            self.native_frame = true;
-        }
-        if wrapper {
-            // Parallel by default: run this function as an interaction net.
-            let def = self.plan.def_index[&fid];
-            self.b.build_call(self.net_ensure.unwrap(), &[], "").s()?;
-            let n = decl.params.len() as u32;
-            let arr_ty = self.ptr.array_type(n.max(1));
-            let arr = self.b.build_alloca(arr_ty, "args").s()?;
-            let i64t = self.ctx.i64_type();
-            for i in 0..n {
-                let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
-                self.b.build_store(slot, fv.get_nth_param(i).unwrap()).s()?;
-            }
-            let r = self.call_rt_ptr("mim_net_call", &[self.i32c(def as i32), self.i32c(n as i32), arr.into()])?;
-            self.ret(r)?;
-            self.scopes.clear();
-            return Ok(());
-        }
-        let v = self.block(&decl.body)?;
-        if !self.terminated() {
-            self.ret(v)?;
-        }
-        self.scopes.clear();
-        self.native_frame = false;
-        Ok(())
-    }
-
-    fn terminated(&self) -> bool {
-        self.b.get_insert_block().and_then(|b| b.get_terminator()).is_some()
-    }
-
-    /// Release every owned local in every scope, check the return type, and return.
-    fn ret(&mut self, v: V<'ctx>) -> R<()> {
-        let v = self.own(v)?;
-        for scope in self.scopes.iter().rev() {
-            for l in scope.iter().rev() {
-                if l.owned {
-                    let cur = self.b.build_load(self.ptr, l.slot, "").s()?;
-                    self.call_rt("mim_release", &[cur.into()])?;
-                }
-            }
-        }
-        if let Some((code, what)) = self.cur_ret.clone() {
-            let w = self.cstring(&what)?;
-            self.call_rt("mim_check_type", &[v.v.into(), self.i32c(code), w.into()])?;
-        }
-        if self.native_frame {
-            self.call_rt("mim_native_leave", &[])?;
-        }
-        self.b.build_return(Some(&v.v)).s()?;
-        Ok(())
-    }
-
-    fn emit_main(&mut self, leak_check: bool) -> R<()> {
-        let entry = self.p.entry().ok_or("no entry point")?;
-        let i32t = self.ctx.i32_type();
-        let ty = i32t.fn_type(&[i32t.into(), self.ptr.into()], false);
-        let main = self.module.add_function("main", ty, None);
-        let bb = self.ctx.append_basic_block(main, "entry");
-        self.b.position_at_end(bb);
-        let argc = main.get_nth_param(0).unwrap();
-        let argv = main.get_nth_param(1).unwrap();
-        self.call_rt("mim_rt_init", &[argc.into(), argv.into()])?;
-        let r = self.b.build_call(self.fns[entry].unwrap(), &[], "").s()?.try_as_basic_value().basic().unwrap();
-        self.call_rt("mim_release", &[r.into()])?;
-        let code = self.call_rt("mim_rt_shutdown", &[self.i32c(leak_check as i32)])?.unwrap();
-        self.b.build_return(Some(&code)).s()?;
-        Ok(())
+    fn ty_of(&self, e: &Expr) -> Ty {
+        self.cur_spec.as_ref().and_then(|s| s.exprs.get(&id(e)).copied()).unwrap_or(Ty::Dyn)
     }
 
     fn lookup(&self, name: &str) -> Option<&Local<'ctx>> {
         self.scopes.iter().rev().flat_map(|s| s.iter().rev()).find(|l| l.name == name)
+    }
+
+    fn dead_block(&self) {
+        let bb = self.ctx.append_basic_block(self.cur_fn.unwrap(), "dead");
+        self.b.position_at_end(bb);
+    }
+
+    fn release_scope(&self, scope: &[Local<'ctx>]) -> R<()> {
+        for l in scope.iter().rev() {
+            if l.owned {
+                let cur = self.b.build_load(self.ptr, l.slot, "").s()?;
+                self.call_rt("mim_release", &[cur.into()])?;
+            }
+        }
+        Ok(())
     }
 
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
@@ -583,20 +934,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let v = self.own(v)?;
         let scope = self.scopes.pop().unwrap();
         if !self.terminated() {
-            for l in scope.iter().rev() {
-                if l.owned {
-                    let cur = self.b.build_load(self.ptr, l.slot, "").s()?;
-                    self.call_rt("mim_release", &[cur.into()])?;
-                }
-            }
+            self.release_scope(&scope)?;
         }
         Ok(v)
-    }
-
-    /// After a `return`, keep emitting into an unreachable block.
-    fn dead_block(&self) {
-        let bb = self.ctx.append_basic_block(self.cur_fn.unwrap(), "dead");
-        self.b.position_at_end(bb);
     }
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
@@ -604,32 +944,40 @@ impl<'ctx> Cg<'ctx, '_> {
             self.dead_block();
         }
         match s {
-            Stmt::Let { name, mutable, ty, value, .. } => {
+            Stmt::Let { name, mutable, value, .. } => {
                 let v = self.expr(value)?;
+                let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);
+                let v = self.as_ty(v, t, &format!("`let {name}`"))?;
                 let v = self.own(v)?;
-                if let Some(t) = ty {
-                    let code = mimic_check::type_code(t).map_err(|d| d.msg)?;
-                    let w = self.cstring(&format!("`let {name}`"))?;
-                    self.call_rt("mim_check_type", &[v.v.into(), self.i32c(code), w.into()])?;
-                }
-                let slot = self.entry_alloca(name)?;
-                self.b.build_store(slot, v.v).s()?;
-                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, owned: true, mutable: *mutable });
+                let slot = self.entry_alloca(t, name)?;
+                self.b.build_store(slot, self.basic(v)).s()?;
+                let owned = matches!(v, V::P(..));
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: *mutable });
             }
             Stmt::Assign { name, index, value, .. } => {
-                let slot = self.lookup(name).ok_or_else(|| format!("unknown variable {name}"))?.slot;
+                let (slot, t) = {
+                    let l = self.lookup(name).ok_or_else(|| format!("unknown variable {name}"))?;
+                    (l.slot, l.ty)
+                };
                 match index {
                     None => {
                         let v = self.expr(value)?;
+                        let v = self.as_ty(v, t, &format!("`{name}`"))?;
                         let v = self.own(v)?;
-                        let old = self.b.build_load(self.ptr, slot, "").s()?;
-                        self.b.build_store(slot, v.v).s()?;
-                        self.call_rt("mim_release", &[old.into()])?;
+                        if matches!(v, V::P(..)) {
+                            let old = self.b.build_load(self.ptr, slot, "").s()?;
+                            self.b.build_store(slot, self.basic(v)).s()?;
+                            self.call_rt("mim_release", &[old.into()])?;
+                        } else {
+                            self.b.build_store(slot, self.basic(v)).s()?;
+                        }
                     }
                     Some(i) => {
                         let iv = self.expr(i)?;
+                        let iv = self.boxed(iv)?;
                         let v = self.expr(value)?;
-                        self.call_rt("mim_set_index", &[slot.into(), iv.v.into(), v.v.into()])?;
+                        let v = self.boxed(v)?;
+                        self.call_rt("mim_set_index", &[slot.into(), self.basic(iv).into(), self.basic(v).into()])?;
                         self.drop_tmp(iv)?;
                         self.drop_tmp(v)?;
                     }
@@ -654,29 +1002,44 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(())
     }
 
-    fn lambda(&mut self, param: &str, body: &Expr) -> R<FunctionValue<'ctx>> {
+    // ---- expressions ----------------------------------------------------
+
+    /// Compile a lambda as a typed function `(param) -> ret`.
+    fn lambda_fn(&mut self, e: &Expr) -> R<(FunctionValue<'ctx>, Ty, Ty)> {
+        let ExprKind::Lambda { param, body } = &e.kind else { return Err("expected a lambda".into()) };
+        let (pt, rt) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(e)).copied()).unwrap_or((Ty::Dyn, Ty::Dyn));
+        let rt = if rt == Ty::Never { Ty::Dyn } else { rt };
         self.lambdas += 1;
-        let name = format!("_mimic_lambda_{}", self.lambdas);
-        let f = self.module.add_function(&name, self.ptr.fn_type(&[self.ptr.into()], false), Some(Linkage::Internal));
-        let saved_bb: BasicBlock = self.b.get_insert_block().unwrap();
-        let saved_fn = self.cur_fn.replace(f);
-        let saved_scopes = std::mem::take(&mut self.scopes);
-        let saved_ret = self.cur_ret.take();
-        let saved_native = std::mem::replace(&mut self.native_frame, false);
-        let entry = self.ctx.append_basic_block(f, "entry");
-        self.b.position_at_end(entry);
-        let slot = self.entry_alloca(param)?;
-        self.b.build_store(slot, f.get_nth_param(0).unwrap()).s()?;
-        self.scopes = vec![vec![Local { name: param.into(), slot, owned: false, mutable: false }]];
-        let v = self.expr(body)?;
-        if !self.terminated() {
-            self.ret(v)?;
-        }
-        self.scopes = saved_scopes;
-        self.cur_fn = saved_fn;
-        self.cur_ret = saved_ret;
-        self.native_frame = saved_native;
-        self.b.position_at_end(saved_bb);
+        let f = self.module.add_function(&format!("_mimic_lambda_{}", self.lambdas), self.fn_type(&[pt], rt), Some(Linkage::Internal));
+        self.in_new_fn(f, |cg| {
+            cg.cur_ret = rt;
+            cg.ret_what = "lambda result".into();
+            let slot = cg.entry_alloca(pt, param)?;
+            cg.b.build_store(slot, f.get_nth_param(0).unwrap()).s()?;
+            cg.scopes = vec![vec![Local { name: param.clone(), slot, ty: pt, owned: false, mutable: false }]];
+            let v = cg.expr(body)?;
+            if !cg.terminated() {
+                cg.ret(v)?;
+            }
+            Ok(())
+        })?;
+        Ok((f, pt, rt))
+    }
+
+    /// A boxed-ABI wrapper around a typed lambda (for `¨`).
+    fn lambda_thunk(&mut self, e: &Expr) -> R<FunctionValue<'ctx>> {
+        let (lf, pt, rt) = self.lambda_fn(e)?;
+        self.lambdas += 1;
+        let f = self.module.add_function(&format!("_mimic_lambda_{}$box", self.lambdas), self.ptr.fn_type(&[self.ptr.into()], false), Some(Linkage::Internal));
+        self.in_new_fn(f, |cg| {
+            let p = f.get_nth_param(0).unwrap().into_pointer_value();
+            let a = cg.as_ty(V::P(p, false), pt, "lambda argument")?;
+            let r = cg.b.build_call(lf, &[cg.basic(a).into()], "").s()?.try_as_basic_value().basic().unwrap();
+            let b = cg.boxed(cg.val_of(r, rt, true))?;
+            let bv = cg.basic(b);
+            cg.b.build_return(Some(&bv)).s()?;
+            Ok(())
+        })?;
         Ok(f)
     }
 
@@ -687,37 +1050,105 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
-    fn fn_pointer(&mut self, e: &Expr) -> R<PointerValue<'ctx>> {
-        match &e.kind {
-            ExprKind::Lambda { param, body } => Ok(self.lambda(param, body)?.as_global_value().as_pointer_value()),
-            ExprKind::Path(path) => {
-                let f = self.resolve_fn(path)?;
-                // ¨ is already parallel across elements: call the native body
-                let fv = self.natives[f].or(self.fns[f]).ok_or("extern function used as a value")?;
-                Ok(fv.as_global_value().as_pointer_value())
-            }
-            _ => Err("expected a function".into()),
+    fn scalar_binary(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
+        use BinOp::*;
+        let bld = &self.b;
+        if matches!(op, And | Or) {
+            let x = self.truth(a)?;
+            let y = self.truth(b)?;
+            return Ok(V::B(if op == And { bld.build_and(x, y, "").s()? } else { bld.build_or(x, y, "").s()? }));
         }
+        let float = matches!(a, V::F(_)) || matches!(b, V::F(_)) || op == Div;
+        if float {
+            let x = self.to_f64(a)?;
+            let y = self.to_f64(b)?;
+            let cmp = |p: FloatPredicate| -> R<V<'ctx>> { Ok(V::B(bld.build_float_compare(p, x, y, "").s()?)) };
+            return match op {
+                Add => Ok(V::F(bld.build_float_add(x, y, "").s()?)),
+                Sub => Ok(V::F(bld.build_float_sub(x, y, "").s()?)),
+                Mul => Ok(V::F(bld.build_float_mul(x, y, "").s()?)),
+                Div => Ok(V::F(bld.build_float_div(x, y, "").s()?)),
+                Mod => Ok(V::F(bld.build_float_rem(x, y, "").s()?)),
+                IntDiv => {
+                    let q = bld.build_float_div(x, y, "").s()?;
+                    let floor = self.intrinsic("llvm.floor")?;
+                    Ok(V::F(bld.build_call(floor, &[q.into()], "").s()?.try_as_basic_value().basic().unwrap().into_float_value()))
+                }
+                Max | Min => {
+                    let c = bld.build_float_compare(if op == Max { FloatPredicate::OGT } else { FloatPredicate::OLT }, x, y, "").s()?;
+                    Ok(V::F(bld.build_select(c, x, y, "").s()?.into_float_value()))
+                }
+                Eq => cmp(FloatPredicate::OEQ),
+                Ne => cmp(FloatPredicate::UNE),
+                Lt => cmp(FloatPredicate::OLT),
+                Le => cmp(FloatPredicate::OLE),
+                Gt => cmp(FloatPredicate::OGT),
+                Ge => cmp(FloatPredicate::OGE),
+                And | Or => unreachable!(),
+            };
+        }
+        let x = self.to_i64(a)?;
+        let y = self.to_i64(b)?;
+        let zero = self.ctx.i64_type().const_zero();
+        let cmp = |p: IntPredicate| -> R<V<'ctx>> { Ok(V::B(bld.build_int_compare(p, x, y, "").s()?)) };
+        match op {
+            Add => Ok(V::I(bld.build_int_add(x, y, "").s()?)),
+            Sub => Ok(V::I(bld.build_int_sub(x, y, "").s()?)),
+            Mul => Ok(V::I(bld.build_int_mul(x, y, "").s()?)),
+            IntDiv => {
+                let z = bld.build_int_compare(IntPredicate::EQ, y, zero, "").s()?;
+                self.panic_if(z, "integer division by zero")?;
+                let q = bld.build_int_signed_div(x, y, "").s()?;
+                let r = bld.build_int_signed_rem(x, y, "").s()?;
+                // floor: step down when the remainder is non-zero and the signs differ
+                let nz = bld.build_int_compare(IntPredicate::NE, r, zero, "").s()?;
+                let sx = bld.build_xor(r, y, "").s()?;
+                let neg = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
+                let adj = bld.build_and(nz, neg, "").s()?;
+                let adj = bld.build_int_z_extend(adj, self.ctx.i64_type(), "").s()?;
+                Ok(V::I(bld.build_int_sub(q, adj, "").s()?))
+            }
+            Mod => {
+                let z = bld.build_int_compare(IntPredicate::EQ, y, zero, "").s()?;
+                self.panic_if(z, "integer modulo by zero")?;
+                let r = bld.build_int_signed_rem(x, y, "").s()?;
+                let r = bld.build_int_add(r, y, "").s()?;
+                Ok(V::I(bld.build_int_signed_rem(r, y, "").s()?))
+            }
+            Max | Min => {
+                let c = bld.build_int_compare(if op == Max { IntPredicate::SGT } else { IntPredicate::SLT }, x, y, "").s()?;
+                Ok(V::I(bld.build_select(c, x, y, "").s()?.into_int_value()))
+            }
+            Eq => cmp(IntPredicate::EQ),
+            Ne => cmp(IntPredicate::NE),
+            Lt => cmp(IntPredicate::SLT),
+            Le => cmp(IntPredicate::SLE),
+            Gt => cmp(IntPredicate::SGT),
+            Ge => cmp(IntPredicate::SGE),
+            Div | And | Or => unreachable!(),
+        }
+    }
+
+    fn is_unboxed(v: &V) -> bool {
+        !matches!(v, V::P(..))
     }
 
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
+        let ty = self.ty_of(e);
         match &e.kind {
-            // Literals are immortal values created once and cached in a global slot:
-            // no allocation and no refcount traffic on the hot path.
-            ExprKind::Int(i) => {
-                let slot = self.literal_slot();
-                self.borrowed(self.call_rt_ptr("mim_lit_int", &[slot.into(), i64t.const_int(*i as u64, true).into()])?)
-            }
-            ExprKind::Float(f) => {
-                let slot = self.literal_slot();
-                self.borrowed(self.call_rt_ptr("mim_lit_float", &[slot.into(), self.ctx.f64_type().const_float(*f).into()])?)
-            }
-            ExprKind::Bool(b) => self.borrowed(self.call_rt_ptr("mim_bool", &[i64t.const_int(*b as u64, false).into()])?),
+            ExprKind::Int(i) => Ok(V::I(i64t.const_int(*i as u64, true))),
+            ExprKind::Float(f) => Ok(V::F(self.ctx.f64_type().const_float(*f))),
+            ExprKind::Bool(b) => Ok(V::B(self.ctx.bool_type().const_int(*b as u64, false))),
             ExprKind::Str(s) => {
-                let slot = self.literal_slot();
+                // an immortal literal created once and cached in a global slot
+                let g = self.module.add_global(self.ptr, None, "lit");
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&self.ptr.const_null());
                 let p = self.cstring(s)?;
-                self.borrowed(self.call_rt_ptr("mim_lit_str", &[slot.into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?)
+                let v = self.call_rt_ptr("mim_lit_str", &[g.as_pointer_value().into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?;
+                let V::P(x, _) = v else { unreachable!() };
+                Ok(V::P(x, false))
             }
             ExprKind::Array(xs) => {
                 let n = xs.len() as u32;
@@ -733,10 +1164,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 let mut vals = Vec::new();
                 for (i, x) in xs.iter().enumerate() {
                     let v = self.expr(x)?;
-                    let slot = unsafe {
-                        self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()?
-                    };
-                    self.b.build_store(slot, v.v).s()?;
+                    let v = self.boxed(v)?;
+                    let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                    self.b.build_store(slot, self.basic(v)).s()?;
                     vals.push(v);
                 }
                 let r = self.call_rt_ptr("mim_array_lit", &[i64t.const_int(n as u64, false).into(), arr.into()])?;
@@ -747,120 +1177,181 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
-                let (slot, mutable) = (l.slot, l.mutable);
-                let v = self.b.build_load(self.ptr, slot, &path[0]).s()?.into_pointer_value();
-                if mutable { self.own(V { v, owned: false }) } else { Ok(V { v, owned: false }) }
+                let (slot, lt, mutable) = (l.slot, l.ty, l.mutable);
+                let bv = self.b.build_load(self.repr(lt), slot, &path[0]).s()?;
+                let v = self.val_of(bv, lt, false);
+                if mutable { self.own(v) } else { Ok(v) }
             }
             ExprKind::Call { callee, args } => {
+                if let ExprKind::Lambda { .. } = &callee.kind {
+                    let a = self.expr(&args[0])?;
+                    let (lf, pt, rt) = self.lambda_fn(callee)?;
+                    let a = self.as_ty(a, pt, "lambda argument")?;
+                    let r = self.b.build_call(lf, &[self.basic(a).into()], "").s()?.try_as_basic_value().basic().unwrap();
+                    self.drop_tmp(a)?;
+                    return Ok(self.val_of(r, rt, true));
+                }
+                let ExprKind::Path(path) = &callee.kind else { return Err("unsupported callee".into()) };
+                let fid = self.resolve_fn(path)?;
                 let mut vals = Vec::new();
                 for a in args {
                     vals.push(self.expr(a)?);
                 }
-                let r = match &callee.kind {
-                    ExprKind::Lambda { param, body } => {
-                        let f = self.lambda(param, body)?;
-                        let r = self.b.build_call(f, &[vals[0].v.into()], "").s()?;
-                        V { v: r.try_as_basic_value().basic().unwrap().into_pointer_value(), owned: true }
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind {
+                    let decl = decl.clone();
+                    let f = self.extern_fn(&decl);
+                    let mut argv = Vec::new();
+                    for (v, (_, t)) in vals.iter().zip(&decl.params) {
+                        argv.push(self.mimic_to_c(*v, t)?);
                     }
-                    ExprKind::Path(path) => {
-                        let fid = self.resolve_fn(path)?;
-                        match &self.p.fns[fid].kind {
-                            FnKind::User(_) => {
-                                let argv: Vec<BasicMetadataValueEnum> = vals.iter().map(|v| v.v.into()).collect();
-                                let r = self.b.build_call(self.callee(fid).unwrap(), &argv, "").s()?;
-                                V { v: r.try_as_basic_value().basic().unwrap().into_pointer_value(), owned: true }
-                            }
-                            FnKind::Extern { decl, .. } => {
-                                let decl = decl.clone();
-                                let f = self.extern_fn(&decl);
-                                let mut argv = Vec::new();
-                                for (v, (_, t)) in vals.iter().zip(&decl.params) {
-                                    argv.push(self.mimic_to_c(v.v, t)?);
-                                }
-                                let r = self.b.build_call(f, &argv, "").s()?;
-                                match (&decl.ret, r.try_as_basic_value().basic()) {
-                                    (Some(t), Some(rv)) => self.c_to_mimic(rv, t)?,
-                                    _ => self.null(),
-                                }
-                            }
-                        }
+                    let r = self.b.build_call(f, &argv, "").s()?;
+                    let out = match (&decl.ret, r.try_as_basic_value().basic()) {
+                        (Some(t), Some(rv)) => self.c_to_mimic(rv, t)?,
+                        _ => self.null(),
+                    };
+                    for v in vals {
+                        self.drop_tmp(v)?;
                     }
-                    _ => return Err("unsupported callee".into()),
-                };
-                for v in vals {
-                    self.drop_tmp(v)?;
+                    return Ok(out);
                 }
-                Ok(r)
+                let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) else {
+                    // the call's argument types never became known (it cannot be reached)
+                    let m = self.cstring("internal error: unreachable call")?;
+                    self.call_rt("mim_panic", &[m.into()])?;
+                    return Ok(self.null());
+                };
+                let kind = self.kind_for(fid);
+                let f = self.request(&k, kind)?;
+                let spec = self.spec(&k)?;
+                let path_s = self.p.fn_path(fid).join("::");
+                let pnames: Vec<String> = match &self.p.fns[fid].kind {
+                    FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+                    _ => vec![],
+                };
+                let mut argv = Vec::new();
+                let mut conv = Vec::new();
+                for (i, v) in vals.into_iter().enumerate() {
+                    let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
+                    argv.push(self.basic(c).into());
+                    conv.push(c);
+                }
+                if kind == Kind::Native {
+                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+                    let d1 = self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?;
+                    argv.push(d1.into());
+                }
+                let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+                for c in conv {
+                    self.drop_tmp(c)?;
+                }
+                Ok(self.val_of(r, spec.ret, true))
             }
             ExprKind::Index { base, index } => {
                 let b = self.expr(base)?;
+                let b = self.boxed(b)?;
                 let i = self.expr(index)?;
-                let r = self.call_rt_ptr("mim_index", &[b.v.into(), i.v.into()])?;
+                let i = self.boxed(i)?;
+                let r = self.call_rt_ptr("mim_index", &[self.basic(b).into(), self.basic(i).into()])?;
                 self.drop_tmp(b)?;
                 self.drop_tmp(i)?;
-                Ok(r)
+                self.as_ty(r, ty, "element")
             }
             ExprKind::Unary { op, expr } => {
                 let a = self.expr(expr)?;
-                let r = self.call_rt_ptr("mim_unop", &[self.i32c(*op as i32), a.v.into()])?;
+                if Self::is_unboxed(&a) && ty.is_unboxed() {
+                    return Ok(match (op, a) {
+                        (UnOp::Not, _) => V::B(self.b.build_not(self.truth(a)?, "").s()?),
+                        (UnOp::Neg, V::F(f)) => V::F(self.b.build_float_neg(f, "").s()?),
+                        (UnOp::Neg, _) => V::I(self.b.build_int_neg(self.to_i64(a)?, "").s()?),
+                        (UnOp::Abs, V::F(f)) => {
+                            let fabs = self.intrinsic("llvm.fabs")?;
+                            V::F(self.b.build_call(fabs, &[f.into()], "").s()?.try_as_basic_value().basic().unwrap().into_float_value())
+                        }
+                        (UnOp::Abs, _) => {
+                            let x = self.to_i64(a)?;
+                            let neg = self.b.build_int_compare(IntPredicate::SLT, x, i64t.const_zero(), "").s()?;
+                            let nx = self.b.build_int_neg(x, "").s()?;
+                            V::I(self.b.build_select(neg, nx, x, "").s()?.into_int_value())
+                        }
+                    });
+                }
+                let a = self.boxed(a)?;
+                let r = self.call_rt_ptr("mim_unop", &[self.i32c(*op as i32), self.basic(a).into()])?;
                 self.drop_tmp(a)?;
-                Ok(r)
+                self.as_ty(r, ty, "operator result")
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
-                let r = self.call_rt_ptr("mim_binop", &[self.i32c(*op as i32), a.v.into(), b.v.into()])?;
+                if Self::is_unboxed(&a) && Self::is_unboxed(&b) && ty.is_unboxed() {
+                    return self.scalar_binary(*op, a, b);
+                }
+                let a = self.boxed(a)?;
+                let b = self.boxed(b)?;
+                let r = self.call_rt_ptr("mim_binop", &[self.i32c(*op as i32), self.basic(a).into(), self.basic(b).into()])?;
                 self.drop_tmp(a)?;
                 self.drop_tmp(b)?;
-                Ok(r)
+                self.as_ty(r, ty, "operator result")
             }
             ExprKind::Prim { prim, args } => {
                 let a = self.expr(&args[0])?;
+                let a = self.boxed(a)?;
                 let r = if *prim == Prim::Each {
-                    let f = self.fn_pointer(&args[1])?;
+                    let f = match &args[1].kind {
+                        ExprKind::Lambda { .. } => self.lambda_thunk(&args[1])?,
+                        _ => {
+                            let ExprKind::Path(path) = &args[1].kind else { return Err("expected a function".into()) };
+                            let fid = self.resolve_fn(path)?;
+                            let k = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()).ok_or("internal error: untyped ¨ callback")?;
+                            // ¨ is already parallel across elements: use the native body
+                            let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                            self.thunk(&k, kind)?
+                        }
+                    };
                     let pure = self.purity.operand_is_pure(self.p, self.cur_mod, &args[1]);
-                    self.call_rt_ptr("mim_each", &[a.v.into(), f.into(), self.i32c(pure as i32)])?
+                    self.call_rt_ptr("mim_each", &[self.basic(a).into(), f.as_global_value().as_pointer_value().into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;
-                    let r = self.call_rt_ptr("mim_prim2", &[self.i32c(*prim as i32), a.v.into(), b.v.into()])?;
+                    let b = self.boxed(b)?;
+                    let r = self.call_rt_ptr("mim_prim2", &[self.i32c(*prim as i32), self.basic(a).into(), self.basic(b).into()])?;
                     self.drop_tmp(b)?;
                     r
                 } else {
-                    self.call_rt_ptr("mim_prim1", &[self.i32c(*prim as i32), a.v.into()])?
+                    self.call_rt_ptr("mim_prim1", &[self.i32c(*prim as i32), self.basic(a).into()])?
                 };
                 self.drop_tmp(a)?;
-                Ok(r)
+                self.as_ty(r, ty, "primitive result")
             }
             ExprKind::Lambda { .. } => Err("lambdas can only be called or passed to ¨ (each)".into()),
             ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
             ExprKind::If { cond, then, els } => {
                 let c = self.expr(cond)?;
-                let t = self.call_rt("mim_truthy", &[c.v.into()])?.unwrap().into_int_value();
-                self.drop_tmp(c)?;
-                let bit = self.b.build_int_compare(IntPredicate::NE, t, i64t.const_zero(), "cond").s()?;
+                let bit = self.truth(c)?;
                 let f = self.cur_fn.unwrap();
                 let then_bb = self.ctx.append_basic_block(f, "then");
                 let else_bb = self.ctx.append_basic_block(f, "else");
                 let merge_bb = self.ctx.append_basic_block(f, "merge");
                 self.b.build_conditional_branch(bit, then_bb, else_bb).s()?;
-
+                // values of a type that is not statically a single scalar are boxed
+                let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
                 let mut incoming = Vec::new();
                 self.b.position_at_end(then_bb);
                 let tv = self.block(then)?;
                 if !self.terminated() {
-                    incoming.push((tv.v, self.b.get_insert_block().unwrap()));
+                    let tv = self.as_ty(tv, rt, "branch value")?;
+                    let tv = self.own(tv)?;
+                    incoming.push((self.basic(tv), self.b.get_insert_block().unwrap()));
                     self.b.build_unconditional_branch(merge_bb).s()?;
                 }
                 self.b.position_at_end(else_bb);
                 let ev = match els {
-                    Some(e) => {
-                        let v = self.expr(e)?;
-                        self.own(v)?
-                    }
+                    Some(x) => self.expr(x)?,
                     None => self.null(),
                 };
                 if !self.terminated() {
-                    incoming.push((ev.v, self.b.get_insert_block().unwrap()));
+                    let ev = self.as_ty(ev, rt, "branch value")?;
+                    let ev = self.own(ev)?;
+                    incoming.push((self.basic(ev), self.b.get_insert_block().unwrap()));
                     self.b.build_unconditional_branch(merge_bb).s()?;
                 }
                 self.b.position_at_end(merge_bb);
@@ -869,12 +1360,22 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.dead_block();
                     return Ok(self.null());
                 }
-                let phi = self.b.build_phi(self.ptr, "ifv").s()?;
+                let phi = self.b.build_phi(self.repr(rt), "ifv").s()?;
                 for (v, bb) in &incoming {
                     phi.add_incoming(&[(v, *bb)]);
                 }
-                Ok(V { v: phi.as_basic_value().into_pointer_value(), owned: true })
+                Ok(self.val_of(phi.as_basic_value(), rt, true))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn suffixes_are_distinct() {
+        use mimic_check::types::{El, Ty};
+        assert_ne!(super::ty_suffix(&[Ty::I64]), super::ty_suffix(&[Ty::F64]));
+        assert_ne!(super::ty_suffix(&[Ty::Arr(El::I64)]), super::ty_suffix(&[Ty::Arr(El::F64)]));
     }
 }

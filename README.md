@@ -32,7 +32,9 @@ Milestone 1 is a working vertical slice:
 Milestone 2 is in progress:
 * **Phase 1, done:** the array layer runs on all cores automatically.
 * **Phase 2, done:** the interaction-net parallel reducer.
-* **Phase 3, done:** pure Mimic functions compile to nets. On 12 cores, unmodified `fib` runs 4.2× faster than native code.
+* **Phase 3, done:** pure Mimic functions compile to nets.
+
+M3 is in progress. Static types and unboxed scalars are done: `fib(38)` runs at 1.42× of C on one core and **5.4× faster than C on 12 cores**, with no annotations beyond `n: i64`.
 
 The roadmap is in [docs/design.md](docs/design.md).
 

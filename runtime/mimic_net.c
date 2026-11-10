@@ -430,10 +430,11 @@ static const uint8_t *g_native_arity = NULL;
 #define NATIVE_LIMIT 2048
 static _Thread_local int32_t t_native_depth = 0;
 
-/* Prologue/epilogue of compiled native functions that may recurse. Returns
- * non-zero when the native stack is deep: the caller should use the net. */
-int32_t mim_native_enter(void) { return ++t_native_depth > NATIVE_LIMIT; }
-void mim_native_leave(void) { --t_native_depth; }
+/* Compiled native code tracks its recursion depth in a hidden argument and
+ * only calls these when it hands a deep call to the net: while inside, the
+ * runtime must not fall back to native code again on this thread. */
+void mim_deep_enter(void) { t_native_depth += NATIVE_LIMIT; }
+void mim_deep_leave(void) { t_native_depth -= NATIVE_LIMIT; }
 
 /* Thread-safe one-time registration, used by compiled programs: the first
  * caller loads the book, concurrent callers wait for it. */

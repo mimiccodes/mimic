@@ -94,7 +94,19 @@ Pure functions compile to interaction nets ([net.md](net.md#compiling-mimic-to-n
 
 Adaptive native fallback runs each core's share of the work at native speed. Bounded native recursion hands deep recursion back to the heap-allocated net. `--no-net` compiles everything natively, for comparison.
 
-**Known bottleneck:** scalars are still boxed (one allocation per scalar result). Unboxed scalars arrive with NUM nodes in the net layer and static types in M4.
+## Milestone 3, step 2 (implemented): static types and unboxed scalars
+
+`mimic_check::types` infers a type for every expression, once per **specialisation**: a function together with the argument types it is called with, as with C++ templates and Rust generics.
+* Recursion is solved by fixpoint iteration.
+* Values whose type depends on run time (for example, an `if` whose branches return `i64` and `f64`) get the type `Dyn` and stay boxed, so behaviour is identical to the dynamic semantics.
+* Annotations coerce (`i64` → `f64`) and are checked at compile time.
+
+Codegen keeps `i64`, `f64` and `bool` in registers, boxing only at array, runtime and net boundaries. Each specialisation can be emitted in three kinds:
+* `Plain`: typed native code.
+* `NetWrap`: the function runs as an interaction net.
+* `Native`: depth-counted native code for the net's fallback. The depth travels as a hidden argument, so counting it costs nothing; past 2048 frames the call moves to the heap-allocated net.
+
+Boxed-ABI thunks connect typed code to `¨`, the net's native table (which dispatches to the typed specialisation when the arguments fit) and library exports. Results are in [BENCHMARK.md](../BENCHMARK.md).
 
 ## Roadmap
 

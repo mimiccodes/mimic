@@ -993,9 +993,21 @@ int64_t mim_truthy(mim_val *v) {
     return getf(v, 0) != 0;
 }
 
+static int type_ok(mim_val *v, int32_t ty);
+
+/* Non-panicking test, used by compiled dispatch thunks. */
+int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
+
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
-    int ok = 0;
+    if (type_ok(v, ty)) return;
     static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]"};
+    char buf[256];
+    snprintf(buf, sizeof buf, "type error: %s expected %s, found %s", what, names[ty], dtname(v));
+    mim_panic(buf);
+}
+
+static int type_ok(mim_val *v, int32_t ty) {
+    int ok = 0;
     if (v) {
         int s = v->rank == 0;
         switch (ty) {
@@ -1009,11 +1021,7 @@ void mim_check_type(mim_val *v, int32_t ty, const char *what) {
         case TY_BOOLVEC: ok = !s && v->dtype == MIM_BOOL; break;
         }
     }
-    if (!ok) {
-        char buf[256];
-        snprintf(buf, sizeof buf, "type error: %s expected %s, found %s", what, names[ty], dtname(v));
-        mim_panic(buf);
-    }
+    return ok;
 }
 
 /* ==== FFI marshalling ==================================================== */
