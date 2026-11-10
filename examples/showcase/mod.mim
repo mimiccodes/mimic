@@ -7,6 +7,7 @@ project = "showcase"
 
 modules {
     "showcase::arrays" = { file = "src/arrays.mim", line = 1, pub = false }
+    "showcase::bench" = { file = "src/bench.mim", line = 1, pub = true }
     "showcase::compute" = { file = "src/compute.mim", line = 1, pub = false }
     "showcase::ffi" = { file = "src/ffi.mim", line = 1, pub = false }
     "showcase::lib" = { file = "src/lib.mim", line = 1, pub = true }
@@ -20,6 +21,27 @@ modules {
 functions {
     "showcase::arrays::demo" = { kind = fn, pub = true, file = "src/arrays.mim", line = 5, sig = "pub fn demo()", hash = "73898d7cba3ec5cc" }
     "showcase::arrays::double" = { kind = fn, pub = false, file = "src/arrays.mim", line = 36, sig = "fn double(x: i64) -> i64", hash = "a32abf91af407392" }
+    "showcase::bench::demo" = { kind = fn, pub = true, file = "src/bench.mim", line = 11, sig = "pub fn demo()", hash = "73898d7cba3ec5cc" }
+    "showcase::bench::escape" = { kind = fn, pub = true, file = "src/bench.mim", line = 24, sig = "pub fn escape(cx: f64, cy: f64, limit: i64) -> i64", hash = "06309112998c36fb" }
+    "showcase::bench::step" = { kind = fn, pub = false, file = "src/bench.mim", line = 28, sig = "fn step(cx: f64, cy: f64, x: f64, y: f64, i: i64, limit: i64) -> i64", hash = "d8de2e00467ce026" }
+    "showcase::bench::pixel" = { kind = fn, pub = false, file = "src/bench.mim", line = 37, sig = "fn pixel(k: i64, size: i64, limit: i64) -> i64", hash = "74d70921e4b9db28" }
+    "showcase::bench::mandelbrot" = { kind = fn, pub = true, file = "src/bench.mim", line = 45, sig = "pub fn mandelbrot(size: i64, limit: i64) -> i64", hash = "91532dea11fdcccf" }
+    "showcase::bench::pixels" = { kind = fn, pub = false, file = "src/bench.mim", line = 49, sig = "fn pixels(lo: i64, hi: i64, size: i64, limit: i64) -> i64", hash = "36e12758a84b920d" }
+    "showcase::bench::run_pixels" = { kind = fn, pub = false, file = "src/bench.mim", line = 58, sig = "fn run_pixels(lo: i64, hi: i64, size: i64, limit: i64) -> i64", hash = "de6b1d43c023d57b" }
+    "showcase::bench::render" = { kind = fn, pub = false, file = "src/bench.mim", line = 63, sig = "fn render()", hash = "c8b8acaf110f7a28" }
+    "showcase::bench::show_rows" = { kind = fn, pub = false, file = "src/bench.mim", line = 67, sig = "fn show_rows(r: i64, n: i64)", hash = "b9279e7bc88de8fd" }
+    "showcase::bench::shade" = { kind = fn, pub = false, file = "src/bench.mim", line = 74, sig = "fn shade(k: i64)", hash = "410cc7b16dae1a2b" }
+    "showcase::bench::count_primes" = { kind = fn, pub = true, file = "src/bench.mim", line = 82, sig = "pub fn count_primes(n: i64) -> i64", hash = "6a463be31c88fa66" }
+    "showcase::bench::primes_in" = { kind = fn, pub = false, file = "src/bench.mim", line = 86, sig = "fn primes_in(lo: i64, hi: i64) -> i64", hash = "d23f343644293938" }
+    "showcase::bench::primes_run" = { kind = fn, pub = false, file = "src/bench.mim", line = 95, sig = "fn primes_run(lo: i64, hi: i64) -> i64", hash = "63ccfdbe4c3708ce" }
+    "showcase::bench::is_prime" = { kind = fn, pub = true, file = "src/bench.mim", line = 99, sig = "pub fn is_prime(n: i64) -> bool", hash = "7ce20684c78d3f59" }
+    "showcase::bench::no_divisor" = { kind = fn, pub = false, file = "src/bench.mim", line = 103, sig = "fn no_divisor(n: i64, d: i64) -> bool", hash = "8d40bba030c0f861" }
+    "showcase::bench::longest_collatz" = { kind = fn, pub = true, file = "src/bench.mim", line = 110, sig = "pub fn longest_collatz(n: i64) -> i64", hash = "2ba92cd0569d2980" }
+    "showcase::bench::best" = { kind = fn, pub = false, file = "src/bench.mim", line = 114, sig = "fn best(lo: i64, hi: i64) -> i64", hash = "0f54ba4607fbb36e" }
+    "showcase::bench::best_run" = { kind = fn, pub = false, file = "src/bench.mim", line = 123, sig = "fn best_run(lo: i64, hi: i64) -> i64", hash = "87e5e688fe7bf778" }
+    "showcase::bench::chain" = { kind = fn, pub = false, file = "src/bench.mim", line = 127, sig = "fn chain(n: i64) -> i64", hash = "74ffdd6bfe038dd6" }
+    "showcase::bench::monte_carlo_pi" = { kind = fn, pub = true, file = "src/bench.mim", line = 134, sig = "pub fn monte_carlo_pi(n: i64) -> f64", hash = "0859c8cba398afcc" }
+    "showcase::bench::integrate_pi" = { kind = fn, pub = true, file = "src/bench.mim", line = 143, sig = "pub fn integrate_pi(n: i64) -> f64", hash = "61daaca1bbb62d72" }
     "showcase::compute::demo" = { kind = fn, pub = true, file = "src/compute.mim", line = 5, sig = "pub fn demo()", hash = "73898d7cba3ec5cc" }
     "showcase::compute::fib" = { kind = fn, pub = true, file = "src/compute.mim", line = 18, sig = "pub fn fib(n: i64) -> i64", hash = "b6e4e36ed517df09" }
     "showcase::compute::tri" = { kind = fn, pub = false, file = "src/compute.mim", line = 25, sig = "fn tri(n: i64) -> i64", hash = "0f0867ca8e43ad82" }

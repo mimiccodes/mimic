@@ -11,5 +11,6 @@ use showcase::banner          // `module lib` is this project's library: `showca
     shapes::demo()
     shop::demo()
     web::demo()
+    bench::demo()
     print(banner("done"))
 }

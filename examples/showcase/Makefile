@@ -3,13 +3,16 @@
 # Uses `mimic` from your PATH, or else the compiler built in this repository
 # (`make compiler` builds it). Override with: make run MIMIC=/path/to/mimic
 
+SHELL  := /bin/bash
 REPO   := ../..
-MIMIC  ?= $(shell command -v mimic 2>/dev/null || echo $(REPO)/target/release/mimic)
+MIMIC  ?= $(shell command -v mimic 2>/dev/null || echo $(abspath $(REPO)/target/release/mimic))
 BIN    := target/release/showcase
+BENCH  := bench/target/release/bench
+ZIG    ?= zig
 TARGET ?= x86_64-linux-gnu
 
 .DEFAULT_GOAL := help
-.PHONY: help compiler check run debug build release parallel ir net cross cross-one glyphs mods clean
+.PHONY: help compiler check run debug build release bench-build bench parallel compare ir net cross cross-one glyphs mods clean
 
 help: ## show this list
 	@echo "Mimic showcase — targets:"
@@ -35,11 +38,27 @@ build: _need-mimic ## build the fastest binary (release is the default)
 release: build ## build the fastest binary and run it
 	./$(BIN)
 
-parallel: build ## time the release binary on 1 thread vs all cores
-	@echo "--- 1 thread"
-	@time MIMIC_THREADS=1 ./$(BIN) > /dev/null
-	@echo "--- all cores"
-	@time ./$(BIN) > /dev/null
+bench-build: _need-mimic
+	@cd bench && $(MIMIC) build
+
+bench: bench-build ## run the compute-heavy algorithms at full size (all cores)
+	@./$(BENCH)
+
+parallel: bench-build ## time the full-size algorithms on 1 thread, then on all cores
+	@echo "=== 1 thread (MIMIC_THREADS=1)"
+	@time env MIMIC_THREADS=1 ./$(BENCH)
+	@echo ""
+	@echo "=== all cores"
+	@time ./$(BENCH)
+
+compare: bench-build ## time the same algorithms in plain C (sequential) against Mimic
+	@mkdir -p bench/target
+	@$(ZIG) cc -O3 -mcpu=native -ffp-contract=off bench/reference.c -o bench/target/reference
+	@echo "=== C, sequential (-O3 -mcpu=native)"
+	@time ./bench/target/reference
+	@echo ""
+	@echo "=== Mimic, all cores"
+	@time ./$(BENCH)
 
 ir: _need-mimic ## write the LLVM IR and the generated interaction nets to target/release/
 	$(MIMIC) build --emit-ir --emit-net
@@ -62,7 +81,7 @@ mods: _need-mimic ## list every module and function (from mod.mim)
 	$(MIMIC) mod list --all
 
 clean: ## remove build output
-	rm -rf target/debug target/release
+	rm -rf target/debug target/release bench/target/debug bench/target/release bench/target/reference
 
 _need-mimic:
 	@command -v $(MIMIC) >/dev/null 2>&1 || test -x $(MIMIC) || { \

@@ -1,6 +1,6 @@
 # Mimic showcase
 
-A guided tour of every Mimic feature built so far. Each file in `src/` covers one area. Running the project prints the result of every example, and section 6 lists the exact output to compare against.
+A guided tour of every Mimic feature built so far. Each file in `src/` covers one area. Running the project prints the result of every example, and section 6 lists the exact output to compare against. `make parallel` times compute-heavy algorithms (Mandelbrot, primes, Collatz, π) on 1 thread and on all cores; see section 8.
 
 **Quick start** (once the requirements in section 1 are installed):
 
@@ -73,7 +73,9 @@ The Makefile uses `mimic` from your `PATH` if there is one, and otherwise `../..
 | `make release` | Builds the **fastest** binary (`target/release/showcase`) and runs it. |
 | `make check` | Type-checks every module without generating code. |
 | `make build` | Builds the fastest binary without running it. Release is the default for `mimic build`. |
-| `make parallel` | Times the release binary on 1 thread, then on all cores. |
+| `make bench` | Runs the compute-heavy algorithms at full size, on all cores. |
+| `make parallel` | Times the full-size algorithms on **1 thread**, then on **all cores**. |
+| `make compare` | Times the same algorithms written in plain C (sequential), then Mimic on all cores. |
 | `make ir` | Writes the LLVM IR (`.ll`) and the generated interaction nets (`.mnet`) to `target/release/`. |
 | `make net` | Runs the hand-written interaction net `nets/fib.mnet` and prints its speed. |
 | `make cross` | Builds for Linux x86-64, Linux arm64 (static musl) and Windows. The list is in `build.mim`. |
@@ -134,6 +136,10 @@ showcase/
 ├── mod.mim          generated index of modules and functions (do not edit)
 ├── Makefile
 ├── nets/fib.mnet    a raw interaction net, run with `make net`
+├── bench/           a second project: full-size runs of src/bench.mim (`make parallel`)
+│   ├── mim.mim      depends on this project: showcase = { path = ".." }
+│   ├── src/main.mim
+│   └── reference.c  the same algorithms in C, for `make compare`
 └── src/
     ├── main.mim     entry point, written with glyph keywords (§ module, ƒ fn)
     ├── lib.mim      the library part: `showcase::banner`, `showcase::version`
@@ -142,7 +148,8 @@ showcase/
     ├── ffi.mim      calling C: trusted and `unsafe` extern functions
     ├── shapes.mim   union types, exhaustive match, nested modules
     ├── shop.mim     records, `with`, lists of records, tuples, named/default arguments
-    └── web.mim      route patterns, Option/Result with let … else, durations, UI-style state
+    ├── web.mim      route patterns, Option/Result with let … else, durations, UI-style state
+    └── bench.mim    compute-heavy algorithms: Mandelbrot, primes, Collatz, π ×2
 ```
 
 ### Feature map
@@ -173,13 +180,17 @@ showcase/
 | Errors without exceptions | `web.mim` | `let u: User = find(id) else { return … }` |
 | Durations | `web.mim` | `250ms + 2s` |
 | UI-style state, messages and view | `web.mim` | `update(s, Inc)`, `view(s2)` |
+| Divide-and-conquer parallelism | `bench.mim` | `pixels(lo, mid, …) + pixels(mid, hi, …)` |
+| Strings built with `¨` (ASCII art) | `bench.mim` | `(r × 64) ‥ ((r + 1) × 64) ¨ shade` |
+| Whole-array numeric kernels | `bench.mim` | `4.0 ÷ (1.0 + xs × xs) ▷ +/` |
+| Path dependencies between projects | `bench/mim.mim` | `showcase = { path = ".." }` |
 | Cross-compilation | `build.mim` | `make cross` |
 
 ---
 
 ## 6. Expected output
 
-`make run` and `make release` print exactly this (with the `Running …` line from `make run` printed first):
+`make run` and `make release` print exactly this, with the `Running …` line from `make run` printed first. The Mandelbrot picture is drawn by the program itself:
 
 ```
 == Mimic showcase v0.1.0 ==
@@ -246,6 +257,36 @@ invalid age `forty`                         age_of("forty"): "forty" isn't an i6
 timeout = 2250 ms                           250ms + 2s
 [clicks: 10]                                Inc, Add(10), Dec
 [clicks: 0]                                 Reset
+== bench: compute-heavy algorithms ==
+                                                                
+                                                                
+                                          . .                   
+                                         ::.                    
+                                       .+@@@%.                  
+                                      ..@@@@=.                  
+                                .=@:+#@@@@@@@@@@:....:          
+                               ..:@@@@@@@@@@@@@@@@@@.           
+                  :           .:@@@@@@@@@@@@@@@@@@@@:.          
+                  ..:...... ..:@@@@@@@@@@@@@@@@@@@@@@.          
+                  ..-@@@@@@@.:@@@@@@@@@@@@@@@@@@@@@@@@.         
+               ....@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@=          
+   @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@.            
+               ....@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@=          
+                  ..-@@@@@@@.:@@@@@@@@@@@@@@@@@@@@@@@@.         
+                  ..:...... ..:@@@@@@@@@@@@@@@@@@@@@@.          
+                  :           .:@@@@@@@@@@@@@@@@@@@@:.          
+                               ..:@@@@@@@@@@@@@@@@@@.           
+                                .=@:+#@@@@@@@@@@:....:          
+                                      ..@@@@=.                  
+                                       .+@@@%.                  
+                                         ::.                    
+                                          . .                   
+                                                                
+mandelbrot iterations (120×120, limit 200): 551558
+primes below 100000: 9592
+longest Collatz chain below 100000: 351
+π by Monte Carlo (1M points): 3.141624
+π by integration (1M slices): 3.14159265358988
 == done ==
 ```
 
@@ -269,7 +310,39 @@ Run `make check` after each change, then undo it.
 
 ---
 
-## 8. Troubleshooting
+## 8. Benchmarks: `make parallel` and `make compare`
+
+`src/bench.mim` holds five compute-heavy algorithms. `make run` runs them at small sizes as part of the tour. The `bench/` project runs them at full size by depending on this project and calling the same functions:
+
+| Algorithm | Size | How it runs in parallel |
+|---|---|---|
+| Mandelbrot: total escape iterations | 1000 × 1000 pixels, limit 500 | divide and conquer over pixel ranges (interaction nets) |
+| Prime counting by trial division | below 3,000,000 | divide and conquer over number ranges |
+| Longest Collatz chain | below 3,000,000 | divide and conquer, combined with `⌈` (max) |
+| π by Monte Carlo | 10M pseudo-random points | whole-array kernels |
+| π by midpoint integration | 20M slices | whole-array kernels |
+
+None of this code mentions threads. The recursive functions are pure, so the compiler turns them into interaction nets, and the two halves of every split run on different cores.
+
+**Results**, measured on an Apple M3 Pro (6 performance + 6 efficiency cores) while other programs were running:
+
+| Run | Time |
+|---|---|
+| Mimic, 1 thread (`make parallel`, first half) | 10.3 s |
+| Mimic, all cores (`make parallel`, second half) | **1.7 s (6.2× faster)** |
+| Plain C, sequential, `-O3 -mcpu=native` (`make compare`) | 5.7–6.9 s |
+
+Your numbers will differ: they depend on the CPU, its core count and what else is running.
+
+**Mimic on one core is about 1.6× slower than C here; with all cores it is 3–4× faster than the C version.** The remaining single-core gap comes mostly from:
+* recursion where C uses loops (the loop words `evolve` and `settle` are next on the roadmap);
+* array kernels that are not yet fused (each `×` and `+` is a separate pass over memory).
+
+**Identical results.** Mimic prints the same results on 1 thread and on all cores. The C reference prints the same integers too, with two caveats:
+* **The midpoint integral differs in the last digits.** Mimic sums in fixed-size parallel chunks, which is a different order but still deterministic.
+* **C needs `-ffp-contract=off`.** C compilers fuse `a*b + c` into a single instruction by default, which rounds differently. Mimic uses strict IEEE arithmetic, so its results are the same on every CPU. Compiled with C's default instead, the C Mandelbrot total is off by about 300 of 88.7 million.
+
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---|---|

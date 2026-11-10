@@ -1,0 +1,14 @@
+module main
+
+// Full-size runs of the algorithms in ../src/bench.mim, used by
+// `make parallel` (1 thread vs all cores) and `make bench`.
+// `showcase` is a path dependency (see mim.mim): its public modules are
+// usable here as `showcase::…` without any import.
+
+fn main() {
+    print("mandelbrot iterations (1000×1000, limit 500): {showcase::bench::mandelbrot(1000, 500)}")
+    print("primes below 3,000,000: {showcase::bench::count_primes(3000000)}")
+    print("longest Collatz chain below 3,000,000: {showcase::bench::longest_collatz(3000000)}")
+    print("π by Monte Carlo (10M points): {showcase::bench::monte_carlo_pi(10000000)}")
+    print("π by integration (20M slices): {showcase::bench::integrate_pi(20000000)}")
+}

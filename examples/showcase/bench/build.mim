@@ -1,0 +1,17 @@
+module build
+
+// Build profiles used by `mimic build|run --debug|--release`.
+profile debug {
+    opt = 0
+    debug = true
+    leak_check = true
+}
+
+profile release {
+    opt = 3
+    debug = false
+    leak_check = false
+}
+
+// Extra cross-compilation targets (Zig triples), built with `mimic build --all-targets`.
+targets = []
