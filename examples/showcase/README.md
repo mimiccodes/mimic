@@ -324,19 +324,26 @@ Run `make check` after each change, then undo it.
 
 None of this code mentions threads. The recursive functions are pure, so the compiler turns them into interaction nets, and the two halves of every split run on different cores.
 
-**Results**, measured on an Apple M3 Pro (6 performance + 6 efficiency cores) while other programs were running:
+**Results**, measured on an Apple M3 Pro (6 performance + 6 efficiency cores) while other programs were running. Times are best of 3:
 
-| Run | Time |
-|---|---|
-| Mimic, 1 thread (`make parallel`, first half) | 10.3 s |
-| Mimic, all cores (`make parallel`, second half) | **1.7 s (6.2× faster)** |
-| Plain C, sequential, `-O3 -mcpu=native` (`make compare`) | 5.7–6.9 s |
+| Algorithm | C, sequential `-O3` | Mimic, 1 thread | Mimic, all cores |
+|---|---|---|---|
+| Mandelbrot | 1.38 s | 1.41 s | 0.20 s |
+| Prime counting | 1.48 s | **1.43 s** | 0.32 s |
+| Longest Collatz chain | 2.21 s | **2.14 s** | 0.33 s |
+| π by Monte Carlo | 0.07 s | 0.17 s | 0.03 s |
+| π by integration | 0.09 s | 0.10 s | 0.02 s |
+| **Whole benchmark** (`make compare`) | 4.81 s | **4.61 s** | **1.04 s** |
 
-Your numbers will differ: they depend on the CPU, its core count and what else is running.
+* **On one core, Mimic matches plain C.** Your numbers will differ: they depend on the CPU, its core count and what else is running.
+* **On all cores, Mimic is about 4.6× faster than the sequential C version,** with no parallel code written.
+* **Monte Carlo is the one remaining single-core gap.** `xs` and `ys` are each used twice and get recomputed per use.
 
-**Mimic on one core is about 1.6× slower than C here; with all cores it is 3–4× faster than the C version.** The remaining single-core gap comes mostly from:
-* recursion where C uses loops (the loop words `evolve` and `settle` are next on the roadmap);
-* array kernels that are not yet fused (each `×` and `+` is a separate pass over memory).
+**What made it fast:**
+* **Kernel fusion.** Array expressions compile to one loop with no temporary arrays. This made Monte Carlo 7× and integration 8× faster.
+* **Cheaper integer operations.** Floored `%` now uses one division instead of two, and `÷`/`%` by powers of two become shifts and masks.
+* **Real loops.** Tail-recursive functions compile to plain loops with no stack-depth bookkeeping.
+* **Collatz written like C.** The next value is chosen inside the recursive call (`chain(if n % 2 == 0 { n div 2 } else { 3 × n + 1 })`), which compiles to a branch-free select, just like C's `?:`.
 
 **Identical results.** Mimic prints the same results on 1 thread and on all cores. The C reference prints the same integers too, with two caveats:
 * **The midpoint integral differs in the last digits.** Mimic sums in fixed-size parallel chunks, which is a different order but still deterministic.

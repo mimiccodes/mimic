@@ -93,6 +93,32 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### After M3 performance step 1: fusion, cheaper division, real loops
+
+These are the showcase's compute benchmarks (`examples/showcase`, run with `make compare` and `make parallel`). Measured on the same M3 Pro under load average 9. Times are best of 3:
+
+| Algorithm | C `-O3 -mcpu=native` | Mimic, 1 thread | Mimic, all cores |
+|---|---|---|---|
+| Mandelbrot (1000², limit 500) | 1.38 s | 1.41 s | 0.20 s |
+| Primes below 3M (trial division) | 1.48 s | **1.43 s** | 0.32 s |
+| Longest Collatz chain below 3M | 2.21 s | **2.14 s** | 0.33 s |
+| π, Monte Carlo (10M points) | 0.07 s | 0.17 s | 0.03 s |
+| π, integration (20M slices) | 0.09 s | 0.10 s | 0.02 s |
+| **Total** | **4.81 s** | **4.61 s (≈ C)** | **1.04 s (4.6× faster)** |
+
+Before this step the totals were 10.3 s on 1 thread and 1.7 s on all cores. The changes:
+
+| Change | Effect |
+|---|---|
+| **Kernel fusion.** Elementwise chains, reductions, and `let`s used only inside them compile to one parallel loop with no temporary arrays. | Monte Carlo 0.96 → 0.17 s, integration 0.81 → 0.10 s |
+| **Floored `%` with one division** instead of two | primes ≈ 2× faster |
+| **`÷`/`%` by a power of two become a shift / mask** (exact for negatives) | Collatz step |
+| **Self-tail-recursion without the native depth check** in optimised builds (LLVM turns it into a loop) | tight loops, same shape as C |
+
+Results stay identical between 1 thread and all cores. A fixture runs every fused kernel with one element per chunk, to test that the partial results combine correctly.
+
+
+
 ### After M3 step 2: static types and unboxed scalars
 
 Measured on an Apple M3 Pro (6 performance + 6 efficiency cores) under background load (load average 6–10). Times are best of 5. The code is unmodified Mimic with one annotation (`n: i64`):

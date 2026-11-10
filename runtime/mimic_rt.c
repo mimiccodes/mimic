@@ -62,6 +62,12 @@ enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRIN
 
 void mim_panic(const char *msg);
 
+/* floored modulo with a single division */
+static inline int64_t floormod(int64_t x, int64_t y) {
+    int64_t r = x % y;
+    return (r != 0 && ((r ^ y) < 0)) ? r + y : r;
+}
+
 /* floored integer division (matches `%`): 7 div 2 = 3, -7 div 2 = -4 */
 static int64_t floordiv(int64_t x, int64_t y) {
     if (y == 0) mim_panic("integer division by zero");
@@ -262,6 +268,15 @@ static void park_forever(void) {
 
 static int64_t nchunks_of(int64_t n) { return n <= 0 ? 0 : (n + g_grain - 1) / g_grain; }
 
+static void parallel_for(int64_t n, mim_task fn, void *ctx);
+
+/* ==== compiler-generated (fused) kernels ===================================
+ * The compiler fuses chains of elementwise array operations into one loop and
+ * runs it with the same fixed-size chunks as the built-in kernels, so results
+ * (including floating-point reductions) do not depend on the thread count. */
+void mim_par_for(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for(n, f, ctx); }
+int64_t mim_par_grain(void);
+
 /* ==== allocation & refcounting ===========================================
  *
  * - one malloc per value: header and elements live in the same block;
@@ -340,6 +355,9 @@ static void dealloc(mim_val *v) {
         free(v);
     }
 }
+
+/* A fresh vector for a fused kernel's output. */
+mim_val *mim_alloc_vec(int32_t dtype, int64_t n) { return alloc(dtype, 1, n); }
 
 void mim_retain(mim_val *v) {
     if (v && __atomic_load_n(&v->rc, __ATOMIC_RELAXED) < MIM_IMMORTAL) __atomic_fetch_add(&v->rc, 1, __ATOMIC_RELAXED);
@@ -658,7 +676,7 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
             case OP_MUL: seti(r, i, (int64_t)((uint64_t)x * (uint64_t)y)); break;
             case OP_MOD:
                 if (y == 0) mim_panic("integer modulo by zero");
-                seti(r, i, ((x % y) + y) % y);
+                seti(r, i, floormod(x, y));
                 break;
             case OP_EQ: seti(r, i, x == y); break;
             case OP_NE: seti(r, i, x != y); break;
@@ -1279,6 +1297,20 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     }
     if (xs->dtype == MIM_F64) setf(xs, k, getf(v, 0));
     else seti(xs, k, geti(v, 0));
+}
+
+int64_t mim_par_grain(void) { return g_grain; }
+
+/* Length of a vector a fused kernel reads directly (its element type must be
+ * exactly the one the compiler inferred). */
+int64_t mim_vec_len(mim_val *v, int32_t dtype) {
+    need(v, "array operand");
+    if (v->rank != 1 || v->dtype != dtype) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "internal error: fused kernel expected a vector of dtype %d, found %s", dtype, dtname(v));
+        mim_panic(buf);
+    }
+    return v->len;
 }
 
 int64_t mim_truthy(mim_val *v) {

@@ -124,8 +124,11 @@ fn best_run(lo: i64, hi: i64) -> i64 {
     if lo == hi { 0 } else { chain(lo) ⌈ best_run(lo + 1, hi) }
 }
 
+// the next value is chosen inside the call (a branch-free select), like
+// C's `n = n % 2 == 0 ? n / 2 : 3 * n + 1`: parity is unpredictable, so a
+// branch per step would be mispredicted half the time
 fn chain(n: i64) -> i64 {
-    if n == 1 { 1 } else if n % 2 == 0 { 1 + chain(n div 2) } else { 1 + chain(3 × n + 1) }
+    if n == 1 { 1 } else { 1 + chain(if n % 2 == 0 { n div 2 } else { 3 × n + 1 }) }
 }
 
 // ---- π, two ways, as whole-array kernels -------------------------------------

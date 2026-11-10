@@ -40,9 +40,9 @@ functions {
     "showcase::bench::longest_collatz" = { kind = fn, pub = true, file = "showcase/src/bench.mim", line = 110, sig = "pub fn longest_collatz(n: i64) -> i64", hash = "2ba92cd0569d2980" }
     "showcase::bench::best" = { kind = fn, pub = false, file = "showcase/src/bench.mim", line = 114, sig = "fn best(lo: i64, hi: i64) -> i64", hash = "0f54ba4607fbb36e" }
     "showcase::bench::best_run" = { kind = fn, pub = false, file = "showcase/src/bench.mim", line = 123, sig = "fn best_run(lo: i64, hi: i64) -> i64", hash = "87e5e688fe7bf778" }
-    "showcase::bench::chain" = { kind = fn, pub = false, file = "showcase/src/bench.mim", line = 127, sig = "fn chain(n: i64) -> i64", hash = "74ffdd6bfe038dd6" }
-    "showcase::bench::monte_carlo_pi" = { kind = fn, pub = true, file = "showcase/src/bench.mim", line = 134, sig = "pub fn monte_carlo_pi(n: i64) -> f64", hash = "0859c8cba398afcc" }
-    "showcase::bench::integrate_pi" = { kind = fn, pub = true, file = "showcase/src/bench.mim", line = 143, sig = "pub fn integrate_pi(n: i64) -> f64", hash = "61daaca1bbb62d72" }
+    "showcase::bench::chain" = { kind = fn, pub = false, file = "showcase/src/bench.mim", line = 130, sig = "fn chain(n: i64) -> i64", hash = "74ffdd6bfe038dd6" }
+    "showcase::bench::monte_carlo_pi" = { kind = fn, pub = true, file = "showcase/src/bench.mim", line = 137, sig = "pub fn monte_carlo_pi(n: i64) -> f64", hash = "0859c8cba398afcc" }
+    "showcase::bench::integrate_pi" = { kind = fn, pub = true, file = "showcase/src/bench.mim", line = 146, sig = "pub fn integrate_pi(n: i64) -> f64", hash = "61daaca1bbb62d72" }
     "showcase::compute::demo" = { kind = fn, pub = true, file = "showcase/src/compute.mim", line = 5, sig = "pub fn demo()", hash = "73898d7cba3ec5cc" }
     "showcase::compute::fib" = { kind = fn, pub = true, file = "showcase/src/compute.mim", line = 18, sig = "pub fn fib(n: i64) -> i64", hash = "b6e4e36ed517df09" }
     "showcase::compute::tri" = { kind = fn, pub = false, file = "showcase/src/compute.mim", line = 25, sig = "fn tri(n: i64) -> i64", hash = "0f0867ca8e43ad82" }
@@ -76,5 +76,5 @@ functions {
 }
 
 lock {
-    showcase = { path = "..", rev = "b913685b82bdf6f15aced0f76189619a3e69fcb2" }
+    showcase = { path = "..", rev = "101eb6c78644e6adf2521fadfb7fc1fee4e4ee1b" }
 }

@@ -40,6 +40,7 @@ use std::fmt::Display;
 use std::path::Path;
 use std::rc::Rc;
 
+mod fuse;
 pub mod tonet;
 
 pub struct Settings {
@@ -162,6 +163,8 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         cur_depth: None,
         lambdas: 0,
         descs: HashMap::new(),
+        lazies: Vec::new(),
+        opt_level: settings.opt_level,
     };
     if !cg.plan.book.defs.is_empty() {
         let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
@@ -235,6 +238,127 @@ struct Cg<'ctx, 'p> {
     lambdas: usize,
     /// Runtime descriptors of record types / union variants.
     descs: HashMap<(TypeId, Option<usize>), PointerValue<'ctx>>,
+    /// `let` bindings of array expressions that are fused into their uses
+    /// instead of being materialised (pointers into the Program's AST).
+    lazies: Vec<(String, *const Expr)>,
+    /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
+    opt_level: u8,
+}
+
+/// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
+/// whose other operand has no self-call (LLVM's accumulator tail-recursion
+/// elimination)? Then optimised builds compile the recursion to a loop.
+fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
+    struct W<'a> {
+        p: &'a Program,
+        fid: usize,
+        module: ModId,
+        ok: bool,
+    }
+    impl W<'_> {
+        fn is_self(&self, e: &Expr) -> bool {
+            matches!(&e.kind, ExprKind::Call { callee, .. }
+                if matches!(&callee.kind, ExprKind::Path(path) if matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if f == self.fid)))
+        }
+        /// any self-call anywhere in `e` is a non-tail call
+        fn none(&mut self, e: &Expr) {
+            if self.is_self(e) {
+                self.ok = false;
+            }
+            self.children(e, false);
+        }
+        /// `e` is in tail position
+        fn tail(&mut self, e: &Expr) {
+            match &e.kind {
+                ExprKind::Call { args, .. } if self.is_self(e) => args.iter().for_each(|a| self.none(a)),
+                ExprKind::Binary { op: BinOp::Add | BinOp::Mul, lhs, rhs } if self.is_self(lhs) || self.is_self(rhs) => {
+                    let (call, other) = if self.is_self(lhs) { (lhs, rhs) } else { (rhs, lhs) };
+                    self.tail(call);
+                    self.none(other);
+                }
+                ExprKind::If { cond, then, els } => {
+                    self.none(cond);
+                    self.block(then, true);
+                    if let Some(x) = els {
+                        self.tail(x);
+                    }
+                }
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b, true),
+                ExprKind::Match { scrut, arms } => {
+                    self.none(scrut);
+                    arms.iter().for_each(|a| self.tail(&a.body));
+                }
+                _ => self.none(e),
+            }
+        }
+        fn block(&mut self, b: &Block, tail: bool) {
+            for s in &b.stmts {
+                match s {
+                    Stmt::Return(Some(x), _) => self.tail(x),
+                    Stmt::LetElse { value, els, .. } => {
+                        self.none(value);
+                        self.block(els, false);
+                    }
+                    Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => self.none(value),
+                    Stmt::Assign { index, value, .. } => {
+                        if let Some(i) = index {
+                            self.none(i);
+                        }
+                        self.none(value);
+                    }
+                    Stmt::Return(None, _) => {}
+                }
+            }
+            if let Some(t) = &b.tail {
+                if tail { self.tail(t) } else { self.none(t) }
+            }
+        }
+        fn children(&mut self, e: &Expr, _: bool) {
+            match &e.kind {
+                ExprKind::Array(xs) | ExprKind::Tuple(xs) | ExprKind::Prim { args: xs, .. } => xs.iter().for_each(|x| self.none(x)),
+                ExprKind::Call { callee, args } => {
+                    self.none(callee);
+                    args.iter().for_each(|x| self.none(x));
+                }
+                ExprKind::Index { base, index } => {
+                    self.none(base);
+                    self.none(index);
+                }
+                ExprKind::Unary { expr, .. } | ExprKind::Field { base: expr, .. } | ExprKind::Named { value: expr, .. } => self.none(expr),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    self.none(lhs);
+                    self.none(rhs);
+                }
+                ExprKind::If { cond, then, els } => {
+                    self.none(cond);
+                    self.block(then, false);
+                    if let Some(x) = els {
+                        self.none(x);
+                    }
+                }
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b, false),
+                ExprKind::Record { fields, .. } => fields.iter().for_each(|(_, x, _)| self.none(x)),
+                ExprKind::With { base, fields } => {
+                    self.none(base);
+                    fields.iter().for_each(|(_, x, _)| self.none(x));
+                }
+                ExprKind::Match { scrut, arms } => {
+                    self.none(scrut);
+                    arms.iter().for_each(|a| self.none(&a.body));
+                }
+                ExprKind::Interp(parts) => parts.iter().for_each(|p| {
+                    if let InterpPart::Expr(x) = p {
+                        self.none(x)
+                    }
+                }),
+                ExprKind::Lambda { body, .. } => self.none(body),
+                _ => {}
+            }
+        }
+    }
+    let mut w = W { p, fid, module: p.fns[fid].module, ok: true };
+    w.block(&d.body, true);
+    w.ok
 }
 
 /// Native recursion is bounded: deeper calls go to the heap-allocated net.
@@ -430,6 +554,10 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
             "mim_str_eq" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_par_for" => void.fn_type(&[i64t, p, p], false),
+            "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
+            "mim_alloc_vec" => ptr.fn_type(&[i32t, i64t], false),
+            "mim_vec_len" => self.ctx.i64_type().fn_type(&[p, i32t], false),
             "mim_route" => self.ctx.i64_type().fn_type(&[p, i64t, p, p, p], false),
             other => panic!("unknown runtime function {other}"),
         };
@@ -578,6 +706,13 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.ret(r)?;
                 self.scopes.clear();
                 return Ok(());
+            }
+            Kind::Native if self.opt_level >= 2 && loops_only(self.p, k.0, decl) => {
+                // every self-call is a tail call (or `x + f(…)` / `x × f(…)`):
+                // LLVM turns the recursion into a loop, so it cannot grow the stack
+                let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
+                self.native_frame = true;
+                self.cur_depth = Some(depth);
             }
             Kind::Native => {
                 // Bounded native recursion: past the limit, hand the call to the net.
@@ -935,7 +1070,16 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
         self.scopes.push(Vec::new());
-        for s in &b.stmts {
+        let lazy_mark = self.lazies.len();
+        for (i, s) in b.stmts.iter().enumerate() {
+            // an array `let` used only inside other array expressions is fused
+            // into those uses rather than materialised
+            if let Stmt::Let { name, mutable: false, ty: None, value, .. } = s
+                && self.lazy_candidate(name, value, &b.stmts[i + 1..], b.tail.as_deref())
+            {
+                self.lazies.push((name.clone(), value as *const Expr));
+                continue;
+            }
             self.stmt(s)?;
         }
         if self.terminated() {
@@ -947,6 +1091,7 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         let v = self.own(v)?;
         let scope = self.scopes.pop().unwrap();
+        self.lazies.truncate(lazy_mark);
         if !self.terminated() {
             self.release_scope(&scope)?;
         }
@@ -1449,6 +1594,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let y = self.to_i64(b)?;
         let zero = self.ctx.i64_type().const_zero();
         let cmp = |p: IntPredicate| -> R<V<'ctx>> { Ok(V::B(bld.build_int_compare(p, x, y, "").s()?)) };
+        // Floored division / modulo by a constant power of two are exactly an
+        // arithmetic shift and a mask (two's complement), for negative x too.
+        if matches!(op, IntDiv | Mod)
+            && let Some(c) = y.get_sign_extended_constant()
+            && c > 0
+            && (c as u64).is_power_of_two()
+        {
+            let k = (c as u64).trailing_zeros() as u64;
+            let i64t = self.ctx.i64_type();
+            return Ok(V::I(if op == IntDiv {
+                bld.build_right_shift(x, i64t.const_int(k, false), true, "").s()?
+            } else {
+                bld.build_and(x, i64t.const_int((c - 1) as u64, false), "").s()?
+            }));
+        }
         match op {
             Add => Ok(V::I(bld.build_int_add(x, y, "").s()?)),
             Sub => Ok(V::I(bld.build_int_sub(x, y, "").s()?)),
@@ -1469,9 +1629,15 @@ impl<'ctx> Cg<'ctx, '_> {
             Mod => {
                 let z = bld.build_int_compare(IntPredicate::EQ, y, zero, "").s()?;
                 self.panic_if(z, "integer modulo by zero")?;
+                // floored modulo with ONE division: r = x rem y, then add y
+                // when r is non-zero and its sign differs from y's
                 let r = bld.build_int_signed_rem(x, y, "").s()?;
-                let r = bld.build_int_add(r, y, "").s()?;
-                Ok(V::I(bld.build_int_signed_rem(r, y, "").s()?))
+                let nz = bld.build_int_compare(IntPredicate::NE, r, zero, "").s()?;
+                let sx = bld.build_xor(r, y, "").s()?;
+                let neg = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
+                let adj = bld.build_and(nz, neg, "").s()?;
+                let ry = bld.build_int_add(r, y, "").s()?;
+                Ok(V::I(bld.build_select(adj, ry, r, "").s()?.into_int_value()))
             }
             Max | Min => {
                 let c = bld.build_int_compare(if op == Max { IntPredicate::SGT } else { IntPredicate::SLT }, x, y, "").s()?;
@@ -1487,6 +1653,25 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
+    pub(crate) fn scalar_unary(&self, op: UnOp, a: V<'ctx>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        Ok(match (op, a) {
+            (UnOp::Not, _) => V::B(self.b.build_not(self.truth(a)?, "").s()?),
+            (UnOp::Neg, V::F(f)) => V::F(self.b.build_float_neg(f, "").s()?),
+            (UnOp::Neg, _) => V::I(self.b.build_int_neg(self.to_i64(a)?, "").s()?),
+            (UnOp::Abs, V::F(f)) => {
+                let fabs = self.intrinsic("llvm.fabs")?;
+                V::F(self.b.build_call(fabs, &[f.into()], "").s()?.try_as_basic_value().basic().unwrap().into_float_value())
+            }
+            (UnOp::Abs, _) => {
+                let x = self.to_i64(a)?;
+                let neg = self.b.build_int_compare(IntPredicate::SLT, x, i64t.const_zero(), "").s()?;
+                let nx = self.b.build_int_neg(x, "").s()?;
+                V::I(self.b.build_select(neg, nx, x, "").s()?.into_int_value())
+            }
+        })
+    }
+
     fn is_unboxed(v: &V) -> bool {
         !matches!(v, V::P(..))
     }
@@ -1494,6 +1679,18 @@ impl<'ctx> Cg<'ctx, '_> {
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let ty = self.ty_of(e);
+        // kernel fusion: whole array expressions become one loop
+        match &e.kind {
+            ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum | Prim::Len), args }
+                if self.is_fae(&args[0]) =>
+            {
+                let r = self.fused_reduce(*p, &args[0])?;
+                return self.as_ty(r, ty, "reduction");
+            }
+            ExprKind::Path(p) if p.len() == 1 && self.lazies.iter().any(|(n, _)| *n == p[0]) => return self.fused_map(e),
+            _ if self.fusible_root(e) => return self.fused_map(e),
+            _ => {}
+        }
         match &e.kind {
             ExprKind::Int(i) => Ok(V::I(i64t.const_int(*i as u64, true))),
             ExprKind::Float(f) => Ok(V::F(self.ctx.f64_type().const_float(*f))),
@@ -1630,21 +1827,7 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Unary { op, expr } => {
                 let a = self.expr(expr)?;
                 if Self::is_unboxed(&a) && ty.is_unboxed() {
-                    return Ok(match (op, a) {
-                        (UnOp::Not, _) => V::B(self.b.build_not(self.truth(a)?, "").s()?),
-                        (UnOp::Neg, V::F(f)) => V::F(self.b.build_float_neg(f, "").s()?),
-                        (UnOp::Neg, _) => V::I(self.b.build_int_neg(self.to_i64(a)?, "").s()?),
-                        (UnOp::Abs, V::F(f)) => {
-                            let fabs = self.intrinsic("llvm.fabs")?;
-                            V::F(self.b.build_call(fabs, &[f.into()], "").s()?.try_as_basic_value().basic().unwrap().into_float_value())
-                        }
-                        (UnOp::Abs, _) => {
-                            let x = self.to_i64(a)?;
-                            let neg = self.b.build_int_compare(IntPredicate::SLT, x, i64t.const_zero(), "").s()?;
-                            let nx = self.b.build_int_neg(x, "").s()?;
-                            V::I(self.b.build_select(neg, nx, x, "").s()?.into_int_value())
-                        }
-                    });
+                    return self.scalar_unary(*op, a);
                 }
                 let a = self.boxed(a)?;
                 let r = self.call_rt_ptr("mim_unop", &[self.i32c(*op as i32), self.basic(a).into()])?;

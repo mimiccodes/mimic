@@ -302,7 +302,7 @@ static Port scalar_binop(NetAlloc *al, int op, numv a, numv b) {
         case OP_MUL: return num_int(al, (int64_t)((uint64_t)x * (uint64_t)y));
         case OP_MOD:
             if (y == 0) mim_panic("integer modulo by zero");
-            return num_int(al, ((x % y) + y) % y);
+            return num_int(al, floormod(x, y));
         case OP_EQ: return num_bool(x == y);
         case OP_NE: return num_bool(x != y);
         case OP_LT: return num_bool(x < y);

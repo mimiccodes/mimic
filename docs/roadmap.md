@@ -28,6 +28,7 @@ Mimic's goals:
 | 2 | Static types and unboxed scalars. Inference, compile-time type errors, per-call-site specialisation. **Result:** `fib` runs at 1.42× of C on one core and 5.4× faster than C on 12 threads. | ✅ |
 | 3a | Records with `with`, tagged unions, exhaustive `match`, field access, string interpolation and equality, named and default arguments, lists of strings/records/lists | ✅ |
 | 3b | Tuples (typed) and tuple patterns, `Option`/`Result` prelude with `let … else`, duration literals, route patterns with typed captures | ✅ |
+| perf 1 | Kernel fusion, single-division floored modulo, power-of-two shifts/masks, real loops for tail recursion. **Result:** the showcase compute benchmark matches C on one core (4.61 s vs 4.81 s) and is 4.6× faster on all cores. | ✅ |
 | 4 (next) | Closures that capture, operators as values (`gather(+)`), function types | |
 | 5 | Loop words: `gather`, `trail`, `evolve`, `settle`, `arms`/`arm` | |
 | 6 | Concurrent I/O: values that wait automatically when used, streams, event loop | |

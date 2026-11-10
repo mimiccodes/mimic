@@ -1,0 +1,7 @@
+// expect-panic: length mismatch between arrays in an elementwise operation
+module main
+fn main() {
+    let a = ⍳ 5
+    let b = ⍳ 6
+    print(a + b ▷ +/)
+}

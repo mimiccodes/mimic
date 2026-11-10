@@ -1,0 +1,26 @@
+module main
+
+// Every expression here compiles to a fused kernel (one loop, no temporaries).
+fn main() {
+    let n = 1000
+    let xs = ⍳ n                         // lazy: only used inside fused expressions
+    let ys = xs × 2 + 1                  // lazy, used twice below
+    print(ys ▷ +/)                       // sum of 1, 3, 5 … 1999
+    print(ys × ys - xs ▷ +/)
+    print(xs % 7 == 0 ▷ +/)              // count multiples of 7 (bool mask)
+    print(xs ÷ n ▷ ⌈/)                   // max of a float kernel
+    print(xs - 500 ▷ ⌊/)
+    print((5 ‥ 10) × 3)                  // materialised fused map
+    print(∣ (5 ‥ 10) - 7 ▷ ×/)            // abs, then product
+    print(xs > 990)                      // a bool vector
+    print(⍳ 0 + 1 ▷ +/)                  // empty: sum is 0
+    print(⍳ 0 × 2.0 ▷ +/)
+    print(⍳ 5 ¨ square + 1)              // a non-fusible ¨ result as a fused leaf
+    print(mean(⍳ 101 × 1.0))             // fused inside a function, leaf from an argument
+    let materialised = xs × 3            // used outside a fused context: stored once
+    print(materialised[999] + (materialised ▷ ≢))
+}
+
+fn square(x: i64) -> i64 { x × x }
+
+fn mean(v: [f64]) -> f64 { (v ▷ +/) ÷ (v ▷ ≢) }
