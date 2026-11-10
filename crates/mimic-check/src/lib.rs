@@ -776,3 +776,115 @@ mod tests {
         assert!(e[0].contains("entry point"));
     }
 }
+
+// ---- purity ---------------------------------------------------------------
+
+/// Which functions are free of side effects (no `print`, no FFI — transitively).
+/// Pure functions may be evaluated in parallel, in any order, or not at all.
+pub struct Purity {
+    pub fns: Vec<bool>,
+}
+
+impl Purity {
+    pub fn analyze(p: &Program) -> Purity {
+        // Optimistic fixpoint: assume pure, then knock out until stable.
+        let mut pure: Vec<bool> = p.fns.iter().map(|f| !f.is_extern()).collect();
+        loop {
+            let mut changed = false;
+            for (fid, f) in p.fns.iter().enumerate() {
+                if !pure[fid] {
+                    continue;
+                }
+                if let FnKind::User(d) = &f.kind {
+                    let ok = PurityWalk { p, module: f.module, pure: &pure }.block(&d.body);
+                    if !ok {
+                        pure[fid] = false;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Purity { fns: pure }
+    }
+
+    /// Is a function operand (path or lambda, as passed to `¨`) pure?
+    pub fn operand_is_pure(&self, p: &Program, module: ModId, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.fns[f]),
+            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.fns }.expr(body),
+            _ => false,
+        }
+    }
+}
+
+struct PurityWalk<'a> {
+    p: &'a Program,
+    module: ModId,
+    pure: &'a [bool],
+}
+
+impl PurityWalk<'_> {
+    fn block(&self, b: &Block) -> bool {
+        b.stmts.iter().all(|s| match s {
+            Stmt::Let { value, .. } => self.expr(value),
+            Stmt::Assign { index, value, .. } => index.as_ref().is_none_or(|i| self.expr(i)) && self.expr(value),
+            Stmt::Expr(e) => self.expr(e),
+            Stmt::Return(e, _) => e.as_ref().is_none_or(|e| self.expr(e)),
+        }) && b.tail.as_ref().is_none_or(|t| self.expr(t))
+    }
+
+    fn expr(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
+            ExprKind::Array(xs) => xs.iter().all(|x| self.expr(x)),
+            ExprKind::Call { callee, args } => {
+                args.iter().all(|a| self.expr(a))
+                    && match &callee.kind {
+                        ExprKind::Lambda { body, .. } => self.expr(body),
+                        ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+                        _ => false,
+                    }
+            }
+            ExprKind::Index { base, index } => self.expr(base) && self.expr(index),
+            ExprKind::Unary { expr, .. } => self.expr(expr),
+            ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
+            ExprKind::Prim { prim, args } => {
+                *prim != Prim::Print
+                    && if *prim == Prim::Each {
+                        self.expr(&args[0])
+                            && match &args[1].kind {
+                                ExprKind::Lambda { body, .. } => self.expr(body),
+                                ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+                                _ => false,
+                            }
+                    } else {
+                        args.iter().all(|a| self.expr(a))
+                    }
+            }
+            ExprKind::Lambda { body, .. } => self.expr(body),
+            ExprKind::If { cond, then, els } => self.expr(cond) && self.block(then) && els.as_ref().is_none_or(|e| self.expr(e)),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
+        }
+    }
+}
+
+#[cfg(test)]
+mod purity_tests {
+    use super::*;
+    use mimic_syntax::parser::parse_file;
+
+    #[test]
+    fn transitive_purity() {
+        let src = "module main\ntrusted extern \"C\" {\n  fn sqrt(x: f64) -> f64\n}\nfn main() { 1 }\nfn a(x) { b(x) + 1 }\nfn b(x) { x × 2 }\nfn c(x) { print(x) }\nfn d(x) { c(x) }\nfn e(x) { sqrt(x) }\nfn r(x) { if x == 0 { 0 } else { r(x - 1) } }\n";
+        let f = SourceFile { path: "m.mim".into(), display: "m.mim".into(), src: src.into(), ast: parse_file(src).unwrap(), package: "t".into() };
+        let (p, d) = Program::build(vec![f], "t");
+        assert!(d.is_empty());
+        let pu = Purity::analyze(&p);
+        let get = |n: &str| pu.fns[p.fns.iter().position(|f| f.name == n).unwrap()];
+        assert!(get("a") && get("b") && get("r"));
+        assert!(!get("c") && !get("d") && !get("e") && !get("sqrt"));
+    }
+}

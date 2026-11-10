@@ -1,0 +1,20 @@
+module main
+
+fn main() {
+    let n = 2000000
+    let xs = ⍳ n
+    print(xs ▷ +/)                          // 1999999000000
+    print(xs × 2 ▷ +/)
+    print(xs ¨ square ▷ ⌈/)                 // parallel ¨ (pure)
+    let fs = xs ÷ 7
+    print(fs ▷ +/)                          // deterministic f64 sum
+    print(xs % 3 == 0 ▷ +/)                 // count multiples of 3
+    print(⍳ 5 ¨ shout ▷ +/)                 // impure ¨: runs in order
+}
+
+fn square(x: i64) -> i64 { x × x }
+
+fn shout(x) {
+    print(x)
+    x
+}

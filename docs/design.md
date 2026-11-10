@@ -51,6 +51,30 @@ M1 is a vertical slice: source → parse → check → **LLVM** → native objec
 
 There is no net layer yet in M1: code runs strictly and sequentially, with the array layer handling memory.
 
+## Parallel by default
+
+Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Whatever can safely run in parallel does, and the compiler and runtime make that call:
+
+* **Purity analysis** (`mimic_check::Purity`). A function is *pure* unless it transitively calls `print` or FFI. Pure code may run in any order, on any thread, or not at all. Impure code keeps program order.
+* The **net layer** (M2 phases 2–3) extends this to every independent subexpression, so the two sides of `fib(n-1) + fib(n-2)`, independent `let`s, and function arguments all reduce in parallel.
+
+## Milestone 2, phase 1 (implemented): parallel array layer
+
+* **Thread pool.** It is sized to the online CPUs (`MIMIC_THREADS` overrides). Nested parallel work runs inline on the worker that encounters it.
+* **Data-parallel kernels.** Elementwise operators, `⍳` and the reductions are split into **fixed-size chunks** (`MIMIC_PAR_GRAIN`, default 16384).
+  * Chunk boundaries never depend on the thread count, and partial results are combined in chunk order.
+  * As a result, floating-point reductions give bit-identical results with 1 thread or 100.
+* **`¨` (each).** Calls with a pure function run in parallel, using fine-grained chunks (about 16 per thread) to balance the load. Calls with an impure function run in order.
+* **Memory:**
+  * Refcounts are atomic.
+  * Each value is a single allocation, with the header and elements together.
+  * Scalar-sized blocks are recycled through per-thread free lists.
+  * The live count used by the leak check is kept per thread, padded to 128-byte cache lines.
+  * `true`, `false`, small integers and every literal in the program are **immortal**: they are created once and never refcounted or freed.
+* **Panics.** If several threads panic, only the first one reports.
+
+**Known bottleneck:** scalars are still boxed (one allocation per scalar result). Unboxed scalars arrive with NUM nodes in the net layer and static types in M4.
+
 ## Roadmap
 
 | Milestone | Scope |

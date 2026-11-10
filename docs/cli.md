@@ -45,6 +45,8 @@ LLVM generates the object for that triple. The C runtime is then compiled for th
 |---|---|
 | `MIMIC_HOME` | Overrides `~/.mimic`, which holds the libraries, the runtime cache and the build directories for single-file runs. |
 | `MIMIC_ZIG` | The path to the `zig` binary. Without Zig, native builds fall back to `cc`. |
+| `MIMIC_THREADS` | **Runtime:** the number of worker threads (default: all CPUs; `1` runs sequentially). |
+| `MIMIC_PAR_GRAIN` | **Runtime:** the number of elements per parallel chunk (default 16384). |
 
 ## Planned commands
 

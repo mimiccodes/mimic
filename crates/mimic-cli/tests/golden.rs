@@ -23,13 +23,21 @@ fn mimic() -> Command {
 fn run_fixtures() {
     let mut failures = Vec::new();
     for f in fixtures("run") {
-        for profile in ["--debug", "--release"] {
-            let out = mimic().arg("run").arg(&f).arg(profile).output().unwrap();
+        // (profile, env): the third run forces every kernel through the thread
+        // pool, one element per chunk, with the leak check on.
+        let runs: [(&str, &[(&str, &str)]); 4] = [
+            ("--debug", &[]),
+            ("--release", &[]),
+            ("--debug", &[("MIMIC_THREADS", "8"), ("MIMIC_PAR_GRAIN", "1")]),
+            ("--release", &[("MIMIC_THREADS", "1")]),
+        ];
+        for (profile, env) in runs {
+            let out = mimic().arg("run").arg(&f).arg(profile).envs(env.iter().copied()).output().unwrap();
             let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
             let got = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !out.status.success() || got != want || stderr.contains("leak") {
-                failures.push(format!("{} {profile}\n--- want\n{want}--- got\n{got}--- stderr\n{stderr}", f.display()));
+                failures.push(format!("{} {profile} {env:?}\n--- want\n{want}--- got\n{got}--- stderr\n{stderr}", f.display()));
             }
         }
     }

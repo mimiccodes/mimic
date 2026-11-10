@@ -88,6 +88,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>) 
         cur_ret: None,
         scopes: Vec::new(),
         lambdas: 0,
+        purity: mimic_check::Purity::analyze(p),
     };
     cg.declare_all(settings)?;
     for fid in 0..p.fns.len() {
@@ -135,6 +136,7 @@ struct Cg<'ctx, 'p> {
     cur_ret: Option<(i32, String)>,
     scopes: Vec<Vec<Local<'ctx>>>,
     lambdas: usize,
+    purity: mimic_check::Purity,
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -154,11 +156,15 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_int" | "mim_bool" => ptr.fn_type(&[i64t], false),
             "mim_float" => ptr.fn_type(&[f64t], false),
             "mim_str" => ptr.fn_type(&[p, i64t], false),
+            "mim_lit_int" => ptr.fn_type(&[p, i64t], false),
+            "mim_lit_float" => ptr.fn_type(&[p, f64t], false),
+            "mim_lit_str" => ptr.fn_type(&[p, p, i64t], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
             "mim_retain" | "mim_release" => void.fn_type(&[p], false),
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
             "mim_unop" | "mim_prim1" => ptr.fn_type(&[i32t, p], false),
-            "mim_each" | "mim_index" => ptr.fn_type(&[p, p], false),
+            "mim_index" => ptr.fn_type(&[p, p], false),
+            "mim_each" => ptr.fn_type(&[p, p, i32t], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -179,6 +185,19 @@ impl<'ctx> Cg<'ctx, '_> {
     fn call_rt_ptr(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> R<V<'ctx>> {
         let v = self.call_rt(name, args)?.ok_or("runtime call returned void")?.into_pointer_value();
         Ok(V { v, owned: true })
+    }
+
+    /// A fresh `ptr` global (initially null) that caches one literal.
+    fn literal_slot(&self) -> PointerValue<'ctx> {
+        let g = self.module.add_global(self.ptr, None, "lit");
+        g.set_linkage(Linkage::Internal);
+        g.set_initializer(&self.ptr.const_null());
+        g.as_pointer_value()
+    }
+
+    /// Immortal values need no release.
+    fn borrowed(&self, v: V<'ctx>) -> R<V<'ctx>> {
+        Ok(V { v: v.v, owned: false })
     }
 
     fn i32c(&self, x: i32) -> BasicMetadataValueEnum<'ctx> {
@@ -532,12 +551,21 @@ impl<'ctx> Cg<'ctx, '_> {
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         match &e.kind {
-            ExprKind::Int(i) => self.call_rt_ptr("mim_int", &[i64t.const_int(*i as u64, true).into()]),
-            ExprKind::Float(f) => self.call_rt_ptr("mim_float", &[self.ctx.f64_type().const_float(*f).into()]),
-            ExprKind::Bool(b) => self.call_rt_ptr("mim_bool", &[i64t.const_int(*b as u64, false).into()]),
+            // Literals are immortal values created once and cached in a global slot:
+            // no allocation and no refcount traffic on the hot path.
+            ExprKind::Int(i) => {
+                let slot = self.literal_slot();
+                self.borrowed(self.call_rt_ptr("mim_lit_int", &[slot.into(), i64t.const_int(*i as u64, true).into()])?)
+            }
+            ExprKind::Float(f) => {
+                let slot = self.literal_slot();
+                self.borrowed(self.call_rt_ptr("mim_lit_float", &[slot.into(), self.ctx.f64_type().const_float(*f).into()])?)
+            }
+            ExprKind::Bool(b) => self.borrowed(self.call_rt_ptr("mim_bool", &[i64t.const_int(*b as u64, false).into()])?),
             ExprKind::Str(s) => {
+                let slot = self.literal_slot();
                 let p = self.cstring(s)?;
-                self.call_rt_ptr("mim_str", &[p.into(), i64t.const_int(s.len() as u64, false).into()])
+                self.borrowed(self.call_rt_ptr("mim_lit_str", &[slot.into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?)
             }
             ExprKind::Array(xs) => {
                 let n = xs.len() as u32;
@@ -638,7 +666,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 let a = self.expr(&args[0])?;
                 let r = if *prim == Prim::Each {
                     let f = self.fn_pointer(&args[1])?;
-                    self.call_rt_ptr("mim_each", &[a.v.into(), f.into()])?
+                    let pure = self.purity.operand_is_pure(self.p, self.cur_mod, &args[1]);
+                    self.call_rt_ptr("mim_each", &[a.v.into(), f.into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;
                     let r = self.call_rt_ptr("mim_prim2", &[self.i32c(*prim as i32), a.v.into(), b.v.into()])?;

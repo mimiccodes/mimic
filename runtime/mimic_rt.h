@@ -7,8 +7,9 @@
  * The compiler inserts mim_retain/mim_release, so there is no GC and no
  * use-after-free. `mut` writes are copy-on-write (in place when rc == 1).
  *
- * Milestone 2 adds the interaction-net layer, which holds ARR handles as
- * opaque nodes: DUP = retain, ERA = release.
+ * Refcounts are atomic and bulk kernels run on a thread pool
+ * (MIMIC_THREADS, MIMIC_PAR_GRAIN). The interaction-net layer holds ARR
+ * handles as opaque nodes: DUP = retain, ERA = release.
  */
 #ifndef MIMIC_RT_H
 #define MIMIC_RT_H
@@ -21,7 +22,8 @@ typedef struct mim_val {
     int32_t dtype;
     int32_t rank;   /* 0 = scalar, 1 = vector (higher ranks: M4) */
     int64_t len;    /* element count */
-    void *data;
+    void *data;   /* points at inl: header and elements are one allocation */
+    int64_t inl[];
 } mim_val;
 
 typedef mim_val *(*mim_fn1)(mim_val *);
@@ -39,6 +41,10 @@ mim_val *mim_float(double x);
 mim_val *mim_bool(int64_t x);
 mim_val *mim_str(const char *s, int64_t len);
 mim_val *mim_array_lit(int64_t n, mim_val **elems);
+/* literals: created once (immortal) and cached in *slot */
+mim_val *mim_lit_int(mim_val **slot, int64_t x);
+mim_val *mim_lit_float(mim_val **slot, double x);
+mim_val *mim_lit_str(mim_val **slot, const char *s, int64_t len);
 
 /* operators: opcodes match mimic_syntax::ast::{BinOp, UnOp} */
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b);
@@ -46,7 +52,8 @@ mim_val *mim_unop(int32_t op, mim_val *a);
 /* primitives: opcodes match mimic_syntax::glyphs::Prim */
 mim_val *mim_prim1(int32_t prim, mim_val *a);
 mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b);
-mim_val *mim_each(mim_val *xs, mim_fn1 f);
+/* pure != 0: f has no side effects, so elements may be processed in parallel */
+mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure);
 mim_val *mim_index(mim_val *xs, mim_val *i);
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v);
 int64_t mim_truthy(mim_val *v);
