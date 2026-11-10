@@ -55,20 +55,98 @@ fn fail_fixtures() {
     for f in fixtures("fail") {
         let src = std::fs::read_to_string(&f).unwrap();
         let first = src.lines().next().unwrap();
-        let (cmd, want) = if let Some(w) = first.strip_prefix("// expect-error: ") {
-            ("check", w)
-        } else if let Some(w) = first.strip_prefix("// expect-panic: ") {
-            ("run", w)
-        } else {
-            panic!("{}: missing `// expect-error:` or `// expect-panic:` header", f.display());
-        };
-        let out = mimic().arg(cmd).arg(&f).output().unwrap();
+        if let Some(w) = first.strip_prefix("// expect-panic: ") {
+            let out = mimic().arg("run").arg(&f).output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() || !stderr.contains(w) {
+                failures.push(format!("{}: expected a panic containing {w:?}, got status {:?}\n{stderr}", f.display(), out.status.code()));
+            }
+            continue;
+        }
+        let w = first.strip_prefix("// expect-error: ").unwrap_or_else(|| panic!("{}: missing `// expect-error:` or `// expect-panic:` header", f.display()));
+        let (code, msg) = w.split_once(' ').unwrap();
+        assert!(code.starts_with('E'), "{}: the expect-error header starts with the error code", f.display());
+        // human output: `error[E0123]: message`
+        let out = mimic().arg("check").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if out.status.success() || !stderr.contains(want) {
-            failures.push(format!("{}: expected failure containing {want:?}, got status {:?}\n{stderr}", f.display(), out.status.code()));
+        if out.status.success() || !stderr.contains(&format!("error[{code}]")) || !stderr.contains(msg) {
+            failures.push(format!("{}: expected error[{code}] containing {msg:?}, got status {:?}\n{stderr}", f.display(), out.status.code()));
+        }
+        // JSON output: the same diagnostic, with a location inside the file
+        let out = mimic().args(["check", "--emit-json"]).arg(&f).output().unwrap();
+        let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{}: --emit-json is not JSON ({e}): {}", f.display(), String::from_utf8_lossy(&out.stdout)));
+                continue;
+            }
+        };
+        let found = v["diagnostics"].as_array().unwrap().iter().any(|d| {
+            d["code"] == code && d["message"].as_str().unwrap().contains(msg) && d["location"]["start"]["line"].as_u64().unwrap_or(0) > 0
+        });
+        if out.status.success() || v["success"] != false || v["schema"] != 1 || !found {
+            failures.push(format!("{}: JSON lacks {code} {msg:?}: {v}", f.display()));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `mimic check --fix` applies machine-applicable fixes and leaves the rest.
+#[test]
+fn check_fix() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-fix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("fixme.mim");
+    std::fs::write(
+        &f,
+        "module main\n\nmodule util {\n    fn double(x) { x * 2 }\n}\n\nextern \"C\" { fn puts(s: cstr) -> i32 }\n\nfn main() {\n    let n = 1\n    n = util::double(n)\n    puts(\"hi\")\n    print(n)\n}\n",
+    )
+    .unwrap();
+    let out = mimic().args(["check", "--fix", "--emit-json"]).arg(&f).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["success"], true, "{v}");
+    assert_eq!(v["fixed"], 3, "{v}");
+    let fixed = std::fs::read_to_string(&f).unwrap();
+    assert!(fixed.contains("    pub fn double(x)"), "{fixed}");
+    assert!(fixed.contains("    let mut n = 1"), "{fixed}");
+    assert!(fixed.contains("    unsafe { puts(\"hi\") }"), "{fixed}");
+    let out = mimic().arg("run").arg(&f).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n2\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Fix suggestions carry exact edits in the JSON output.
+#[test]
+fn json_fix_suggestions() {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/fail/unresolved_suggest.mim");
+    let out = mimic().args(["check", "--emit-json"]).arg(&f).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["name"], "unresolved-name");
+    assert_eq!(d["location"]["text"], "totl");
+    let fx = &d["fixes"][0];
+    assert_eq!(fx["applicability"], "maybe-incorrect");
+    assert_eq!(fx["edits"][0]["replacement"], "total");
+    assert_eq!(fx["edits"][0]["location"]["text"], "totl");
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/fail/arg_type.mim");
+    let out = mimic().args(["check", "--emit-json"]).arg(&f).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["location"]["text"], "\"ten\"", "errors point at the argument");
+    assert_eq!(d["labels"][0]["location"]["text"], "x", "and label the parameter");
+}
+
+#[test]
+fn explain_codes() {
+    let out = mimic().args(["explain", "E0401"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("E0401 (type-mismatch)"));
+    let out = mimic().args(["explain", "--emit-json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v.as_array().unwrap().len() >= 50);
+    let out = mimic().args(["explain", "E9999"]).output().unwrap();
+    assert!(!out.status.success());
 }
 
 #[test]

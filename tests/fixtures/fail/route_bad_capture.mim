@@ -1,4 +1,4 @@
-// expect-error: route captures are str, i64 or f64, found `bool`
+// expect-error: E0211 route captures are str, i64 or f64, found `bool`
 module main
 fn main() { print(f("/a/true")) }
 fn f(p: str) -> i64 {

@@ -12,6 +12,7 @@
 
 use crate::{FileDiag, FnId, FnKind, ModId, Program, Resolved};
 use mimic_syntax::ast::*;
+use mimic_syntax::codes as C;
 use mimic_syntax::glyphs::Prim;
 use mimic_syntax::Diag;
 use std::collections::HashMap;
@@ -374,7 +375,7 @@ impl Infer<'_> {
                 let t = match coerce_in(p, module, prm.ty.as_ref(), *arg) {
                     Ok(t) => t,
                     Err(m) => {
-                        w.err(Diag::new(format!("argument `{}` of `{path}`: {m}", prm.name), prm.span));
+                        w.err(Diag::new(&C::TYPE_MISMATCH, format!("argument `{}` of `{path}`: {m}", prm.name), prm.span));
                         Ty::Dyn
                     }
                 };
@@ -386,7 +387,7 @@ impl Infer<'_> {
             if let Some(rt) = &d.ret {
                 match coerce_in(p, module, Some(rt), ret) {
                     Ok(t) => ret = t,
-                    Err(m) => w.err(Diag::new(format!("return value of `{path}`: {m}"), d.span)),
+                    Err(m) => w.err(Diag::new(&C::TYPE_MISMATCH, format!("return value of `{path}`: {m}"), d.span)),
                 }
             }
             w.out.ret = ret;
@@ -432,7 +433,7 @@ impl Walk<'_, '_> {
                     let mut t = match coerce_in(self.inf.p, self.module, ty.as_ref(), v) {
                         Ok(t) => t,
                         Err(m) => {
-                            self.err(Diag::new(format!("`let {name}`: {m}"), *span));
+                            self.err(Diag::new(&C::TYPE_MISMATCH, format!("`let {name}`: {m}"), *span));
                             Ty::Dyn
                         }
                     };
@@ -488,13 +489,13 @@ impl Walk<'_, '_> {
                         Ty::Tup(id) => {
                             let e = tuple_elems(id);
                             if e.len() != names.len() {
-                                self.err(Diag::new(format!("this tuple has {} elements, but {} names are bound", e.len(), names.len()), *span));
+                                self.err(Diag::new(&C::TUPLE_ARITY, format!("this tuple has {} elements, but {} names are bound", e.len(), names.len()), *span));
                             }
                             e
                         }
                         Ty::Dyn | Ty::Never => vec![vt; names.len()],
                         other => {
-                            self.err(Diag::new(format!("`let (…) =` needs a tuple, found {}", show(self.inf.p, other)), *span));
+                            self.err(Diag::new(&C::TUPLE_ARITY, format!("`let (…) =` needs a tuple, found {}", show(self.inf.p, other)), *span));
                             vec![Ty::Dyn; names.len()]
                         }
                     };
@@ -511,7 +512,7 @@ impl Walk<'_, '_> {
                     if let Ty::Obj(t) = vt {
                         let tn = &self.inf.p.types[t as usize].name;
                         if tn != "Option" && tn != "Result" {
-                            self.err(Diag::new(format!("`let … else` needs an Option or Result, found `{tn}`"), *span));
+                            self.err(Diag::new(&C::LET_ELSE_TYPE, format!("`let … else` needs an Option or Result, found `{tn}`"), *span));
                         }
                     }
                     self.block(els);
@@ -531,6 +532,29 @@ impl Walk<'_, '_> {
         };
         self.scopes.pop();
         t
+    }
+
+    /// Check argument types against the callee's annotations here, so errors
+    /// point at the argument (with the parameter as a secondary label).
+    /// Mismatched arguments become `Dyn` so the callee is not blamed again.
+    fn check_args_at_call(&mut self, call: &Expr, path: &[String], f: FnId, args: &[Expr], argt: &mut [Ty]) {
+        let p = self.inf.p;
+        let FnKind::User(d) = &p.fns[f].kind else { return };
+        let (module, file) = (p.fns[f].module, p.fns[f].file);
+        for (i, prm) in d.params.iter().enumerate() {
+            let (Some(a), Some(t)) = (args.get(i), argt.get(i).copied()) else { break };
+            // defaults filled in by `normalize` live in the callee's file
+            let here = a.span.start >= call.span.start && a.span.end <= call.span.end;
+            if prm.ty.is_none() || !here || matches!(t, Ty::Never) {
+                continue;
+            }
+            if let Err(m) = coerce_in(p, module, prm.ty.as_ref(), t) {
+                let d = Diag::new(&C::TYPE_MISMATCH, format!("argument `{}` of `{}`: {m}", prm.name, path.join("::")), a.span)
+                    .label_in(file, prm.span, "parameter declared here");
+                self.err(d);
+                argt[i] = Ty::Dyn;
+            }
+        }
     }
 
     fn call_user(&mut self, at: usize, fid: FnId, args: Vec<Ty>) -> Ty {
@@ -598,17 +622,20 @@ impl Walk<'_, '_> {
                 },
             },
             ExprKind::Call { callee, args } => {
-                let argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
+                let mut argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
                 match &callee.kind {
                     ExprKind::Lambda { .. } => self.lambda(callee, argt.first().copied().unwrap_or(Ty::Dyn)),
                     ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
-                        Ok(Resolved::Fn(f)) => self.call_user(id(e), f, argt),
+                        Ok(Resolved::Fn(f)) => {
+                            self.check_args_at_call(e, path, f, args, &mut argt);
+                            self.call_user(id(e), f, argt)
+                        }
                         Ok(Resolved::Variant(t, v)) => {
                             let td = &self.inf.p.types[t];
                             let (fields, tm, vname) = (td.variants()[v].fields.clone(), td.module, td.variants()[v].name.clone());
                             for (i, (ft, at)) in fields.iter().zip(&argt).enumerate() {
                                 if let Err(m) = coerce_in(self.inf.p, tm, Some(ft), *at) {
-                                    self.err(Diag::new(format!("field {} of `{vname}`: {m}", i + 1), args[i].span));
+                                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("field {} of `{vname}`: {m}", i + 1), args[i].span));
                                 }
                             }
                             Ty::Obj(t as u32)
@@ -646,7 +673,7 @@ impl Walk<'_, '_> {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
                 if matches!(a, Ty::Obj(_)) || matches!(b, Ty::Obj(_)) {
-                    self.err(Diag::new(format!("operator `{op:?}` is not defined for records and variants (use `match`)"), e.span));
+                    self.err(Diag::new(&C::NO_OPERATOR, format!("operator `{op:?}` is not defined for records and variants (use `match`)"), e.span));
                     return Ty::Dyn;
                 }
                 binary_ty(*op, a, b)
@@ -680,7 +707,7 @@ impl Walk<'_, '_> {
                     if let Some((_, ft, _)) = decl.iter().find(|(d, _, _)| d == n)
                         && let Err(m) = coerce_in(p, td.module, Some(ft), vt)
                     {
-                        self.err(Diag::new(format!("field `{n}` of `{}`: {m}", td.name), *sp));
+                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("field `{n}` of `{}`: {m}", td.name), *sp));
                     }
                 }
                 Ty::Obj(t as u32)
@@ -700,19 +727,19 @@ impl Walk<'_, '_> {
                             TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == n) {
                                 Some((_, ft, _)) => {
                                     if let Err(m) = coerce_in(p, td.module, Some(ft), vt) {
-                                        self.err(Diag::new(format!("field `{n}` of `{}`: {m}", td.name), *sp));
+                                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("field `{n}` of `{}`: {m}", td.name), *sp));
                                     }
                                 }
-                                None => self.err(Diag::new(format!("`{}` has no field `{n}`", td.name), *sp)),
+                                None => self.err(Diag::new(&C::NO_FIELD, format!("`{}` has no field `{n}`", td.name), *sp)),
                             },
-                            TypeKind::Union(_) => self.err(Diag::new(format!("`{}` is a union; `with` works on records", td.name), e.span)),
+                            TypeKind::Union(_) => self.err(Diag::new(&C::UNION_NOT_RECORD, format!("`{}` is a union; `with` works on records", td.name), e.span)),
                         }
                     }
                 }
                 match b {
                     Ty::Obj(_) | Ty::Never => b,
                     _ => {
-                        self.err(Diag::new("`with` needs a value whose record type is known here", base.span)
+                        self.err(Diag::new(&C::TYPE_NOT_KNOWN, "`with` needs a value whose record type is known here", base.span)
                             .note("annotate the parameter or binding, e.g. `u: User`"));
                         Ty::Dyn
                     }
@@ -782,7 +809,7 @@ impl Walk<'_, '_> {
                 match name.parse::<usize>() {
                     Ok(i) if i < e.len() => e[i],
                     _ => {
-                        self.err(Diag::new(format!("this tuple has {} elements; `.{name}` is not one of them", e.len()), span));
+                        self.err(Diag::new(&C::NO_FIELD, format!("this tuple has {} elements; `.{name}` is not one of them", e.len()), span));
                         Ty::Dyn
                     }
                 }
@@ -794,18 +821,18 @@ impl Walk<'_, '_> {
                     TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == name) {
                         Some((_, ft, _)) => ann_in(p, td.module, ft).unwrap_or(Ty::Dyn),
                         None => {
-                            self.err(Diag::new(format!("`{}` has no field `{name}`", td.name), span));
+                            self.err(Diag::new(&C::NO_FIELD, format!("`{}` has no field `{name}`", td.name), span));
                             Ty::Dyn
                         }
                     },
                     TypeKind::Union(_) => {
-                        self.err(Diag::new(format!("`{}` is a union: use `match` to get at its fields", td.name), span));
+                        self.err(Diag::new(&C::UNION_NOT_RECORD, format!("`{}` is a union: use `match` to get at its fields", td.name), span));
                         Ty::Dyn
                     }
                 }
             }
             other => {
-                self.err(Diag::new(format!("`.{name}`: a {} has no fields", show(p, other)), span));
+                self.err(Diag::new(&C::NO_FIELD, format!("`.{name}`: a {} has no fields", show(p, other)), span));
                 Ty::Dyn
             }
         }
@@ -822,7 +849,7 @@ impl Walk<'_, '_> {
             Pattern::Lit(e) => {
                 let lt = self.expr(e);
                 if t.is_scalar() && lt.is_scalar() && (t == Ty::Bool) != (lt == Ty::Bool) {
-                    self.err(Diag::new(format!("this pattern is a {lt}, but the value is a {t}"), e.span));
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a {lt}, but the value is a {t}"), e.span));
                 }
             }
             Pattern::Tuple(ps, _) => {
@@ -836,7 +863,7 @@ impl Walk<'_, '_> {
             }
             Pattern::Route(parts, span) => {
                 if !matches!(t, Ty::Arr(El::Char) | Ty::Dyn | Ty::Never) {
-                    self.err(Diag::new(format!("a route pattern matches a str, but the value is {}", show(self.inf.p, t)), *span));
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("a route pattern matches a str, but the value is {}", show(self.inf.p, t)), *span));
                 }
                 let mut k = 0;
                 for part in parts {
@@ -859,7 +886,7 @@ impl Walk<'_, '_> {
                 if let Ty::Obj(st) = t
                     && st as usize != tid
                 {
-                    self.err(Diag::new(format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
                 }
                 let fts: Vec<Ty> = td.variants()[v].fields.iter().map(|f| ann_in(p, td.module, f).unwrap_or(Ty::Dyn)).collect();
                 for (a, ft) in args.iter().zip(fts) {
@@ -973,7 +1000,7 @@ mod tests {
         let p = prog("module main\nfn main() {\n  print(h(3))\n  print(k(2.5))\n}\nfn h(x: f64) -> f64 { x }\nfn k(n: i64) -> i64 { n }\n");
         let t = infer(&p, &default_roots(&p, false));
         assert_eq!(t.spec(&(fid(&p, "h"), vec![Ty::I64])).params, vec![Ty::F64], "i64 coerces into an f64 parameter");
-        assert!(t.errors.iter().any(|e| e.diag.msg.contains("argument `n` of `t::main::k`: expected i64, found f64")), "{:?}", t.errors.iter().map(|e| &e.diag.msg).collect::<Vec<_>>());
+        assert!(t.errors.iter().any(|e| e.diag.msg.contains("argument `n` of `k`: expected i64, found f64") && e.diag.span.line == 4), "{:?}", t.errors.iter().map(|e| &e.diag.msg).collect::<Vec<_>>());
     }
 
     #[test]

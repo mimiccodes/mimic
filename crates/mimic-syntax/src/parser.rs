@@ -20,6 +20,7 @@
 
 use crate::ast::*;
 use crate::glyphs::Prim;
+use crate::codes as C;
 use crate::lexer::{StrPart, Tok, Token, lex};
 use crate::{Diag, Span};
 
@@ -211,7 +212,7 @@ impl Parser {
             Ok(self.next().span)
         } else {
             let found = self.peek_tok().clone();
-            Err(Diag::new(format!("expected {}, found {}", t.describe(), found.tok.describe()), found.span))
+            Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected {}, found {}", t.describe(), found.tok.describe()), found.span))
         }
     }
     pub(crate) fn skip_newlines(&mut self) {
@@ -223,11 +224,11 @@ impl Parser {
         let t = self.next();
         match t.tok {
             Tok::Ident(s) => Ok((s, t.span)),
-            Tok::Prim(p) => Err(Diag::new(
+            Tok::Prim(p) => Err(Diag::new(&C::PRIMITIVE_AS_NAME, 
                 format!("`{}` is a built-in primitive ({}) and cannot be used as a name", p.info().word, p.info().glyph),
                 t.span,
             )),
-            other => Err(Diag::new(format!("expected identifier, found {}", other.describe()), t.span)),
+            other => Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected identifier, found {}", other.describe()), t.span)),
         }
     }
     /// A name where built-in words are allowed too: C function names in
@@ -253,13 +254,13 @@ impl Parser {
         let is_pub = self.eat(&Tok::Pub);
         if !self.at(&Tok::Module) {
             let s = self.span();
-            return Err(Diag::new("the first line of every .mim file must be `module <name>` (or `§ <name>`)", s));
+            return Err(Diag::new(&C::MODULE_HEADER, "the first line of every .mim file must be `module <name>` (or `§ <name>`)", s));
         }
         self.next();
         let (name, _) = self.ident()?;
         if self.at(&Tok::LBrace) {
             let s = self.span();
-            return Err(Diag::new("the file's header module takes no braces; write `module name` on the first line", s));
+            return Err(Diag::new(&C::MODULE_HEADER, "the file's header module takes no braces; write `module name` on the first line", s));
         }
         let items = self.items(true)?;
         let end = self.span();
@@ -275,7 +276,7 @@ impl Parser {
                 Tok::RBrace if !top => break,
                 Tok::Eof => {
                     let s = self.span();
-                    return Err(Diag::new("unclosed module: expected `}`", s));
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, "unclosed module: expected `}`", s));
                 }
                 _ => items.push(self.item()?),
             }
@@ -299,7 +300,7 @@ impl Parser {
             }
             Tok::Use => {
                 if is_pub {
-                    return Err(Diag::new("`pub use` (re-exports) is not supported yet", start));
+                    return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, "`pub use` (re-exports) is not supported yet", start));
                 }
                 self.next();
                 let path = self.path_segments()?;
@@ -311,10 +312,10 @@ impl Parser {
                 self.expect(&Tok::Extern)?;
                 let abi = match self.next() {
                     Token { tok: Tok::Str(s), .. } => s,
-                    t => return Err(Diag::new("expected ABI string, e.g. extern \"C\"", t.span)),
+                    t => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected ABI string, e.g. extern \"C\"", t.span)),
                 };
                 if abi != "C" {
-                    return Err(Diag::new(format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
+                    return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
                 self.expect(&Tok::LBrace)?;
                 let mut fns = Vec::new();
@@ -334,7 +335,7 @@ impl Parser {
                         let (pn, ps) = self.ident()?;
                         if !self.eat(&Tok::Colon) {
                             self.nl_ignore -= 1;
-                            return Err(Diag::new("extern parameters need a C type, e.g. `x: f64`", ps));
+                            return Err(Diag::new(&C::NOT_C_TYPE, "extern parameters need a C type, e.g. `x: f64`", ps));
                         }
                         params.push((pn, self.ty()?));
                         if !self.eat(&Tok::Comma) {
@@ -348,7 +349,7 @@ impl Parser {
                 }
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, span: start }))
             }
-            other => Err(Diag::new(
+            other => Err(Diag::new(&C::UNEXPECTED_TOKEN, 
                 format!("expected an item (`fn`, `module`, `use`, `extern`), found {}", other.describe()),
                 start,
             )),
@@ -359,7 +360,13 @@ impl Parser {
         self.expect(&Tok::Type)?;
         let (name, nspan) = self.ident()?;
         if !is_upper(&name) {
-            return Err(Diag::new(format!("type names start with an uppercase letter: `{}`", upper_first(&name)), nspan));
+            let fixed = upper_first(&name);
+            return Err(Diag::new(&C::NAME_CASE, format!("type names start with an uppercase letter: `{fixed}`"), nspan).fix(
+                format!("rename it `{fixed}` (and its uses)"),
+                nspan,
+                fixed.clone(),
+                crate::Applicability::MaybeIncorrect,
+            ));
         }
         self.expect(&Tok::Assign)?;
         // record: `{ field: Type, … }`
@@ -373,7 +380,7 @@ impl Parser {
                     self.expect(&Tok::Colon)?;
                     let t = self.ty()?;
                     if fields.iter().any(|(n, _, _): &(String, Type, Span)| *n == f) {
-                        return Err(Diag::new(format!("field `{f}` is declared twice"), fs));
+                        return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("field `{f}` is declared twice"), fs));
                     }
                     fields.push((f, t, fs));
                     self.eat(&Tok::Comma);
@@ -404,7 +411,13 @@ impl Parser {
         loop {
             let (v, vs) = self.ident()?;
             if !is_upper(&v) {
-                return Err(Diag::new(format!("variant names start with an uppercase letter: `{}`", upper_first(&v)), vs));
+                let fixed = upper_first(&v);
+                return Err(Diag::new(&C::NAME_CASE, format!("variant names start with an uppercase letter: `{fixed}`"), vs).fix(
+                    format!("rename it `{fixed}` (and its uses)"),
+                    vs,
+                    fixed.clone(),
+                    crate::Applicability::MaybeIncorrect,
+                ));
             }
             let mut fields = Vec::new();
             if self.at(&Tok::LParen) {
@@ -424,7 +437,7 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
             }
             if variants.iter().any(|x: &Variant| x.name == v) {
-                return Err(Diag::new(format!("variant `{v}` is declared twice"), vs));
+                return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("variant `{v}` is declared twice"), vs));
             }
             variants.push(Variant { name: v, fields, span: vs });
             if !skip_to_bar(self) {
@@ -444,14 +457,14 @@ impl Parser {
             if self.at(&Tok::Mut) {
                 let s = self.span();
                 self.nl_ignore -= 1;
-                return Err(Diag::new("parameters are immutable; bind a `let mut` copy inside the body", s));
+                return Err(Diag::new(&C::PARAM_RULES, "parameters are immutable; bind a `let mut` copy inside the body", s));
             }
             let (pn, ps) = self.ident()?;
             let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
             let default = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
             if default.is_none() && params.iter().any(|p: &Param| p.default.is_some()) {
                 self.nl_ignore -= 1;
-                return Err(Diag::new("parameters without a default must come before those with one", ps));
+                return Err(Diag::new(&C::PARAM_RULES, "parameters without a default must come before those with one", ps));
             }
             params.push(Param { name: pn, ty, default, span: ps });
             if !self.eat(&Tok::Comma) {
@@ -520,7 +533,7 @@ impl Parser {
                 other => {
                     let d = other.describe();
                     let s = self.span();
-                    return Err(Diag::new(format!("expected end of statement, found {d}"), s)
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected end of statement, found {d}"), s)
                         .note("put each statement on its own line or separate them with `;`"));
                 }
             }
@@ -554,7 +567,7 @@ impl Parser {
                     self.expect(&Tok::RParen)?;
                     if !self.eat(&Tok::Assign) && !self.eat(&Tok::Bind) {
                         let s = self.span();
-                        return Err(Diag::new("expected `=` in let binding", s));
+                        return Err(Diag::new(&C::BAD_LET, "expected `=` in let binding", s));
                     }
                     let value = self.expr()?;
                     return Ok(Stmt::LetTuple { names, value, span: start });
@@ -564,13 +577,13 @@ impl Parser {
                 let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
                 if !self.eat(&Tok::Assign) && !self.eat(&Tok::Bind) {
                     let s = self.span();
-                    return Err(Diag::new("expected `=` in let binding", s));
+                    return Err(Diag::new(&C::BAD_LET, "expected `=` in let binding", s));
                 }
                 let value = self.expr()?;
                 if self.at(&Tok::Else) {
                     self.next();
                     if mutable {
-                        return Err(Diag::new("`let … else` bindings cannot be `mut`", start));
+                        return Err(Diag::new(&C::BAD_LET, "`let … else` bindings cannot be `mut`", start));
                     }
                     let els = self.block()?;
                     return Ok(Stmt::LetElse { name, ty, value, els, span: start });
@@ -583,7 +596,7 @@ impl Parser {
                 let (name, _) = self.ident()?;
                 if !self.eat(&Tok::Bind) && !self.eat(&Tok::Assign) {
                     let s = self.span();
-                    return Err(Diag::new("expected `←` after `mut name`", s));
+                    return Err(Diag::new(&C::BAD_LET, "expected `←` after `mut name`", s));
                 }
                 let value = self.expr()?;
                 Ok(Stmt::Let { name, mutable: true, ty: None, value, span: start })
@@ -615,9 +628,9 @@ impl Parser {
                                 value,
                                 span: start,
                             }),
-                            _ => Err(Diag::new("can only assign to `name[index]`", e.span)),
+                            _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "can only assign to `name[index]`", e.span)),
                         },
-                        _ => Err(Diag::new("invalid assignment target", e.span)),
+                        _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "invalid assignment target", e.span)),
                     };
                 }
                 Ok(Stmt::Expr(e))
@@ -673,11 +686,11 @@ impl Parser {
                 // `xs ▷ (x => x × 2)`
                 let f = self.primary()?;
                 if !matches!(f.kind, ExprKind::Lambda { .. }) {
-                    return Err(Diag::new("a pipeline stage must be a primitive, a function or a lambda", f.span));
+                    return Err(Diag::new(&C::BAD_PIPELINE, "a pipeline stage must be a primitive, a function or a lambda", f.span));
                 }
                 Ok(Expr { span: start.to(f.span), kind: ExprKind::Call { callee: Box::new(f), args: vec![lhs] } })
             }
-            other => Err(Diag::new(
+            other => Err(Diag::new(&C::BAD_PIPELINE, 
                 format!("expected a primitive or function after `▷`, found {}", other.describe()),
                 start,
             )),
@@ -719,7 +732,8 @@ impl Parser {
             let rhs = self.binary(prec + 1)?;
             if prec == 3
                 && let ExprKind::Binary { op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, .. } = lhs.kind {
-                    return Err(Diag::new("comparisons cannot be chained; use `and`", op_span));
+                    return Err(Diag::new(&C::CHAINED_COMPARISON, "comparisons cannot be chained; use `and`", op_span)
+                        .help("write `a < b and b < c`"));
                 }
             let span = lhs.span.to(rhs.span);
             lhs = Expr { kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, span };
@@ -776,7 +790,7 @@ impl Parser {
                     Ok(Expr { kind: ExprKind::Path(path), span: s })
                 }
                 Tok::LParen => self.primary(),
-                other => Err(Diag::new(format!("`¨` (each) expects a function, found {}", other.describe()), s)),
+                other => Err(Diag::new(&C::BAD_PIPELINE, format!("`¨` (each) expects a function, found {}", other.describe()), s)),
             };
         }
         self.prefix()
@@ -789,7 +803,7 @@ impl Parser {
             if self.at(&Tok::LParen) && self.adjacent() {
                 let args = self.call_args()?;
                 if args.len() != p.arity() {
-                    return Err(Diag::new(
+                    return Err(Diag::new(&C::ARG_COUNT, 
                         format!("`{}` takes {} argument(s), got {}", p.info().word, p.arity(), args.len()),
                         start,
                     ));
@@ -797,7 +811,7 @@ impl Parser {
                 return Ok(prim_expr(p, args, start.to(self.prev_span())));
             }
             if p.arity() != 1 {
-                return Err(Diag::new(
+                return Err(Diag::new(&C::PRIM_USAGE, 
                     format!(
                         "`{}` is dyadic: write `xs {} y` or `{}(xs, y)`",
                         p.info().glyph,
@@ -969,7 +983,7 @@ impl Parser {
                     match p {
                         StrPart::Text(t) => out.push(InterpPart::Text(t)),
                         StrPart::Code(c) => {
-                            let mut e = parse_expr(&c).map_err(|d| Diag::new(format!("in `{{{c}}}`: {}", d.msg), span))?;
+                            let mut e = parse_expr(&c).map_err(|d| Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {}", d.msg), span))?;
                             respan(&mut e, span);
                             out.push(InterpPart::Expr(e));
                         }
@@ -982,7 +996,7 @@ impl Parser {
                 ExprKind::Unsafe(b)
             }
             other => {
-                return Err(Diag::new(format!("expected an expression, found {}", other.describe()), span));
+                return Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected an expression, found {}", other.describe()), span));
             }
         };
         Ok(Expr { kind, span: span.to(self.prev_span()) })
@@ -1020,7 +1034,7 @@ impl Parser {
                 self.expect(&Tok::Colon)?;
                 let v = self.expr()?;
                 if fields.iter().any(|(n, _, _): &(String, Expr, Span)| *n == f) {
-                    return Err(Diag::new(format!("field `{f}` is given twice"), fs));
+                    return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("field `{f}` is given twice"), fs));
                 }
                 fields.push((f, v, fs));
                 self.eat(&Tok::Comma);
@@ -1057,7 +1071,7 @@ impl Parser {
                 arms.push(Arm { pat, body, span });
                 if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Comma | Tok::RBrace) {
                     let s = self.span();
-                    return Err(Diag::new("expected a new line, `,` or `}` after a match arm", s));
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected a new line, `,` or `}` after a match arm", s));
                 }
             }
             Ok(arms)
@@ -1066,7 +1080,7 @@ impl Parser {
         let arms = r?;
         let end = self.expect(&Tok::RBrace)?;
         if arms.is_empty() {
-            return Err(Diag::new("`match` needs at least one arm", start));
+            return Err(Diag::new(&C::EMPTY_MATCH, "`match` needs at least one arm", start));
         }
         Ok(Expr { kind: ExprKind::Match { scrut: Box::new(scrut), arms }, span: start.to(end) })
     }
@@ -1094,15 +1108,15 @@ impl Parser {
                                 None => (c.trim().to_string(), None),
                             };
                             if !name.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                                return Err(Diag::new(format!("a route capture is `{{name}}` or `{{name: i64}}`, found `{{{c}}}`"), t.span));
+                                return Err(Diag::new(&C::BAD_ROUTE, format!("a route capture is `{{name}}` or `{{name: i64}}`, found `{{{c}}}`"), t.span));
                             }
                             if let Some(ty) = &ty
                                 && !matches!(ty.as_str(), "str" | "i64" | "f64")
                             {
-                                return Err(Diag::new(format!("route captures are str, i64 or f64, found `{ty}`"), t.span));
+                                return Err(Diag::new(&C::BAD_ROUTE, format!("route captures are str, i64 or f64, found `{ty}`"), t.span));
                             }
                             if matches!(out.last(), Some(RoutePart::Capture { .. })) {
-                                return Err(Diag::new("two route captures need text between them", t.span));
+                                return Err(Diag::new(&C::BAD_ROUTE, "two route captures need text between them", t.span));
                             }
                             out.push(RoutePart::Capture { name, ty });
                         }
@@ -1156,7 +1170,7 @@ impl Parser {
                 }
                 Ok(Pattern::Variant { path, args, span: t.span.to(self.prev_span()) })
             }
-            other => Err(Diag::new(format!("expected a pattern, found {}", other.describe()), t.span)),
+            other => Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected a pattern, found {}", other.describe()), t.span)),
         }
     }
 

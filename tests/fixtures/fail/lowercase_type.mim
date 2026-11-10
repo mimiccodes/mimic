@@ -1,4 +1,4 @@
-// expect-error: type names start with an uppercase letter: `Point`
+// expect-error: E0204 type names start with an uppercase letter: `Point`
 module main
 type point = { x: i64 }
 fn main() {}

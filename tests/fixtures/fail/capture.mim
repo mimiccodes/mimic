@@ -1,4 +1,4 @@
-// expect-error: lambdas cannot capture variables yet
+// expect-error: E0604 lambdas cannot capture variables yet
 module main
 fn main() {
     let k = 3

@@ -1,0 +1,8 @@
+// expect-error: E0401 argument `x` of `half`: expected f64, found str
+module main
+
+fn half(x: f64) -> f64 { x / 2.0 }
+
+fn main() {
+    print(half("ten"))
+}

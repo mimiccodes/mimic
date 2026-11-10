@@ -2,13 +2,16 @@
 
 mod driver;
 mod modfile;
+mod report;
 mod targets;
 
 use clap::{Args, Parser, Subcommand};
 use driver::{Input, Profile};
+use mimic_check::Program;
 use mimic_project::{MOD_FILE, Project, packages};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use report::Report;
 use targets::Target;
 
 #[derive(Parser)]
@@ -88,6 +91,10 @@ enum Cmd {
         file: Option<PathBuf>,
         #[command(flatten)]
         profile: ProfileArgs,
+        /// On a compile error, print the diagnostics as JSON to stderr
+        /// (program output stays on stdout)
+        #[arg(long)]
+        emit_json: bool,
         /// Arguments passed to the program (after `--`)
         #[arg(last = true)]
         args: Vec<String>,
@@ -109,9 +116,29 @@ enum Cmd {
         /// Write the generated interaction nets (target/<profile>/<name>.mnet)
         #[arg(long)]
         emit_net: bool,
+        /// Print the result as JSON on stdout (see docs/diagnostics.md)
+        #[arg(long)]
+        emit_json: bool,
     },
     /// Check the project (or a file) for errors without compiling
-    Check { file: Option<PathBuf> },
+    Check {
+        file: Option<PathBuf>,
+        /// Print the result as JSON on stdout, for editors and agents
+        /// (schema: docs/diagnostics.md)
+        #[arg(long)]
+        emit_json: bool,
+        /// Apply every machine-applicable fix to the sources, then re-check
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Explain an error code (`mimic explain E0401`), or list them all
+    Explain {
+        /// A code (E0401) or its name (type-mismatch); omit to list every code
+        code: Option<String>,
+        /// Print as JSON
+        #[arg(long)]
+        emit_json: bool,
+    },
     /// Manage the module index (mod.mim)
     Mod {
         #[command(subcommand)]
@@ -226,43 +253,120 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             status("Created", format!("{} `{name}` project", kind_label(bin, lib)));
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Check { file } => {
-            let input = driver::input_from(file.as_deref())?;
-            let p = driver::load(&input)?;
-            if let Input::Project(proj) = &input {
-                modfile::sync(proj, &p)?;
-            }
-            let nfiles = p.files.iter().filter(|f| f.package == p.root_package).count();
-            status("Checked", format!("`{}`: no errors ({nfiles} file(s), {} function(s))", input.name(), p.fns.len()));
-            Ok(ExitCode::SUCCESS)
-        }
-        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net } => {
-            let input = driver::input_from(file.as_deref())?;
-            let prof = profile_of(&input, profile, true);
-            let mut targets = vec![match &target {
-                Some(t) => Target::parse(t)?,
-                None => Target::host(),
-            }];
-            if all_targets
-                && let Input::Project(p) = &input {
-                    for t in &p.build.targets {
-                        targets.push(Target::parse(t)?);
-                    }
+        Cmd::Check { file, emit_json, fix } => {
+            let check_once = || -> Result<(String, Program), Report> {
+                let input = driver::input_from(file.as_deref())?;
+                let p = driver::load(&input)?;
+                if let Input::Project(proj) = &input {
+                    modfile::sync(proj, &p)?;
                 }
-            for t in &targets {
-                status("Compiling", format!("{} ({}, {})", input.name(), prof.name(), t.name()));
-                let a = driver::build(&input, &prof, t, emit_ir, emit_net)?;
-                status("Finished", format!("{} → {}", if a.is_exe { "executable" } else { "static library" }, shown(&a.path)));
+                Ok((input.name(), p))
+            };
+            let mut checked = check_once();
+            let mut fixed = 0;
+            // fixes can uncover further errors (the parser stops at the first one)
+            for _ in 0..8 {
+                let Err(r) = &checked else { break };
+                if !fix {
+                    break;
+                }
+                let n = r.apply_fixes()?;
+                if n == 0 {
+                    break;
+                }
+                fixed += n;
+                checked = check_once();
             }
-            Ok(ExitCode::SUCCESS)
+            if fixed > 0 && !emit_json {
+                status("Fixed", format!("{fixed} problem(s)"));
+            }
+            match checked {
+                Ok((name, p)) => {
+                    let nfiles = p.files.iter().filter(|f| f.package == p.root_package).count();
+                    if emit_json {
+                        let mut v = Report::default().json("check");
+                        v["fixed"] = fixed.into();
+                        v["package"] = name.clone().into();
+                        v["files"] = nfiles.into();
+                        v["functions"] = p.fns.len().into();
+                        println!("{v}");
+                    } else {
+                        status("Checked", format!("`{name}`: no errors ({nfiles} file(s), {} function(s))", p.fns.len()));
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(r) => {
+                    if emit_json {
+                        let mut v = r.json("check");
+                        v["fixed"] = fixed.into();
+                        println!("{v}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    fail(r, false, "check", false)
+                }
+            }
         }
-        Cmd::Run { file, profile, args } => {
-            let input = driver::input_from(file.as_deref())?;
-            if !input.is_bin() {
-                return Err("this is a library project; there is nothing to run (add `bin` to `kind` in mim.mim)".into());
+        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net, emit_json } => {
+            let built = (|| -> Result<Vec<serde_json::Value>, Report> {
+                let input = driver::input_from(file.as_deref())?;
+                let prof = profile_of(&input, profile, true);
+                let mut targets = vec![match &target {
+                    Some(t) => Target::parse(t)?,
+                    None => Target::host(),
+                }];
+                if all_targets
+                    && let Input::Project(p) = &input {
+                        for t in &p.build.targets {
+                            targets.push(Target::parse(t)?);
+                        }
+                    }
+                let mut out = Vec::new();
+                for t in &targets {
+                    if !emit_json {
+                        status("Compiling", format!("{} ({}, {})", input.name(), prof.name(), t.name()));
+                    }
+                    let a = driver::build(&input, &prof, t, emit_ir, emit_net)?;
+                    if !emit_json {
+                        status("Finished", format!("{} → {}", if a.is_exe { "executable" } else { "static library" }, shown(&a.path)));
+                    }
+                    out.push(serde_json::json!({
+                        "target": t.name(),
+                        "profile": prof.name(),
+                        "kind": if a.is_exe { "executable" } else { "static-library" },
+                        "path": a.path.display().to_string(),
+                    }));
+                }
+                Ok(out)
+            })();
+            match built {
+                Ok(arts) => {
+                    if emit_json {
+                        let mut v = Report::default().json("build");
+                        v["artifacts"] = arts.into();
+                        println!("{v}");
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(r) => fail(r, emit_json, "build", false),
             }
-            let prof = profile_of(&input, profile, false);
-            let a = driver::build(&input, &prof, &Target::host(), false, false)?;
+        }
+        Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Run { file, profile, emit_json, args } => {
+            let built = (|| -> Result<driver::Artifact, Report> {
+                let input = driver::input_from(file.as_deref())?;
+                if !input.is_bin() {
+                    return Err(Report::plain(
+                        &mimic_syntax::codes::ENTRY_MODULE,
+                        "this is a library project; there is nothing to run (add `bin` to `kind` in mim.mim)",
+                    ));
+                }
+                let prof = profile_of(&input, profile, false);
+                driver::build(&input, &prof, &Target::host(), false, false)
+            })();
+            let a = match built {
+                Ok(a) => a,
+                Err(r) => return fail(r, emit_json, "run", true),
+            };
             status("Running", shown(&a.path));
             let st = std::process::Command::new(&a.path).args(&args).status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
@@ -310,6 +414,43 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Report a failed check/build/run: JSON (stdout, or stderr for `run`) or text.
+fn fail(r: Report, json: bool, command: &str, json_to_stderr: bool) -> Result<ExitCode, String> {
+    if !json {
+        return Err(r.human());
+    }
+    let v = r.json(command);
+    if json_to_stderr {
+        eprintln!("{v}");
+    } else {
+        println!("{v}");
+    }
+    Ok(ExitCode::FAILURE)
+}
+
+fn explain(code: Option<&str>, json: bool) -> Result<ExitCode, String> {
+    use mimic_syntax::codes;
+    let one = |c: &codes::Code| serde_json::json!({ "code": c.id, "name": c.name, "title": c.title, "explanation": c.explain });
+    match code {
+        None if json => println!("{}", serde_json::Value::Array(codes::ALL.iter().map(|c| one(c)).collect())),
+        None => {
+            for c in codes::ALL {
+                println!("{}  {:<26} {}", c.id, c.name, c.title);
+            }
+            println!("\nRun `mimic explain <code>` for details.");
+        }
+        Some(q) => {
+            let c = codes::find(q).ok_or_else(|| format!("no error code `{q}`; run `mimic explain` for the list"))?;
+            if json {
+                println!("{}", one(c));
+            } else {
+                println!("{} ({}): {}\n\n{}", c.id, c.name, c.title, c.explain);
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn kind_label(bin: bool, lib: bool) -> &'static str {

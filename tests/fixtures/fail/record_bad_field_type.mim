@@ -1,4 +1,4 @@
-// expect-error: field `age` of `User`: expected i64, found str
+// expect-error: E0401 field `age` of `User`: expected i64, found str
 module main
 type User = { name: str, age: i64 }
 fn main() { print(User { name: "ada", age: "old" }) }

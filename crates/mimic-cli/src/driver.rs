@@ -2,7 +2,9 @@
 //! compile runtime with `zig cc` → link with `zig cc`.
 
 use crate::targets::Target;
-use mimic_check::{FileDiag, Options, Program, SourceFile};
+use crate::report::Report;
+use mimic_check::{Options, Program, SourceFile};
+use mimic_syntax::codes as C;
 use mimic_project::{MANIFEST, Project, packages};
 use mimic_syntax::parser::parse_file;
 use std::collections::BTreeSet;
@@ -79,50 +81,38 @@ fn display_path(root: Option<&Path>, p: &Path) -> String {
     root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string()
 }
 
-fn read_parse(path: &Path, display: String, package: &str, errors: &mut String) -> Option<SourceFile> {
+fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) -> Option<SourceFile> {
     let src = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            errors.push_str(&format!("error: cannot read {}: {e}\n", path.display()));
+            report.push_plain(&C::IO, format!("cannot read {}: {e}", path.display()));
             return None;
         }
     };
     match parse_file(&src) {
         Ok(ast) => Some(SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() }),
         Err(d) => {
-            errors.push_str(&d.render(Path::new(&display), &src));
+            report.push_in(Some(path), &display, &src, d);
             None
         }
     }
 }
 
-pub fn render(p: &Program, diags: &[FileDiag]) -> String {
-    let mut out = String::new();
-    for d in diags {
-        let f = &p.files[d.file];
-        out.push_str(&d.diag.render(Path::new(&f.display), &f.src));
-        out.push('\n');
-    }
-    out
-}
-
-fn count_errors(s: &str) -> usize {
-    s.matches("error: ").count()
-}
-
-/// Load, parse, resolve and check. Errors come back fully rendered.
-pub fn load(input: &Input) -> Result<Program, String> {
-    let mut errors = String::new();
+/// Load, parse, resolve and check. Errors come back as a structured report.
+pub fn load(input: &Input) -> Result<Program, Report> {
+    let mut report = Report::default();
     let mut files = Vec::new();
     let pkg = input.name();
     match input {
         Input::File(f) => {
-            if let Some(sf) = read_parse(f, f.display().to_string(), &pkg, &mut errors) {
+            if let Some(sf) = read_parse(f, f.display().to_string(), &pkg, &mut report) {
                 if sf.ast.module.name != "main" {
-                    errors.push_str(&format!(
-                        "error: `mimic run <file>` expects the file to declare `module main` (found `module {}`)\n",
-                        sf.ast.module.name
-                    ));
+                    let d = mimic_syntax::Diag::new(
+                        &C::ENTRY_MODULE,
+                        format!("`mimic run <file>` expects the file to declare `module main` (found `module {}`)", sf.ast.module.name),
+                        sf.ast.module.span,
+                    );
+                    report.push_in(Some(&sf.path), &sf.display, &sf.src, d);
                 }
                 files.push(sf);
             }
@@ -133,34 +123,33 @@ pub fn load(input: &Input) -> Result<Program, String> {
                 if path.file_name().is_some_and(|n| n == "test.mim") && path.parent() == Some(&p.root.join("src")) {
                     continue;
                 }
-                if let Some(sf) = read_parse(&path, display_path(Some(&p.root), &path), &pkg, &mut errors) {
+                if let Some(sf) = read_parse(&path, display_path(Some(&p.root), &path), &pkg, &mut report) {
                     files.push(sf);
                 }
             }
             if !p.manifest.bin && !files.iter().any(|f| f.ast.module.name == "lib") {
-                errors.push_str("error: library projects need src/lib.mim with `module lib`\n");
+                report.push_plain(&C::ENTRY_MODULE, "library projects need src/lib.mim with `module lib`");
             }
             // dependencies (transitively), compiled from their library sources
             let mut seen = BTreeSet::from([pkg.clone()]);
             let mut queue: Vec<(PathBuf, mimic_project::Dependency)> =
                 p.manifest.dependencies.iter().map(|d| (p.root.clone(), d.clone())).collect();
+            let dep_err = |s: String| Report::from_text(&C::DEPENDENCY, &s);
             while let Some((from_root, dep)) = queue.pop() {
                 if !seen.insert(dep.name.clone()) {
                     continue;
                 }
                 let holder = Project::load(&from_root)?;
-                let dir = holder.dep_dir(&dep)?;
+                let dir = holder.dep_dir(&dep).map_err(dep_err)?;
                 let dp = Project::load(&dir)?;
                 if dp.manifest.name != dep.name {
-                    return Err(format!(
-                        "error: dependency `{}` resolves to {}, whose mim.mim names it `{}`",
-                        dep.name,
-                        dir.display(),
-                        dp.manifest.name
+                    return Err(Report::plain(
+                        &C::DEPENDENCY,
+                        format!("dependency `{}` resolves to {}, whose mim.mim names it `{}`", dep.name, dir.display(), dp.manifest.name),
                     ));
                 }
                 if !dp.manifest.lib {
-                    return Err(format!("error: dependency `{}` is not a library", dep.name));
+                    return Err(Report::plain(&C::DEPENDENCY, format!("dependency `{}` is not a library", dep.name)));
                 }
                 for path in dp.sources()? {
                     let fname = path.file_name().unwrap().to_string_lossy().to_string();
@@ -168,7 +157,7 @@ pub fn load(input: &Input) -> Result<Program, String> {
                         continue;
                     }
                     let shown = format!("{}/{}", dep.name, display_path(Some(&dir), &path));
-                    if let Some(sf) = read_parse(&path, shown, &dep.name, &mut errors) {
+                    if let Some(sf) = read_parse(&path, shown, &dep.name, &mut report) {
                         files.push(sf);
                     }
                 }
@@ -178,35 +167,29 @@ pub fn load(input: &Input) -> Result<Program, String> {
             }
         }
     }
-    if !errors.is_empty() {
-        return Err(summarize(errors));
+    if !report.entries.is_empty() {
+        return Err(report);
     }
     files.push(prelude_file());
     let (mut program, diags) = Program::build(files, &pkg);
     if !diags.is_empty() {
-        return Err(summarize(render(&program, &diags)));
+        return Err(Report::from_program(&program, diags));
     }
     // named and default arguments become plain positional calls
     let ndiags = mimic_check::normalize(&mut program);
     if !ndiags.is_empty() {
-        return Err(summarize(render(&program, &ndiags)));
+        return Err(Report::from_program(&program, ndiags));
     }
     let diags = mimic_check::check(&program, &Options { require_main: input.is_bin() });
     if !diags.is_empty() {
-        return Err(summarize(render(&program, &diags)));
+        return Err(Report::from_program(&program, diags));
     }
     // static type errors (inference over every reachable specialisation)
     let tdiags = mimic_check::types::check_types(&program, !input.is_bin());
     if !tdiags.is_empty() {
-        return Err(summarize(render(&program, &tdiags)));
+        return Err(Report::from_program(&program, tdiags));
     }
     Ok(program)
-}
-
-fn summarize(mut errors: String) -> String {
-    let n = count_errors(&errors).max(1);
-    errors.push_str(&format!("error: could not compile due to {n} previous error{}", if n == 1 { "" } else { "s" }));
-    errors
 }
 
 // ---- toolchain --------------------------------------------------------------
@@ -292,11 +275,22 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     d
 }
 
-pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, String> {
+pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, Report> {
     let program = load(input)?;
     if let Input::Project(p) = input {
         crate::modfile::sync(p, &program)?;
     }
+    codegen_and_link(input, &program, profile, target, emit_ir, emit_net).map_err(|e| Report::from_text(&C::BUILD, &e))
+}
+
+fn codegen_and_link(
+    input: &Input,
+    program: &Program,
+    profile: &Profile,
+    target: &Target,
+    emit_ir: bool,
+    emit_net: bool,
+) -> Result<Artifact, String> {
     let dir = out_dir(input, profile, target);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let name = input.name();
@@ -305,7 +299,7 @@ pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, e
     let net = dir.join(format!("{name}.mnet"));
     let is_exe = input.is_bin();
     mimic_codegen::compile(
-        &program,
+        program,
         &mimic_codegen::Settings {
             triple: target.llvm.clone(),
             opt_level: profile.opt,

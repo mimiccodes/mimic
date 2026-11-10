@@ -1,2 +1,2 @@
-// expect-error: the first line of every .mim file must be `module <name>`
+// expect-error: E0202 the first line of every .mim file must be `module <name>`
 fn main() {}

@@ -1,9 +1,13 @@
 //! Semantic checking: module tree, path resolution, visibility, mutability,
 //! arity, FFI safety. Powers `mimic check` and feeds codegen.
 
+// Diagnostics are rich (labels, fixes) and only built on the error path.
+#![allow(clippy::result_large_err)]
+
 use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
-use mimic_syntax::{Diag, Span};
+use mimic_syntax::codes as C;
+use mimic_syntax::{Applicability, Diag, Edit, Span};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -130,6 +134,62 @@ pub struct FileDiag {
     pub diag: Diag,
 }
 
+/// Why a path did not resolve; turned into a [`Diag`] with [`ResolveError::diag`].
+#[derive(Clone, Debug)]
+pub struct ResolveError {
+    pub code: &'static mimic_syntax::Code,
+    pub msg: String,
+    /// The whole path with the misspelled segment corrected.
+    pub suggestion: Option<String>,
+    /// The item exists but is private.
+    pub private: Option<Resolved>,
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl From<ResolveError> for String {
+    fn from(e: ResolveError) -> String {
+        e.msg
+    }
+}
+
+impl ResolveError {
+    /// A diagnostic at `span` in `file` (the text of the path being resolved),
+    /// with a "did you mean" fix or a fix adding `pub` to the definition.
+    pub fn diag(&self, p: &Program, file: usize, span: Span) -> Diag {
+        let mut d = Diag::new(self.code, self.msg.clone(), span);
+        if let Some(fixed) = &self.suggestion {
+            // only offer the edit when the span is exactly the path's text
+            let text = p.files.get(file).and_then(|f| f.src.get(span.start..span.end)).unwrap_or("");
+            let first_seg = fixed.split("::").count();
+            if text.split("::").count() == first_seg && !text.contains(['(', ' ', '{']) {
+                d = d.fix(format!("did you mean `{fixed}`?"), span, fixed.clone(), Applicability::MaybeIncorrect);
+            } else {
+                d = d.help(format!("did you mean `{fixed}`?"));
+            }
+        }
+        if let Some(r) = self.private
+            && let Some((df, ds)) = p.decl_site(r)
+        {
+            d = d.label_in(df, ds, "declared here without `pub`");
+            let src = &p.files[df].src;
+            if ["fn ", "type ", "module "].iter().any(|k| src.get(ds.start..).is_some_and(|t| t.starts_with(k))) {
+                let at = Span { start: ds.start, end: ds.start, ..ds };
+                d = d.fix_edits(
+                    "make it public",
+                    vec![Edit { file: Some(df), span: at, text: "pub ".into() }],
+                    Applicability::MachineApplicable,
+                );
+            }
+        }
+        d
+    }
+}
+
 pub struct Program {
     pub files: Vec<SourceFile>,
     pub mods: Vec<Module>,
@@ -210,11 +270,11 @@ impl Program {
         let pkg = self.mods[parent].package.clone();
         if self.mods[parent].children.contains_key(&decl.name) {
             let what = if is_file_root { "another file already declares" } else { "duplicate" };
-            diags.push(FileDiag { file, diag: Diag::new(format!("{what} module `{}`", decl.name), decl.span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("{what} module `{}`", decl.name), decl.span) });
             return;
         }
         if self.mods[parent].fns.contains_key(&decl.name) {
-            diags.push(FileDiag { file, diag: Diag::new(format!("module `{}` collides with a function of the same name", decl.name), decl.span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("module `{}` collides with a function of the same name", decl.name), decl.span) });
             return;
         }
         // `lib` is the library entry point and is always public.
@@ -237,7 +297,7 @@ impl Program {
                 Item::Use(u) => {
                     let name = u.local_name().to_string();
                     if self.mods[id].uses.insert(name.clone(), u.clone()).is_some() {
-                        diags.push(FileDiag { file, diag: Diag::new(format!("`{name}` is imported twice"), u.span) });
+                        diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("`{name}` is imported twice"), u.span) });
                     }
                 }
             }
@@ -248,7 +308,7 @@ impl Program {
             if m.fns.contains_key(name) || m.children.contains_key(name) {
                 diags.push(FileDiag {
                     file,
-                    diag: Diag::new(format!("`use` of `{name}` collides with a local definition"), u.span)
+                    diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("`use` of `{name}` collides with a local definition"), u.span)
                         .note("rename it with `use path as other_name`"),
                 });
             }
@@ -258,7 +318,7 @@ impl Program {
     fn register_type(&mut self, m: ModId, t: &TypeDecl, file: usize, diags: &mut Vec<FileDiag>) {
         let taken = |s: &Self, n: &str| s.mods[m].fns.contains_key(n) || s.mods[m].children.contains_key(n) || s.mods[m].types.contains_key(n) || s.mods[m].variants.contains_key(n);
         if taken(self, &t.name) {
-            diags.push(FileDiag { file, diag: Diag::new(format!("`{}` is already defined in this module", t.name), t.span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("`{}` is already defined in this module", t.name), t.span) });
             return;
         }
         self.types.push(TypeDef { name: t.name.clone(), module: m, is_pub: t.is_pub, decl: t.clone(), file });
@@ -267,7 +327,7 @@ impl Program {
         if let TypeKind::Union(vs) = &t.kind {
             for (i, v) in vs.iter().enumerate() {
                 if taken(self, &v.name) {
-                    diags.push(FileDiag { file, diag: Diag::new(format!("variant `{}` collides with another name in this module", v.name), v.span) });
+                    diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("variant `{}` collides with another name in this module", v.name), v.span) });
                     continue;
                 }
                 self.mods[m].variants.insert(v.name.clone(), (id, i));
@@ -278,15 +338,15 @@ impl Program {
     #[allow(clippy::too_many_arguments)]
     fn register_fn(&mut self, m: ModId, name: &str, is_pub: bool, kind: FnKind, file: usize, span: Span, diags: &mut Vec<FileDiag>) {
         if self.mods[m].fns.contains_key(name) {
-            diags.push(FileDiag { file, diag: Diag::new(format!("function `{name}` is defined twice in this module"), span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("function `{name}` is defined twice in this module"), span) });
             return;
         }
         if self.mods[m].children.contains_key(name) {
-            diags.push(FileDiag { file, diag: Diag::new(format!("function `{name}` collides with a module of the same name"), span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("function `{name}` collides with a module of the same name"), span) });
             return;
         }
         if self.mods[m].types.contains_key(name) || self.mods[m].variants.contains_key(name) {
-            diags.push(FileDiag { file, diag: Diag::new(format!("function `{name}` collides with a type or variant of the same name"), span) });
+            diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("function `{name}` collides with a type or variant of the same name"), span) });
             return;
         }
         // strict: no shadowing of functions from enclosing modules
@@ -295,7 +355,7 @@ impl Program {
             if self.mods[a].fns.contains_key(name) {
                 diags.push(FileDiag {
                     file,
-                    diag: Diag::new(format!("function `{name}` shadows `{}::{name}` from an enclosing module", self.mod_path(a).join("::")), span),
+                    diag: Diag::new(&C::SHADOWING, format!("function `{name}` shadows `{}::{name}` from an enclosing module", self.mod_path(a).join("::")), span),
                 });
             }
             cur = self.mods[a].parent;
@@ -369,18 +429,52 @@ impl Program {
     }
 
     /// Resolve `path` as seen from module `from`.
-    pub fn resolve(&self, from: ModId, path: &[String]) -> Result<Resolved, String> {
+    pub fn resolve(&self, from: ModId, path: &[String]) -> Result<Resolved, ResolveError> {
         self.resolve_depth(from, path, 0)
     }
 
-    fn resolve_depth(&self, from: ModId, path: &[String], depth: usize) -> Result<Resolved, String> {
+    /// Every name visible unqualified from `from` (for suggestions).
+    pub fn visible_names(&self, from: ModId) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut m = Some(from);
+        while let Some(c) = m {
+            out.extend(self.member_names(c, false));
+            out.extend(self.mods[c].uses.keys().cloned());
+            m = self.mods[c].parent;
+        }
+        out.extend(self.roots.keys().filter(|r| r.as_str() != "std").cloned());
+        if let Some(std) = self.roots.get("std")
+            && let Some(pre) = self.mods[*std].children.get("prelude")
+        {
+            out.extend(self.member_names(*pre, false));
+        }
+        out
+    }
+
+    fn member_names(&self, m: ModId, through_lib: bool) -> Vec<String> {
+        let md = &self.mods[m];
+        let mut v: Vec<String> =
+            md.fns.keys().chain(md.children.keys()).chain(md.types.keys()).chain(md.variants.keys()).cloned().collect();
+        if through_lib
+            && md.parent.is_none()
+            && let Some(lib) = md.children.get("lib")
+        {
+            v.extend(self.member_names(*lib, false));
+        }
+        v
+    }
+
+    fn resolve_depth(&self, from: ModId, path: &[String], depth: usize) -> Result<Resolved, ResolveError> {
+        let plain = |code: &'static mimic_syntax::Code, msg: String| ResolveError { code, msg, suggestion: None, private: None };
         if depth > 16 {
-            return Err("`use` cycle detected".into());
+            return Err(plain(&C::BAD_PATH, "`use` cycle detected".into()));
         }
         let first = &path[0];
         let mut cur = match first.as_str() {
             "self" => Some(Resolved::Mod(from)),
-            "super" => Some(Resolved::Mod(self.mods[from].parent.ok_or("`super` used at the package root")?)),
+            "super" => Some(Resolved::Mod(
+                self.mods[from].parent.ok_or_else(|| plain(&C::BAD_PATH, "`super` used at the package root".into()))?,
+            )),
             _ => None,
         };
         if cur.is_none() {
@@ -392,7 +486,11 @@ impl Program {
                     break;
                 }
                 if let Some(u) = self.mods[c].uses.get(first) {
-                    let r = self.resolve_depth(c, &u.path, depth + 1).map_err(|e| format!("in `use {}`: {e}", u.path.join("::")))?;
+                    let r = self.resolve_depth(c, &u.path, depth + 1).map_err(|mut e| {
+                        e.msg = format!("in `use {}`: {}", u.path.join("::"), e.msg);
+                        e.suggestion = None;
+                        e
+                    })?;
                     cur = Some(r);
                     break;
                 }
@@ -410,22 +508,63 @@ impl Program {
         {
             cur = self.local(*pre, first);
         }
-        let mut cur = cur.ok_or_else(|| format!("cannot find `{first}` in this scope"))?;
-        for seg in &path[1..] {
+        let Some(mut cur) = cur else {
+            let names = self.visible_names(from);
+            let suggestion = mimic_syntax::closest(first, names.iter().map(String::as_str)).map(|best| {
+                let mut fixed = path.to_vec();
+                fixed[0] = best.to_string();
+                fixed.join("::")
+            });
+            return Err(ResolveError {
+                code: &C::UNRESOLVED_NAME,
+                msg: format!("cannot find `{first}` in this scope"),
+                suggestion,
+                private: None,
+            });
+        };
+        for (i, seg) in path.iter().enumerate().skip(1) {
             let Resolved::Mod(m) = cur else {
-                return Err(format!("{} is not a module, so `{seg}` cannot be looked up in it", self.describe(cur)));
+                return Err(plain(&C::WRONG_KIND, format!("{} is not a module, so `{seg}` cannot be looked up in it", self.describe(cur))));
             };
             if seg == "super" {
-                cur = Resolved::Mod(self.mods[m].parent.ok_or("`super` goes above the package root")?);
+                cur = Resolved::Mod(self.mods[m].parent.ok_or_else(|| plain(&C::BAD_PATH, "`super` goes above the package root".into()))?);
                 continue;
             }
-            let next = self.member(m, seg).ok_or_else(|| format!("cannot find `{seg}` in {}", self.describe(cur)))?;
+            let Some(next) = self.member(m, seg) else {
+                let names: Vec<String> =
+                    self.member_names(m, true).into_iter().filter(|n| self.member(m, n).is_some_and(|r| self.accessible(from, r))).collect();
+                let suggestion = mimic_syntax::closest(seg, names.iter().map(String::as_str)).map(|best| {
+                    let mut fixed = path.to_vec();
+                    fixed[i] = best.to_string();
+                    fixed.join("::")
+                });
+                return Err(ResolveError {
+                    code: &C::UNRESOLVED_NAME,
+                    msg: format!("cannot find `{seg}` in {}", self.describe(cur)),
+                    suggestion,
+                    private: None,
+                });
+            };
             if !self.accessible(from, next) {
-                return Err(format!("{} is private", self.describe(next)));
+                return Err(ResolveError {
+                    code: &C::PRIVATE_ITEM,
+                    msg: format!("{} is private", self.describe(next)),
+                    suggestion: None,
+                    private: Some(next),
+                });
             }
             cur = next;
         }
         Ok(cur)
+    }
+
+    /// Where an item is declared: (file, span of its first keyword).
+    pub fn decl_site(&self, r: Resolved) -> Option<(usize, Span)> {
+        match r {
+            Resolved::Fn(f) => Some((self.fns[f].file, self.fns[f].span)),
+            Resolved::Mod(m) => self.mods[m].file.map(|f| (f, self.mods[m].span)),
+            Resolved::Type(t) | Resolved::Variant(t, _) => Some((self.types[t].file, self.types[t].decl.span)),
+        }
     }
 
     /// The module that encloses a file's top-level items.
@@ -459,11 +598,11 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                 let span = file.map(|f| p.files[f].ast.module.span).unwrap_or_default();
                 diags.push(FileDiag {
                     file: file.unwrap_or(0),
-                    diag: Diag::new("binary has no entry point: `module main` must define `fn main()`", span),
+                    diag: Diag::new(&C::NO_MAIN, "binary has no entry point: `module main` must define `fn main()`", span),
                 });
             }
             Some(f) if p.fns[f].arity() != 0 => {
-                diags.push(FileDiag { file: p.fns[f].file, diag: Diag::new("`fn main` takes no parameters", p.fns[f].span) });
+                diags.push(FileDiag { file: p.fns[f].file, diag: Diag::new(&C::NO_MAIN, "`fn main` takes no parameters", p.fns[f].span) });
             }
             _ => {}
         }
@@ -492,7 +631,8 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
     for (mid, m) in p.mods.iter().enumerate() {
         for u in m.uses.values() {
             if let Err(e) = p.resolve(mid, &u.path) {
-                diags.push(FileDiag { file: m.file.unwrap_or(0), diag: Diag::new(e, u.span) });
+                let file = m.file.unwrap_or(0);
+                diags.push(FileDiag { file, diag: e.diag(p, file, u.span) });
             }
         }
     }
@@ -502,15 +642,15 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
 fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
     match t {
         Type::Named(n, s) => {
-            if C_TYPES.contains(&n.as_str()) { Ok(()) } else { Err(Diag::new(format!("`{n}` is not a C type; use one of {}", C_TYPES.join(", ")), *s)) }
+            if C_TYPES.contains(&n.as_str()) { Ok(()) } else { Err(Diag::new(&C::NOT_C_TYPE, format!("`{n}` is not a C type; use one of {}", C_TYPES.join(", ")), *s)) }
         }
         Type::Ptr(inner, s) => {
             if is_ret {
-                return Err(Diag::new("returning raw pointers from C is not supported yet", *s));
+                return Err(Diag::new(&C::FFI_UNSUPPORTED, "returning raw pointers from C is not supported yet", *s));
             }
             check_ctype(inner, false)
         }
-        Type::Array(_, s) => Err(Diag::new("arrays cross the FFI boundary as `ptr[T]`", *s)),
+        Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
     }
 }
 
@@ -523,20 +663,22 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             "bool" => 3,
             "c_char" | "char" => 4,
             "str" => 5,
-            other => return Err(Diag::new(format!("unknown type `{other}`"), *s)),
+            other => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{other}`"), *s)),
         },
         Type::Array(inner, s) => match &**inner {
             Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize") => 6,
             Type::Named(n, _) if matches!(n.as_str(), "f32" | "f64") => 7,
             Type::Named(n, _) if n == "bool" => 8,
-            _ => return Err(Diag::new("only arrays of numbers or bools are supported in this version", *s)),
+            _ => return Err(Diag::new(&C::UNSUPPORTED_TYPE, "only arrays of numbers or bools are supported in this version", *s)),
         },
-        Type::Ptr(_, s) => return Err(Diag::new("`ptr[T]` is only allowed in `extern` declarations", *s)),
+        Type::Ptr(_, s) => return Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
     })
 }
 
 struct Var {
     mutable: bool,
+    /// where it was declared (`let …`, a parameter, a pattern binding)
+    span: Span,
 }
 
 struct Checker<'a> {
@@ -566,16 +708,16 @@ impl Checker<'_> {
 
     fn declare(&mut self, name: &str, mutable: bool, span: Span) {
         if self.lookup(name).is_some() {
-            self.err(Diag::new(format!("`{name}` is already defined; Mimic does not allow shadowing"), span)
+            self.err(Diag::new(&C::SHADOWING, format!("`{name}` is already defined; Mimic does not allow shadowing"), span)
                 .note("use `let mut` and reassign it, or pick a different name"));
             return;
         }
         if let Ok(r) = self.p.resolve(self.module, &[name.to_string()])
             && matches!(r, Resolved::Fn(_)) {
-                self.err(Diag::new(format!("variable `{name}` collides with a function of the same name"), span));
+                self.err(Diag::new(&C::DUPLICATE_DEFINITION, format!("variable `{name}` collides with a function of the same name"), span));
                 return;
             }
-        self.scopes.last_mut().unwrap().insert(name.into(), Var { mutable });
+        self.scopes.last_mut().unwrap().insert(name.into(), Var { mutable, span });
     }
 
     /// Annotations: built-in types, or record/union types in scope.
@@ -587,10 +729,14 @@ impl Checker<'_> {
             Type::Named(n, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
                 Ok(Resolved::Type(_)) => Ok(()),
                 _ if n == "str" || n == "any" => Ok(()),
-                _ => Err(Diag::new(format!("unknown type `{n}`"), *s)),
+                _ => {
+                    let mut names: Vec<String> = BUILTIN_TYPES.iter().map(|t| t.to_string()).collect();
+                    names.extend(self.p.visible_names(self.module).into_iter().filter(|x| x.starts_with(|c: char| c.is_ascii_uppercase())));
+                    Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{n}`"), *s).did_you_mean(n, *s, names.iter().map(String::as_str)))
+                }
             },
             Type::Array(inner, _) => self.ann_result(inner),
-            Type::Ptr(_, s) => Err(Diag::new("`ptr[T]` is only allowed in `extern` declarations", *s)),
+            Type::Ptr(_, s) => Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
         }
     }
 
@@ -629,11 +775,11 @@ impl Checker<'_> {
                 Ok(Resolved::Variant(t, v)) => {
                     let want = self.p.types[t].variants()[v].fields.len();
                     if args.len() != want {
-                        self.err(Diag::new(format!("`{}` has {want} field(s), but the pattern has {}", path.join("::"), args.len()), *span));
+                        self.err(Diag::new(&C::PATTERN_ARITY, format!("`{}` has {want} field(s), but the pattern has {}", path.join("::"), args.len()), *span));
                     }
                     if top {
                         match union {
-                            Some(u) if *u != t => self.err(Diag::new(format!("this arm matches `{}`, but earlier arms match `{}`", self.p.types[t].name, self.p.types[*u].name), *span)),
+                            Some(u) if *u != t => self.err(Diag::new(&C::MIXED_ARMS, format!("this arm matches `{}`, but earlier arms match `{}`", self.p.types[t].name, self.p.types[*u].name), *span)),
                             _ => *union = Some(t),
                         }
                         if args.iter().all(|a| matches!(a, Pattern::Wild(_) | Pattern::Bind(..))) {
@@ -645,8 +791,8 @@ impl Checker<'_> {
                         self.pattern(a, false, &mut u2, &mut c2, &mut a2);
                     }
                 }
-                Ok(r) => self.err(Diag::new(format!("{} is not a variant", self.p.describe(r)), *span)),
-                Err(m) => self.err(Diag::new(m, *span)),
+                Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a variant", self.p.describe(r)), *span)),
+                Err(m) => self.err(m.diag(self.p, self.file, *span)),
             },
         }
     }
@@ -660,7 +806,7 @@ impl Checker<'_> {
             if let Some(d) = &prm.default
                 && !is_constant(self.p, self.module, d)
             {
-                self.err(Diag::new(format!("the default value of `{}` must be a constant", prm.name), d.span)
+                self.err(Diag::new(&C::DEFAULT_NOT_CONST, format!("the default value of `{}` must be a constant", prm.name), d.span)
                     .note("literals, operators on literals, arrays of them, and unit variants"));
             }
             self.declare(&prm.name, false, prm.span);
@@ -692,14 +838,25 @@ impl Checker<'_> {
                     }
                     self.expr(value);
                     match self.lookup(name) {
-                        None => self.err(Diag::new(format!("cannot assign to undefined variable `{name}`"), *span)),
+                        None => self.err(Diag::new(&C::ASSIGN_UNDEFINED, format!("cannot assign to undefined variable `{name}`"), *span)),
                         Some((lvl, _)) if lvl < self.lambda_floor => {
-                            self.err(Diag::new(format!("lambdas cannot modify captured variable `{name}`"), *span))
+                            self.err(Diag::new(&C::CAPTURE_MUTATION, format!("lambdas cannot modify captured variable `{name}`"), *span))
                         }
-                        Some((_, v)) if !v.mutable => self.err(
-                            Diag::new(format!("cannot assign twice to immutable variable `{name}`"), *span)
-                                .note(format!("declare it as `let mut {name}` (or `mut {name} ← …`)")),
-                        ),
+                        Some((_, v)) if !v.mutable => {
+                            let decl = v.span;
+                            let src = &self.p.files[self.file].src;
+                            let is_let = src.get(decl.start..).is_some_and(|t| t.starts_with("let "));
+                            let shown = if is_let { Span { end: decl.start + 4 + name.len(), ..decl } } else { decl };
+                            let mut d = Diag::new(&C::ASSIGN_IMMUTABLE, format!("cannot assign twice to immutable variable `{name}`"), *span)
+                                .label(shown, "first bound here");
+                            if is_let {
+                                let at = Span { start: decl.start + 4, end: decl.start + 4, line: decl.line, col: decl.col + 4 };
+                                d = d.fix(format!("make `{name}` mutable"), at, "mut ", Applicability::MachineApplicable);
+                            } else {
+                                d = d.note(format!("declare it as `let mut {name}` (or `mut {name} ← …`)"));
+                            }
+                            self.err(d)
+                        }
                         _ => {}
                     }
                 }
@@ -724,7 +881,7 @@ impl Checker<'_> {
                     }
                     self.block(els, true);
                     if els.tail.is_some() || !matches!(els.stmts.last(), Some(Stmt::Return(..))) {
-                        self.err(Diag::new("the `else` block of `let … else` must end with `return`", els.span)
+                        self.err(Diag::new(&C::ELSE_MUST_RETURN, "the `else` block of `let … else` must end with `return`", els.span)
                             .note("it runs when the value is `None` or `Err`, so the binding has no value"));
                     }
                     self.declare(name, false, *span);
@@ -744,23 +901,23 @@ impl Checker<'_> {
             ExprKind::Lambda { param, body } => self.lambda(param, body),
             ExprKind::Path(path) => {
                 if path.len() == 1 && self.lookup(&path[0]).is_some() {
-                    self.err(Diag::new(format!("`{}` is a variable, not a function", path[0]), e.span));
+                    self.err(Diag::new(&C::WRONG_KIND, format!("`{}` is a variable, not a function", path[0]), e.span));
                     return;
                 }
                 match self.p.resolve(self.module, path) {
                     Ok(Resolved::Fn(f)) => {
                         let func = &self.p.fns[f];
                         if func.is_extern() {
-                            self.err(Diag::new("extern functions cannot be passed as values; wrap them in a Mimic function", e.span));
+                            self.err(Diag::new(&C::FFI_UNSUPPORTED, "extern functions cannot be passed as values; wrap them in a Mimic function", e.span));
                         } else if func.arity() != want_arity {
-                            self.err(Diag::new(format!("`{}` takes {} argument(s), but `¨` passes {want_arity}", path.join("::"), func.arity()), e.span));
+                            self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), but `¨` passes {want_arity}", path.join("::"), func.arity()), e.span));
                         }
                     }
-                    Ok(r) => self.err(Diag::new(format!("{} is not a function", self.p.describe(r)), e.span)),
-                    Err(m) => self.err(Diag::new(m, e.span)),
+                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), e.span)),
+                    Err(m) => self.err(m.diag(self.p, self.file, e.span)),
                 }
             }
-            _ => self.err(Diag::new("expected a function or a lambda", e.span)),
+            _ => self.err(Diag::new(&C::BAD_PIPELINE, "expected a function or a lambda", e.span)),
         }
     }
 
@@ -772,7 +929,7 @@ impl Checker<'_> {
                 if path.len() == 1
                     && let Some((lvl, _)) = self.lookup(&path[0]) {
                         if lvl < self.lambda_floor {
-                            self.err(Diag::new(format!("lambdas cannot capture variables yet (`{}`)", path[0]), e.span)
+                            self.err(Diag::new(&C::LAMBDA_LIMIT, format!("lambdas cannot capture variables yet (`{}`)", path[0]), e.span)
                                 .note("pass it as an argument or make it a top-level function"));
                         }
                         return;
@@ -781,13 +938,19 @@ impl Checker<'_> {
                     Ok(Resolved::Variant(t, v)) => {
                         let n = self.p.types[t].variants()[v].fields.len();
                         if n > 0 {
-                            self.err(Diag::new(format!("variant `{}` has {n} field(s): write `{}(…)`", path.join("::"), path.join("::")), e.span));
+                            self.err(Diag::new(&C::WRONG_KIND, format!("variant `{}` has {n} field(s): write `{}(…)`", path.join("::"), path.join("::")), e.span));
                         }
                     }
-                    Ok(r) => self.err(Diag::new(format!("{} used as a value", self.p.describe(r)), e.span)
+                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} used as a value", self.p.describe(r)), e.span)
                         .note("call functions with `f(x)` or a pipeline `x ▷ f`")),
-                    Err(_) if path.len() == 1 => self.err(Diag::new(format!("cannot find variable `{}` in this scope", path[0]), e.span)),
-                    Err(m) => self.err(Diag::new(m, e.span)),
+                    Err(_) if path.len() == 1 => {
+                        let mut names: Vec<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+                        names.extend(self.p.visible_names(self.module));
+                        let d = Diag::new(&C::UNRESOLVED_NAME, format!("cannot find variable `{}` in this scope", path[0]), e.span)
+                            .did_you_mean(&path[0], e.span, names.iter().map(String::as_str));
+                        self.err(d)
+                    }
+                    Err(m) => self.err(m.diag(self.p, self.file, e.span)),
                 }
             }
             ExprKind::Call { callee, args } => {
@@ -797,41 +960,51 @@ impl Checker<'_> {
                 match &callee.kind {
                     ExprKind::Lambda { param, body } => {
                         if args.len() != 1 {
-                            self.err(Diag::new("lambdas take exactly one argument", e.span));
+                            self.err(Diag::new(&C::LAMBDA_LIMIT, "lambdas take exactly one argument", e.span));
                         }
                         self.lambda(param, body);
                     }
                     ExprKind::Path(path) => {
                         if path.len() == 1 && self.lookup(&path[0]).is_some() {
-                            self.err(Diag::new(format!("`{}` is a variable, not a function", path[0]), callee.span));
+                            self.err(Diag::new(&C::WRONG_KIND, format!("`{}` is a variable, not a function", path[0]), callee.span));
                             return;
                         }
                         match self.p.resolve(self.module, path) {
                             Ok(Resolved::Variant(t, v)) => {
                                 let n = self.p.types[t].variants()[v].fields.len();
                                 if n != args.len() {
-                                    self.err(Diag::new(format!("variant `{}` has {n} field(s) but {} were given", path.join("::"), args.len()), e.span));
+                                    self.err(Diag::new(&C::ARG_COUNT, format!("variant `{}` has {n} field(s) but {} were given", path.join("::"), args.len()), e.span));
                                 }
                             }
                             Ok(Resolved::Fn(f)) => {
                                 let func = &self.p.fns[f];
                                 if func.arity() != args.len() {
-                                    self.err(Diag::new(
+                                    self.err(Diag::new(&C::ARG_COUNT, 
                                         format!("`{}` takes {} argument(s) but {} were supplied", path.join("::"), func.arity(), args.len()),
                                         e.span,
                                     ));
                                 }
                                 if let FnKind::Extern { trusted: false, .. } = func.kind
                                     && self.unsafe_depth == 0 {
-                                        self.err(Diag::new(format!("call to extern function `{}` requires an `unsafe {{ }}` block", path.join("::")), e.span)
-                                            .note("or declare the block as `trusted extern \"C\"` if the C function is memory safe"));
+                                        let end = mimic_syntax::span_at(&self.p.files[self.file].src, e.span.end, e.span.end);
+                                        let start = Span { end: e.span.start, ..e.span };
+                                        self.err(Diag::new(&C::UNSAFE_REQUIRED, format!("call to extern function `{}` requires an `unsafe {{ }}` block", path.join("::")), e.span)
+                                            .note("or declare the block as `trusted extern \"C\"` if the C function is memory safe")
+                                            .fix_edits(
+                                                "wrap the call in `unsafe { … }`",
+                                                vec![
+                                                    Edit { file: None, span: start, text: "unsafe { ".into() },
+                                                    Edit { file: None, span: end, text: " }".into() },
+                                                ],
+                                                Applicability::MachineApplicable,
+                                            ));
                                     }
                             }
-                            Ok(r) => self.err(Diag::new(format!("{} is not a function", self.p.describe(r)), callee.span)),
-                            Err(m) => self.err(Diag::new(m, callee.span)),
+                            Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), callee.span)),
+                            Err(m) => self.err(m.diag(self.p, self.file, callee.span)),
                         }
                     }
-                    _ => self.err(Diag::new("only named functions and lambdas can be called", callee.span)),
+                    _ => self.err(Diag::new(&C::WRONG_KIND, "only named functions and lambdas can be called", callee.span)),
                 }
             }
             ExprKind::Index { base, index } => {
@@ -845,7 +1018,7 @@ impl Checker<'_> {
             }
             ExprKind::Prim { prim, args } => {
                 if args.len() != prim.arity() {
-                    self.err(Diag::new(format!("`{}` takes {} argument(s), got {}", prim.info().word, prim.arity(), args.len()), e.span));
+                    self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), got {}", prim.info().word, prim.arity(), args.len()), e.span));
                     return;
                 }
                 if *prim == Prim::Each {
@@ -864,7 +1037,7 @@ impl Checker<'_> {
                     }
                 }
             }
-            ExprKind::Named { .. } => self.err(Diag::new("named arguments are only allowed in calls to functions", e.span)),
+            ExprKind::Named { .. } => self.err(Diag::new(&C::NAMED_ARG_PLACE, "named arguments are only allowed in calls to functions", e.span)),
             ExprKind::With { base, fields } => {
                 self.expr(base);
                 fields.iter().for_each(|(_, v, _)| self.expr(v));
@@ -875,23 +1048,27 @@ impl Checker<'_> {
                     Ok(Resolved::Type(t)) => {
                         let td = &self.p.types[t];
                         let TypeKind::Record(decl) = &td.decl.kind else {
-                            self.err(Diag::new(format!("`{}` is a union: construct one of its variants", td.name), e.span));
+                            self.err(Diag::new(&C::UNION_NOT_RECORD, format!("`{}` is a union: construct one of its variants", td.name), e.span));
                             return;
                         };
                         let mut errs = Vec::new();
                         for (n, _, sp) in fields {
                             if !decl.iter().any(|(d, _, _)| d == n) {
-                                errs.push(Diag::new(format!("`{}` has no field `{n}`", td.name), *sp));
+                                let at = Span { end: sp.start + n.len(), ..*sp };
+                                errs.push(
+                                    Diag::new(&C::NO_FIELD, format!("`{}` has no field `{n}`", td.name), *sp)
+                                        .did_you_mean(n, at, decl.iter().map(|(d, _, _)| d.as_str())),
+                                );
                             }
                         }
                         let missing: Vec<&str> = decl.iter().filter(|(d, _, _)| !fields.iter().any(|(n, _, _)| n == d)).map(|(d, _, _)| d.as_str()).collect();
                         if !missing.is_empty() {
-                            errs.push(Diag::new(format!("missing field(s) of `{}`: {}", td.name, missing.join(", ")), e.span));
+                            errs.push(Diag::new(&C::MISSING_FIELDS, format!("missing field(s) of `{}`: {}", td.name, missing.join(", ")), e.span));
                         }
                         errs.into_iter().for_each(|d| self.err(d));
                     }
-                    Ok(r) => self.err(Diag::new(format!("{} is not a record type", self.p.describe(r)), e.span)),
-                    Err(m) => self.err(Diag::new(m, e.span)),
+                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a record type", self.p.describe(r)), e.span)),
+                    Err(m) => self.err(m.diag(self.p, self.file, e.span)),
                 }
             }
             ExprKind::Match { scrut, arms } => {
@@ -906,24 +1083,35 @@ impl Checker<'_> {
                 if !catch_all {
                     match union {
                         Some(t) => {
-                            let missing: Vec<String> = self.p.types[t]
-                                .variants()
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, _)| !covered.contains(i))
-                                .map(|(_, v)| format!("`{}`", v.name))
-                                .collect();
+                            let absent: Vec<_> =
+                                self.p.types[t].variants().iter().enumerate().filter(|(i, _)| !covered.contains(i)).map(|(_, v)| v).collect();
+                            let missing: Vec<String> = absent.iter().map(|v| format!("`{}`", v.name)).collect();
                             if !missing.is_empty() {
-                                self.err(Diag::new(format!("`match` does not cover every case: missing {}", missing.join(", ")), e.span)
-                                    .note("add the missing arms, or a final `_ => …`"));
+                                let mut d = Diag::new(&C::NON_EXHAUSTIVE, format!("`match` does not cover every case: missing {}", missing.join(", ")), e.span)
+                                    .note("add the missing arms, or a final `_ => …`");
+                                let arms_text: Vec<String> = absent
+                                    .iter()
+                                    .map(|v| {
+                                        let pat = if v.fields.is_empty() {
+                                            v.name.clone()
+                                        } else {
+                                            format!("{}({})", v.name, vec!["_"; v.fields.len()].join(", "))
+                                        };
+                                        format!("{pat} => …")
+                                    })
+                                    .collect();
+                                if let Some(edit) = insert_arms(&self.p.files[self.file].src, e.span, &arms_text) {
+                                    d = d.fix_edits("add the missing arms", vec![edit], Applicability::HasPlaceholders);
+                                }
+                                self.err(d);
                             }
                         }
-                        None => self.err(Diag::new("`match` on values needs a final `_ => …` arm", e.span)),
+                        None => self.err(Diag::new(&C::NON_EXHAUSTIVE, "`match` on values needs a final `_ => …` arm", e.span)),
                     }
                 }
             }
             ExprKind::Lambda { .. } => self.err(
-                Diag::new("lambdas are not first-class values yet", e.span)
+                Diag::new(&C::LAMBDA_LIMIT, "lambdas are not first-class values yet", e.span)
                     .note("call them in a pipeline `x ▷ (y => …)` or pass them to `¨` (each)"),
             ),
             ExprKind::If { cond, then, els } => {
@@ -949,7 +1137,7 @@ impl Checker<'_> {
                 self.lambda_floor = self.scopes.len();
                 self.scopes.push(HashMap::new());
                 // lambda params may reuse outer names: the outer scope is invisible inside
-                self.scopes.last_mut().unwrap().insert(param.to_string(), Var { mutable: false });
+                self.scopes.last_mut().unwrap().insert(param.to_string(), Var { mutable: false, span: body.span });
                 self.expr(body);
                 self.scopes.pop();
                 self.lambda_floor = saved_floor;
@@ -1172,14 +1360,19 @@ impl Norm<'_> {
                 ExprKind::Named { name, value } => {
                     seen_named = true;
                     match params.iter().position(|(n, _)| *n == name) {
-                        Some(i) if slots[i].is_some() => self.err(Diag::new(format!("argument `{name}` is given twice"), a.span)),
+                        Some(i) if slots[i].is_some() => self.err(Diag::new(&C::DUPLICATE_ARG, format!("argument `{name}` is given twice"), a.span)),
                         Some(i) => slots[i] = Some(*value),
-                        None => self.err(Diag::new(format!("`{fname}` has no parameter `{name}`"), a.span)),
+                        None => {
+                            let at = Span { end: a.span.start + name.len(), ..a.span };
+                            let d = Diag::new(&C::UNKNOWN_PARAM, format!("`{fname}` has no parameter `{name}`"), a.span)
+                                .did_you_mean(&name, at, params.iter().map(|(n, _)| n.as_str()));
+                            self.err(d)
+                        }
                     }
                 }
                 _ => {
                     if seen_named {
-                        self.err(Diag::new("positional arguments must come before named ones", a.span));
+                        self.err(Diag::new(&C::POSITIONAL_AFTER_NAMED, "positional arguments must come before named ones", a.span));
                     }
                     if pos < slots.len() {
                         slots[pos] = Some(a);
@@ -1199,7 +1392,7 @@ impl Norm<'_> {
                     d.span = span;
                     out.push(d);
                 }
-                (None, None) => self.err(Diag::new(format!("missing argument `{}` in call to `{fname}`", params[i].0), span)),
+                (None, None) => self.err(Diag::new(&C::MISSING_ARG, format!("missing argument `{}` in call to `{fname}`", params[i].0), span)),
             }
         }
         out.extend(extra);
@@ -1332,5 +1525,30 @@ mod purity_tests {
         let get = |n: &str| pu.fns[p.fns.iter().position(|f| f.name == n).unwrap()];
         assert!(get("a") && get("b") && get("r"));
         assert!(!get("c") && !get("d") && !get("e") && !get("sqrt"));
+    }
+}
+
+/// Built-in type names (for suggestions).
+const BUILTIN_TYPES: &[&str] = &["i64", "f64", "bool", "char", "str", "any"];
+
+/// An edit inserting `arms` (one per line) before the closing `}` of the
+/// `match` expression at `span`, indented like the existing arms.
+fn insert_arms(src: &str, span: Span, arms: &[String]) -> Option<Edit> {
+    let text = src.get(span.start..span.end)?;
+    let close = span.start + text.rfind('}')?;
+    let before = &src[..close];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let closing_indent: String = before[line_start..].chars().take_while(|c| c.is_whitespace()).collect();
+    if before[line_start..].trim().is_empty() {
+        // `}` on its own line: insert full lines above it, indented one level deeper
+        let indent = format!("{closing_indent}    ");
+        let body: String = arms.iter().map(|a| format!("{indent}{a}\n")).collect();
+        Some(Edit { file: None, span: mimic_syntax::span_at(src, line_start, line_start), text: body })
+    } else {
+        // single-line match: `match x { A => 1 }` → `match x { A => 1, B => … }`
+        let trimmed = before.trim_end();
+        let at = trimmed.len();
+        let sep = if trimmed.ends_with('{') || trimmed.ends_with(',') { " " } else { ", " };
+        Some(Edit { file: None, span: mimic_syntax::span_at(src, at, at), text: format!("{sep}{}", arms.join(", ")) })
     }
 }

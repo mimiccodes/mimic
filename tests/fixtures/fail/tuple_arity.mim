@@ -1,4 +1,4 @@
-// expect-error: this tuple has 2 elements, but 3 names are bound
+// expect-error: E0405 this tuple has 2 elements, but 3 names are bound
 module main
 fn main() {
     let (a, b, c) = (1, 2)

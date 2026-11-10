@@ -1,4 +1,4 @@
-// expect-error: the `else` block of `let … else` must end with `return`
+// expect-error: E0504 the `else` block of `let … else` must end with `return`
 module main
 fn main() { print(f()) }
 fn f() -> i64 {

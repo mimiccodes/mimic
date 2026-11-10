@@ -1,4 +1,4 @@
-// expect-error: `label` has no parameter `colour`
+// expect-error: E0702 `label` has no parameter `colour`
 module main
 fn main() { print(label("x", colour: 3)) }
 fn label(text: str, size: i64 = 16) -> str { text }

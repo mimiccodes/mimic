@@ -1,4 +1,4 @@
-// expect-error: `match` does not cover every case: missing `Reset`
+// expect-error: E0501 `match` does not cover every case: missing `Reset`
 module main
 type Msg = Inc | Dec | Reset
 fn main() { print(f(Inc)) }

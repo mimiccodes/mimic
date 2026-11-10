@@ -90,7 +90,7 @@ pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
     let src = fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let cfg = config::parse(&src).map_err(|d| err_at(path, &src, d))?;
     let bad = |msg: String, key: &str, t: &Table| {
-        let d = mimic_syntax::Diag::new(msg, t.span_of(key).unwrap_or_default());
+        let d = mimic_syntax::Diag::new(&mimic_syntax::codes::PROJECT, msg, t.span_of(key).unwrap_or_default());
         err_at(path, &src, d)
     };
     if cfg.header != "mim" {

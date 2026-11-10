@@ -1,4 +1,4 @@
-// expect-error: Mimic does not allow shadowing
+// expect-error: E0302 Mimic does not allow shadowing
 module main
 fn main() {
     let a = 1

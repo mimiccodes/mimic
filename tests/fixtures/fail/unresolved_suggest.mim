@@ -1,0 +1,7 @@
+// expect-error: E0303 cannot find variable `totl` in this scope
+module main
+
+fn main() {
+    let total = 3
+    print(totl)
+}

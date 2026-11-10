@@ -1,4 +1,4 @@
-// expect-error: function `private::main::inner::hidden` is private
+// expect-error: E0304 function `private::main::inner::hidden` is private
 module main
 fn main() {
     inner::hidden()

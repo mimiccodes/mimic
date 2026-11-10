@@ -6,9 +6,10 @@
 |---|---|
 | `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. |
 | `mimic init [--name N] [--bin] [--lib]` | Turn the current directory into a project. |
-| `mimic run [file.mim] [--debug\|--release] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. |
-| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
-| `mimic check [file.mim]` | Parse, resolve and check everything without generating code. |
+| `mimic run [file.mim] [--debug\|--release] [--emit-json] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. With `--emit-json`, compile errors go to stderr as JSON. |
+| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
+| `mimic check [file.mim] [--emit-json] [--fix]` | Parse, resolve and check everything without generating code. `--emit-json` prints the result as JSON for editors and agents; `--fix` applies the machine-applicable fixes. See [diagnostics.md](diagnostics.md). |
+| `mimic explain [code] [--emit-json]` | Explain an error code (`mimic explain E0401`), or list them all. |
 | `mimic mod init` | Create `mod.mim`. |
 | `mimic mod update` | Regenerate `mod.mim`. |
 | `mimic mod list [--all]` | List the project's modules. `--all` adds functions and dependencies. |

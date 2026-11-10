@@ -2,6 +2,7 @@
 //! the difference between `⍳ 10 ▷ +/` and `iota 10 |> sum`.
 
 use crate::glyphs::{self, Prim};
+use crate::codes as C;
 use crate::{Diag, Span};
 
 /// A piece of an interpolated string literal: text, or the source of an `{expression}`.
@@ -361,16 +362,16 @@ impl<'a> Lexer<'a> {
             }
             '"' => self.string(start)?,
             '\\' => {
-                let d = self.bump().ok_or_else(|| Diag::new("dangling `\\`", start))?;
+                let d = self.bump().ok_or_else(|| Diag::new(&C::UNKNOWN_DIGRAPH, "dangling `\\`", start))?;
                 let key = format!("\\{d}");
                 let g = glyphs::digraph(&key)
-                    .ok_or_else(|| Diag::new(format!("unknown digraph `{key}` (run `mimic glyphs`)"), start))?;
+                    .ok_or_else(|| Diag::new(&C::UNKNOWN_DIGRAPH, format!("unknown digraph `{key}` (run `mimic glyphs`)"), start))?;
                 // Re-lex the glyph it stands for. ⌈/ and ⌊/ digraphs already include the slash.
                 return Ok(match g {
                     "⌈/" => Tok::Prim(Prim::Maximum),
                     "⌊/" => Tok::Prim(Prim::Minimum),
                     _ => {
-                        let sub = lex(g).map_err(|_| Diag::new("bad digraph", start))?;
+                        let sub = lex(g).map_err(|_| Diag::new(&C::UNKNOWN_DIGRAPH, "bad digraph", start))?;
                         sub[0].tok.clone()
                     }
                 });
@@ -379,7 +380,7 @@ impl<'a> Lexer<'a> {
                 if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     return self.number(start, true);
                 }
-                return Err(Diag::new("`¯` (high minus) must be followed by a number", start));
+                return Err(Diag::new(&C::BAD_NUMBER, "`¯` (high minus) must be followed by a number", start));
             }
             c if c.is_ascii_digit() => {
                 self.pos = start.start;
@@ -408,7 +409,7 @@ impl<'a> Lexer<'a> {
                 if let Some(p) = glyphs::PRIMS.iter().find(|p| p.glyph.chars().count() == 1 && p.glyph.starts_with(other)) {
                     Tok::Prim(p.prim)
                 } else {
-                    return Err(Diag::new(format!("unexpected character `{other}`"), start));
+                    return Err(Diag::new(&C::UNEXPECTED_CHAR, format!("unexpected character `{other}`"), start));
                 }
             }
         };
@@ -456,17 +457,17 @@ impl<'a> Lexer<'a> {
             }
             let mut span = start;
             span.end = self.pos;
-            let v: f64 = text.parse().map_err(|_| Diag::new("invalid duration", span))?;
+            let v: f64 = text.parse().map_err(|_| Diag::new(&C::BAD_NUMBER, "invalid duration", span))?;
             let ns = (v * sc).round();
             return Ok(Tok::Int((if negative { -ns } else { ns }) as i64));
         }
         let mut span = start;
         span.end = self.pos;
         if is_float {
-            let v: f64 = text.parse().map_err(|_| Diag::new("invalid float literal", span))?;
+            let v: f64 = text.parse().map_err(|_| Diag::new(&C::BAD_NUMBER, "invalid float literal", span))?;
             Ok(Tok::Float(if negative { -v } else { v }))
         } else {
-            let v: i64 = text.parse().map_err(|_| Diag::new("integer literal out of range for i64", span))?;
+            let v: i64 = text.parse().map_err(|_| Diag::new(&C::BAD_NUMBER, "integer literal out of range for i64", span))?;
             Ok(Tok::Int(if negative { -v } else { v }))
         }
     }
@@ -476,7 +477,7 @@ impl<'a> Lexer<'a> {
         let mut parts: Vec<StrPart> = Vec::new();
         loop {
             match self.bump() {
-                None | Some('\n') => return Err(Diag::new("unterminated string literal", start)),
+                None | Some('\n') => return Err(Diag::new(&C::UNTERMINATED_STRING, "unterminated string literal", start)),
                 Some('"') => break,
                 Some('{') => {
                     // `{expression}` inside a string: capture its source text
@@ -487,7 +488,7 @@ impl<'a> Lexer<'a> {
                     let mut code = String::new();
                     loop {
                         match self.bump() {
-                            None | Some('\n') => return Err(Diag::new("unterminated `{` in string literal", start)),
+                            None | Some('\n') => return Err(Diag::new(&C::UNTERMINATED_STRING, "unterminated `{` in string literal", start)),
                             Some('{') => {
                                 depth += 1;
                                 code.push('{');
@@ -505,7 +506,7 @@ impl<'a> Lexer<'a> {
                     parts.push(StrPart::Code(code));
                 }
                 Some('\\') => {
-                    let e = self.bump().ok_or_else(|| Diag::new("unterminated string literal", start))?;
+                    let e = self.bump().ok_or_else(|| Diag::new(&C::UNTERMINATED_STRING, "unterminated string literal", start))?;
                     s.push(match e {
                         '{' => '{',
                         '}' => '}',
@@ -514,7 +515,7 @@ impl<'a> Lexer<'a> {
                         '0' => '\0',
                         '\\' => '\\',
                         '"' => '"',
-                        other => return Err(Diag::new(format!("unknown escape `\\{other}`"), self.here())),
+                        other => return Err(Diag::new(&C::UNKNOWN_ESCAPE, format!("unknown escape `\\{other}`"), self.here())),
                     });
                 }
                 Some(c) => s.push(c),

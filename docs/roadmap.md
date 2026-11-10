@@ -36,6 +36,22 @@ Mimic's goals:
 | 8 | Tooling: `mimic test`, `mimic fmt` | |
 | 9 | Proof libraries: minimal `ui` (terminal renderer) and `net::http` | |
 
+## Toolchain phases (the plan of 2026-11-10)
+
+These run alongside the language milestones. Bootstrapping, a compiler written in Mimic, comes only after everything else is done.
+
+| Phase | Contents | Status |
+|---|---|---|
+| C1–C4 | Stable error codes, `mimic explain`, `check/build/run --emit-json` ([diagnostics.md](diagnostics.md)), fix suggestions with exact edits, `check --fix`, type errors reported at the call site | ✅ |
+| C5–C7 | `--json` for `mod list` and `targets`, inferred types per span (`--types`), LSP server | |
+| A | No Zig: embedded LLD, Clang and LLVM, bundled libc for every target (musl, glibc stubs 2.0–2.44, mingw-w64, macOS stubs, wasi-libc, BSD stubs), compiler-rt; every Zig target via `--target arch-os-abi[.version]` and `--cpu`; one static `mimic` binary | |
+| B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
+| D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |
+| E | Standard library and I/O (M3 step 6, M5, M6) | |
+| F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
+| G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
+| H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
+
 ## Later milestones
 
 | Milestone | Contents |

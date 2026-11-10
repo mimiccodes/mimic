@@ -1,4 +1,4 @@
-// expect-error: missing argument `b` in call to `add`
+// expect-error: E0705 missing argument `b` in call to `add`
 module main
 fn main() { add(1) }
 fn add(a, b) { a + b }

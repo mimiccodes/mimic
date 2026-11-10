@@ -1,4 +1,4 @@
-// expect-error: cannot assign twice to immutable variable `x`
+// expect-error: E0601 cannot assign twice to immutable variable `x`
 module main
 fn main() {
     let x = 1

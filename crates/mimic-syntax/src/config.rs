@@ -13,6 +13,7 @@
 //! ```
 
 use crate::lexer::{Tok, Token, lex};
+use crate::codes as C;
 use crate::{Diag, Span};
 use std::fmt::Write as _;
 
@@ -55,7 +56,7 @@ impl Table {
     fn insert_path(&mut self, keys: &[String], v: Value, span: Span) -> Result<(), Diag> {
         if keys.len() == 1 {
             if self.get(&keys[0]).is_some() {
-                return Err(Diag::new(format!("duplicate key `{}`", keys[0]), span));
+                return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("duplicate key `{}`", keys[0]), span));
             }
             self.entries.push((keys[0].clone(), v, span));
             return Ok(());
@@ -65,7 +66,7 @@ impl Table {
         }
         match self.entries.iter_mut().find(|(k, _, _)| *k == keys[0]) {
             Some((_, Value::Table(t), _)) => t.insert_path(&keys[1..], v, span),
-            _ => Err(Diag::new(format!("`{}` is not a table", keys[0]), span)),
+            _ => Err(Diag::new(&C::PROJECT, format!("`{}` is not a table", keys[0]), span)),
         }
     }
 }
@@ -97,7 +98,7 @@ pub fn parse(src: &str) -> Result<ConfigFile, Diag> {
     let mut p = CP { toks, pos: 0 };
     p.skip_nl();
     if !matches!(p.peek().tok, Tok::Module) {
-        return Err(Diag::new("config files start with `module <name>`", p.peek().span));
+        return Err(Diag::new(&C::MODULE_HEADER, "config files start with `module <name>`", p.peek().span));
     }
     p.pos += 1;
     let header = p.key()?.0;
@@ -132,7 +133,7 @@ impl CP {
                 self.pos += 1;
                 Ok((t.text, t.span))
             }
-            other => Err(Diag::new(format!("expected a key, found {}", other.describe()), t.span)),
+            other => Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected a key, found {}", other.describe()), t.span)),
         }
     }
     fn entries(&mut self, nested: bool) -> Result<Table, Diag> {
@@ -142,7 +143,7 @@ impl CP {
             match self.peek().tok {
                 Tok::Eof if !nested => return Ok(table),
                 Tok::RBrace if nested => return Ok(table),
-                Tok::Eof => return Err(Diag::new("expected `}`", self.peek().span)),
+                Tok::Eof => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected `}`", self.peek().span)),
                 _ => {}
             }
             let (k, span) = self.key()?;
@@ -177,7 +178,7 @@ impl CP {
             Tok::Minus => match self.value()? {
                 Value::Int(i) => Value::Int(-i),
                 Value::Float(f) => Value::Float(-f),
-                _ => return Err(Diag::new("`-` must precede a number", t.span)),
+                _ => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "`-` must precede a number", t.span)),
             },
             Tok::LBracket => {
                 let mut items = Vec::new();
@@ -197,7 +198,7 @@ impl CP {
                 Value::Table(tbl)
             }
             _ if t.text.chars().all(|c| c.is_alphanumeric() || c == '_') && !t.text.is_empty() => Value::Ident(t.text),
-            other => return Err(Diag::new(format!("expected a value, found {}", other.describe()), t.span)),
+            other => return Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected a value, found {}", other.describe()), t.span)),
         })
     }
 }
