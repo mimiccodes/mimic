@@ -81,7 +81,10 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 
 Arithmetic and comparison broadcast a scalar against a vector, and work elementwise on two vectors of equal length.
 
-**Parallelism is automatic.** Primitives over large arrays run on all cores. `xs ¨ f` runs in parallel whenever `f` is pure, meaning it never reaches `print` or FFI. Nothing needs to be declared.
+**Parallelism is automatic.** Nothing needs to be declared:
+* Primitives over large arrays run on all cores.
+* `xs ¨ f` runs in parallel whenever `f` is pure, meaning it never reaches `print` or FFI.
+* Pure recursive functions compile to interaction nets, so independent calls run on different cores. In `fib(n - 1) + fib(n - 2)`, both calls proceed at once.
 
 **Known gap:** `÷` always produces `f64`, and there is no integer division operator yet.
 

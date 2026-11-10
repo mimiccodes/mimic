@@ -25,6 +25,8 @@ use mimic_syntax::glyphs::Prim;
 use std::fmt::Display;
 use std::path::Path;
 
+pub mod tonet;
+
 pub struct Settings {
     /// LLVM target triple; `None` = host.
     pub triple: Option<String>,
@@ -35,6 +37,8 @@ pub struct Settings {
     pub emit_main: bool,
     /// Keep `pub` functions externally visible (library builds).
     pub export_pub: bool,
+    /// Compile pure functions to interaction nets (parallel by default).
+    pub use_net: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -48,8 +52,9 @@ impl<T, E: Display> OrStr<T> for Result<T, E> {
     }
 }
 
-/// Compile the checked program to a native object file (and optionally textual IR).
-pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>) -> R<()> {
+/// Compile the checked program to a native object file (and optionally
+/// textual LLVM IR and the generated interaction nets).
+pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<()> {
     Target::initialize_all(&InitializationConfig::default());
     let triple = match &settings.triple {
         Some(t) => TargetTriple::create(t),
@@ -76,6 +81,11 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>) 
     module.set_triple(&triple);
     module.set_data_layout(&tm.get_target_data().get_data_layout());
 
+    let purity = mimic_check::Purity::analyze(p);
+    let plan = if settings.use_net { tonet::plan(p, &purity) } else { tonet::NetPlan::default() };
+    if let Some(path) = net_out {
+        std::fs::write(path, plan.book.to_string()).s()?;
+    }
     let mut cg = Cg {
         ctx: &ctx,
         module,
@@ -88,9 +98,14 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>) 
         cur_ret: None,
         scopes: Vec::new(),
         lambdas: 0,
-        purity: mimic_check::Purity::analyze(p),
+        purity,
+        plan,
+        net_ensure: None,
+        natives: Vec::new(),
+        native_frame: false,
     };
     cg.declare_all(settings)?;
+    cg.emit_book()?;
     for fid in 0..p.fns.len() {
         cg.define(fid)?;
     }
@@ -137,6 +152,13 @@ struct Cg<'ctx, 'p> {
     scopes: Vec<Vec<Local<'ctx>>>,
     lambdas: usize,
     purity: mimic_check::Purity,
+    plan: tonet::NetPlan,
+    /// `_mimic_net_ensure()`: registers the book once.
+    net_ensure: Option<FunctionValue<'ctx>>,
+    /// Native bodies (`<symbol>.native`) of net-entered functions.
+    natives: Vec<Option<FunctionValue<'ctx>>>,
+    /// Compiling a native body: calls go to native versions, frames are counted.
+    native_frame: bool,
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -172,6 +194,10 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_check_type" => void.fn_type(&[p, i32t, p], false),
             "mim_rt_init" => void.fn_type(&[i32t, p], false),
             "mim_rt_shutdown" => self.ctx.i32_type().fn_type(&[i32t], false),
+            "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
+            "mim_native_enter" => self.ctx.i32_type().fn_type(&[], false),
+            "mim_native_leave" => void.fn_type(&[], false),
+            "mim_net_call" => ptr.fn_type(&[i32t, i32t, p], false),
             other => panic!("unknown runtime function {other}"),
         };
         self.module.add_function(name, ty, Some(Linkage::External))
@@ -242,10 +268,21 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 FnKind::Extern { .. } => None,
             };
-            let _ = fid;
+            // Net-entered functions also get a plain native body, used by the
+            // runtime's native fallback and by native-to-native calls.
+            let native = match (&fv, self.plan.entered.contains(&fid)) {
+                (Some(f), true) => Some(self.module.add_function(&format!("{}.native", f.get_name().to_str().unwrap()), f.get_type(), Some(Linkage::Internal))),
+                _ => None,
+            };
             self.fns.push(fv);
+            self.natives.push(native);
         }
         Ok(())
+    }
+
+    /// The function to call for `fid` from the current context.
+    fn callee(&self, fid: usize) -> Option<FunctionValue<'ctx>> {
+        if self.native_frame { self.natives[fid].or(self.fns[fid]) } else { self.fns[fid] }
     }
 
     fn extern_fn(&self, decl: &ExternFn) -> FunctionValue<'ctx> {
@@ -330,6 +367,68 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
+    // ---- interaction-net book --------------------------------------------
+
+    fn emit_book(&mut self) -> R<()> {
+        if self.plan.book.defs.is_empty() {
+            return Ok(());
+        }
+        let enc = mimic_net::encode(&self.plan.book).map_err(|e| format!("internal compiler error: {e}"))?;
+        let i64t = self.ctx.i64_type();
+        let global = |name: &str, data: &[u64]| {
+            let vals: Vec<_> = data.iter().map(|w| i64t.const_int(*w, false)).collect();
+            let arr = i64t.const_array(&vals);
+            let g = self.module.add_global(arr.get_type(), None, name);
+            g.set_linkage(Linkage::Internal);
+            g.set_constant(true);
+            g.set_initializer(&arr);
+            g.as_pointer_value()
+        };
+        let words = global("mimic_net_words", &enc.words);
+        let offsets = global("mimic_net_offsets", &enc.offsets);
+        // def index → native function (and its arity) for the runtime's native fallback
+        let ndefs = enc.offsets.len();
+        let mut fptrs = vec![self.ptr.const_null(); ndefs];
+        let mut arity = vec![0u64; ndefs];
+        for (fid, def) in &self.plan.def_index {
+            let n = self.p.fns[*fid].arity();
+            if n <= 6
+                && let Some(f) = self.natives[*fid].or(self.fns[*fid]) {
+                    fptrs[*def as usize] = f.as_global_value().as_pointer_value();
+                    arity[*def as usize] = n as u64;
+                }
+        }
+        let ftab = self.ptr.const_array(&fptrs);
+        let gf = self.module.add_global(ftab.get_type(), None, "mimic_net_natives");
+        gf.set_linkage(Linkage::Internal);
+        gf.set_constant(true);
+        gf.set_initializer(&ftab);
+        let i8t = self.ctx.i8_type();
+        let atab = i8t.const_array(&arity.iter().map(|a| i8t.const_int(*a, false)).collect::<Vec<_>>());
+        let ga = self.module.add_global(atab.get_type(), None, "mimic_net_arity");
+        ga.set_linkage(Linkage::Internal);
+        ga.set_constant(true);
+        ga.set_initializer(&atab);
+        let f = self.module.add_function("_mimic_net_ensure", self.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
+        let bb = self.ctx.append_basic_block(f, "entry");
+        self.b.position_at_end(bb);
+        // type-check messages: an array of C strings
+        let msgs: Vec<_> = self.plan.check_msgs.clone().iter().map(|m| self.cstring(m)).collect::<R<Vec<_>>>()?;
+        let mtab = self.ptr.const_array(&if msgs.is_empty() { vec![self.ptr.const_null()] } else { msgs });
+        let gm = self.module.add_global(mtab.get_type(), None, "mimic_net_check_msgs");
+        gm.set_linkage(Linkage::Internal);
+        gm.set_constant(true);
+        gm.set_initializer(&mtab);
+        let n = self.i32c(enc.offsets.len() as i32);
+        self.call_rt(
+            "mim_net_book_once",
+            &[words.into(), offsets.into(), n, gf.as_pointer_value().into(), ga.as_pointer_value().into(), gm.as_pointer_value().into()],
+        )?;
+        self.b.build_return(None).s()?;
+        self.net_ensure = Some(f);
+        Ok(())
+    }
+
     // ---- function bodies -----------------------------------------------
 
     fn entry_alloca(&self, name: &str) -> R<PointerValue<'ctx>> {
@@ -344,9 +443,22 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn define(&mut self, fid: usize) -> R<()> {
+        if !matches!(self.p.fns[fid].kind, FnKind::User(_)) {
+            return Ok(());
+        }
+        let entered = self.plan.entered.contains(&fid);
+        self.define_body(fid, self.fns[fid].unwrap(), entered, false)?;
+        if let Some(native) = self.natives[fid] {
+            self.define_body(fid, native, false, true)?;
+        }
+        Ok(())
+    }
+
+    /// Emit one body for `fid` into `fv`: the net wrapper, a counted native
+    /// body (for net-entered functions), or a plain native body.
+    fn define_body(&mut self, fid: usize, fv: FunctionValue<'ctx>, wrapper: bool, native: bool) -> R<()> {
         let f = &self.p.fns[fid];
         let FnKind::User(decl) = &f.kind else { return Ok(()) };
-        let fv = self.fns[fid].unwrap();
         let path = self.p.fn_path(fid).join("::");
         self.cur_fn = Some(fv);
         self.cur_mod = f.module;
@@ -368,11 +480,44 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(slot, arg).s()?;
             self.scopes[0].push(Local { name: prm.name.clone(), slot, owned: false, mutable: false });
         }
+        if native {
+            // Bounded native recursion: past the limit, hand the call to the net.
+            let deep = self.call_rt("mim_native_enter", &[])?.unwrap().into_int_value();
+            let is_deep = self.b.build_int_compare(IntPredicate::NE, deep, self.ctx.i32_type().const_zero(), "deep").s()?;
+            let deep_bb = self.ctx.append_basic_block(fv, "deep");
+            let body_bb = self.ctx.append_basic_block(fv, "body");
+            self.b.build_conditional_branch(is_deep, deep_bb, body_bb).s()?;
+            self.b.position_at_end(deep_bb);
+            let args: Vec<BasicMetadataValueEnum> = (0..decl.params.len()).map(|i| fv.get_nth_param(i as u32).unwrap().into()).collect();
+            let r = self.b.build_call(self.fns[fid].unwrap(), &args, "").s()?.try_as_basic_value().basic().unwrap();
+            self.call_rt("mim_native_leave", &[])?;
+            self.b.build_return(Some(&r)).s()?;
+            self.b.position_at_end(body_bb);
+            self.native_frame = true;
+        }
+        if wrapper {
+            // Parallel by default: run this function as an interaction net.
+            let def = self.plan.def_index[&fid];
+            self.b.build_call(self.net_ensure.unwrap(), &[], "").s()?;
+            let n = decl.params.len() as u32;
+            let arr_ty = self.ptr.array_type(n.max(1));
+            let arr = self.b.build_alloca(arr_ty, "args").s()?;
+            let i64t = self.ctx.i64_type();
+            for i in 0..n {
+                let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                self.b.build_store(slot, fv.get_nth_param(i).unwrap()).s()?;
+            }
+            let r = self.call_rt_ptr("mim_net_call", &[self.i32c(def as i32), self.i32c(n as i32), arr.into()])?;
+            self.ret(r)?;
+            self.scopes.clear();
+            return Ok(());
+        }
         let v = self.block(&decl.body)?;
         if !self.terminated() {
             self.ret(v)?;
         }
         self.scopes.clear();
+        self.native_frame = false;
         Ok(())
     }
 
@@ -394,6 +539,9 @@ impl<'ctx> Cg<'ctx, '_> {
         if let Some((code, what)) = self.cur_ret.clone() {
             let w = self.cstring(&what)?;
             self.call_rt("mim_check_type", &[v.v.into(), self.i32c(code), w.into()])?;
+        }
+        if self.native_frame {
+            self.call_rt("mim_native_leave", &[])?;
         }
         self.b.build_return(Some(&v.v)).s()?;
         Ok(())
@@ -514,6 +662,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_fn = self.cur_fn.replace(f);
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_ret = self.cur_ret.take();
+        let saved_native = std::mem::replace(&mut self.native_frame, false);
         let entry = self.ctx.append_basic_block(f, "entry");
         self.b.position_at_end(entry);
         let slot = self.entry_alloca(param)?;
@@ -526,6 +675,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.scopes = saved_scopes;
         self.cur_fn = saved_fn;
         self.cur_ret = saved_ret;
+        self.native_frame = saved_native;
         self.b.position_at_end(saved_bb);
         Ok(f)
     }
@@ -542,7 +692,9 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Lambda { param, body } => Ok(self.lambda(param, body)?.as_global_value().as_pointer_value()),
             ExprKind::Path(path) => {
                 let f = self.resolve_fn(path)?;
-                Ok(self.fns[f].ok_or("extern function used as a value")?.as_global_value().as_pointer_value())
+                // ¨ is already parallel across elements: call the native body
+                let fv = self.natives[f].or(self.fns[f]).ok_or("extern function used as a value")?;
+                Ok(fv.as_global_value().as_pointer_value())
             }
             _ => Err("expected a function".into()),
         }
@@ -615,7 +767,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         match &self.p.fns[fid].kind {
                             FnKind::User(_) => {
                                 let argv: Vec<BasicMetadataValueEnum> = vals.iter().map(|v| v.v.into()).collect();
-                                let r = self.b.build_call(self.fns[fid].unwrap(), &argv, "").s()?;
+                                let r = self.b.build_call(self.callee(fid).unwrap(), &argv, "").s()?;
                                 V { v: r.try_as_basic_value().basic().unwrap().into_pointer_value(), owned: true }
                             }
                             FnKind::Extern { decl, .. } => {

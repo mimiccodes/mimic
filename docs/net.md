@@ -85,8 +85,64 @@ fib(32), which takes 81M interactions:
 
 Single-thread throughput still has room to improve. The known costs are the atomic exchange on every wire and the per-call expansion of small definitions. A later phase will add HVM-style optimisations: eager pre-reduction of definitions, and skipping wire allocation for direct links.
 
-## Phase 3: compiling Mimic to nets
+## Compiling Mimic to nets (phase 3)
 
-* Pure functions, as decided by `mimic_check::Purity`, compile to definitions. Everything else stays in LLVM code, which calls `mim_net_call`.
-* `if` compiles to SWI, so only the taken branch is ever expanded.
-* Independent subexpressions become independent redexes. This is what makes "parallel by default" cover ordinary code, not only array primitives.
+The compiler is `crates/mimic-codegen/src/tonet.rs`. Run `mimic build --emit-net` to see the nets it generates.
+
+### Which functions are compiled
+
+* **Eligibility.** A function is compiled when it is pure and its body stays inside the net subset:
+  * numbers, bools, variables, `let` (immutable), operators, primitives other than `¨`, and indexing;
+  * `if`/`else`;
+  * early `return`s that can be rewritten as `if`/`else`;
+  * calls to other eligible functions.
+
+  Everything else stays native, and every function keeps its LLVM version.
+* **Entry.** An eligible function that calls functions is *entered* through the net: its native symbol becomes a wrapper around `mim_net_call`. Leaf functions stay native when called from native code, because there is nothing in them to parallelise.
+
+### How code becomes a net
+
+* **Sharing.** A variable used *k* times is bound to a chain of DUP nodes; an unused variable is erased.
+* **`if`** compiles to SWI over two lifted branch definitions, which receive the free variables as arguments. Only the taken branch is ever expanded.
+* **Type annotations** compile to `check` operators. Nets enforce the same checks, with the same messages, as native code.
+
+What `fib` compiles to:
+
+```text
+@main.fib = ({n_u0 n_u1} r) & n_u0 ~ $<(#2 c) & c ~ ?((@main.fib.then1 @main.fib.else1) (n_u1 r))
+@main.fib.then1 = (n n)
+@main.fib.else1 = ({a b} r)
+  & a ~ $-(#1 t1) & @main.fib ~ (t1 t2)
+  & b ~ $-(#2 t3) & @main.fib ~ (t3 t4)
+  & t2 ~ $+(t4 r)
+```
+
+### Adaptive native fallback
+
+A pure interpreter of nets is several times slower per core than compiled code. Mimic therefore uses the net to **split** work and native code to **do** it:
+
+* The compiled program registers, for each definition, the native body (`<fn>.native`) of the function it came from.
+* When a call is about to expand, the runtime calls the native body instead if all three of these hold:
+  * every argument is already a value;
+  * every worker is busy;
+  * some other work remains to be stolen.
+* Before a native call, a worker publishes its pending redexes so that idle workers can steal them meanwhile.
+
+The result is native speed on one core and native speed on every core in parallel.
+
+* **Deep recursion.** Native recursion is bounded at 2048 frames, and worker threads have 32 MB stacks. Deeper calls go back to the heap-allocated net, so `tri(100000)` (100,000-deep non-tail recursion) runs without overflowing the stack.
+* **Comparing.** `--no-net` turns all of this off. The golden tests run every program both ways and require identical output.
+
+### fib(32): unmodified Mimic code, M3 Pro (6P+6E), best of 3
+
+| Configuration | Time |
+|---|---|
+| Native, `--no-net` | 1.59 s |
+| Net, 1 thread | 1.80 s |
+| Net, 4 threads | 0.58 s |
+| Net, 12 threads | **0.38 s (4.2× native)** |
+
+### Limits
+
+* The net subset excludes `¨`/lambdas, strings, array literals, mutation and closures. Those functions run natively, and `¨` is still data-parallel.
+* Interaction counts are no longer identical across thread counts once native fallback is active. Results are identical.

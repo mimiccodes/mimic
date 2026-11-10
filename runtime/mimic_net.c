@@ -54,8 +54,13 @@ enum { NK_INT = 0, NK_BOX = 1, NK_BOOL = 2, NK_CHAR = 3 };
 #define OP_NOT 17
 #define OP_PRIM1 32
 #define OP_PRIM2 64
+#define OP_INDEX 96
+#define OP_CHECK 128 /* 128 + type code; message index in aux bits 12.. */
 
 typedef struct { Port a, b; } Pair;
+
+/* hot helpers must inline: each is a handful of instructions */
+#define HOT static inline __attribute__((always_inline))
 
 /* ==== global tables & per-thread allocation ============================== */
 
@@ -79,7 +84,7 @@ typedef struct {
 
 static _Thread_local NetAlloc t_alloc;
 
-static void vec_push(u32vec *v, uint32_t x) {
+HOT void vec_push(u32vec *v, uint32_t x) {
     if (v->n == v->cap) {
         v->cap = v->cap ? v->cap * 2 : 1024;
         v->v = (uint32_t *)realloc(v->v, v->cap * sizeof(uint32_t));
@@ -108,7 +113,7 @@ static void alloc_flush(NetAlloc *al) {
     }
 }
 
-static uint32_t node_alloc(NetAlloc *al) {
+HOT uint32_t node_alloc(NetAlloc *al) {
     al->nodes++;
     if (al->node_free.n) return al->node_free.v[--al->node_free.n];
     if (al->nb == al->ne) {
@@ -120,12 +125,12 @@ static uint32_t node_alloc(NetAlloc *al) {
     return (uint32_t)al->nb++;
 }
 
-static void node_free(NetAlloc *al, uint32_t loc) {
+HOT void node_free(NetAlloc *al, uint32_t loc) {
     al->nodes--;
     vec_push(&al->node_free, loc);
 }
 
-static uint32_t var_alloc(NetAlloc *al) {
+HOT uint32_t var_alloc(NetAlloc *al) {
     uint32_t x;
     if (al->var_free.n) {
         x = al->var_free.v[--al->var_free.n];
@@ -138,16 +143,16 @@ static uint32_t var_alloc(NetAlloc *al) {
         }
         x = (uint32_t)al->vb++;
     }
-    __atomic_store_n(&g_vars[x], NONE, __ATOMIC_RELAXED);
+    g_vars[x] = NONE; /* unpublished until a port referencing it is linked */
     return x;
 }
 
-static void var_free(NetAlloc *al, uint32_t x) {
-    __atomic_store_n(&g_vars[x], 0, __ATOMIC_RELAXED);
+HOT void var_free(NetAlloc *al, uint32_t x) {
+    g_vars[x] = 0; /* only the owner of both ends frees a wire */
     vec_push(&al->var_free, x);
 }
 
-static Pair node_take(NetAlloc *al, uint32_t loc) {
+HOT Pair node_take(NetAlloc *al, uint32_t loc) {
     Pair p = g_node[loc];
     node_free(al, loc);
     return p;
@@ -165,7 +170,7 @@ static Port num_box(NetAlloc *al, int dtype, uint64_t bits) {
     return ((uint64_t)loc << 6) | ((uint64_t)NK_BOX << 4) | T_NUM;
 }
 
-static Port num_int(NetAlloc *al, int64_t x) {
+HOT Port num_int(NetAlloc *al, int64_t x) {
     if (x >= INLINE_MIN && x <= INLINE_MAX) return ((uint64_t)x << 6) | ((uint64_t)NK_INT << 4) | T_NUM;
     return num_box(al, MIM_I64, (uint64_t)x);
 }
@@ -182,7 +187,7 @@ static Port num_char(int64_t c) { return ((uint64_t)(c & 0xFF) << 6) | ((uint64_
 typedef struct { int dtype; int64_t i; double f; } numv;
 
 /* Read a NUM port without consuming it. */
-static numv num_peek(Port p) {
+HOT numv num_peek(Port p) {
     numv v;
     switch ((uint32_t)((p >> 4) & 3)) {
     case NK_INT: v.dtype = MIM_I64; v.i = (int64_t)p >> 6; v.f = (double)v.i; break;
@@ -198,10 +203,10 @@ static numv num_peek(Port p) {
     return v;
 }
 
-static int num_is_boxed(Port p) { return P_TAG(p) == T_NUM && ((p >> 4) & 3) == NK_BOX; }
+HOT int num_is_boxed(Port p) { return P_TAG(p) == T_NUM && ((p >> 4) & 3) == NK_BOX; }
 
 /* Consume a value port: free its box / release its array. */
-static void value_drop(NetAlloc *al, Port p) {
+HOT void value_drop(NetAlloc *al, Port p) {
     if (num_is_boxed(p)) node_free(al, (uint32_t)(p >> 6));
     else if (P_TAG(p) == T_ARR) mim_release((mim_val *)(uintptr_t)P_PAY(p));
 }
@@ -317,7 +322,7 @@ static Port apply2(NetAlloc *al, int op, Port a, Port b) {
         return r;
     }
     mim_val *x = val_from_port(al, a), *y = val_from_port(al, b);
-    mim_val *r = op >= OP_PRIM2 ? mim_prim2(op - OP_PRIM2, x, y) : mim_binop(op, x, y);
+    mim_val *r = op == OP_INDEX ? mim_index(x, y) : op >= OP_PRIM2 ? mim_prim2(op - OP_PRIM2, x, y) : mim_binop(op, x, y);
     mim_release(x);
     mim_release(y);
     return port_from_owned_val(al, r);
@@ -336,7 +341,29 @@ static Port apply1(NetAlloc *al, int op, Port a) {
     return port_from_owned_val(al, r);
 }
 
-static int op_is_unary(int op) { return op == OP_NEG || op == OP_NOT || (op >= OP_PRIM1 && op < OP_PRIM2); }
+static const char *const *g_check_msgs = NULL;
+
+/* Type-annotation check inside the net: same rules and messages as native code. */
+static Port apply_check(NetAlloc *al, uint32_t aux, Port a) {
+    int ty = (int)(aux & 0xFF) - OP_CHECK;
+    const char *what = g_check_msgs ? g_check_msgs[aux >> 12] : "value";
+    if (P_TAG(a) == T_ARR) {
+        mim_check_type((mim_val *)(uintptr_t)P_PAY(a), ty, what);
+        return a;
+    }
+    numv v = num_peek(a);
+    int ok = (ty == 1 && (v.dtype == MIM_I64 || v.dtype == MIM_BOOL)) || (ty == 2 && v.dtype != MIM_CHAR) ||
+             (ty == 3 && v.dtype == MIM_BOOL) || (ty == 4 && v.dtype == MIM_CHAR);
+    if (!ok) {
+        mim_val *x = val_from_port(al, a);
+        mim_check_type(x, ty, what); /* panics with the standard message */
+    }
+    return a;
+}
+
+static int op_is_unary(int op) {
+    return op == OP_NEG || op == OP_NOT || (op >= OP_PRIM1 && op < OP_PRIM2) || (op >= OP_CHECK && op < OP_CHECK + 16);
+}
 
 /* ==== the book (global definitions) ====================================== */
 
@@ -371,6 +398,59 @@ void mim_net_book(const uint64_t *words, const uint64_t *offsets, uint32_t ndefs
     g_ndefs = ndefs;
 }
 
+/* ==== native fallback ====================================================
+ *
+ * Compiled programs register, per definition, the native (LLVM) version of
+ * the function it came from. When a call is about to be expanded in the net,
+ * all of its arguments are already values, and every worker is busy, the
+ * runtime calls the native version instead: the net is used to *split* work
+ * while cores are idle, and each core then runs its share at native speed.
+ * Native recursion is bounded (NATIVE_LIMIT frames); deeper calls go back to
+ * the heap-allocated net, so deep recursion cannot overflow the stack. */
+
+typedef mim_val *(*nat0)(void);
+typedef mim_val *(*nat1)(mim_val *);
+typedef mim_val *(*nat2)(mim_val *, mim_val *);
+typedef mim_val *(*nat3)(mim_val *, mim_val *, mim_val *);
+typedef mim_val *(*nat4)(mim_val *, mim_val *, mim_val *, mim_val *);
+typedef mim_val *(*nat5)(mim_val *, mim_val *, mim_val *, mim_val *, mim_val *);
+typedef mim_val *(*nat6)(mim_val *, mim_val *, mim_val *, mim_val *, mim_val *, mim_val *);
+
+static void *const *g_native = NULL;
+static const uint8_t *g_native_arity = NULL;
+
+#define NATIVE_LIMIT 2048
+static _Thread_local int32_t t_native_depth = 0;
+
+/* Prologue/epilogue of compiled native functions that may recurse. Returns
+ * non-zero when the native stack is deep: the caller should use the net. */
+int32_t mim_native_enter(void) { return ++t_native_depth > NATIVE_LIMIT; }
+void mim_native_leave(void) { --t_native_depth; }
+
+/* Thread-safe one-time registration, used by compiled programs: the first
+ * caller loads the book, concurrent callers wait for it. */
+void mim_net_book_once(const uint64_t *words, const uint64_t *offsets, uint32_t ndefs, void *const *natives,
+                       const uint8_t *arity, const char *const *check_msgs) {
+    static int state = 0; /* 0 = empty, 1 = loading, 2 = ready */
+    if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) == 2) return;
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&state, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        mim_net_book(words, offsets, ndefs);
+        g_native = natives;
+        g_native_arity = arity;
+        g_check_msgs = check_msgs;
+        __atomic_store_n(&state, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2) {
+#if MIM_THREADS && !defined(_WIN32)
+        sched_yield();
+#elif MIM_THREADS
+        SwitchToThread();
+#endif
+    }
+}
+
 /* ==== workers, bags and runs =============================================
  *
  * Each worker reduces from a private stack with no synchronisation. Only
@@ -399,6 +479,7 @@ typedef struct {
 typedef struct {
     Run *run;
     int id;
+    int par; /* other workers may touch shared wires: use atomics */
     Bag *bag;
     NetAlloc *al;
     uint64_t itrs;
@@ -412,6 +493,7 @@ static void tm_init(TM *tm, Run *r, int id) {
     tm->id = id;
     tm->bag = &r->bags[id];
     tm->al = &t_alloc;
+    tm->par = r->nworkers > 1;
 }
 
 static void tm_done(TM *tm) {
@@ -420,7 +502,7 @@ static void tm_done(TM *tm) {
     alloc_flush(tm->al);
 }
 
-static void push_redex(TM *tm, Port a, Port b) {
+HOT void push_redex(TM *tm, Port a, Port b) {
     if (tm->lt == tm->lcap) {
         if (tm->lh > 0) {
             memmove(tm->loc, tm->loc + tm->lh, (size_t)(tm->lt - tm->lh) * sizeof(Redex));
@@ -505,10 +587,18 @@ static void publish_all(TM *tm) {
 
 /* ==== linking ============================================================ */
 
+/* Exchange a wire slot: atomic when other workers run, plain otherwise. */
+HOT Port var_xchg(int par, uint64_t x, Port v) {
+    if (par) return __atomic_exchange_n(&g_vars[x], v, __ATOMIC_ACQ_REL);
+    Port old = g_vars[x];
+    g_vars[x] = v;
+    return old;
+}
+
 /* Follow a var whose other end has already been resolved. */
-static Port enter(NetAlloc *al, Port var) {
+HOT Port enter(NetAlloc *al, int par, Port var) {
     while (P_TAG(var) == T_VAR) {
-        Port val = __atomic_exchange_n(&g_vars[P_PAY(var)], NONE, __ATOMIC_ACQ_REL);
+        Port val = var_xchg(par, P_PAY(var), NONE);
         if (val == NONE || val == 0) break;
         var_free(al, (uint32_t)P_PAY(var));
         var = val;
@@ -518,7 +608,7 @@ static Port enter(NetAlloc *al, Port var) {
 
 /* Connect A and B. Two principal ports form a redex; a var is resolved by
  * racing on its slot — whoever arrives second completes the connection. */
-static void net_link(TM *tm, Port A, Port B) {
+HOT void net_link(TM *tm, Port A, Port B) {
     for (;;) {
         if (P_TAG(A) != T_VAR && P_TAG(B) == T_VAR) {
             Port X = A;
@@ -529,8 +619,8 @@ static void net_link(TM *tm, Port A, Port B) {
             push_redex(tm, A, B);
             return;
         }
-        B = enter(tm->al, B);
-        Port A2 = __atomic_exchange_n(&g_vars[P_PAY(A)], B, __ATOMIC_ACQ_REL);
+        B = enter(tm->al, tm->par, B);
+        Port A2 = var_xchg(tm->par, P_PAY(A), B);
         if (A2 == NONE) return; /* first to arrive: the other end finishes the job */
         var_free(tm->al, (uint32_t)P_PAY(A));
         A = A2;
@@ -548,7 +638,7 @@ static Port lit_port(NetAlloc *al, const Def *d, uint64_t i) {
     return num_make(al, v);
 }
 
-static Port subst(NetAlloc *al, const Def *d, Port t, const uint32_t *nloc, const uint32_t *vloc) {
+HOT Port subst(NetAlloc *al, const Def *d, Port t, const uint32_t *nloc, const uint32_t *vloc) {
     switch (P_TAG(t)) {
     case T_VAR: return MK(T_VAR, vloc[P_PAY(t)]);
     case T_CON:
@@ -560,6 +650,11 @@ static Port subst(NetAlloc *al, const Def *d, Port t, const uint32_t *nloc, cons
     }
 }
 
+/* Expand definition `id` against `target`.
+ *
+ * Spine fusion: a call is `@f ~ (a1 (a2 … r))` and f's root is usually
+ * `(p1 (p2 … body))`. Instead of building f's root CONs only to annihilate
+ * them with the caller's, connect p_i ~ a_i directly. */
 static void expand(TM *tm, uint32_t id, Port target) {
     if (id >= g_ndefs) mim_panic("interaction net: unknown definition");
     const Def *d = &g_defs[id];
@@ -572,21 +667,109 @@ static void expand(TM *tm, uint32_t id, Port target) {
         nloc = heap;
         vloc = heap + d->nnodes + 1;
     }
-    for (uint32_t i = 0; i < d->nnodes; i++) nloc[i] = node_alloc(al);
+
+    /* walk the matching CON spines */
+#define MAX_SPINE 32
+    Port spine_tpl[MAX_SPINE], spine_arg[MAX_SPINE];
+    int nspine = 0;
+    Port tp = d->root, tg = target;
+    while (nspine < MAX_SPINE && P_TAG(tp) == T_CON && P_TAG(tg) == T_CON && P_AUX(tp) == 0 && P_AUX(tg) == 0) {
+        uint32_t tl = P_LOC(tp);
+        Pair arg = node_take(al, P_LOC(tg));
+        spine_tpl[nspine] = d->nodes[2 * tl];
+        spine_arg[nspine] = arg.a;
+        nspine++;
+        tp = d->nodes[2 * tl + 1];
+        tg = arg.b;
+    }
+    if (nspine) tm->itrs += (uint64_t)nspine; /* count the annihilations we skipped */
+
+    /* mark spine nodes so they are never materialised */
+    if (nspine)
+        for (uint32_t i = 0; i < d->nnodes; i++) nloc[i] = 0;
+    Port walk = d->root;
+    for (int i = 0; i < nspine; i++) {
+        nloc[P_LOC(walk)] = UINT32_MAX;
+        walk = d->nodes[2 * P_LOC(walk) + 1];
+    }
+    for (uint32_t i = 0; i < d->nnodes; i++) {
+        if (nspine && nloc[i] == UINT32_MAX) continue;
+        nloc[i] = node_alloc(al);
+    }
     for (uint32_t i = 0; i < d->nvars; i++) vloc[i] = var_alloc(al);
     for (uint32_t i = 0; i < d->nnodes; i++) {
+        if (nspine && nloc[i] == UINT32_MAX) continue;
         g_node[nloc[i]].a = subst(al, d, d->nodes[2 * i], nloc, vloc);
         g_node[nloc[i]].b = subst(al, d, d->nodes[2 * i + 1], nloc, vloc);
     }
     for (uint32_t i = 0; i < d->nredex; i++)
         net_link(tm, subst(al, d, d->redex[2 * i], nloc, vloc), subst(al, d, d->redex[2 * i + 1], nloc, vloc));
-    net_link(tm, subst(al, d, d->root, nloc, vloc), target);
-    free(heap);
+    for (int i = 0; i < nspine; i++) net_link(tm, subst(al, d, spine_tpl[i], nloc, vloc), spine_arg[i]);
+    net_link(tm, subst(al, d, tp, nloc, vloc), tg);
+    if (heap) free(heap);
+}
+
+/* If `p` is a value (or a wire whose other end already holds one), return it,
+ * taking ownership; otherwise 0. Never blocks and never changes an unready wire. */
+HOT Port ready_value(TM *tm, Port p) {
+    uint32_t t = P_TAG(p);
+    if (t == T_NUM || t == T_ARR) return p;
+    if (t != T_VAR) return 0;
+    Port v = tm->par ? __atomic_load_n(&g_vars[P_PAY(p)], __ATOMIC_ACQUIRE) : g_vars[P_PAY(p)];
+    if (v == NONE || v == 0 || (P_TAG(v) != T_NUM && P_TAG(v) != T_ARR)) return 0;
+    var_free(tm->al, (uint32_t)P_PAY(p)); /* the other end is done with it: we own both */
+    return v;
+}
+
+static void share(TM *tm);
+static void publish_all(TM *tm);
+
+static int try_native(TM *tm, uint32_t id, Port target) {
+    if (!g_native || !g_native[id] || P_TAG(target) != T_CON) return 0;
+    if (t_native_depth >= NATIVE_LIMIT) return 0;
+    if (tm->par) {
+        /* only when every worker is busy, and others still have work to steal */
+        if (__atomic_load_n(&tm->run->idle, __ATOMIC_RELAXED) > 0) return 0;
+        if (tm->lt == tm->lh && !bag_nonempty(tm->bag)) return 0;
+    }
+    int ar = g_native_arity[id];
+    uint32_t locs[6];
+    Port spine = target;
+    for (int i = 0; i < ar; i++) {
+        if (P_TAG(spine) != T_CON || P_AUX(spine) != 0) return 0;
+        uint32_t loc = P_LOC(spine);
+        Port a = ready_value(tm, g_node[loc].a);
+        if (!a) return 0; /* not ready: expand in the net (resolved args stay resolved) */
+        g_node[loc].a = a;
+        locs[i] = loc;
+        spine = g_node[loc].b;
+    }
+    NetAlloc *al = tm->al;
+    mim_val *args[6];
+    for (int i = 0; i < ar; i++) {
+        args[i] = val_from_port(al, g_node[locs[i]].a);
+        node_free(al, locs[i]);
+    }
+    if (tm->par && tm->lt > tm->lh) publish_all(tm); /* let thieves progress meanwhile */
+    void *f = g_native[id];
+    mim_val *r;
+    switch (ar) {
+    case 0: r = ((nat0)f)(); break;
+    case 1: r = ((nat1)f)(args[0]); break;
+    case 2: r = ((nat2)f)(args[0], args[1]); break;
+    case 3: r = ((nat3)f)(args[0], args[1], args[2]); break;
+    case 4: r = ((nat4)f)(args[0], args[1], args[2], args[3]); break;
+    case 5: r = ((nat5)f)(args[0], args[1], args[2], args[3], args[4]); break;
+    default: r = ((nat6)f)(args[0], args[1], args[2], args[3], args[4], args[5]); break;
+    }
+    for (int i = 0; i < ar; i++) mim_release(args[i]);
+    net_link(tm, port_from_owned_val(al, r), spine);
+    return 1;
 }
 
 /* ==== interaction rules ================================================== */
 
-static int is_nullary(uint32_t t) { return t == T_ERA || t == T_NUM || t == T_ARR || t == T_REF; }
+HOT int is_nullary(uint32_t t) { return t == T_ERA || t == T_NUM || t == T_ARR || t == T_REF; }
 
 static void interact(TM *tm, Port a, Port b) {
     NetAlloc *al = tm->al;
@@ -608,7 +791,7 @@ static void interact(TM *tm, Port a, Port b) {
             Pair n = node_take(al, P_LOC(b));
             net_link(tm, n.a, a);
             net_link(tm, n.b, a);
-        } else { /* CALL */
+        } else if (!try_native(tm, (uint32_t)P_PAY(a), b)) { /* CALL */
             expand(tm, (uint32_t)P_PAY(a), b);
         }
         return;
@@ -635,7 +818,7 @@ static void interact(TM *tm, Port a, Port b) {
             Pair n = node_take(al, P_LOC(b));
             if (op_is_unary(op)) {
                 net_link(tm, n.a, ERA_P);
-                net_link(tm, n.b, apply1(al, op, a));
+                net_link(tm, n.b, op >= OP_CHECK ? apply_check(al, aux, a) : apply1(al, op, a));
                 return;
             }
             uint32_t tx = P_TAG(n.a);
@@ -660,6 +843,15 @@ static void interact(TM *tm, Port a, Port b) {
                 mim_release(v);
             }
             Pair n = node_take(al, P_LOC(b));
+            if (P_TAG(n.a) == T_CON && P_AUX(n.a) == 0) {
+                /* the branch pair is right here: pick one, erase the other
+                 * (counted as the CON~CON annihilation it replaces) */
+                Pair br = node_take(al, P_LOC(n.a));
+                tm->itrs++;
+                net_link(tm, truth ? br.a : br.b, n.b);
+                net_link(tm, truth ? br.b : br.a, ERA_P);
+                return;
+            }
             uint32_t m = node_alloc(al);
             g_node[m].a = truth ? n.b : ERA_P;
             g_node[m].b = truth ? ERA_P : n.b;
@@ -770,9 +962,9 @@ static mim_val *net_reduce(TM *seed, uint32_t root_var) {
         if (r->nworkers > 1) parallel_for_grain(r->nworkers, 1, net_chunk, r);
         else net_chunk(r, 0, 1);
         __atomic_fetch_add(&g_net_interactions, r->interactions, __ATOMIC_RELAXED);
-        Port res = enter(al, MK(T_VAR, root_var));
+        Port res = enter(al, 0, MK(T_VAR, root_var)); /* workers have joined */
+        /* enter() already freed the root wire when it followed it */
         if (P_TAG(res) == T_VAR) mim_panic("interaction net: the result is disconnected");
-        var_free(al, root_var);
         if (P_TAG(res) != T_REF) return val_from_port(al, res);
         /* the result is a lazy reference: expand it and keep reducing */
         root_var = var_alloc(al);
@@ -796,6 +988,7 @@ mim_val *mim_net_call(uint32_t def, int32_t nargs, mim_val **args) {
 
     TM seed;
     tm_init(&seed, &r, 0);
+    seed.par = 0; /* setup happens before any worker starts */
     NetAlloc *al = seed.al;
     uint32_t root = var_alloc(al);
     Port target = MK(T_VAR, root);

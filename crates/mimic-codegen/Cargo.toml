@@ -8,3 +8,4 @@ license.workspace = true
 mimic-syntax.workspace = true
 mimic-check.workspace = true
 inkwell.workspace = true
+mimic-net.workspace = true

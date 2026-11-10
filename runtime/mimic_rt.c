@@ -154,13 +154,15 @@ static void start_pool(void) {
     cond_init(&g_done);
     for (int i = 1; i < g_nthreads; i++) {
 #ifdef _WIN32
-        HANDLE h = CreateThread(NULL, 0, worker, NULL, 0, NULL);
+        HANDLE h = CreateThread(NULL, (SIZE_T)32 << 20, worker, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
         if (h) CloseHandle(h);
 #else
         pthread_t t;
         pthread_attr_t a;
         pthread_attr_init(&a);
         pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        /* native code may recurse (up to NATIVE_LIMIT frames) on workers */
+        pthread_attr_setstacksize(&a, (size_t)32 << 20);
         pthread_create(&t, &a, worker, NULL);
         pthread_attr_destroy(&a);
 #endif

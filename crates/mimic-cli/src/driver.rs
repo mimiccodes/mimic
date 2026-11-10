@@ -40,6 +40,8 @@ impl Input {
 
 pub struct Profile {
     pub release: bool,
+    /// Compile pure functions to interaction nets (default on).
+    pub net: bool,
     pub opt: u8,
     pub leak_check: bool,
 }
@@ -51,7 +53,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, opt: p.opt, leak_check: p.leak_check }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -260,7 +262,7 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     d
 }
 
-pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool) -> Result<Artifact, String> {
+pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, String> {
     let program = load(input)?;
     if let Input::Project(p) = input {
         crate::modfile::sync(p, &program)?;
@@ -270,6 +272,7 @@ pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool) -
     let name = input.name();
     let obj = dir.join(format!("{name}.o"));
     let ir = dir.join(format!("{name}.ll"));
+    let net = dir.join(format!("{name}.mnet"));
     let is_exe = input.is_bin();
     mimic_codegen::compile(
         &program,
@@ -279,9 +282,11 @@ pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool) -
             leak_check: profile.leak_check,
             emit_main: is_exe,
             export_pub: !is_exe,
+            use_net: profile.net,
         },
         &obj,
         emit_ir.then_some(ir.as_path()),
+        emit_net.then_some(net.as_path()),
     )?;
     let rt = runtime_object(target, profile.release)?;
     if is_exe {

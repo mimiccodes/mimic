@@ -7,7 +7,7 @@
 | `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. |
 | `mimic init [--name N] [--bin] [--lib]` | Turn the current directory into a project. |
 | `mimic run [file.mim] [--debug\|--release] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. |
-| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. |
+| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
 | `mimic check [file.mim]` | Parse, resolve and check everything without generating code. |
 | `mimic mod init` | Create `mod.mim`. |
 | `mimic mod update` | Regenerate `mod.mim`. |

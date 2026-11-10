@@ -34,6 +34,15 @@ struct ProfileArgs {
     /// Build with the release profile: optimised (-O3)
     #[arg(long)]
     release: bool,
+    /// Do not compile pure functions to interaction nets (everything native)
+    #[arg(long)]
+    no_net: bool,
+}
+
+fn profile_of(input: &Input, args: ProfileArgs) -> Profile {
+    let mut p = Profile::for_input(input, args.release);
+    p.net = !args.no_net;
+    p
 }
 
 #[derive(Args)]
@@ -92,6 +101,9 @@ enum Cmd {
         /// Write the LLVM IR next to the object file (target/<profile>/<name>.ll)
         #[arg(long)]
         emit_ir: bool,
+        /// Write the generated interaction nets (target/<profile>/<name>.mnet)
+        #[arg(long)]
+        emit_net: bool,
     },
     /// Check the project (or a file) for errors without compiling
     Check { file: Option<PathBuf> },
@@ -219,9 +231,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             status("Checked", format!("`{}`: no errors ({nfiles} file(s), {} function(s))", input.name(), p.fns.len()));
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Build { file, profile, target, all_targets, emit_ir } => {
+        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net } => {
             let input = driver::input_from(file.as_deref())?;
-            let prof = Profile::for_input(&input, profile.release);
+            let prof = profile_of(&input, profile);
             let mut targets = vec![match &target {
                 Some(t) => Target::parse(t)?,
                 None => Target::host(),
@@ -234,7 +246,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             for t in &targets {
                 status("Compiling", format!("{} ({}, {})", input.name(), prof.name(), t.name()));
-                let a = driver::build(&input, &prof, t, emit_ir)?;
+                let a = driver::build(&input, &prof, t, emit_ir, emit_net)?;
                 status("Finished", format!("{} → {}", if a.is_exe { "executable" } else { "static library" }, shown(&a.path)));
             }
             Ok(ExitCode::SUCCESS)
@@ -244,8 +256,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             if !input.is_bin() {
                 return Err("this is a library project; there is nothing to run (add `bin` to `kind` in mim.mim)".into());
             }
-            let prof = Profile::for_input(&input, profile.release);
-            let a = driver::build(&input, &prof, &Target::host(), false)?;
+            let prof = profile_of(&input, profile);
+            let a = driver::build(&input, &prof, &Target::host(), false, false)?;
             status("Running", shown(&a.path));
             let st = std::process::Command::new(&a.path).args(&args).status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))

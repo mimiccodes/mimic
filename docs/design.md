@@ -85,6 +85,15 @@ The parallel reducer for interaction nets is described in [net.md](net.md). It h
 
 Nets are written in a text format (`.mnet`) and run with `mimic net run`. Phase 3 compiles pure Mimic functions to this form.
 
+## Milestone 2, phase 3 (implemented): compiling Mimic to nets
+
+Pure functions compile to interaction nets ([net.md](net.md#compiling-mimic-to-nets-phase-3)), so ordinary recursive code runs in parallel with no annotations:
+* Independent calls such as `fib(n-1) + fib(n-2)` reduce on different cores.
+* `if` is lazy.
+* Type annotations are enforced in nets exactly as in native code.
+
+Adaptive native fallback runs each core's share of the work at native speed. Bounded native recursion hands deep recursion back to the heap-allocated net. `--no-net` compiles everything natively, for comparison.
+
 **Known bottleneck:** scalars are still boxed (one allocation per scalar result). Unboxed scalars arrive with NUM nodes in the net layer and static types in M4.
 
 ## Roadmap

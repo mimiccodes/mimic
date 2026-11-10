@@ -74,6 +74,10 @@ pub enum Op {
     Not,
     Prim1(Prim),
     Prim2(Prim),
+    /// `xs[i]`
+    Index,
+    /// Runtime type check (type code, message index); passes the value through.
+    Check(u8, u16),
 }
 
 impl Op {
@@ -84,11 +88,13 @@ impl Op {
             Op::Not => 17,
             Op::Prim1(p) => 32 + p as u32,
             Op::Prim2(p) => 64 + p as u32,
+            Op::Index => 96,
+            Op::Check(ty, msg) => (128 + ty as u32) | ((msg as u32) << 12),
         }
     }
 
     pub fn is_unary(self) -> bool {
-        matches!(self, Op::Neg | Op::Not | Op::Prim1(_))
+        matches!(self, Op::Neg | Op::Not | Op::Prim1(_) | Op::Check(..))
     }
 
     pub fn name(self) -> String {
@@ -97,6 +103,8 @@ impl Op {
             Op::Neg => "neg".into(),
             Op::Not => "not".into(),
             Op::Prim1(p) | Op::Prim2(p) => p.info().word.into(),
+            Op::Index => "index".into(),
+            Op::Check(ty, msg) => format!("check{ty}_{msg}"),
         }
     }
 
@@ -107,6 +115,11 @@ impl Op {
         match s {
             "neg" => return Some(Op::Neg),
             "not" => return Some(Op::Not),
+            "index" => return Some(Op::Index),
+            c if c.starts_with("check") => {
+                let (ty, msg) = c[5..].split_once('_')?;
+                return Some(Op::Check(ty.parse().ok()?, msg.parse().ok()?));
+            }
             _ => {}
         }
         let p = PRIMS.iter().find(|p| p.word == s)?;
