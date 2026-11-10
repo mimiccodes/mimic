@@ -174,6 +174,11 @@ pub fn load(input: &Input) -> Result<Program, String> {
     if !diags.is_empty() {
         return Err(summarize(render(&program, &diags)));
     }
+    // static type errors (inference over every reachable specialisation)
+    let tdiags = mimic_check::types::check_types(&program, !input.is_bin());
+    if !tdiags.is_empty() {
+        return Err(summarize(render(&program, &tdiags)));
+    }
     Ok(program)
 }
 

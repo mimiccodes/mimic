@@ -7,6 +7,8 @@ use mimic_syntax::{Diag, Span};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+pub mod types;
+
 pub type ModId = usize;
 pub type FnId = usize;
 
