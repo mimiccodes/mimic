@@ -1,5 +1,6 @@
 //! Compilation pipeline: load sources → parse → check → LLVM codegen →
-//! compile runtime with `zig cc` → link with `zig cc`.
+//! compile the runtime with the embedded Clang → link with the embedded LLD
+//! (or `zig cc` for targets not embedded yet; see toolchain.rs).
 
 use crate::targets::Target;
 use crate::report::Report;
@@ -10,7 +11,6 @@ use mimic_syntax::parser::parse_file;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub const RUNTIME_C: &str = include_str!("../../../runtime/mimic_rt.c");
 pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
@@ -194,41 +194,14 @@ pub fn load(input: &Input) -> Result<Program, Report> {
 
 // ---- toolchain --------------------------------------------------------------
 
-fn zig() -> Option<PathBuf> {
-    if let Some(z) = std::env::var_os("MIMIC_ZIG") {
-        return Some(PathBuf::from(z));
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(if cfg!(windows) { "zig.exe" } else { "zig" })).find(|p| p.is_file())
-}
-
-/// The C driver: `zig cc` (cross-capable) or the system `cc` for native builds.
-pub fn cc(target: &Target) -> Result<Command, String> {
-    match zig() {
-        Some(z) => {
-            let mut c = Command::new(z);
-            c.arg("cc");
-            if let Some(t) = &target.zig {
-                c.args(["-target", t]);
-            }
-            Ok(c)
-        }
-        None if target.zig.is_none() => Ok(Command::new("cc")),
-        None => Err("cross-compilation needs Zig: install it (https://ziglang.org) or set MIMIC_ZIG".into()),
-    }
-}
-
-pub fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
-    let out = c.output().map_err(|e| format!("cannot run {what}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{what} failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
-    }
-    Ok(())
-}
+pub use crate::toolchain::run_tool;
+use crate::toolchain::{self, LinkJob, Toolchain};
 
 /// Compile (and cache) the C runtime for a target.
-pub fn runtime_object(target: &Target, release: bool) -> Result<PathBuf, String> {
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}", target.name()).as_bytes());
+pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<PathBuf, String> {
+    let key = mimic_syntax::fnv1a(
+        format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}", target.name(), toolchain::describe(tc)).as_bytes(),
+    );
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -243,7 +216,7 @@ pub fn runtime_object(target: &Target, release: bool) -> Result<PathBuf, String>
     fs::write(src_dir.join("mimic_net.c"), RUNTIME_NET_C).map_err(|e| e.to_string())?;
     fs::write(dir.join("mimic_rt.h"), RUNTIME_H).map_err(|e| e.to_string())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
-    let mut c = cc(target)?;
+    let mut c = toolchain::cc(tc, target);
     c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);
     if release && target.zig.is_none() {
         c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
@@ -312,41 +285,23 @@ fn codegen_and_link(
         emit_ir.then_some(ir.as_path()),
         emit_net.then_some(net.as_path()),
     )?;
-    let rt = runtime_object(target, profile.release)?;
+    let tc = toolchain::select(target)?;
+    let rt = runtime_object(&tc, target, profile.release)?;
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
-        let mut c = cc(target)?;
-        c.arg(&obj).arg(&rt).arg("-o").arg(&exe);
+        let objects = [obj, rt];
+        let mut job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !profile.release };
         if let Input::Project(p) = input {
-            for s in &p.manifest.ffi_search {
-                c.arg(format!("-L{}", p.root.join(s).display()));
-            }
-            for l in &p.manifest.ffi_link {
-                c.arg(format!("-l{l}"));
-            }
+            job.search = p.manifest.ffi_search.iter().map(|s| p.root.join(s)).collect();
+            job.libs = p.manifest.ffi_link.clone();
         }
-        if target.needs_libm() {
-            c.arg("-lm");
-        }
-        if !profile.release {
-            c.arg("-g");
-        }
-        run_tool(c, "linking")?;
+        run_tool(toolchain::link(&tc, target, &job), "linking")?;
         Ok(Artifact { path: exe, is_exe: true })
     } else {
         // library: static archive of the program object + runtime
         let lib = dir.join(format!("lib{name}.a"));
         let _ = fs::remove_file(&lib);
-        let mut c = match zig() {
-            Some(z) => {
-                let mut c = Command::new(z);
-                c.arg("ar");
-                c
-            }
-            None => Command::new("ar"),
-        };
-        c.arg("rcs").arg(&lib).arg(&obj).arg(&rt);
-        run_tool(c, "archiving")?;
+        toolchain::archive(&tc, target, &lib, &[obj, rt])?;
         Ok(Artifact { path: lib, is_exe: false })
     }
 }
@@ -383,13 +338,15 @@ pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let c_src = dir.join("main.c");
     fs::write(&c_src, mimic_net::emit_c_main(&enc, entry, !release)).map_err(|e| e.to_string())?;
-    let rt = runtime_object(&target, release)?;
-    let exe = dir.join(&stem);
-    let mut c = cc(&target)?;
-    c.arg(if release { "-O2" } else { "-O0" }).arg(&c_src).arg(&rt).arg("-o").arg(&exe);
-    if target.needs_libm() {
-        c.arg("-lm");
-    }
+    let tc = toolchain::select(&target)?;
+    let rt = runtime_object(&tc, &target, release)?;
+    let main_obj = dir.join("main.o");
+    let mut c = toolchain::cc(&tc, &target);
+    c.args(["-c", if release { "-O2" } else { "-O0" }]).arg(&c_src).arg("-o").arg(&main_obj);
     run_tool(c, "compiling the net")?;
+    let exe = dir.join(&stem);
+    let objects = [main_obj, rt];
+    let job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !release };
+    run_tool(toolchain::link(&tc, &target, &job), "linking the net")?;
     Ok(exe)
 }

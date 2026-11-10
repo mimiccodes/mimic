@@ -4,6 +4,7 @@ mod driver;
 mod modfile;
 mod report;
 mod targets;
+mod toolchain;
 
 use clap::{Args, Parser, Subcommand};
 use driver::{Input, Profile};
@@ -204,6 +205,20 @@ enum ModCmd {
 }
 
 fn main() -> ExitCode {
+    // The embedded tools: `mimic cc …` is clang, `mimic ld.lld …` (and
+    // ld64.lld, lld-link, wasm-ld) is LLD. They take the tools' own flags, so
+    // they are dispatched before argument parsing.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(tool) = argv.get(1).map(String::as_str) {
+        if tool == "cc" || tool == "c++" {
+            let mut args = vec![if tool == "cc" { "clang".to_string() } else { "clang++".to_string() }];
+            args.extend(argv[2..].iter().cloned());
+            return ExitCode::from(mimic_toolchain::clang_main(&args).clamp(0, 255) as u8);
+        }
+        if mimic_toolchain::LLD_FLAVOURS.contains(&tool) {
+            return ExitCode::from(mimic_toolchain::lld_main(&argv[1..]).clamp(0, 255) as u8);
+        }
+    }
     let cli = Cli::parse();
     match run(cli) {
         Ok(code) => code,

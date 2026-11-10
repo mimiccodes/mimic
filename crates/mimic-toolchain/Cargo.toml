@@ -1,0 +1,17 @@
+[package]
+name = "mimic-toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded LLD linker and Clang C compiler for the mimic binary"
+build = "build.rs"
+links = "mimic_toolchain"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
+
+[build-dependencies]
+cc = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }

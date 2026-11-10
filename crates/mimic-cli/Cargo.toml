@@ -15,5 +15,6 @@ mimic-check.workspace = true
 mimic-codegen.workspace = true
 mimic-project.workspace = true
 mimic-net.workspace = true
+mimic-toolchain.workspace = true
 clap.workspace = true
 serde_json.workspace = true

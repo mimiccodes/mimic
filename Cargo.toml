@@ -13,6 +13,7 @@ mimic-check = { path = "crates/mimic-check" }
 mimic-codegen = { path = "crates/mimic-codegen" }
 mimic-project = { path = "crates/mimic-project" }
 mimic-net = { path = "crates/mimic-net" }
+mimic-toolchain = { path = "crates/mimic-toolchain" }
 clap = { version = "4.6", features = ["derive"] }
 serde_json = "1"
 inkwell = { version = "0.11", default-features = false, features = ["llvm23-1", "target-all"] }
