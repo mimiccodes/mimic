@@ -59,7 +59,26 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 
 **Literals.** Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
 
-**Lambdas.** A lambda is `x => body` (or `x ⇒ body`). It can be called through a pipeline or passed to `¨`. In M1 lambdas cannot capture variables, so pass values as arguments.
+**Functions are values.** Lambdas, named functions and operators can be stored, passed, returned and called:
+
+```mimic
+let k = 10
+let add_k = x => x + k                 // a lambda capturing k (by value)
+let mul = (a, b) => a * b              // several parameters; `() => …` for none
+apply(double, 21)                      // a named function as a value
+fold(xs, (+), 0)                       // an operator as a value: (+) (*) (==) …
+fn make_adder(n: i64) { x => x + n }   // returning a closure
+make_adder(100)(1)                     // calling a call's result
+xs ¨ add_k                             // ¨ with any function value
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
+```
+
+**How they behave:**
+* **Capture.** Lambdas capture the variables they use, by value, when they are created. Values are immutable, so a closure always sees the value it was created with.
+* **No mutation.** A lambda may not modify a captured variable (error E0603).
+* **Types.** A function type `fn(i64) -> i64` is checked as "a function" when the program runs.
+* **Parallelism.** `¨` runs a function value on all cores when the function is pure, which the compiler records when it creates the value.
+* **Speed.** Lambdas that capture nothing and are called on the spot, or passed to `¨`, compile to direct typed calls. Calls through function values work on boxed values; typed fast paths for them are part of the performance phase.
 
 ## Primitives (M1)
 

@@ -343,10 +343,9 @@ The suggested fix declares it `let mut total = 0`.";
 Return the new value from the lambda instead (`¨` collects the results).";
 
     LAMBDA_LIMIT = "E0604" "lambda-limit" "a lambda feature not supported yet"
-"In this version lambdas take exactly one argument, cannot capture local
-variables, and are only allowed directly where a function is expected (a
-pipeline stage, `¨`, or a call). Closures and functions as values are next on
-the roadmap (M3 step 4).";
+"Lambdas take any number of parameters (`x => …`, `(a, b) => …`) and capture
+the variables they use by value. What is not supported yet is described in
+the message (for example passing a Mimic function to C as a callback).";
 
     // ---- E07xx calls and arguments ----------------------------------------------
     ARG_COUNT = "E0701" "argument-count" "a call with the wrong number of arguments"

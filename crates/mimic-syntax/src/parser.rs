@@ -525,6 +525,20 @@ impl Parser {
             self.expect(&Tok::RBracket)?;
             return Ok(Type::Array(Box::new(inner), s));
         }
+        // `fn(i64, f64) -> bool`
+        if self.eat(&Tok::Fn) {
+            self.expect(&Tok::LParen)?;
+            let mut ps = Vec::new();
+            while !self.at(&Tok::RParen) {
+                ps.push(self.ty()?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen)?;
+            let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.ty()?)) } else { None };
+            return Ok(Type::Fn(ps, ret, s));
+        }
         let (n, _) = self.ident()?;
         if n == "ptr" {
             self.expect(&Tok::LBracket)?;
@@ -737,6 +751,55 @@ impl Parser {
         }
     }
 
+    /// After a `(`: is this `ident, … ) =>` or `) =>` (a lambda's parameters)?
+    fn lambda_params_ahead(&self) -> bool {
+        let mut i = self.pos;
+        let tok = |i: usize| self.toks.get(i).map(|t| &t.tok);
+        let skip_nl = |mut i: usize| {
+            while matches!(tok(i), Some(Tok::Newline)) {
+                i += 1;
+            }
+            i
+        };
+        i = skip_nl(i);
+        if matches!(tok(i), Some(Tok::RParen)) {
+            return matches!(tok(skip_nl(i + 1)), Some(Tok::FatArrow));
+        }
+        loop {
+            if !matches!(tok(i), Some(Tok::Ident(_))) {
+                return false;
+            }
+            i = skip_nl(i + 1);
+            match tok(i) {
+                Some(Tok::Comma) => i = skip_nl(i + 1),
+                Some(Tok::RParen) => return matches!(tok(skip_nl(i + 1)), Some(Tok::FatArrow)),
+                _ => return false,
+            }
+        }
+    }
+
+    /// After a `(`: is this `op )`, an operator as a value?
+    fn op_ref_ahead(&self) -> Option<BinOp> {
+        let op = match self.toks.get(self.pos).map(|t| &t.tok)? {
+            Tok::Plus => BinOp::Add,
+            Tok::Minus => BinOp::Sub,
+            Tok::Star => BinOp::Mul,
+            Tok::Slash => BinOp::Div,
+            Tok::Percent => BinOp::Mod,
+            Tok::IntDiv => BinOp::IntDiv,
+            Tok::EqEq => BinOp::Eq,
+            Tok::Ne => BinOp::Ne,
+            Tok::Lt => BinOp::Lt,
+            Tok::Le => BinOp::Le,
+            Tok::Gt => BinOp::Gt,
+            Tok::Ge => BinOp::Ge,
+            Tok::And => BinOp::And,
+            Tok::Or => BinOp::Or,
+            _ => return None,
+        };
+        matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::RParen)).then_some(op)
+    }
+
     fn prev_span(&self) -> Span {
         self.toks[self.pos.saturating_sub(1)].span
     }
@@ -945,7 +1008,7 @@ impl Parser {
                     self.next();
                     let body = self.expr()?;
                     let span = span.to(body.span);
-                    return Ok(Expr { kind: ExprKind::Lambda { param: name, body: Box::new(body) }, span });
+                    return Ok(Expr { kind: ExprKind::Lambda { params: vec![name], body: Box::new(body) }, span });
                 }
                 let mut segs = vec![name];
                 while self.at(&Tok::PathSep) {
@@ -957,6 +1020,28 @@ impl Parser {
                     return Ok(Expr { kind: ExprKind::Record { path: segs, fields }, span: span.to(self.prev_span()) });
                 }
                 ExprKind::Path(segs)
+            }
+            Tok::LParen if self.lambda_params_ahead() => {
+                // `(a, b) => e`, `() => e`
+                let mut params = Vec::new();
+                while !self.at(&Tok::RParen) {
+                    params.push(self.ident()?.0);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RParen)?;
+                self.expect(&Tok::FatArrow)?;
+                let body = self.expr()?;
+                let span = span.to(body.span);
+                return Ok(Expr { kind: ExprKind::Lambda { params, body: Box::new(body) }, span });
+            }
+            Tok::LParen if self.op_ref_ahead().is_some() => {
+                // `(+)`: an operator as a function value
+                let op = self.op_ref_ahead().unwrap();
+                self.next();
+                self.expect(&Tok::RParen)?;
+                return Ok(Expr { kind: ExprKind::OpRef(op), span: span.to(self.prev_span()) });
             }
             Tok::LParen => {
                 self.nl_ignore += 1;
@@ -1267,7 +1352,8 @@ mod tests {
             ExprKind::Prim { prim, args } => {
                 format!("({} {})", prim.info().word, args.iter().map(sx).collect::<Vec<_>>().join(" "))
             }
-            ExprKind::Lambda { param, body } => format!("(λ {param} {})", sx(body)),
+            ExprKind::Lambda { params, body } => format!("(λ {} {})", params.join(" "), sx(body)),
+            ExprKind::OpRef(op) => format!("({op:?})"),
             ExprKind::If { cond, .. } => format!("(if {})", sx(cond)),
             ExprKind::Block(_) => "{}".into(),
             ExprKind::Unsafe(_) => "unsafe{}".into(),

@@ -123,12 +123,14 @@ pub enum Type {
     Named(String, Span),
     Array(Box<Type>, Span),
     Ptr(Box<Type>, Span),
+    /// `fn(i64, f64) -> bool`: a function value.
+    Fn(Vec<Type>, Option<Box<Type>>, Span),
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named(_, s) | Type::Array(_, s) | Type::Ptr(_, s) => *s,
+            Type::Named(_, s) | Type::Array(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
         }
     }
 }
@@ -139,6 +141,14 @@ impl std::fmt::Display for Type {
             Type::Named(n, _) => write!(f, "{n}"),
             Type::Array(t, _) => write!(f, "[{t}]"),
             Type::Ptr(t, _) => write!(f, "ptr[{t}]"),
+            Type::Fn(ps, r, _) => {
+                let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
+                write!(f, "fn({})", ps.join(", "))?;
+                match r {
+                    Some(r) => write!(f, " -> {r}"),
+                    None => Ok(()),
+                }
+            }
         }
     }
 }
@@ -247,7 +257,10 @@ pub enum ExprKind {
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// A fully applied primitive (glyph or word form).
     Prim { prim: Prim, args: Vec<Expr> },
-    Lambda { param: String, body: Box<Expr> },
+    /// `x => e`, `(a, b) => e`: may capture variables of the enclosing function.
+    Lambda { params: Vec<String>, body: Box<Expr> },
+    /// `(+)`: an operator as a function value.
+    OpRef(BinOp),
     /// `u.name`
     Field { base: Box<Expr>, name: String },
     /// `User { name: "ada", age: 36 }`
@@ -265,4 +278,82 @@ pub enum ExprKind {
     If { cond: Box<Expr>, then: Block, els: Option<Box<Expr>> },
     Block(Block),
     Unsafe(Block),
+}
+
+impl Expr {
+    /// Visit this expression and every expression inside it (blocks, arms,
+    /// interpolations, nested lambdas), parents before children.
+    pub fn walk(&self, f: &mut dyn FnMut(&Expr)) {
+        f(self);
+        let block = |b: &Block, f: &mut dyn FnMut(&Expr)| b.walk(f);
+        match &self.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) => {}
+            ExprKind::Array(xs) | ExprKind::Tuple(xs) | ExprKind::Prim { args: xs, .. } => xs.iter().for_each(|x| x.walk(f)),
+            ExprKind::Call { callee, args } => {
+                callee.walk(f);
+                args.iter().for_each(|x| x.walk(f));
+            }
+            ExprKind::Index { base, index } => {
+                base.walk(f);
+                index.walk(f);
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::Field { base: expr, .. } | ExprKind::Named { value: expr, .. } => expr.walk(f),
+            ExprKind::Lambda { body, .. } => body.walk(f),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                lhs.walk(f);
+                rhs.walk(f);
+            }
+            ExprKind::Record { fields, .. } => fields.iter().for_each(|(_, x, _)| x.walk(f)),
+            ExprKind::With { base, fields } => {
+                base.walk(f);
+                fields.iter().for_each(|(_, x, _)| x.walk(f));
+            }
+            ExprKind::Match { scrut, arms } => {
+                scrut.walk(f);
+                arms.iter().for_each(|a| a.body.walk(f));
+            }
+            ExprKind::Interp(parts) => parts.iter().for_each(|p| {
+                if let InterpPart::Expr(x) = p {
+                    x.walk(f)
+                }
+            }),
+            ExprKind::If { cond, then, els } => {
+                cond.walk(f);
+                block(then, f);
+                if let Some(e) = els {
+                    e.walk(f);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => block(b, f),
+        }
+    }
+}
+
+impl Block {
+    /// Visit every expression in the block (see [`Expr::walk`]).
+    pub fn walk(&self, f: &mut dyn FnMut(&Expr)) {
+        for s in &self.stmts {
+            match s {
+                Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) => value.walk(f),
+                Stmt::Assign { index, value, .. } => {
+                    if let Some(i) = index {
+                        i.walk(f);
+                    }
+                    value.walk(f);
+                }
+                Stmt::Return(e, _) => {
+                    if let Some(e) = e {
+                        e.walk(f);
+                    }
+                }
+                Stmt::LetElse { value, els, .. } => {
+                    value.walk(f);
+                    els.walk(f);
+                }
+            }
+        }
+        if let Some(t) = &self.tail {
+            t.walk(f);
+        }
+    }
 }

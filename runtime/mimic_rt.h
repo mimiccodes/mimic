@@ -17,7 +17,7 @@
 
 /* BOXED: vector of handles (nested arrays, lists of strings/records).
  * OBJ: record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6 } mim_dtype;
 
 typedef struct {
     const char *type_name;
@@ -26,6 +26,17 @@ typedef struct {
     int32_t nfields;
     const char *const *fields; /* record field names */
 } mim_desc;
+
+/* FN: a function value. `len` captured handles (its environment) plus a
+ * descriptor; `code(env, args)` borrows both and returns an owned value. */
+typedef struct mim_val mim_val;
+typedef mim_val *(*mim_code)(mim_val *const *env, mim_val *const *args);
+typedef struct {
+    const char *name;
+    mim_code code;
+    int32_t arity;
+    int32_t pure; /* no side effects: `¨` may run it in parallel */
+} mim_fn_desc;
 
 typedef struct mim_val {
     int64_t rc;
@@ -79,6 +90,9 @@ mim_val *mim_format(mim_val *v);
 mim_val *mim_concat(int64_t n, mim_val **parts);
 int64_t mim_str_eq(mim_val *a, mim_val *b);
 mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields);
+mim_val *mim_closure(const mim_fn_desc *d, int64_t nenv, mim_val **env);
+mim_val *mim_call(mim_val *f, int32_t argc, mim_val **args);
+mim_val *mim_each_fn(mim_val *xs, mim_val *f);
 int64_t mim_obj_tag(mim_val *o);
 mim_val *mim_obj_get(mim_val *o, int64_t i);
 mim_val *mim_obj_get_named(mim_val *o, const char *name);

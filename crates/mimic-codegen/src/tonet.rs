@@ -234,7 +234,10 @@ impl Eligible<'_> {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
             // variables only: uppercase names are variants (not in the net subset yet)
-            ExprKind::Path(p) => p.len() == 1 && !mimic_syntax::parser::is_upper(&p[0]),
+            // (a function named as a value is a closure, not a net variable)
+            ExprKind::Path(p) => {
+                p.len() == 1 && !mimic_syntax::parser::is_upper(&p[0]) && !matches!(self.p.resolve(self.module, p), Ok(Resolved::Fn(_)))
+            }
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),

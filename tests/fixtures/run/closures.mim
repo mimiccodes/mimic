@@ -1,0 +1,39 @@
+module main
+
+fn double(x: i64) -> i64 { x * 2 }
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+
+fn compose(f, g) { x => f(g(x)) }
+
+fn make_adder(n: i64) { x => x + n }
+
+fn fold(xs, f, acc) {
+    if ≢ xs == 0 { acc } else { fold(xs ↓ 1, f, f(acc, xs[0])) }
+}
+
+fn main() {
+    let k = 10
+    let add_k = x => x + k                 // captures k
+    print(add_k(5))
+    print(apply(double, 21))               // a named function as a value
+    print(apply(x => x * x, 9))            // a lambda as an argument
+    let add3 = make_adder(3)               // a closure returned from a function
+    print(add3(4))
+    print(make_adder(100)(1))              // calling a call's result
+    let inc_then_double = compose(double, make_adder(1))
+    print(inc_then_double(5))              // (5 + 1) * 2
+    let mul = (a, b) => a * b              // two parameters
+    print(mul(6, 7))
+    print(fold([1 2 3 4 5], (+), 0))       // an operator as a value
+    print(fold([1 2 3 4 5], (*), 1))
+    let scale = 3
+    print([1 2 3] ¨ (x => x * scale))      // ¨ with a capturing lambda
+    print([1 2 3] ¨ add_k)                 // ¨ with a function value
+    print(apply(double, 1))
+    let fs = [double, add3]
+    print(fs[1](10))
+    let ys = ⍳ 5 × 2                       // a fused array captured by a closure
+    let at = i => ys[i] + 1
+    print(at(3))
+}

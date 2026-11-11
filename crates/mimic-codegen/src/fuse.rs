@@ -534,7 +534,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 InterpPart::Expr(x) => self.uses_ok(name, x, false),
                 InterpPart::Text(_) => true,
             }),
-            // lambdas cannot capture, so they never mention `name`
+            // a lambda capturing `name` needs it as a real variable (unless a
+            // parameter of the same name hides it)
+            ExprKind::Lambda { params, body } => params.iter().any(|p| p == name) || self.uses_ok(name, body, false),
             _ => true,
         }
     }

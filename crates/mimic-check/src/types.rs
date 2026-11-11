@@ -166,7 +166,7 @@ pub struct Spec {
     /// Callee specialisation of every user-function call (by call/each expression id).
     pub calls: HashMap<usize, Key>,
     /// Lambdas: (parameter type, result type) by lambda expression id.
-    pub lambdas: HashMap<usize, (Ty, Ty)>,
+    pub lambdas: HashMap<usize, (Vec<Ty>, Ty)>,
     /// Types of `match` pattern bindings (by pattern id).
     pub binds: HashMap<usize, Ty>,
     /// `let (a, b) = …` element types, by (statement id, position).
@@ -205,6 +205,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             _ => return None,
         },
         Type::Ptr(..) => return None,
+        Type::Fn(..) => Ty::Dyn, // function values are handles
     })
 }
 
@@ -220,6 +221,7 @@ pub fn ann_in(p: &Program, module: ModId, t: &Type) -> Option<Ty> {
         },
         Type::Array(inner, _) => Some(Ty::Arr(ann_in(p, module, inner)?.el())),
         Type::Ptr(..) => None,
+        Type::Fn(..) => Some(Ty::Dyn),
     }
 }
 
@@ -571,16 +573,30 @@ impl Walk<'_, '_> {
         self.inf.specs[&k].ret
     }
 
-    /// A lambda applied to one argument of type `arg`.
-    fn lambda(&mut self, e: &Expr, arg: Ty) -> Ty {
-        let ExprKind::Lambda { param, body } = &e.kind else { return Ty::Dyn };
-        let saved = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
-        self.scopes[0].insert(param.clone(), (id(e), arg));
+    /// A lambda applied to arguments of types `args`. The enclosing scopes stay
+    /// visible: captured variables keep their types (codegen unboxes them to
+    /// the same types inside the closure).
+    fn lambda(&mut self, e: &Expr, args: Vec<Ty>) -> Ty {
+        let ExprKind::Lambda { params, body } = &e.kind else { return Ty::Dyn };
+        let mut scope = HashMap::new();
+        for (i, p) in params.iter().enumerate() {
+            scope.insert(p.clone(), (id(e) + i, args.get(i).copied().unwrap_or(Ty::Dyn)));
+        }
+        self.scopes.push(scope);
         let r = self.expr(body);
-        self.scopes = saved;
-        self.out.lambdas.insert(id(e), (arg, r));
+        self.scopes.pop();
+        let pts: Vec<Ty> = (0..params.len()).map(|i| args.get(i).copied().unwrap_or(Ty::Dyn)).collect();
+        self.out.lambdas.insert(id(e), (pts, r));
         self.out.exprs.insert(id(e), r);
         r
+    }
+
+    /// `f` used as a value: its dynamic specialisation must exist.
+    fn fn_value(&mut self, f: FnId) {
+        if !self.inf.p.fns[f].is_extern() {
+            let n = self.inf.p.fns[f].arity();
+            self.inf.ensure((f, vec![Ty::Dyn; n]));
+        }
     }
 
     fn expr(&mut self, e: &Expr) -> Ty {
@@ -618,13 +634,20 @@ impl Walk<'_, '_> {
                 Some((_, t)) if path.len() == 1 => t,
                 _ => match self.inf.p.resolve(self.module, path) {
                     Ok(Resolved::Variant(t, _)) => Ty::Obj(t as u32),
+                    Ok(Resolved::Fn(f)) => {
+                        self.fn_value(f);
+                        Ty::Dyn
+                    }
                     _ => Ty::Dyn,
                 },
             },
+            ExprKind::OpRef(_) => Ty::Dyn,
             ExprKind::Call { callee, args } => {
                 let mut argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
                 match &callee.kind {
-                    ExprKind::Lambda { .. } => self.lambda(callee, argt.first().copied().unwrap_or(Ty::Dyn)),
+                    ExprKind::Lambda { .. } => self.lambda(callee, argt.clone()),
+                    // a function value in a variable: its result is dynamic
+                    ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some() => Ty::Dyn,
                     ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
                         Ok(Resolved::Fn(f)) => {
                             self.check_args_at_call(e, path, f, args, &mut argt);
@@ -642,7 +665,11 @@ impl Walk<'_, '_> {
                         }
                         _ => Ty::Dyn,
                     },
-                    _ => Ty::Dyn,
+                    // any other callee produces a function value: `make_adder(1)(2)`
+                    _ => {
+                        self.expr(callee);
+                        Ty::Dyn
+                    }
                 }
             }
             ExprKind::Index { base, index } => {
@@ -765,12 +792,16 @@ impl Walk<'_, '_> {
                         s => s,
                     };
                     let r = match &args[1].kind {
-                        ExprKind::Lambda { .. } => self.lambda(&args[1], el),
+                        ExprKind::Lambda { .. } => self.lambda(&args[1], vec![el]),
+                        ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some() => Ty::Dyn,
                         ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
                             Ok(Resolved::Fn(f)) => self.call_user(id(e), f, vec![el]),
                             _ => Ty::Dyn,
                         },
-                        _ => Ty::Dyn,
+                        _ => {
+                            self.expr(&args[1]);
+                            Ty::Dyn
+                        }
                     };
                     return match (a, r) {
                         (_, Ty::Never) => Ty::Never,
@@ -784,7 +815,12 @@ impl Walk<'_, '_> {
                 }
                 prim_ty(*prim, a, b)
             }
-            ExprKind::Lambda { .. } => Ty::Dyn,
+            // a lambda as a value: its parameters can be anything
+            ExprKind::Lambda { params, .. } => {
+                let n = params.len();
+                self.lambda(e, vec![Ty::Dyn; n]);
+                Ty::Dyn
+            }
             ExprKind::If { cond, then, els } => {
                 self.expr(cond);
                 let t = self.block(then);

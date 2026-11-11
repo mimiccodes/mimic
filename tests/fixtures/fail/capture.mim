@@ -1,6 +1,10 @@
-// expect-error: E0604 lambdas cannot capture variables yet
+// expect-error: E0603 lambdas cannot modify captured variable `k`
 module main
 fn main() {
-    let k = 3
-    print(⍳ 3 ¨ (x => x + k))
+    let mut k = 3
+    let f = x => {
+        k = x
+        x
+    }
+    print(f(1))
 }

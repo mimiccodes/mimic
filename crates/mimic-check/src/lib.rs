@@ -679,6 +679,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
             check_ctype(inner, false)
         }
         Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
+        Type::Fn(_, _, s) => Err(Diag::new(&C::FFI_UNSUPPORTED, "C callbacks (function pointers) are not supported yet", *s)),
     }
 }
 
@@ -700,6 +701,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             _ => return Err(Diag::new(&C::UNSUPPORTED_TYPE, "only arrays of numbers or bools are supported in this version", *s)),
         },
         Type::Ptr(_, s) => return Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
+        Type::Fn(..) => 9, // TY_FN: any function value
     })
 }
 
@@ -765,6 +767,15 @@ impl Checker<'_> {
             },
             Type::Array(inner, _) => self.ann_result(inner),
             Type::Ptr(_, s) => Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
+            Type::Fn(ps, r, _) => {
+                for p in ps {
+                    self.ann_result(p)?;
+                }
+                match r {
+                    Some(r) => self.ann_result(r),
+                    None => Ok(()),
+                }
+            }
         }
     }
 
@@ -926,26 +937,32 @@ impl Checker<'_> {
 
     fn fn_operand(&mut self, e: &Expr, want_arity: usize) {
         match &e.kind {
-            ExprKind::Lambda { param, body } => self.lambda(param, body),
-            ExprKind::Path(path) => {
-                if path.len() == 1 && self.lookup(&path[0]).is_some() {
-                    self.err(Diag::new(&C::WRONG_KIND, format!("`{}` is a variable, not a function", path[0]), e.span));
-                    return;
+            ExprKind::Lambda { params, body } => {
+                if params.len() != want_arity {
+                    self.err(Diag::new(&C::ARG_COUNT, format!("this lambda takes {} argument(s), but `¨` passes {want_arity}", params.len()), e.span));
                 }
-                match self.p.resolve(self.module, path) {
-                    Ok(Resolved::Fn(f)) => {
-                        let func = &self.p.fns[f];
-                        if func.is_extern() {
-                            self.err(Diag::new(&C::FFI_UNSUPPORTED, "extern functions cannot be passed as values; wrap them in a Mimic function", e.span));
-                        } else if func.arity() != want_arity {
-                            self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), but `¨` passes {want_arity}", path.join("::"), func.arity()), e.span));
-                        }
-                    }
-                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), e.span)),
-                    Err(m) => self.err(m.diag(self.p, self.file, e.span)),
-                }
+                self.lambda(params, body)
             }
-            _ => self.err(Diag::new(&C::BAD_PIPELINE, "expected a function or a lambda", e.span)),
+            ExprKind::OpRef(_) if want_arity != 2 => {
+                self.err(Diag::new(&C::ARG_COUNT, format!("an operator takes 2 arguments, but `¨` passes {want_arity}"), e.span))
+            }
+            ExprKind::OpRef(_) => {}
+            // a function value held in a variable: checked when called
+            ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some() => self.expr(e),
+            ExprKind::Path(path) => match self.p.resolve(self.module, path) {
+                Ok(Resolved::Fn(f)) => {
+                    let func = &self.p.fns[f];
+                    if func.is_extern() {
+                        self.err(Diag::new(&C::FFI_UNSUPPORTED, "extern functions cannot be passed as values; wrap them in a Mimic function", e.span));
+                    } else if func.arity() != want_arity {
+                        self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), but `¨` passes {want_arity}", path.join("::"), func.arity()), e.span));
+                    }
+                }
+                Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), e.span)),
+                Err(m) => self.err(m.diag(self.p, self.file, e.span)),
+            },
+            // any other expression may produce a function value
+            _ => self.expr(e),
         }
     }
 
@@ -954,14 +971,10 @@ impl Checker<'_> {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
             ExprKind::Array(xs) => xs.iter().for_each(|x| self.expr(x)),
             ExprKind::Path(path) => {
-                if path.len() == 1
-                    && let Some((lvl, _)) = self.lookup(&path[0]) {
-                        if lvl < self.lambda_floor {
-                            self.err(Diag::new(&C::LAMBDA_LIMIT, format!("lambdas cannot capture variables yet (`{}`)", path[0]), e.span)
-                                .note("pass it as an argument or make it a top-level function"));
-                        }
-                        return;
-                    }
+                // a local variable (captured by value when used inside a lambda)
+                if path.len() == 1 && self.lookup(&path[0]).is_some() {
+                    return;
+                }
                 match self.p.resolve(self.module, path) {
                     Ok(Resolved::Variant(t, v)) => {
                         let n = self.p.types[t].variants()[v].fields.len();
@@ -969,8 +982,12 @@ impl Checker<'_> {
                             self.err(Diag::new(&C::WRONG_KIND, format!("variant `{}` has {n} field(s): write `{}(…)`", path.join("::"), path.join("::")), e.span));
                         }
                     }
-                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} used as a value", self.p.describe(r)), e.span)
-                        .note("call functions with `f(x)` or a pipeline `x ▷ f`")),
+                    // a function as a value: `let f = double`, `apply(double, 3)`
+                    Ok(Resolved::Fn(f)) if self.p.fns[f].is_extern() => self.err(
+                        Diag::new(&C::FFI_UNSUPPORTED, "extern functions cannot be used as values; wrap them in a Mimic function", e.span),
+                    ),
+                    Ok(Resolved::Fn(_)) => {}
+                    Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} used as a value", self.p.describe(r)), e.span)),
                     Err(_) if path.len() == 1 => {
                         let mut names: Vec<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
                         names.extend(self.p.visible_names(self.module));
@@ -986,15 +1003,19 @@ impl Checker<'_> {
                     self.expr(a);
                 }
                 match &callee.kind {
-                    ExprKind::Lambda { param, body } => {
-                        if args.len() != 1 {
-                            self.err(Diag::new(&C::LAMBDA_LIMIT, "lambdas take exactly one argument", e.span));
+                    ExprKind::Lambda { params, body } => {
+                        if args.len() != params.len() {
+                            self.err(Diag::new(&C::ARG_COUNT, format!("this lambda takes {} argument(s), but {} were given", params.len(), args.len()), e.span));
                         }
-                        self.lambda(param, body);
+                        self.lambda(params, body);
                     }
+                    ExprKind::OpRef(_) if args.len() != 2 => {
+                        self.err(Diag::new(&C::ARG_COUNT, format!("an operator takes 2 arguments, but {} were given", args.len()), e.span))
+                    }
+                    ExprKind::OpRef(_) => {}
                     ExprKind::Path(path) => {
+                        // calling a function value held in a variable
                         if path.len() == 1 && self.lookup(&path[0]).is_some() {
-                            self.err(Diag::new(&C::WRONG_KIND, format!("`{}` is a variable, not a function", path[0]), callee.span));
                             return;
                         }
                         match self.p.resolve(self.module, path) {
@@ -1033,7 +1054,8 @@ impl Checker<'_> {
                             Err(m) => self.err(m.diag(self.p, self.file, callee.span)),
                         }
                     }
-                    _ => self.err(Diag::new(&C::WRONG_KIND, "only named functions and lambdas can be called", callee.span)),
+                    // any expression producing a function value: `make_adder(1)(2)`
+                    _ => self.expr(callee),
                 }
             }
             ExprKind::Index { base, index } => {
@@ -1139,10 +1161,8 @@ impl Checker<'_> {
                     }
                 }
             }
-            ExprKind::Lambda { .. } => self.err(
-                Diag::new(&C::LAMBDA_LIMIT, "lambdas are not first-class values yet", e.span)
-                    .note("call them in a pipeline `x ▷ (y => …)` or pass them to `¨` (each)"),
-            ),
+            ExprKind::Lambda { params, body } => self.lambda(params, body),
+            ExprKind::OpRef(_) => {}
             ExprKind::If { cond, then, els } => {
                 self.expr(cond);
                 self.block(then, true);
@@ -1159,19 +1179,17 @@ impl Checker<'_> {
         }
     }
 
-    fn lambda(&mut self, param: &str, body: &Expr) {
-        {
-            {
-                let saved_floor = self.lambda_floor;
-                self.lambda_floor = self.scopes.len();
-                self.scopes.push(HashMap::new());
-                // lambda params may reuse outer names: the outer scope is invisible inside
-                self.scopes.last_mut().unwrap().insert(param.to_string(), Var { mutable: false, span: body.span });
-                self.expr(body);
-                self.scopes.pop();
-                self.lambda_floor = saved_floor;
-            }
+    fn lambda(&mut self, params: &[String], body: &Expr) {
+        let saved_floor = self.lambda_floor;
+        self.lambda_floor = self.scopes.len();
+        self.scopes.push(HashMap::new());
+        // the enclosing function's variables stay visible: they are captured by value
+        for p in params {
+            self.scopes.last_mut().unwrap().insert(p.to_string(), Var { mutable: false, span: body.span });
         }
+        self.expr(body);
+        self.scopes.pop();
+        self.lambda_floor = saved_floor;
     }
 }
 
@@ -1236,10 +1254,13 @@ mod tests {
     }
 
     #[test]
-    fn lambdas_cannot_capture() {
-        let e = errors(&[("app", "src/main.mim", "module main\nfn main() {\n  let k = 2\n  print(⍳ 3 ¨ x => x × k)\n  print(⍳ 3 ¨ x => x × 2)\n}\n")]);
+    fn lambdas_capture_but_do_not_mutate() {
+        // capturing by value is fine; assigning to a captured variable is not
+        let ok = errors(&[("app", "src/main.mim", "module main\nfn main() {\n  let k = 2\n  print(⍳ 3 ¨ x => x × k)\n}\n")]);
+        assert!(ok.is_empty(), "{ok:?}");
+        let e = errors(&[("app", "src/main.mim", "module main\nfn main() {\n  let mut k = 2\n  let f = x => {\n    k = x\n    x\n  }\n  print(f(1))\n}\n")]);
         assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("capture"));
+        assert!(e[0].contains("captured"));
     }
 
     #[test]
@@ -1493,11 +1514,13 @@ impl PurityWalk<'_> {
     fn expr(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
+            ExprKind::OpRef(_) => true,
             ExprKind::Array(xs) => xs.iter().all(|x| self.expr(x)),
             ExprKind::Call { callee, args } => {
                 args.iter().all(|a| self.expr(a))
                     && match &callee.kind {
                         ExprKind::Lambda { body, .. } => self.expr(body),
+                        ExprKind::OpRef(_) => true,
                         ExprKind::Path(path) => match self.p.resolve(self.module, path) {
                             Ok(Resolved::Fn(f)) => self.pure[f],
                             Ok(Resolved::Variant(..)) => true,
@@ -1515,6 +1538,7 @@ impl PurityWalk<'_> {
                         self.expr(&args[0])
                             && match &args[1].kind {
                                 ExprKind::Lambda { body, .. } => self.expr(body),
+                                ExprKind::OpRef(_) => true,
                                 ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
                                 _ => false,
                             }

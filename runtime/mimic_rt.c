@@ -29,7 +29,7 @@
 
 /* BOXED: a vector of handles (nested arrays, lists of strings/records).
  * OBJ: a record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6 } mim_dtype;
 
 /* Emitted by the compiler, one per record type / union variant. */
 typedef struct {
@@ -39,6 +39,17 @@ typedef struct {
     int32_t nfields;
     const char *const *fields; /* record field names (NULL for variants) */
 } mim_desc;
+
+/* FN: a function value — `len` captured handles plus a descriptor (stored in
+ * `desc`); `code(env, args)` borrows both and returns an owned value. */
+typedef struct mim_val mim_val;
+typedef mim_val *(*mim_code)(mim_val *const *env, mim_val *const *args);
+typedef struct {
+    const char *name;
+    mim_code code;
+    int32_t arity;
+    int32_t pure;
+} mim_fn_desc;
 
 typedef struct mim_val {
     int64_t rc; /* atomic; >= MIM_IMMORTAL means never freed */
@@ -50,7 +61,8 @@ typedef struct mim_val {
     int64_t inl[];
 } mim_val;
 
-#define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ)
+#define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ || (v)->dtype == MIM_FN)
+#define FN_DESC(v) ((const mim_fn_desc *)(const void *)(v)->desc)
 
 #define MIM_IMMORTAL ((int64_t)1 << 62)
 
@@ -75,7 +87,7 @@ static int64_t floordiv(int64_t x, int64_t y) {
     if ((x % y != 0) && ((x < 0) != (y < 0))) q--;
     return q;
 }
-enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC };
+enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC, TY_FN };
 
 static void park_forever(void);
 
@@ -291,7 +303,8 @@ static size_t elsize(int dt) {
     case MIM_I64: return 8;
     case MIM_F64: return 8;
     case MIM_BOXED:
-    case MIM_OBJ: return sizeof(void *);
+    case MIM_OBJ:
+    case MIM_FN: return sizeof(void *);
     default: return 1;
     }
 }
@@ -506,6 +519,7 @@ static const char *dtname(const mim_val *v) {
     if (!v) return "()";
     if (v->dtype == MIM_OBJ) return v->desc && v->desc->type_name ? v->desc->type_name : "record";
     if (v->dtype == MIM_BOXED) return "list";
+    if (v->dtype == MIM_FN) return "function";
     return v->rank == 0 ? s[v->dtype] : vs[v->dtype];
 }
 
@@ -807,6 +821,12 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
 /* `quoted`: strings nested inside lists/records print with quotes */
 static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
     if (!v) { sb_str(b, "()"); return; }
+    if (v->dtype == MIM_FN) {
+        sb_str(b, "<fn ");
+        sb_str(b, FN_DESC(v)->name ? FN_DESC(v)->name : "lambda");
+        sb_str(b, ">");
+        return;
+    }
     if (v->dtype == MIM_OBJ) {
         const mim_desc *d = v->desc;
         mim_val **h = (mim_val **)v->data;
@@ -897,6 +917,34 @@ mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields) {
         ((mim_val **)v->data)[i] = fields[i];
     }
     return v;
+}
+
+/* ==== function values ==================================================== */
+
+mim_val *mim_closure(const mim_fn_desc *d, int64_t nenv, mim_val **env) {
+    mim_val *v = alloc(MIM_FN, 0, nenv);
+    v->desc = (const mim_desc *)(const void *)d;
+    for (int64_t i = 0; i < nenv; i++) {
+        mim_retain(env[i]);
+        ((mim_val **)v->data)[i] = env[i];
+    }
+    return v;
+}
+
+mim_val *mim_call(mim_val *f, int32_t argc, mim_val **args) {
+    need(f, "function call");
+    if (f->dtype != MIM_FN) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "cannot call a value of type %s", dtname(f));
+        mim_panic(buf);
+    }
+    const mim_fn_desc *d = FN_DESC(f);
+    if (d->arity != argc) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "%s takes %d argument(s), but %d were given", d->name ? d->name : "the function", d->arity, argc);
+        mim_panic(buf);
+    }
+    return d->code((mim_val *const *)f->data, (mim_val *const *)args);
 }
 
 static mim_val *obj_check(mim_val *o, const char *what) {
@@ -1273,6 +1321,39 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     return r;
 }
 
+typedef struct {
+    mim_val *xs;
+    mim_val *f;
+    mim_val **out;
+} each_fn_ctx;
+
+static void each_fn_range(void *vc, int64_t lo, int64_t hi) {
+    each_fn_ctx *c = (each_fn_ctx *)vc;
+    for (int64_t i = lo; i < hi; i++) {
+        mim_val *e = scalar_at(c->xs, i);
+        mim_val *r = mim_call(c->f, 1, &e);
+        mim_release(e);
+        need(r, "¨ (each) function result");
+        c->out[i] = r;
+    }
+}
+
+/* `xs ¨ f` with a function value: parallel when the function is pure. */
+mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
+    need(xs, "¨ (each)");
+    if (xs->rank == 0) return mim_call(f, 1, &xs);
+    int64_t n = xs->len;
+    if (n == 0) return alloc(MIM_I64, 1, 0);
+    mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
+    each_fn_ctx c = {xs, f, tmp};
+    if (f->dtype == MIM_FN && FN_DESC(f)->pure) parallel_for_grain(n, fine_grain(n), each_fn_range, &c);
+    else each_fn_range(&c, 0, n);
+    mim_val *r = mim_array_lit(n, tmp);
+    for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+    free(tmp);
+    return r;
+}
+
 /* ==== indexing =========================================================== */
 
 static int64_t check_index(mim_val *xs, mim_val *i) {
@@ -1354,7 +1435,7 @@ int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
 
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
     if (type_ok(v, ty)) return;
-    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]"};
+    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function"};
     char buf[256];
     snprintf(buf, sizeof buf, "type error: %s expected %s, found %s", what, names[ty], dtname(v));
     mim_panic(buf);
@@ -1366,13 +1447,14 @@ static int type_ok(mim_val *v, int32_t ty) {
         int s = v->rank == 0;
         switch (ty) {
         case TY_INT: ok = s && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
-        case TY_FLOAT: ok = s && v->dtype != MIM_CHAR; break;
+        case TY_FLOAT: ok = s && (v->dtype == MIM_F64 || v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
         case TY_BOOL: ok = s && v->dtype == MIM_BOOL; break;
         case TY_CHAR: ok = s && v->dtype == MIM_CHAR; break;
         case TY_STR: ok = !s && v->dtype == MIM_CHAR; break;
         case TY_INTVEC: ok = !s && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
-        case TY_FLOATVEC: ok = !s && v->dtype != MIM_CHAR; break;
+        case TY_FLOATVEC: ok = !s && (v->dtype == MIM_F64 || v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
         case TY_BOOLVEC: ok = !s && v->dtype == MIM_BOOL; break;
+        case TY_FN: ok = v->dtype == MIM_FN; break;
         }
     }
     return ok;

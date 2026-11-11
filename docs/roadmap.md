@@ -29,7 +29,7 @@ Mimic's goals:
 | 3a | Records with `with`, tagged unions, exhaustive `match`, field access, string interpolation and equality, named and default arguments, lists of strings/records/lists | ✅ |
 | 3b | Tuples (typed) and tuple patterns, `Option`/`Result` prelude with `let … else`, duration literals, route patterns with typed captures | ✅ |
 | perf 1 | Kernel fusion, single-division floored modulo, power-of-two shifts/masks, real loops for tail recursion. **Result:** the showcase compute benchmark matches C on one core (4.61 s vs 4.81 s) and is 4.6× faster on all cores. | ✅ |
-| 4 (next) | Closures that capture, operators as values (`gather(+)`), function types | |
+| 4 | Closures that capture (by value), multi-parameter lambdas, functions and operators as values (`(+)`), calling any function value, `fn(…) -> T` types, parallel `¨` over pure function values | ✅ |
 | 5 | Loop words: `gather`, `trail`, `evolve`, `settle`, `arms`/`arm` | |
 | 6 | Concurrent I/O: values that wait automatically when used, streams, event loop | |
 | 7 | Performance: kernel fusion, compile-time reference-count elision, wider net subset, benchmark CI | |

@@ -193,6 +193,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         thunks: HashMap::new(),
         queue: Vec::new(),
         purity,
+        fn_descs: HashMap::new(),
         plan,
         net_ensure: None,
         cur_fn: None,
@@ -285,6 +286,8 @@ struct Cg<'ctx, 'p> {
     thunks: HashMap<(Key, Kind), FunctionValue<'ctx>>,
     queue: Vec<(Key, Kind)>,
     purity: mimic_check::Purity,
+    /// Descriptors of function values already emitted (`fn:<id>`, `op:<n>`).
+    fn_descs: HashMap<String, PointerValue<'ctx>>,
     plan: tonet::NetPlan,
     net_ensure: Option<FunctionValue<'ctx>>,
     // current function
@@ -630,6 +633,9 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_is_type" => self.ctx.i32_type().fn_type(&[p, i32t], false),
             "mim_rt_init" => void.fn_type(&[i32t, p], false),
             "mim_rt_ensure" => void.fn_type(&[], false),
+            "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_call" => ptr.fn_type(&[p, i32t, p], false),
+            "mim_each_fn" => ptr.fn_type(&[p, p], false),
             "mim_cstr_dup" => ptr.fn_type(&[p], false),
             "mim_rt_shutdown" => self.ctx.i32_type().fn_type(&[i32t], false),
             "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
@@ -748,6 +754,19 @@ impl<'ctx> Cg<'ctx, '_> {
             None => tmp.position_at_end(entry),
         }
         let a = tmp.build_alloca(self.repr(t), name).s()?;
+        self.to_generic(&tmp, a)
+    }
+
+    /// A stack slot of an arbitrary LLVM type, in the entry block.
+    fn entry_alloca_ty(&self, t: BasicTypeEnum<'ctx>, name: &str) -> R<PointerValue<'ctx>> {
+        let f = self.cur_fn.unwrap();
+        let entry = f.get_first_basic_block().unwrap();
+        let tmp = self.ctx.create_builder();
+        match entry.get_first_instruction() {
+            Some(i) => tmp.position_before(&i),
+            None => tmp.position_at_end(entry),
+        }
+        let a = tmp.build_alloca(t, name).s()?;
         self.to_generic(&tmp, a)
     }
 
@@ -1143,7 +1162,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
-            Type::Ptr(..) | Type::Array(..) => self.ptr.into(),
+            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) => self.ptr.into(),
         }
     }
 
@@ -1364,31 +1383,248 @@ impl<'ctx> Cg<'ctx, '_> {
 
     // ---- expressions ----------------------------------------------------
 
-    /// Compile a lambda as a typed function `(param) -> ret`.
-    fn lambda_fn(&mut self, e: &Expr) -> R<(FunctionValue<'ctx>, Ty, Ty)> {
-        let ExprKind::Lambda { param, body } = &e.kind else { return Err("expected a lambda".into()) };
-        let (pt, rt) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(e)).copied()).unwrap_or((Ty::Dyn, Ty::Dyn));
+    /// Compile a lambda without captures as a typed function `(params…) -> ret`.
+    fn lambda_fn(&mut self, e: &Expr) -> R<(FunctionValue<'ctx>, Vec<Ty>, Ty)> {
+        let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
+        let (pts, rt) = self
+            .cur_spec
+            .as_ref()
+            .and_then(|s| s.lambdas.get(&id(e)).cloned())
+            .unwrap_or_else(|| (vec![Ty::Dyn; params.len()], Ty::Dyn));
         let rt = if rt == Ty::Never { Ty::Dyn } else { rt };
         self.lambdas += 1;
-        let f = self.module.add_function(&format!("_mimic_lambda_{}", self.lambdas), self.fn_type(&[pt], rt), Some(Linkage::Internal));
+        let f = self.module.add_function(&format!("_mimic_lambda_{}", self.lambdas), self.fn_type(&pts, rt), Some(Linkage::Internal));
         self.in_new_fn(f, |cg| {
             cg.cur_ret = rt;
             cg.ret_what = "lambda result".into();
-            let slot = cg.entry_alloca(pt, param)?;
-            cg.b.build_store(slot, f.get_nth_param(0).unwrap()).s()?;
-            cg.scopes = vec![vec![Local { name: param.clone(), slot, ty: pt, owned: false, mutable: false }]];
+            let mut locals = Vec::new();
+            for (i, (name, pt)) in params.iter().zip(&pts).enumerate() {
+                let slot = cg.entry_alloca(*pt, name)?;
+                cg.b.build_store(slot, f.get_nth_param(i as u32).unwrap()).s()?;
+                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false });
+            }
+            cg.scopes = vec![locals];
             let v = cg.expr(body)?;
             if !cg.terminated() {
                 cg.ret(v)?;
             }
             Ok(())
         })?;
-        Ok((f, pt, rt))
+        Ok((f, pts, rt))
+    }
+
+    /// The outer variables a lambda's body uses: captured by value.
+    fn captures(&self, params: &[String], body: &Expr) -> Vec<(String, Ty)> {
+        let mut seen: Vec<(String, Ty)> = Vec::new();
+        body.walk(&mut |x| {
+            if let ExprKind::Path(path) = &x.kind
+                && path.len() == 1
+                && !params.contains(&path[0])
+                && !seen.iter().any(|(n, _)| n == &path[0])
+                && let Some(l) = self.lookup(&path[0])
+            {
+                seen.push((l.name.clone(), l.ty));
+            }
+        });
+        seen
+    }
+
+    /// A descriptor `{ name, code, arity, pure }` for a function value.
+    fn fn_desc(&mut self, name: &str, code: FunctionValue<'ctx>, arity: usize, pure: bool) -> PointerValue<'ctx> {
+        let i32t = self.ctx.i32_type();
+        let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into()], false);
+        let nm = self.global_cstr(name);
+        let init = st.const_named_struct(&[
+            nm.into(),
+            self.fn_addr(code).into(),
+            i32t.const_int(arity as u64, false).into(),
+            i32t.const_int(pure as u64, false).into(),
+        ]);
+        let g = self.module.add_global(st, None, "fndesc");
+        g.set_linkage(Linkage::Internal);
+        g.set_constant(true);
+        g.set_initializer(&init);
+        self.gaddr(g)
+    }
+
+    /// `mim_closure(desc, n, env)`: a function value capturing `env` (by value).
+    fn make_closure(&mut self, desc: PointerValue<'ctx>, env: &[V<'ctx>]) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let n = env.len();
+        let arr = if n == 0 {
+            self.ptr.const_null()
+        } else {
+            let arr_ty = self.ptr.array_type(n as u32);
+            let arr = self.entry_alloca_ty(arr_ty.into(), "env")?;
+            for (i, v) in env.iter().enumerate() {
+                let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                self.b.build_store(slot, self.basic(*v)).s()?;
+            }
+            arr
+        };
+        self.call_rt_ptr("mim_closure", &[desc.into(), i64t.const_int(n as u64, false).into(), arr.into()])
+    }
+
+    /// A lambda as a value: a closure over the variables it uses.
+    fn closure_value(&mut self, e: &Expr) -> R<V<'ctx>> {
+        let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
+        let caps = self.captures(params, body);
+        let (pts, _) = self
+            .cur_spec
+            .as_ref()
+            .and_then(|s| s.lambdas.get(&id(e)).cloned())
+            .unwrap_or_else(|| (vec![Ty::Dyn; params.len()], Ty::Dyn));
+        self.lambdas += 1;
+        let code = self.module.add_function(
+            &format!("_mimic_closure_{}", self.lambdas),
+            self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        let caps2 = caps.clone();
+        let params2 = params.clone();
+        self.in_new_fn(code, |cg| {
+            cg.cur_ret = Ty::Dyn;
+            cg.ret_what = "lambda result".into();
+            let env = code.get_nth_param(0).unwrap().into_pointer_value();
+            let args = code.get_nth_param(1).unwrap().into_pointer_value();
+            let mut locals = Vec::new();
+            let mut bind = |cg: &mut Self, base: PointerValue<'ctx>, i: usize, name: &str, t: Ty| -> R<()> {
+                let at = unsafe { cg.b.build_in_bounds_gep(cg.ptr, base, &[cg.ctx.i64_type().const_int(i as u64, false)], "").s()? };
+                let p = cg.b.build_load(cg.ptr, at, name).s()?.into_pointer_value();
+                let v = cg.as_ty(V::P(p, false), t, "lambda argument")?;
+                let owned = matches!(v, V::P(_, true));
+                let slot = cg.entry_alloca(t, name)?;
+                cg.b.build_store(slot, cg.basic(v)).s()?;
+                locals.push(Local { name: name.to_string(), slot, ty: t, owned, mutable: false });
+                Ok(())
+            };
+            for (i, name) in params2.iter().enumerate() {
+                bind(cg, args, i, name, pts.get(i).copied().unwrap_or(Ty::Dyn))?;
+            }
+            for (j, (name, t)) in caps2.iter().enumerate() {
+                bind(cg, env, j, name, *t)?;
+            }
+            cg.scopes = vec![locals];
+            let v = cg.expr(body)?;
+            if !cg.terminated() {
+                cg.ret(v)?;
+            }
+            Ok(())
+        })?;
+        let pure = self.purity.operand_is_pure(self.p, self.cur_mod, e);
+        let desc = self.fn_desc("lambda", code, params.len(), pure);
+        let mut env = Vec::new();
+        for (name, _) in &caps {
+            let l = self.lookup(name).ok_or("internal error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+            env.push(self.boxed(self.val_of(bv, lt, false))?);
+        }
+        let r = self.make_closure(desc, &env)?;
+        for v in env {
+            self.drop_tmp(v)?;
+        }
+        Ok(r)
+    }
+
+    /// A named function as a value.
+    fn fn_value(&mut self, fid: usize) -> R<V<'ctx>> {
+        let key = format!("fn:{fid}");
+        let desc = match self.fn_descs.get(&key) {
+            Some(d) => *d,
+            None => {
+                let n = self.p.fns[fid].arity();
+                let k: Key = (fid, vec![Ty::Dyn; n]);
+                let kind = self.kind_for(fid);
+                let inner = self.thunk(&k, kind)?;
+                let code = self.module.add_function(
+                    &format!("{}$value", self.p.fns[fid].symbol),
+                    self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false),
+                    Some(Linkage::Internal),
+                );
+                self.in_new_fn(code, |cg| {
+                    let args = code.get_nth_param(1).unwrap().into_pointer_value();
+                    let mut av: Vec<BasicMetadataValueEnum> = Vec::new();
+                    for i in 0..n {
+                        let at = unsafe { cg.b.build_in_bounds_gep(cg.ptr, args, &[cg.ctx.i64_type().const_int(i as u64, false)], "").s()? };
+                        av.push(cg.b.build_load(cg.ptr, at, "").s()?.into());
+                    }
+                    let r = cg.b.build_call(inner, &av, "").s()?.try_as_basic_value().basic().unwrap();
+                    cg.b.build_return(Some(&r)).s()?;
+                    Ok(())
+                })?;
+                let name = self.p.fn_path(fid).join("::");
+                let d = self.fn_desc(&name, code, n, self.purity.fns[fid]);
+                self.fn_descs.insert(key, d);
+                d
+            }
+        };
+        self.make_closure(desc, &[])
+    }
+
+    /// An operator as a value: `(+)`.
+    fn op_value(&mut self, op: mimic_syntax::ast::BinOp) -> R<V<'ctx>> {
+        let key = format!("op:{}", op as i32);
+        let desc = match self.fn_descs.get(&key) {
+            Some(d) => *d,
+            None => {
+                let code = self.module.add_function(
+                    &format!("_mimic_op_{}", op as i32),
+                    self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false),
+                    Some(Linkage::Internal),
+                );
+                self.in_new_fn(code, |cg| {
+                    let args = code.get_nth_param(1).unwrap().into_pointer_value();
+                    let mut av: Vec<BasicMetadataValueEnum> = vec![cg.i32c(op as i32)];
+                    for i in 0..2u64 {
+                        let at = unsafe { cg.b.build_in_bounds_gep(cg.ptr, args, &[cg.ctx.i64_type().const_int(i, false)], "").s()? };
+                        av.push(cg.b.build_load(cg.ptr, at, "").s()?.into());
+                    }
+                    let r = cg.call_rt("mim_binop", &av)?.unwrap();
+                    cg.b.build_return(Some(&r)).s()?;
+                    Ok(())
+                })?;
+                let d = self.fn_desc(&format!("({op:?})"), code, 2, true);
+                self.fn_descs.insert(key, d);
+                d
+            }
+        };
+        self.make_closure(desc, &[])
+    }
+
+    /// Call a function value: `mim_call(f, n, args)`.
+    fn call_value(&mut self, f: V<'ctx>, args: &[Expr], ty: Ty) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let f = self.boxed(f)?;
+        let mut vals = Vec::new();
+        for a in args {
+            let v = self.expr(a)?;
+            vals.push(self.boxed(v)?);
+        }
+        let n = vals.len();
+        let arr = if n == 0 {
+            self.ptr.const_null()
+        } else {
+            let arr_ty = self.ptr.array_type(n as u32);
+            let arr = self.entry_alloca_ty(arr_ty.into(), "args")?;
+            for (i, v) in vals.iter().enumerate() {
+                let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                self.b.build_store(slot, self.basic(*v)).s()?;
+            }
+            arr
+        };
+        let r = self.call_rt_ptr("mim_call", &[self.basic(f).into(), self.i32c(n as i32), arr.into()])?;
+        for v in vals {
+            self.drop_tmp(v)?;
+        }
+        self.drop_tmp(f)?;
+        self.as_ty(r, ty, "call result")
     }
 
     /// A boxed-ABI wrapper around a typed lambda (for `¨`).
     fn lambda_thunk(&mut self, e: &Expr) -> R<FunctionValue<'ctx>> {
-        let (lf, pt, rt) = self.lambda_fn(e)?;
+        let (lf, pts, rt) = self.lambda_fn(e)?;
+        let pt = pts.first().copied().unwrap_or(Ty::Dyn);
         self.lambdas += 1;
         let f = self.module.add_function(&format!("_mimic_lambda_{}$box", self.lambdas), self.ptr.fn_type(&[self.ptr.into()], false), Some(Linkage::Internal));
         self.in_new_fn(f, |cg| {
@@ -1891,8 +2127,16 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(path) if !(path.len() == 1 && self.lookup(&path[0]).is_some()) => match self.p.resolve(self.cur_mod, path)? {
                 Resolved::Variant(t, v) => self.construct(t, Some(v), vec![]),
+                Resolved::Fn(f) => {
+                    let v = self.fn_value(f)?;
+                    self.as_ty(v, ty, "function value")
+                }
                 _ => Err(format!("unknown variable `{}`", path.join("::"))),
             },
+            ExprKind::OpRef(op) => {
+                let v = self.op_value(*op)?;
+                self.as_ty(v, ty, "function value")
+            }
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
                 let (slot, lt, mutable) = (l.slot, l.ty, l.mutable);
@@ -1901,13 +2145,39 @@ impl<'ctx> Cg<'ctx, '_> {
                 if mutable { self.own(v) } else { Ok(v) }
             }
             ExprKind::Call { callee, args } => {
-                if let ExprKind::Lambda { .. } = &callee.kind {
-                    let a = self.expr(&args[0])?;
-                    let (lf, pt, rt) = self.lambda_fn(callee)?;
-                    let a = self.as_ty(a, pt, "lambda argument")?;
-                    let r = self.b.build_call(lf, &[self.basic(a).into()], "").s()?.try_as_basic_value().basic().unwrap();
-                    self.drop_tmp(a)?;
-                    return Ok(self.val_of(r, rt, true));
+                if let ExprKind::Lambda { params, body } = &callee.kind {
+                    // a lambda called on the spot: a direct typed call unless it captures
+                    if self.captures(params, body).is_empty() {
+                        let mut vals = Vec::new();
+                        for a in args {
+                            vals.push(self.expr(a)?);
+                        }
+                        let (lf, pts, rt) = self.lambda_fn(callee)?;
+                        let mut av = Vec::new();
+                        for (v, pt) in vals.iter().zip(&pts) {
+                            av.push(self.as_ty(*v, *pt, "lambda argument")?);
+                        }
+                        let argv: Vec<BasicMetadataValueEnum> = av.iter().map(|a| self.basic(*a).into()).collect();
+                        let r = self.b.build_call(lf, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+                        for a in av {
+                            self.drop_tmp(a)?;
+                        }
+                        let v = self.val_of(r, rt, true);
+                        return self.as_ty(v, ty, "lambda result");
+                    }
+                    let f = self.closure_value(callee)?;
+                    return self.call_value(f, args, ty);
+                }
+                // anything that is not a named function or variant is a function value
+                let named = match &callee.kind {
+                    ExprKind::Path(path) if !(path.len() == 1 && self.lookup(&path[0]).is_some()) => {
+                        matches!(self.p.resolve(self.cur_mod, path), Ok(Resolved::Fn(_) | Resolved::Variant(..)))
+                    }
+                    _ => false,
+                };
+                if !named {
+                    let f = self.expr(callee)?;
+                    return self.call_value(f, args, ty);
                 }
                 let ExprKind::Path(path) = &callee.kind else { return Err("unsupported callee".into()) };
                 if let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) {
@@ -2035,6 +2305,23 @@ impl<'ctx> Cg<'ctx, '_> {
                 let a = self.expr(&args[0])?;
                 let a = self.boxed(a)?;
                 let r = if *prim == Prim::Each {
+                    // a function value (variable, capturing lambda, any expression): mim_each_fn
+                    let value_fn = match &args[1].kind {
+                        ExprKind::Lambda { params, body } => !self.captures(params, body).is_empty(),
+                        ExprKind::Path(path) => path.len() == 1 && self.lookup(&path[0]).is_some(),
+                        _ => true,
+                    };
+                    if value_fn {
+                        let f = match &args[1].kind {
+                            ExprKind::Lambda { .. } => self.closure_value(&args[1])?,
+                            _ => self.expr(&args[1])?,
+                        };
+                        let f = self.boxed(f)?;
+                        let r = self.call_rt_ptr("mim_each_fn", &[self.basic(a).into(), self.basic(f).into()])?;
+                        self.drop_tmp(f)?;
+                        self.drop_tmp(a)?;
+                        return self.as_ty(r, ty, "primitive result");
+                    }
                     let f = match &args[1].kind {
                         ExprKind::Lambda { .. } => self.lambda_thunk(&args[1])?,
                         _ => {
@@ -2060,7 +2347,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(a)?;
                 self.as_ty(r, ty, "primitive result")
             }
-            ExprKind::Lambda { .. } => Err("lambdas can only be called or passed to ¨ (each)".into()),
+            ExprKind::Lambda { .. } => {
+                let v = self.closure_value(e)?;
+                self.as_ty(v, ty, "function value")
+            }
             ExprKind::Named { .. } => Err("named arguments are only allowed in calls to functions".into()),
             ExprKind::Tuple(xs) => {
                 let mut vals = Vec::new();
