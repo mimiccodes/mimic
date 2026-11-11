@@ -38,21 +38,20 @@ Each profile can be tuned in `build.mim`.
 
 ## Cross-compilation
 
-`--target` takes a Zig-style triple, such as:
-* `x86_64-linux-gnu`
-* `aarch64-linux-musl`
-* `aarch64-macos`
-* `x86_64-windows`
-* `wasm32-wasi`
+`--target` takes an LLVM target triple; the vendor may be left out:
+* `x86_64-linux-musl` (the ABI defaults to musl on Linux, so `x86_64-linux` is the same)
+* `aarch64-linux`
+* `x86_64-apple-macosx13.0`
+* `riscv64-unknown-linux-musl`
+* `wasm32-wasi`, `nvptx64-nvidia-cuda`, `avr-unknown-unknown`, …
 
-LLVM generates the object for that triple. The C runtime is then compiled for the same triple with `zig cc` and cached in `~/.mimic/cache/runtime`, and `zig cc` links the result. This means every target Zig can link is reachable, with no per-target toolchain to install.
+LLVM generates the code for that triple. If `mimic` has a C library for the target, the runtime is compiled for the same triple by the embedded Clang (cached in `~/.mimic/cache/runtime`) and the embedded LLD links a complete executable. Otherwise the object file (or assembly, for NVPTX) is produced. `mimic targets` lists everything; see [targets.md](targets.md).
 
 ## Environment
 
 | Variable | Effect |
 |---|---|
 | `MIMIC_HOME` | Overrides `~/.mimic`, which holds the libraries, the runtime cache and the build directories for single-file runs. |
-| `MIMIC_ZIG` | The path to the `zig` binary. Without Zig, native builds fall back to `cc`. |
 | `MIMIC_THREADS` | **Runtime:** the number of worker threads (default: all CPUs; `1` runs sequentially). |
 | `MIMIC_PAR_GRAIN` | **Runtime:** the number of elements per parallel chunk (default 16384). |
 | `MIMIC_NET_NODES` | **Runtime:** the interaction-net capacity in nodes (default 16M). |

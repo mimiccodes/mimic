@@ -56,7 +56,7 @@ pub struct Profile {
 pub struct BuildConfig {
     pub debug: Profile,
     pub release: Profile,
-    /// Default cross targets (Zig-style triples) built by `mimic build --all-targets`.
+    /// Default cross targets (LLVM triples) built by `mimic build --all-targets`.
     pub targets: Vec<String>,
 }
 
@@ -301,7 +301,7 @@ profile release {
     leak_check = false
 }
 
-// Extra cross-compilation targets (Zig triples), built with `mimic build --all-targets`.
+// Extra cross-compilation targets (LLVM triples, e.g. "aarch64-linux"), built with `mimic build --all-targets`.
 targets = []
 "#;
 

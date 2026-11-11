@@ -105,7 +105,7 @@ enum Cmd {
         file: Option<PathBuf>,
         #[command(flatten)]
         profile: ProfileArgs,
-        /// Cross-compile for a Zig-style target triple, e.g. x86_64-linux-gnu, aarch64-macos, x86_64-windows
+        /// Cross-compile for an LLVM target triple (vendor optional), e.g. x86_64-linux-musl, aarch64-linux, x86_64-apple-macosx13.0; `mimic targets` lists them
         #[arg(long)]
         target: Option<String>,
         /// Also build every target listed in build.mim `targets`
@@ -132,7 +132,7 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
-    /// List every target: architectures, OSes, ABIs, libc targets and their status
+    /// List what LLVM can target (architectures, OSes, environments) and what builds executables
     Targets {
         /// List the CPU models of an architecture (e.g. `--cpus aarch64`), for `--cpu`
         #[arg(long, value_name = "ARCH")]
@@ -140,6 +140,9 @@ enum Cmd {
         /// List the CPU features of an architecture
         #[arg(long, value_name = "ARCH")]
         features: Option<String>,
+        /// Show how a target is understood (LLVM triple) and what it can build
+        #[arg(long, value_name = "TARGET")]
+        check: Option<String>,
         /// Print as JSON
         #[arg(long)]
         json: bool,
@@ -221,9 +224,31 @@ fn main() -> ExitCode {
     // ld64.lld, lld-link, wasm-ld) is LLD. They take the tools' own flags, so
     // they are dispatched before argument parsing.
     let argv: Vec<String> = std::env::args().collect();
+    // invoked through a tool link (`ld64.lld` → mimic): run that tool
+    let me = argv.first().and_then(|a| Path::new(a).file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if mimic_toolchain::LLD_FLAVOURS.contains(&me.as_str()) {
+        return ExitCode::from(mimic_toolchain::lld_main(&argv).clamp(0, 255) as u8);
+    }
     if let Some(tool) = argv.get(1).map(String::as_str) {
         if tool == "cc" || tool == "c++" {
             let mut args = vec![if tool == "cc" { "clang".to_string() } else { "clang++".to_string() }];
+            // driver mode only: `mimic cc -cc1 …` is Clang re-running itself
+            let driver_mode = !argv.get(2).is_some_and(|a| a.starts_with("-cc1"));
+            // Clang's own headers (stddef.h, …) are bundled in mimic
+            if driver_mode
+                && !argv.iter().any(|a| a.starts_with("-resource-dir"))
+                && let Ok(dir) = mimic_toolchain::resource_dir(&packages::cache_dir().join("libc"))
+            {
+                args.push("-resource-dir".into());
+                args.push(dir.display().to_string());
+            }
+            // link with the embedded LLD, not whatever linker the system has
+            if driver_mode
+                && !argv.iter().any(|a| a.starts_with("-fuse-ld") || a.starts_with("--ld-path"))
+                && let Some(ld) = tool_link(lld_flavour(&argv[2..]))
+            {
+                args.push(format!("--ld-path={}", ld.display()));
+            }
             args.extend(argv[2..].iter().cloned());
             return ExitCode::from(mimic_toolchain::clang_main(&args).clamp(0, 255) as u8);
         }
@@ -244,6 +269,47 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The LLD flavour Clang should link with, from `--target`/`-target`.
+fn lld_flavour(args: &[String]) -> &'static str {
+    let target = args
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| a.strip_prefix("--target=").map(String::from).or_else(|| (a == "-target").then(|| args.get(i + 1).cloned()).flatten()))
+        .unwrap_or_else(|| if cfg!(target_os = "macos") { "apple-darwin".into() } else { "linux".into() });
+    if target.contains("apple") || target.contains("darwin") || target.contains("macos") {
+        "ld64.lld"
+    } else if target.contains("windows-msvc") || (target.contains("windows") && !target.contains("gnu")) {
+        "lld-link"
+    } else if target.starts_with("wasm") {
+        "wasm-ld"
+    } else {
+        "ld.lld"
+    }
+}
+
+/// `<cache>/bin/<name>`: a link to this binary, so tools that run a linker by
+/// path (Clang's driver) get the embedded one.
+fn tool_link(name: &str) -> Option<PathBuf> {
+    if !mimic_toolchain::EMBEDDED {
+        return None;
+    }
+    let me = std::env::current_exe().ok()?;
+    let me = std::fs::canonicalize(&me).unwrap_or(me);
+    let dir = packages::cache_dir().join("bin");
+    let link = dir.join(name);
+    if std::fs::read_link(&link).ok().as_deref() == Some(me.as_path()) {
+        return Some(link);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    let tmp = dir.join(format!(".{name}.{}", std::process::id()));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&me, &tmp).ok()?;
+    #[cfg(not(unix))]
+    std::fs::copy(&me, &tmp).ok()?;
+    std::fs::rename(&tmp, &link).ok()?;
+    Some(link)
 }
 
 fn status(verb: &str, msg: impl AsRef<str>) {
@@ -354,12 +420,16 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     }
                     let a = driver::build(&input, &prof, t, emit_ir, emit_net)?;
                     if !emit_json {
-                        status("Finished", format!("{} → {}", if a.is_exe { "executable" } else { "static library" }, shown(&a.path)));
+                        status("Finished", format!("{} → {}", a.kind.describe(), shown(&a.path)));
+                        if let Some(n) = &a.note {
+                            eprintln!("     warning: no executable: {n}");
+                        }
                     }
                     out.push(serde_json::json!({
                         "target": t.name(),
                         "profile": prof.name(),
-                        "kind": if a.is_exe { "executable" } else { "static-library" },
+                        "kind": a.kind.json(),
+                        "note": a.note,
                         "path": a.path.display().to_string(),
                     }));
                 }
@@ -378,7 +448,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
-        Cmd::Targets { cpus, features, json } => targets_cmd(cpus.as_deref(), features.as_deref(), json),
+        Cmd::Targets { cpus, features, check, json } => targets_cmd(cpus.as_deref(), features.as_deref(), check.as_deref(), json),
         Cmd::Run { file, profile, emit_json, args } => {
             let built = (|| -> Result<driver::Artifact, Report> {
                 let input = driver::input_from(file.as_deref())?;
@@ -458,11 +528,12 @@ fn fail(r: Report, json: bool, command: &str, json_to_stderr: bool) -> Result<Ex
     Ok(ExitCode::FAILURE)
 }
 
-fn targets_cmd(cpus: Option<&str>, features: Option<&str>, json: bool) -> Result<ExitCode, String> {
+fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, json: bool) -> Result<ExitCode, String> {
+    use mimic_toolchain::{Names, llvm_names};
     use serde_json::json;
-    use targets::{ABIS, ARCHES, Backend, LIBC_TARGETS, OSES};
+    use toolchain::Support;
     if let Some(arch) = cpus.or(features) {
-        let t = Target::parse(&format!("{arch}-freestanding"))?;
+        let t = if arch.contains('-') { Target::parse(arch)? } else { Target::parse(&format!("{arch}-unknown-unknown"))? };
         let triple = t.llvm.unwrap();
         let list = mimic_toolchain::cpus(&triple, features.is_some()).ok_or_else(|| format!("no CPU list for `{arch}`"))?;
         if json {
@@ -475,50 +546,62 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, json: bool) -> Result
         }
         return Ok(ExitCode::SUCCESS);
     }
-    let status = |t: &str| -> &'static str {
-        match Target::parse(t) {
-            Err(_) => "no code generator",
-            Ok(tg) => {
-                let triple = tg.llvm.clone().unwrap_or_default();
-                if tg.os == "linux" && tg.abi.starts_with("musl") && mimic_toolchain::musl::arch(&triple).is_some() {
-                    "embedded"
-                } else if tg.os == "macos" && cfg!(target_os = "macos") {
-                    "embedded (macOS SDK)"
-                } else {
-                    "zig fallback"
-                }
-            }
-        }
+    let support_str = |t: &Target| match toolchain::support(t) {
+        Support::Bundled => "executables (bundled libc)".to_string(),
+        Support::Sdk => "executables (platform SDK)".to_string(),
+        Support::NotYet(why) => format!("objects only: {why}"),
     };
+    if let Some(t) = check {
+        let tg = Target::parse(t)?;
+        let s = support_str(&tg);
+        if json {
+            println!("{}", json!({"target": tg.name(), "llvm": tg.llvm, "arch": tg.arch, "os": tg.os, "env": tg.env, "support": s}));
+        } else {
+            println!("{} → {} ({s})", tg.name(), tg.llvm.as_deref().unwrap_or("native"));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let arches = targets::arches();
+    let backends = llvm_names(Names::Backends);
+    let oses: Vec<String> = llvm_names(Names::Oses).into_iter().map(|x| x.0).collect();
+    let envs: Vec<String> = llvm_names(Names::Environments).into_iter().map(|x| x.0).collect();
+    let vendors: Vec<String> = llvm_names(Names::Vendors).into_iter().map(|x| x.0).collect();
+    // complete executables: the bundled-musl targets, plus macOS with its SDK
+    let mut exes: Vec<String> = mimic_toolchain::musl::TARGETS.iter().map(|t| t.to_string()).collect();
+    if cfg!(target_os = "macos") {
+        exes.extend(["aarch64-apple-macosx".to_string(), "x86_64-apple-macosx".to_string()]);
+    }
     if json {
         let v = json!({
-            "arches": ARCHES.iter().map(|(n, l, b)| json!({"name": n, "llvm": l, "backend": b.as_str()})).collect::<Vec<_>>(),
-            "oses": OSES.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
-            "abis": ABIS,
-            "libc": LIBC_TARGETS.iter().map(|t| json!({"target": t, "status": status(t)})).collect::<Vec<_>>(),
-            "native": Target::host().arch + "-" + std::env::consts::OS,
+            "backends": backends.iter().map(|(n, d)| json!({"name": n, "description": d})).collect::<Vec<_>>(),
+            "arches": arches.iter().map(|(n, b)| json!({"name": n, "backend": b})).collect::<Vec<_>>(),
+            "vendors": vendors,
+            "oses": oses,
+            "environments": envs,
+            "executables": exes,
         });
         println!("{v}");
         return Ok(ExitCode::SUCCESS);
     }
-    let with_backend = ARCHES.iter().filter(|a| a.2 == Backend::Yes).count();
-    println!("Architectures ({}, {with_backend} with a code generator in this build):", ARCHES.len());
-    for (n, _, b) in ARCHES {
-        let mark = match b {
-            Backend::Yes => "",
-            Backend::Experimental => "  (LLVM experimental: not in this build)",
-            Backend::None => "  (no LLVM backend)",
-        };
-        println!("  {n}{mark}");
+    println!("Code generators in this build ({}):", backends.len());
+    for (n, d) in &backends {
+        println!("  {n:<14} {d}");
     }
-    println!("\nOperating systems ({}):\n  {}", OSES.len(), OSES.iter().map(|o| o.0).collect::<Vec<_>>().join(" "));
-    println!("\nABIs ({}):\n  {}", ABIS.len(), ABIS.join(" "));
-    println!("\nTargets with a libc, buildable as complete executables ({}):", LIBC_TARGETS.len());
-    for t in LIBC_TARGETS {
-        println!("  {t:<28} {}", status(t));
+    let with: Vec<&str> = arches.iter().filter(|a| a.1.is_some()).map(|a| a.0.as_str()).collect();
+    let without: Vec<&str> = arches.iter().filter(|a| a.1.is_none()).map(|a| a.0.as_str()).collect();
+    println!("\nArchitectures ({} known to LLVM, {} with a code generator here):\n  {}", arches.len(), with.len(), with.join(" "));
+    if !without.is_empty() {
+        println!("  without a code generator in this build: {}", without.join(" "));
     }
-    println!("\nWrite targets as <arch>-<os>[-<abi>][.<version>], e.g. x86_64-linux-musl, x86_64-linux-gnu.2.17, aarch64-macos.13.0");
-    println!("`embedded` = built with the tools inside mimic; `zig fallback` = needs Zig until its libc is bundled.");
+    println!("\nOperating systems ({}):\n  {}", oses.len(), oses.join(" "));
+    println!("\nEnvironments / ABIs ({}):\n  {}", envs.len(), envs.join(" "));
+    println!("\nVendors ({}):\n  {}", vendors.len(), vendors.join(" "));
+    println!("\nComplete executables ({}): any other target compiles to objects", exes.len());
+    for e in &exes {
+        println!("  {e}");
+    }
+    println!("\nWrite a target as an LLVM triple, vendor optional: x86_64-linux-musl, aarch64-linux, x86_64-apple-macosx13.0.");
+    println!("`mimic targets --check <target>` shows how a target is understood and what it can build.");
     Ok(ExitCode::SUCCESS)
 }
 

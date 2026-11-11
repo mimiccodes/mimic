@@ -1,68 +1,97 @@
 # Targets and the embedded toolchain
 
-`mimic` compiles C, links, and builds C libraries with tools **inside its own binary**:
-* **Clang:** the C compiler. It builds the runtime and C sources, and is available as `mimic cc`.
+**Mimic can target everything the LLVM inside it can generate code for.** The lists of architectures, operating systems, environments and code generators are not hand-written: `mimic targets` reads them from LLVM itself.
+
+`mimic` carries its own tools inside its binary:
+* **Clang:** the C compiler. It builds the runtime and C libraries, and is available as `mimic cc`.
 * **LLD:** the linker. It is available as `mimic ld.lld`, `mimic ld64.lld`, `mimic lld-link` and `mimic wasm-ld`.
 * **LLVM's archive writer:** it writes static libraries.
+* **musl and compiler-rt:** these are carried as sources. A target's C library is built the first time it is used.
 
-You do not need Zig, Xcode's command-line tools or a system C compiler for the targets marked **embedded**. This is roadmap Phase A. Targets that are not embedded yet fall back to `zig cc` if Zig is installed.
+No other compiler, linker or SDK has to be installed for the targets that produce **complete executables** (see below).
 
 ## Writing a target
 
-```text
-mimic build --target <arch>-<os>[-<abi>][.<version>]
+A target is an LLVM triple. The vendor may be left out.
 
-mimic build --target x86_64-linux-musl        # static Linux executable
-mimic build --target aarch64-linux            # ABI defaults to musl on Linux
-mimic build --target x86_64-linux-gnu.2.17    # glibc 2.17 (Zig fallback for now)
-mimic build --target aarch64-macos.13.0       # minimum macOS 13.0
-mimic targets                                 # the full list, with status
-mimic targets --json                          # the same, for tools
-mimic targets --cpus riscv64                  # CPU models
-mimic targets --features aarch64              # CPU features
+```text
+mimic build --target x86_64-linux-musl           # static Linux executable
+mimic build --target aarch64-linux               # environment defaults to musl on Linux
+mimic build --target riscv64-unknown-linux-musl  # full triple
+mimic build --target x86_64-apple-macosx13.0     # minimum macOS 13.0
+mimic build --target nvptx64-nvidia-cuda         # GPU: writes PTX
+mimic build --target avr-unknown-unknown         # microcontroller: object file
+
+mimic targets                       # architectures, OSes, environments, code generators
+mimic targets --check aarch64-linux # how a target is understood, what it can build
+mimic targets --cpus riscv64        # CPU models
+mimic targets --features aarch64    # CPU features
+mimic targets --json                # everything, for tools
 ```
 
-The names are Zig's. Every architecture (61), OS (48) and ABI (30) that Zig 0.17 knows is accepted. An architecture without a code generator in this build is rejected with a clear message.
+### Defaults
 
-### Defaults when the ABI is omitted
-
-| OS | Default ABI |
+| Situation | Default |
 |---|---|
-| Linux | `musl`, producing fully static executables with no system libc needed. 32-bit ARM, MIPS and PowerPC use `musleabihf`; MIPS64 uses `muslabi64`. |
-| Windows | `gnu` (MinGW). |
-| Everything else | `none`. |
+| Linux, no environment given | `musl`, producing fully static executables. 32-bit ARM, MIPS and PowerPC use `musleabihf`; MIPS64 uses `muslabi64`. |
+| Windows, no environment given | `gnu` (MinGW). |
+| 32-bit ARM and Thumb | ARMv7-A is the baseline CPU. |
+| Apple OSes without a version | macOS 11.0, iOS and tvOS 14.0, watchOS 7.0, visionOS 1.0. |
+| glibc version | Written after the environment, e.g. `x86_64-linux-gnu.2.17`. |
 
 ### CPU and ABI
 
-For each target, Mimic code is compiled with the same CPU model, features and ABI that Clang would choose, for example `generic-rv64` with `+m,+a,+f,+d,+c` and `lp64d` on riscv64. This keeps Mimic code, the runtime and the C library consistent; mixing floating-point ABIs is a link error.
+For each target, Mimic code is compiled with the CPU model, features and ABI that Clang would choose. For example, riscv64 uses `generic-rv64` with `+m,+a,+f,+d,+c` and the `lp64d` ABI. This keeps Mimic code, the runtime and the C library consistent; mixing floating-point ABIs is a link error.
 
-Native builds (no `--target`) use the host CPU and all its features.
+Native builds (no `--target`) use the host CPU with all its features.
 
-## Status
+## What each target produces
 
-| Family | Status |
+LLVM's triple parser knows 62 architectures, 49 operating systems and 53 environments. This build has code generators for 44 of those architectures.
+
+**All 39 CPU architectures compile Mimic programs, and a test checks this for each one:** arm, armeb, aarch64, aarch64_be, aarch64_32, avr, bpfel, bpfeb, hexagon, loongarch32, loongarch64, mips, mipsel, mips64, mips64el, msp430, powerpc, powerpcle, powerpc64, powerpc64le, riscv32, riscv64, riscv32be, riscv64be, sparc, sparcv9, sparcel, s390x, thumb, thumbeb, i386, x86_64, xcore, nvptx, nvptx64, lanai, wasm32, wasm64, ve.
+
+The 5 GPU architectures (amdgpu, r600, spirv, spirv32, spirv64) take compute kernels, not whole programs: a program's runtime, threads and function pointers cannot run on them. Compiling Mimic's array kernels for GPUs is the GPU backend on the roadmap (F8). Until then, building for them says so. NVPTX already gets a whole program as PTX assembly.
+
+| Output | Targets |
 |---|---|
-| macOS, native | **Embedded:** runtime compiled with the embedded Clang, linked with `ld64.lld`, with ad-hoc code signing on arm64. Still uses the macOS SDK from `xcrun`; bundled SDK stubs come next. |
-| Linux, musl (30 of 33 targets) | **Embedded.** musl 1.2.5 and compiler-rt are built from sources bundled in `mimic`, the first time each target is used (about 40 s per target), then cached under `~/.mimic/cache/libc/`. Executables are fully static. Not yet: `riscv32` (needs quad-precision soft-float for `long double`) and `hexagon` (musl has no port); `m68k` has no code generator in this build. |
-| Linux, glibc | Zig fallback. Next step: glibc stubs for 2.0–2.44. |
-| Windows (MinGW) | Zig fallback. Next step: bundled mingw-w64. |
-| WASI | Zig fallback. Next step: bundled wasi-libc. |
-| FreeBSD, NetBSD, OpenBSD | Zig fallback. Next step: generated libc stubs. |
-| No libc (`freestanding`, GPU targets) | Object files only (tier 3). |
+| **Complete executable** | Native macOS, and macOS cross-builds between arm64 and x86_64, using the SDK on the machine.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
+| **Object file** | Any other target on a CPU architecture: Windows, WASI, glibc Linux, Android, the BSDs, UEFI, bare metal (`riscv32-unknown-elf`), AVR, MSP430, BPF, Hexagon, … |
+| **Assembly** | Backends that do not write object files: PTX for `nvptx`/`nvptx64`, `.s` for `xcore`. |
 
-`mimic targets` prints the status of every target with a libc:
-* `embedded` means it is built only with the tools inside `mimic`;
-* `zig fallback` means it needs Zig until that libc is bundled;
-* `no code generator` means this LLVM build has no backend for the architecture.
+These are the 30 Linux musl targets:
 
-## Architectures without a code generator
+| Architecture | Targets |
+|---|---|
+| x86 | x86_64, x86_64 x32, x86 |
+| AArch64 | aarch64, aarch64_be |
+| 32-bit ARM | arm, armeb, thumb and thumbeb, each in `eabi` and `eabihf` |
+| LoongArch | loongarch64 (`musl`, `muslf32`, `muslsf`) |
+| MIPS, 32-bit | mips, mipsel (`eabi`, `eabihf`) |
+| MIPS, 64-bit | mips64, mips64el (`abi64`, `abin32`) |
+| Others | powerpc (`eabi`, `eabihf`), powerpc64, powerpc64le, riscv64, s390x |
 
-Zig *lists* 61 architectures, but generating code needs a backend:
-* **Experimental in LLVM**, not in this build: `arc`, `csky`, `m68k`, `xtensa`. Building our own LLVM, in step A8, can enable them.
-* **No LLVM backend at all:** `alpha`, `arceb`, `ez80`, `hppa`, `hppa64`, `kalimba`, `kvx`, `m88k`, `microblaze`, `microblazeel`, `or1k`, `propeller`, `sh`, `sheb`, `spork8`, `xtensaeb`.
+`mimic targets --check <target>` says which of these three outputs a target gets, and why.
+
+### Next C libraries
+
+These will turn object-only targets into complete executables:
+* glibc stubs for linking against any glibc version;
+* mingw-w64 (Windows);
+* wasi-libc (WASI);
+* the BSDs' and Android's libcs;
+* Apple SDK stubs, so that macOS no longer needs the SDK installed.
+
+Two musl targets are not available yet:
+* `riscv32` needs quad-precision soft-float for musl's 128-bit `long double`;
+* `hexagon` has no musl port.
+
+## Architectures LLVM knows but this build cannot generate
+
+LLVM's triple parser knows more architectures than this build has backends for, for example the experimental `m68k`, `csky`, `arc`, `xtensa` and `directx` backends. `mimic targets` lists these separately. They become available when `mimic` is linked against an LLVM built with them; that is roadmap step A8.
 
 ## Building `mimic` itself
 
-`tools/deps.sh` downloads and checks (sha256) the LLVM 23.1.4 sources and musl 1.2.5, then builds static LLD into `~/.mimic/deps`. The Rust build then compiles the Clang driver from those sources and links everything statically.
+`tools/deps.sh` downloads the LLVM 23.1.4 sources and musl 1.2.5, checks their sha256 against the published values, and builds static LLD into `~/.mimic/deps`. The Rust build then compiles the Clang driver from those sources and links everything statically.
 
-If those inputs are missing, `mimic` still builds, but without the embedded tools: `mimic targets` and the build fall back to Zig or the system compiler.
+If those inputs are missing, `mimic` still builds without the embedded tools. In that case native builds use the system C compiler, and cross targets produce object files only.

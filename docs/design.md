@@ -33,7 +33,7 @@ The language targets three problems:
 
 ## Milestone 1 (implemented)
 
-M1 is a vertical slice: source → parse → check → **LLVM** → native object, then `zig cc` links it. The pieces:
+M1 is a vertical slice: source → parse → check → **LLVM** → native object, then a linker turns it into an executable (today: the LLD built into `mimic`). The pieces:
 
 * **Front end** (`crates/mimic-syntax`). It has a lexer in which glyphs and words produce identical tokens. The glyph table is the single source of truth, and the parser is a precedence-climbing parser with left-to-right trains.
 * **Checker** (`crates/mimic-check`) covers:
@@ -46,7 +46,7 @@ M1 is a vertical slice: source → parse → check → **LLVM** → native objec
   * Every value is a `mim_val*` handle into the array layer.
   * Codegen inserts retain/release according to one contract. Runtime calls and Mimic functions **borrow** their arguments and return an **owned** value. `let` bindings own their value until scope exit.
   * In debug builds the program checks at exit that no array is still alive. The golden tests run every fixture under that leak check.
-* **Runtime** (`runtime/mimic_rt.c`). This is the array layer in portable C. It is embedded in the `mimic` binary, then compiled and cached per target with `zig cc`, which is why every Zig target is reachable.
+* **Runtime** (`runtime/mimic_rt.c`). This is the array layer in portable C. It is embedded in the `mimic` binary, then compiled and cached per target by the Clang built into `mimic`.
 * **Type annotations** (`x: i64`, `xs: [f64]`, `-> f64`) are optional. When present they are enforced at function boundaries at runtime. Static inference is planned for M4.
 
 There is no net layer yet in M1: code runs strictly and sequentially, with the array layer handling memory.
@@ -112,7 +112,7 @@ Boxed-ABI thunks connect typed code to `¨`, the net's native table (which dispa
 
 | Milestone | Scope |
 |---|---|
-| **M1** ✅ | CLI, project system, mod.mim, packages from git, lexer/parser/checker, LLVM codegen, array runtime, C FFI (import), cross-compilation via Zig. |
+| **M1** ✅ | CLI, project system, mod.mim, packages from git, lexer/parser/checker, LLVM codegen, array runtime, C FFI (import), cross-compilation. |
 | **M2** | Net runtime in C with a parallel reducer and `ARR` handle nodes. Lazy `let`. Parallel `¨`. Kernel fusion. Atomic refcounts for shared handles. |
 | **M3** | LLVM auto-vectorised kernels with explicit SIMD widths. A GPU backend (NVPTX / AMDGPU / SPIR-V) for array kernels, with the net deciding placement. |
 | **M4** | Static types with rank polymorphism and generics. Nested arrays (`⊂`). Higher ranks. Closures. `pub extern fn` exports with `--emit-header`. Registry, `mimic fmt`, `mimic test`, LSP. |

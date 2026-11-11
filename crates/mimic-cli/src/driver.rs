@@ -1,6 +1,6 @@
 //! Compilation pipeline: load sources → parse → check → LLVM codegen →
 //! compile the runtime with the embedded Clang → link with the embedded LLD
-//! (or `zig cc` for targets not embedded yet; see toolchain.rs).
+//! (see toolchain.rs).
 
 use crate::targets::Target;
 use crate::report::Report;
@@ -224,7 +224,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);
     c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);
-    if release && target.zig.is_none() {
+    if release && target.name.is_none() {
         c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
     }
     c.arg(&src).arg("-o").arg(&tmp);
@@ -235,7 +235,39 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<
 
 pub struct Artifact {
     pub path: PathBuf,
-    pub is_exe: bool,
+    pub kind: ArtifactKind,
+    /// Why only an object was produced, when that happens.
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactKind {
+    Executable,
+    StaticLibrary,
+    /// LLVM can generate code for the target, but `mimic` has no C library
+    /// for it yet: the program's object file, without the runtime.
+    Object,
+    /// Like `Object`, for backends that only emit assembly (NVPTX: `.ptx`).
+    Assembly,
+}
+
+impl ArtifactKind {
+    pub fn describe(self) -> &'static str {
+        match self {
+            ArtifactKind::Executable => "executable",
+            ArtifactKind::StaticLibrary => "static library",
+            ArtifactKind::Object => "object file",
+            ArtifactKind::Assembly => "assembly",
+        }
+    }
+    pub fn json(self) -> &'static str {
+        match self {
+            ArtifactKind::Executable => "executable",
+            ArtifactKind::StaticLibrary => "static-library",
+            ArtifactKind::Object => "object",
+            ArtifactKind::Assembly => "assembly",
+        }
+    }
 }
 
 pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
@@ -248,7 +280,7 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
         }
     };
     let mut d = base.join(profile.name());
-    if target.zig.is_some() {
+    if target.name.is_some() {
         d = d.join(target.name());
     }
     d
@@ -270,6 +302,12 @@ fn codegen_and_link(
     emit_ir: bool,
     emit_net: bool,
 ) -> Result<Artifact, String> {
+    if target.is_device_only() {
+        return Err(format!(
+            "`{}` is a GPU target: a whole program cannot run there; compiling Mimic's array kernels for GPUs is the GPU backend on the roadmap (F8)",
+            target.name()
+        ));
+    }
     let dir = out_dir(input, profile, target);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let name = input.name();
@@ -285,7 +323,7 @@ fn codegen_and_link(
         },
         None => (None, None, None),
     };
-    mimic_codegen::compile(
+    let obj = mimic_codegen::compile(
         program,
         &mimic_codegen::Settings {
             triple: target.llvm.clone(),
@@ -302,7 +340,15 @@ fn codegen_and_link(
         emit_ir.then_some(ir.as_path()),
         emit_net.then_some(net.as_path()),
     )?;
-    let tc = toolchain::select(target)?;
+    let tc = match toolchain::select(target) {
+        Ok(tc) => tc,
+        // every target LLVM supports gets at least its object file
+        Err(why) if target.name.is_some() => {
+            let kind = if obj.extension().is_some_and(|e| e == "o") { ArtifactKind::Object } else { ArtifactKind::Assembly };
+            return Ok(Artifact { path: obj, kind, note: Some(why) });
+        }
+        Err(why) => return Err(why),
+    };
     let rt = runtime_object(&tc, target, profile.release)?;
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
@@ -313,13 +359,13 @@ fn codegen_and_link(
             job.libs = p.manifest.ffi_link.clone();
         }
         run_tool(toolchain::link(&tc, target, &job), "linking")?;
-        Ok(Artifact { path: exe, is_exe: true })
+        Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })
     } else {
         // library: static archive of the program object + runtime
         let lib = dir.join(format!("lib{name}.a"));
         let _ = fs::remove_file(&lib);
         toolchain::archive(&tc, target, &lib, &[obj, rt])?;
-        Ok(Artifact { path: lib, is_exe: false })
+        Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
     }
 }
 

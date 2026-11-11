@@ -167,24 +167,20 @@ fn create_build_cross() {
     let out = mimic().current_dir(&proj).arg("build").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(proj.join("target/release/demo").is_file(), "build must default to the release profile");
-    let out = mimic().current_dir(&proj).args(["build", "--release", "--target", "x86_64-linux-gnu"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let elf = std::fs::read(proj.join("target/release/x86_64-linux-gnu/demo")).unwrap();
-    assert_eq!(&elf[..4], b"\x7fELF");
-    // musl targets need nothing but mimic: no Zig on PATH
-    let no_zig: String = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .filter(|d| !d.join("zig").is_file())
-        .map(|d| d.display().to_string())
-        .collect::<Vec<_>>()
-        .join(":");
+    // complete static Linux executables, built only with the tools inside mimic
     for (t, machine) in [("aarch64-linux-musl", 183u16), ("x86_64-linux-musl", 62)] {
-        let out = mimic().current_dir(&proj).env("PATH", &no_zig).env_remove("MIMIC_ZIG").args(["build", "--target", t]).output().unwrap();
+        let out = mimic().current_dir(&proj).args(["build", "--target", t]).output().unwrap();
         assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stderr));
         let elf = std::fs::read(proj.join(format!("target/release/{t}/demo"))).unwrap();
         assert_eq!(&elf[..4], b"\x7fELF", "{t}");
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), machine, "{t}: e_machine");
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2, "{t}: ET_EXEC (static)");
     }
+    // a target without a bundled C library still gets its object file
+    let out = mimic().current_dir(&proj).args(["build", "--target", "x86_64-windows"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let coff = std::fs::read(proj.join("target/release/x86_64-windows-gnu/demo.o")).unwrap();
+    assert_eq!(&coff[..2], &[0x64, 0x86], "x86-64 COFF object");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -236,15 +232,47 @@ fn targets_listing() {
     let out = mimic().args(["targets", "--json"]).output().unwrap();
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["arches"].as_array().unwrap().len(), 61);
-    assert_eq!(v["oses"].as_array().unwrap().len(), 48);
-    assert_eq!(v["abis"].as_array().unwrap().len(), 30);
-    let libc = v["libc"].as_array().unwrap();
-    assert_eq!(libc.len(), 108);
-    assert!(libc.iter().any(|t| t["target"] == "x86_64-linux-musl" && t["status"] == "embedded"));
+    // everything comes from the linked LLVM
+    let arches = v["arches"].as_array().unwrap();
+    assert!(arches.len() > 50, "LLVM knows more than 50 architectures");
+    let with_backend: Vec<&str> = arches.iter().filter(|a| !a["backend"].is_null()).map(|a| a["name"].as_str().unwrap()).collect();
+    assert!(with_backend.len() >= 40, "{with_backend:?}");
+    assert!(v["backends"].as_array().unwrap().iter().any(|b| b["name"] == "riscv64"));
+    assert!(v["oses"].as_array().unwrap().iter().any(|o| o == "linux"));
+    assert!(v["environments"].as_array().unwrap().iter().any(|e| e == "musleabihf"));
+    assert!(v["executables"].as_array().unwrap().iter().any(|t| t == "x86_64-linux-musl"));
     let out = mimic().args(["targets", "--cpus", "x86_64"]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).lines().any(|l| l == "znver4"));
+    let out = mimic().args(["targets", "--check", "aarch64-linux", "--json"]).output().unwrap();
+    let c: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(c["llvm"], "aarch64-unknown-linux-musl");
     let f = fixtures("run").into_iter().next().unwrap();
-    let out = mimic().arg("build").arg(&f).args(["--target", "m68k-linux-musl"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("no code generator"));
+    let out = mimic().arg("build").arg(&f).args(["--target", "bogus-linux"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown architecture"));
+}
+
+/// Every CPU architecture with an LLVM backend in this build compiles Mimic
+/// programs; GPU architectures explain that they need the GPU backend.
+#[test]
+fn every_backend_compiles() {
+    let out = mimic().args(["targets", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let f = fixtures("run").into_iter().find(|p| p.ends_with("basics.mim")).unwrap();
+    let mut failures = Vec::new();
+    // GPU backends take kernels, not whole programs (roadmap F8: GPU backend)
+    const DEVICE: &[&str] = &["amdgcn", "amdgpu", "r600", "spirv", "spirv32", "spirv64", "dxil"];
+    for a in v["arches"].as_array().unwrap().iter().filter(|a| !a["backend"].is_null()) {
+        let name = a["name"].as_str().unwrap();
+        let t = format!("{name}-unknown-unknown");
+        if DEVICE.contains(&name) {
+            let out = mimic().arg("build").arg(&f).args(["--target", &t]).output().unwrap();
+            assert!(String::from_utf8_lossy(&out.stderr).contains("GPU target"), "{t}");
+            continue;
+        }
+        let out = mimic().arg("build").arg(&f).args(["--target", &t]).output().unwrap();
+        if !out.status.success() {
+            failures.push(format!("{t}: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

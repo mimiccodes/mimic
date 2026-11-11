@@ -27,7 +27,7 @@ Milestone 1 is a working vertical slice:
 * a checker for modules, privacy, immutability and FFI `unsafe`;
 * **LLVM** code generation and a refcounted array runtime that the tests show to be leak-free;
 * calls into C;
-* cross-compilation to any target Zig supports.
+* cross-compilation to every architecture LLVM supports, with Clang and LLD built into `mimic` (see [docs/targets.md](docs/targets.md)).
 
 Milestone 2 is in progress:
 * **Phase 1, done:** the array layer runs on all cores automatically.
@@ -64,9 +64,10 @@ make run        # runs the tour
 Requirements:
 * Rust 1.88 or newer
 * LLVM 23 (`brew install llvm`); `.cargo/config.toml` points `LLVM_SYS_231_PREFIX` at `/opt/homebrew/opt/llvm`, so edit that if yours lives elsewhere
-* Zig, tested with 0.17 (`brew install zig`)
+* `tools/deps.sh` once: it fetches the LLVM sources and musl and builds the linker that `mimic` embeds
 
 ```sh
+tools/deps.sh                  # once: sources for the embedded Clang, LLD and musl
 cargo build --release          # → target/release/mimic
 cargo test                     # unit tests + golden tests (tests/fixtures)
 ```
@@ -80,7 +81,9 @@ crates/mimic-check     module tree, name resolution, visibility, mutability, FFI
 crates/mimic-codegen   LLVM codegen (inkwell)
 crates/mimic-project   mim.mim / build.mim, scaffolding, ~/.mimic/libraries
 crates/mimic-net       interaction-net IR, .mnet parser, encoder to the runtime book
-runtime/               C runtime: array layer + interaction-net reducer (embedded, compiled per target by zig cc)
+runtime/               C runtime: array layer + interaction-net reducer (embedded, compiled per target by the embedded Clang)
+crates/mimic-toolchain embedded Clang + LLD, bundled musl / compiler-rt, C library builds
+tools/deps.sh          fetches and builds the native dependencies
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
 tests/nets             interaction-net programs (*.mnet + .out)
 ```

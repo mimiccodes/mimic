@@ -98,3 +98,63 @@ extern "C" int mimic_list_cpus(const char *triple, int what, void (*cb)(const ch
     }
     return 0;
 }
+
+// ---- target introspection: everything comes from the linked LLVM ----------
+
+// kind: 0 = architectures, 1 = vendors, 2 = operating systems,
+// 3 = environments (ABIs), 4 = code generators (name, description).
+extern "C" void mimic_llvm_names(int kind, void (*cb)(const char *, const char *, void *), void *ud) {
+    using llvm::Triple;
+    std::string a, b;
+    switch (kind) {
+    case 0:
+        for (int i = 1; i <= Triple::LastArchType; i++) {
+            a = Triple::getArchTypeName((Triple::ArchType)i).str();
+            cb(a.c_str(), "", ud);
+        }
+        break;
+    case 1:
+        for (int i = 1; i <= Triple::LastVendorType; i++) {
+            a = Triple::getVendorTypeName((Triple::VendorType)i).str();
+            cb(a.c_str(), "", ud);
+        }
+        break;
+    case 2:
+        for (int i = 1; i <= Triple::LastOSType; i++) {
+            a = Triple::getOSTypeName((Triple::OSType)i).str();
+            cb(a.c_str(), "", ud);
+        }
+        break;
+    case 3:
+        for (int i = 1; i <= Triple::LastEnvironmentType; i++) {
+            a = Triple::getEnvironmentTypeName((Triple::EnvironmentType)i).str();
+            cb(a.c_str(), "", ud);
+        }
+        break;
+    default:
+        llvm::InitializeAllTargetInfos();
+        for (const auto &t : llvm::TargetRegistry::targets()) {
+            a = t.getName();
+            b = t.getShortDescription();
+            cb(a.c_str(), b.c_str(), ud);
+        }
+    }
+}
+
+// Normalise a triple with LLVM's own parser and report what it understood.
+// out gets "<normalized>\t<arch>\t<vendor>\t<os>\t<env>\t<backend>" where
+// backend is the code generator's name, or empty when there is none.
+extern "C" void mimic_llvm_triple(const char *in, char *out, size_t outlen) {
+    using llvm::Triple;
+    llvm::InitializeAllTargetInfos();
+    Triple t(Triple::normalize(in));
+    std::string err;
+    const llvm::Target *tg = t.getArch() == Triple::UnknownArch ? nullptr : llvm::TargetRegistry::lookupTarget(t, err);
+    std::string s = t.str() + "\t" + Triple::getArchTypeName(t.getArch()).str() + "\t" +
+                    (t.getVendor() == Triple::UnknownVendor ? std::string() : Triple::getVendorTypeName(t.getVendor()).str()) + "\t" +
+                    (t.getOS() == Triple::UnknownOS ? std::string() : Triple::getOSTypeName(t.getOS()).str()) + "\t" +
+                    (t.getEnvironment() == Triple::UnknownEnvironment ? std::string() : Triple::getEnvironmentTypeName(t.getEnvironment()).str()) + "\t" +
+                    (tg ? tg->getName() : "");
+    std::strncpy(out, s.c_str(), outlen - 1);
+    out[outlen - 1] = 0;
+}

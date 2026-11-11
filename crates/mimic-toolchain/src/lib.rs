@@ -1,8 +1,8 @@
 //! The linker (LLD) and C compiler (Clang) embedded in the `mimic` binary.
 //!
 //! Both run as `mimic` itself in a child process (`mimic ld.lld …`,
-//! `mimic cc …`), like `zig cc`: each tool gets a fresh process, so their
-//! global state and signal handlers never touch the compiler's.
+//! `mimic cc …`): each tool gets a fresh process, so its global state and
+//! signal handlers never touch the compiler's.
 
 pub mod bundle;
 pub mod compiler_rt;
@@ -20,6 +20,8 @@ unsafe extern "C" {
         cb: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void),
         ud: *mut std::ffi::c_void,
     ) -> c_int;
+    fn mimic_llvm_names(kind: c_int, cb: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void), ud: *mut std::ffi::c_void);
+    fn mimic_llvm_triple(input: *const c_char, out: *mut c_char, outlen: usize);
     fn mimic_clang_main(argc: c_int, argv: *const *mut c_char, self_path: *const c_char) -> c_int;
 }
 
@@ -104,4 +106,58 @@ pub fn cpus(triple: &str, features: bool) -> Option<Vec<(String, String)>> {
     let mut v: Vec<(String, String)> = Vec::new();
     let rc = unsafe { mimic_list_cpus(t.as_ptr(), c_int::from(features), push, &mut v as *mut _ as *mut std::ffi::c_void) };
     (rc == 0).then_some(v)
+}
+
+extern "C" fn push_pair(k: *const c_char, d: *const c_char, ud: *mut std::ffi::c_void) {
+    let v = unsafe { &mut *(ud as *mut Vec<(String, String)>) };
+    let s = |p: *const c_char| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    v.push((s(k), s(d)));
+}
+
+/// What LLVM knows, straight from the linked library.
+#[derive(Clone, Copy)]
+pub enum Names {
+    Arches = 0,
+    Vendors = 1,
+    Oses = 2,
+    Environments = 3,
+    /// Code generators in this build: (name, description).
+    Backends = 4,
+}
+
+pub fn llvm_names(kind: Names) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = Vec::new();
+    unsafe { mimic_llvm_names(kind as c_int, push_pair, &mut v as *mut _ as *mut std::ffi::c_void) };
+    v
+}
+
+/// A triple as LLVM's parser understands it.
+#[derive(Clone, Debug, Default)]
+pub struct Triple {
+    /// Normalised: `x86_64-unknown-linux-musl`.
+    pub triple: String,
+    /// Empty fields are unknown to LLVM.
+    pub arch: String,
+    pub vendor: String,
+    pub os: String,
+    pub env: String,
+    /// The code generator for it, if this build has one.
+    pub backend: Option<String>,
+}
+
+pub fn llvm_triple(input: &str) -> Triple {
+    let Ok(c) = CString::new(input) else { return Triple::default() };
+    let mut buf = vec![0 as c_char; 512];
+    unsafe { mimic_llvm_triple(c.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+    let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
+    let f: Vec<&str> = s.split('\t').collect();
+    let get = |i: usize| f.get(i).map(|x| x.to_string()).unwrap_or_default();
+    Triple {
+        triple: get(0),
+        arch: get(1),
+        vendor: get(2),
+        os: get(3),
+        env: get(4),
+        backend: Some(get(5)).filter(|b| !b.is_empty()),
+    }
 }

@@ -1,9 +1,9 @@
 //! Compiling C and linking with the tools embedded in `mimic` itself:
-//! Clang (`mimic cc`) and LLD (`mimic ld64.lld`, `mimic ld.lld`, …).
+//! Clang (`mimic cc`) and LLD (`mimic ld64.lld`, `mimic ld.lld`, …), plus the
+//! C libraries `mimic` builds from bundled sources.
 //!
-//! Targets move here from Zig one family at a time; a target the embedded
-//! toolchain cannot handle yet falls back to `zig cc` when Zig is installed.
-//! Set `MIMIC_TOOLCHAIN=zig` to force the old path (for comparison).
+//! Every target LLVM can generate code for can be compiled to an object;
+//! a complete executable also needs a C library, which `support` reports.
 
 use crate::targets::Target;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,6 @@ use std::process::Command;
 pub enum Toolchain {
     /// Clang and LLD inside this binary.
     Embedded(Sysroot),
-    /// `zig cc` (legacy fallback for targets not yet embedded).
-    Zig(PathBuf),
     /// The system C compiler (host only, when nothing else is available).
     System,
 }
@@ -28,27 +26,71 @@ pub enum Sysroot {
 }
 
 pub fn select(target: &Target) -> Result<Toolchain, String> {
-    let forced = std::env::var("MIMIC_TOOLCHAIN").ok();
-    if forced.as_deref() != Some("zig") && mimic_toolchain::EMBEDDED && let Some(s) = embedded_sysroot(target)? {
+    if mimic_toolchain::EMBEDDED
+        && let Some(s) = embedded_sysroot(target)?
+    {
         return Ok(Toolchain::Embedded(s));
     }
-    if let Some(z) = zig() {
-        return Ok(Toolchain::Zig(z));
-    }
-    if target.zig.is_none() {
+    if target.name.is_none() {
         return Ok(Toolchain::System);
     }
-    Err(format!(
-        "target `{}` is not yet supported by the embedded toolchain; install Zig (https://ziglang.org) or set MIMIC_ZIG for now",
-        target.name()
-    ))
+    Err(match support(target) {
+        Support::NotYet(why) => format!("cannot build executables for `{}` yet: {why} (run `mimic targets`)", target.name()),
+        _ => format!("cannot build executables for `{}`: this mimic was built without its embedded toolchain", target.name()),
+    })
+}
+
+/// How `mimic` provides the C library for a target.
+pub enum Support {
+    /// Built from sources bundled in `mimic` (musl, …).
+    Bundled,
+    /// The platform SDK found on this machine (macOS).
+    Sdk,
+    /// Not available yet; the reason.
+    NotYet(String),
+}
+
+pub fn support(target: &Target) -> Support {
+    let triple = target.llvm.clone().unwrap_or_default();
+    if target.os == "linux" && target.env.starts_with("musl") {
+        return if mimic_toolchain::musl::arch(&triple).is_some() || target.name.is_none() {
+            Support::Bundled
+        } else if target.arch == "riscv32" {
+            Support::NotYet("musl's 128-bit long double needs quad-precision soft-float, not available for riscv32 yet".into())
+        } else {
+            Support::NotYet(format!("musl has no port for {}", target.arch))
+        };
+    }
+    if target.os == "macosx" && cfg!(target_os = "macos") {
+        return Support::Sdk;
+    }
+    let os = if target.os.is_empty() { "unknown" } else { target.os.as_str() };
+    let what = match (os, target.env.as_str()) {
+        ("linux", e) if e.starts_with("gnu") => "glibc stubs are not bundled yet",
+        ("linux", e) if e.starts_with("android") => "the Android NDK libc is not bundled yet",
+        ("windows", _) => "mingw-w64 is not bundled yet",
+        ("wasi", _) => "wasi-libc is not bundled yet",
+        ("freebsd" | "netbsd" | "openbsd" | "dragonfly", _) => "BSD libc stubs are not bundled yet",
+        ("macosx" | "ios" | "tvos" | "watchos" | "xros" | "driverkit", _) => "Apple SDK stubs are not bundled yet",
+        ("cuda" | "amdhsa" | "amdpal" | "mesa3d" | "nvcl" | "vulkan" | "opencl" | "shadermodel", _) => {
+            "a GPU target: mimic produces device code, to be loaded by a host program"
+        }
+        ("unknown", _) => "no operating system: there is no C library for the runtime",
+        _ => "no C library for this OS is bundled",
+    };
+    Support::NotYet(what.into())
 }
 
 fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
-    if target.zig.is_none() && cfg!(target_os = "macos") {
+    if target.os == "macosx" && cfg!(target_os = "macos") {
         let Some(sdk) = macos_sdk() else { return Ok(None) };
         let sdk_version = tool_output("xcrun", &["--sdk", "macosx", "--show-sdk-version"]).unwrap_or_else(|| "11.0".into());
-        let min_os = tool_output("sw_vers", &["-productVersion"]).unwrap_or_else(|| "11.0".into());
+        // native builds target this machine's OS; cross builds the triple's minimum
+        let min_os = match &target.llvm {
+            Some(t) => t.split('-').nth(2).map(|os| os.trim_start_matches("macosx").to_string()).filter(|v| !v.is_empty()),
+            None => tool_output("sw_vers", &["-productVersion"]),
+        }
+        .unwrap_or_else(|| "11.0".into());
         return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version }));
     }
     if let Some(triple) = &target.llvm
@@ -86,14 +128,6 @@ fn macos_sdk() -> Option<PathBuf> {
     tool_output("xcrun", &["--sdk", "macosx", "--show-sdk-path"]).map(PathBuf::from).filter(|p| p.is_dir())
 }
 
-pub fn zig() -> Option<PathBuf> {
-    if let Some(z) = std::env::var_os("MIMIC_ZIG") {
-        return Some(PathBuf::from(z));
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(if cfg!(windows) { "zig.exe" } else { "zig" })).find(|p| p.is_file())
-}
-
 fn self_exe() -> PathBuf {
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mimic"))
 }
@@ -125,14 +159,6 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
                 Sysroot::Musl { triple, root, .. } => {
                     c.args(mimic_toolchain::musl::target_flags(triple)).arg(format!("--sysroot={}", root.display()));
                 }
-            }
-            c
-        }
-        Toolchain::Zig(z) => {
-            let mut c = Command::new(z);
-            c.arg("cc");
-            if let Some(t) = &target.zig {
-                c.args(["-target", t]);
             }
             c
         }
@@ -195,7 +221,7 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             c.arg(lib.join("crtn.o"));
             c
         }
-        Toolchain::Zig(_) | Toolchain::System => {
+        Toolchain::System => {
             let mut c = cc(tc, target);
             c.args(job.objects).arg("-o").arg(job.output);
             for s in &job.search {
@@ -204,7 +230,7 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             for l in &job.libs {
                 c.arg(format!("-l{l}"));
             }
-            if target.needs_libm() {
+            if !target.is_apple() {
                 c.arg("-lm");
             }
             if job.debug {
@@ -219,20 +245,14 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
 pub fn archive(tc: &Toolchain, target: &Target, output: &Path, objects: &[PathBuf]) -> Result<(), String> {
     if mimic_toolchain::EMBEDDED {
         let kind = match target.os.as_str() {
-            "macos" | "ios" | "tvos" | "watchos" | "visionos" | "maccatalyst" | "driverkit" => mimic_toolchain::ArchiveKind::Darwin,
+            _ if target.is_apple() => mimic_toolchain::ArchiveKind::Darwin,
             "windows" | "uefi" => mimic_toolchain::ArchiveKind::Coff,
             _ => mimic_toolchain::ArchiveKind::Gnu,
         };
         return mimic_toolchain::write_archive(output, kind, objects);
     }
-    let mut c = match tc {
-        Toolchain::Zig(z) => {
-            let mut c = Command::new(z);
-            c.arg("ar");
-            c
-        }
-        _ => Command::new("ar"),
-    };
+    let _ = tc;
+    let mut c = Command::new("ar");
     c.arg("rcs").arg(output).args(objects);
     run_tool(c, "archiving")
 }
@@ -249,7 +269,6 @@ pub fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
 pub fn describe(tc: &Toolchain) -> &'static str {
     match tc {
         Toolchain::Embedded(_) => "embedded",
-        Toolchain::Zig(_) => "zig",
         Toolchain::System => "system",
     }
 }
@@ -272,7 +291,7 @@ pub fn clang_defaults(triple: &str) -> Option<(String, String, Option<String>)> 
             let all = String::from_utf8_lossy(&out.stderr).into_owned();
             let line = all.lines().rev().find(|l| l.contains("\"-cc1\""))?.to_string();
             let words: Vec<String> = line.split("\" \"").map(|w| w.trim_matches([' ', '"']).to_string()).collect();
-            let mut cpu = String::from("generic");
+            let mut cpu = String::new(); // none named: LLVM's default
             let mut feats = Vec::new();
             let mut abi = String::new();
             for w in words.windows(2) {

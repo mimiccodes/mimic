@@ -17,3 +17,9 @@ extern "C" int mimic_write_archive(const char *, int, int, const char **, char *
     return 1;
 }
 extern "C" int mimic_list_cpus(const char *, int, void (*)(const char *, const char *, void *), void *) { return 1; }
+extern "C" void mimic_llvm_names(int, void (*)(const char *, const char *, void *), void *) {}
+extern "C" void mimic_llvm_triple(const char *in, char *out, unsigned long outlen) {
+    unsigned long i = 0;
+    for (; in[i] && i + 1 < outlen; i++) out[i] = in[i];
+    out[i] = 0;
+}

@@ -20,14 +20,13 @@ These are needed once, to build the `mimic` compiler.
 |---|---|---|
 | Rust | 1.88 or newer | building the compiler |
 | LLVM | 23 | code generation |
-| Zig | tested with 0.17 | compiling the runtime, linking, and cross-compilation |
 | make | any | the targets in this folder |
 
 ### macOS (Homebrew)
 
 ```sh
 curl https://sh.rustup.rs -sSf | sh     # Rust
-brew install llvm zig                   # LLVM 23 and Zig
+brew install llvm                       # LLVM 23
 ```
 
 ### Linux (Debian / Ubuntu)
@@ -35,7 +34,6 @@ brew install llvm zig                   # LLVM 23 and Zig
 ```sh
 curl https://sh.rustup.rs -sSf | sh                         # Rust
 wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 23   # LLVM 23 → /usr/lib/llvm-23
-# Zig: download from https://ziglang.org/download/ and put `zig` on your PATH
 ```
 
 On Linux, also point the build at LLVM by editing the repository's `.cargo/config.toml`:
@@ -53,6 +51,9 @@ LLVM_SYS_231_PREFIX = { value = "/usr/lib/llvm-23", force = false }
 Pick one of these:
 
 ```sh
+# once: sources for the Clang, LLD and musl that mimic carries inside it
+../../tools/deps.sh
+
 # a) build it inside the repository (the Makefile finds it automatically)
 make compiler                          # = cd ../.. && cargo build --release
 
@@ -78,8 +79,8 @@ The Makefile uses `mimic` from your `PATH` if there is one, and otherwise `../..
 | `make compare` | Times the same algorithms written in plain C (sequential), then Mimic on all cores. |
 | `make ir` | Writes the LLVM IR (`.ll`) and the generated interaction nets (`.mnet`) to `target/release/`. |
 | `make net` | Runs the hand-written interaction net `nets/fib.mnet` and prints its speed. |
-| `make cross` | Builds for Linux x86-64, Linux arm64 (static musl) and Windows. The list is in `build.mim`. |
-| `make cross-one TARGET=aarch64-macos` | Builds for any one Zig target triple. |
+| `make cross` | Builds static Linux executables for x86-64, arm64 and riscv64. The list is in `build.mim`. |
+| `make cross-one TARGET=riscv64-linux-musl` | Builds for any one LLVM target triple (`mimic targets` lists them). |
 | `make glyphs` | Prints the glyph ↔ word ↔ ASCII digraph table. |
 | `make mods` | Lists every module and function, as recorded in `mod.mim`. |
 | `make clean` | Removes the build output. |
@@ -355,6 +356,6 @@ None of this code mentions threads. The recursive functions are pure, so the com
 |---|---|
 | `error: mimic compiler not found` | Run `make compiler`, or install with `cargo install --path ../../crates/mimic-cli`. |
 | Building the compiler fails in `llvm-sys` because it can't find LLVM | Install LLVM 23 and set `LLVM_SYS_231_PREFIX` in `.cargo/config.toml` to its path. |
-| `cross-compilation needs Zig` | Install Zig and make sure `zig` is on your `PATH` (or set `MIMIC_ZIG=/path/to/zig`). |
+| `warning: no executable: …` | That target has no bundled C library yet; its object file was still written. `mimic targets` lists the targets that build complete executables. |
 | The first run of a new binary takes about a second on macOS | macOS scans newly built executables once. Later runs start instantly. |
 | Timings from `make parallel` vary between runs | Other programs share the cores. Run it a few times and compare the best. |

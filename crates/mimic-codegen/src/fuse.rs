@@ -188,7 +188,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(i) => tmp.position_before(&i),
             None => tmp.position_at_end(entry),
         }
-        tmp.build_alloca(ty, "kctx").s()
+        let a = tmp.build_alloca(ty, "kctx").s()?;
+        self.to_generic(&tmp, a)
     }
 
     /// The per-element value inside a kernel.
@@ -384,7 +385,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let data = self.call_rt("mim_dataptr", &[self.basic(out).into()])?.unwrap();
         let k = self.emit_kernel(&root, &plan, Mode::Map(el))?;
         let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
-        self.call_rt("mim_par_for", &[n.into(), k.as_global_value().as_pointer_value().into(), ctx.into()])?;
+        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
         self.release_plan(&plan)?;
         Ok(out)
     }
@@ -415,7 +416,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let partials = self.call_malloc(bytes)?;
         let k = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
         let ctx = self.pack_ctx(&plan, &[partials.into(), grain.into()])?;
-        self.call_rt("mim_par_for", &[n.into(), k.as_global_value().as_pointer_value().into(), ctx.into()])?;
+        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
         self.release_plan(&plan)?;
         // combine the partials in order
         let f = self.cur_fn.unwrap();

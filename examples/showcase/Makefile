@@ -8,8 +8,7 @@ REPO   := ../..
 MIMIC  ?= $(shell command -v mimic 2>/dev/null || echo $(abspath $(REPO)/target/release/mimic))
 BIN    := target/release/showcase
 BENCH  := bench/target/release/bench
-ZIG    ?= zig
-TARGET ?= x86_64-linux-gnu
+TARGET ?= aarch64-linux-musl
 
 .DEFAULT_GOAL := help
 .PHONY: help compiler check run debug build release bench-build bench parallel compare ir net cross cross-one glyphs mods clean
@@ -20,7 +19,7 @@ help: ## show this list
 	@echo ""
 	@echo "compiler: $(MIMIC)"
 
-compiler: ## build the mimic compiler from this repository (Rust + LLVM 23 + Zig)
+compiler: ## build the mimic compiler from this repository (Rust + LLVM 23; run ../../tools/deps.sh once first)
 	cd $(REPO) && cargo build --release
 	@echo "built $(REPO)/target/release/mimic"
 
@@ -53,7 +52,7 @@ parallel: bench-build ## time the full-size algorithms on 1 thread, then on all 
 
 compare: bench-build ## time the same algorithms in plain C (sequential) against Mimic
 	@mkdir -p bench/target
-	@$(ZIG) cc -O3 -mcpu=native -ffp-contract=off bench/reference.c -o bench/target/reference
+	@$(MIMIC) cc -O3 -mcpu=native -ffp-contract=off bench/reference.c -o bench/target/reference
 	@echo "=== C, sequential (-O3 -mcpu=native)"
 	@time ./bench/target/reference
 	@echo ""
@@ -67,11 +66,11 @@ ir: _need-mimic ## write the LLVM IR and the generated interaction nets to targe
 net: _need-mimic ## run a hand-written interaction net (nets/fib.mnet) with statistics
 	$(MIMIC) net run nets/fib.mnet --release --stats
 
-cross: _need-mimic ## cross-compile for every target in build.mim (Linux, musl, Windows)
+cross: _need-mimic ## cross-compile for every target in build.mim (static Linux executables)
 	$(MIMIC) build --all-targets
 	@file target/release/*/showcase target/release/*/showcase.exe 2>/dev/null
 
-cross-one: _need-mimic ## cross-compile for one target: make cross-one TARGET=aarch64-macos
+cross-one: _need-mimic ## cross-compile for one target: make cross-one TARGET=riscv64-linux-musl
 	$(MIMIC) build --target $(TARGET)
 
 glyphs: _need-mimic ## print the glyph ↔ word ↔ ASCII digraph table

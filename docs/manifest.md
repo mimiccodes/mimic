@@ -68,12 +68,12 @@ module build
 profile debug   { opt = 0, debug = true,  leak_check = true }
 profile release { opt = 3, debug = false, leak_check = false }
 
-targets = ["x86_64-linux-gnu", "aarch64-macos", "x86_64-windows"]   // mimic build --all-targets
+targets = ["x86_64-linux-musl", "aarch64-linux", "x86_64-apple-macosx"]   // mimic build --all-targets
 ```
 
 * **`opt`** is the LLVM optimisation level, 0 to 3.
 * **`leak_check`** makes the program verify at exit that every array was freed.
-* **`targets`** use Zig triples. Anything `zig cc -target` accepts can be used, as long as LLVM has the backend.
+* **`targets`** are LLVM target triples (vendor optional). Every architecture with an LLVM backend can be used; see [targets.md](targets.md).
 
 ## mod.mim (generated)
 

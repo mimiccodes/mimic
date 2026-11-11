@@ -10,7 +10,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
    | Language | Build command |
    |---|---|
    | Mimic | `mimic build` (release is the default) |
-   | C | `zig cc -O3 -mcpu=native` |
+   | C | `mimic cc -O3 -mcpu=native` (the Clang inside `mimic`) |
    | Rust | `cargo build --release` with `-C target-cpu=native` |
    | Go | `go build` |
 

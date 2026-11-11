@@ -82,8 +82,10 @@ enum Kind {
 }
 
 /// Compile the checked program to a native object file (and optionally
-/// textual LLVM IR and the generated interaction nets).
-pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<()> {
+/// textual LLVM IR and the generated interaction nets). Returns the file
+/// written: the object, or — for backends that only emit assembly, such as
+/// NVPTX — the assembly next to it (`.ptx` / `.s`).
+pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<std::path::PathBuf> {
     Target::initialize_all(&InitializationConfig::default());
     let triple = match &settings.triple {
         Some(t) => TargetTriple::create(t),
@@ -93,7 +95,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     let (mut cpu, mut features) = if settings.triple.is_none() {
         (TargetMachine::get_host_cpu_name().to_string(), TargetMachine::get_host_cpu_features().to_string())
     } else {
-        ("generic".to_string(), String::new())
+        (String::new(), String::new()) // LLVM's default CPU for the triple
     };
     if let Some(c) = &settings.cpu {
         cpu = c.clone();
@@ -216,7 +218,22 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if let Some(ir) = ir {
         cg.module.print_to_file(ir).s()?;
     }
-    tm.write_to_file(&cg.module, FileType::Object, obj).s()
+    // backends that only write assembly
+    let tstr = triple.as_str().to_string_lossy().to_string();
+    if tstr.starts_with("nvptx") || tstr.starts_with("xcore") {
+        let asm = obj.with_extension(if tstr.starts_with("nvptx") { "ptx" } else { "s" });
+        tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
+        return Ok(asm);
+    }
+    match tm.write_to_file(&cg.module, FileType::Object, obj) {
+        Ok(()) => Ok(obj.to_path_buf()),
+        Err(_) => {
+            let ext = if triple.as_str().to_string_lossy().starts_with("nvptx") { "ptx" } else { "s" };
+            let asm = obj.with_extension(ext);
+            tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
+            Ok(asm)
+        }
+    }
 }
 
 /// A compiled value: an unboxed scalar, or a handle with an ownership flag.
@@ -423,6 +440,30 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
+    /// A function's address as a plain data pointer. On targets that keep code
+    /// in its own address space (AVR's program memory) this is a cast.
+    /// A stack slot as a plain pointer. On targets whose stack lives in its own
+    /// address space (AMDGPU: 5) this is a cast to the generic one.
+    pub(crate) fn to_generic(&self, b: &inkwell::builder::Builder<'ctx>, p: PointerValue<'ctx>) -> R<PointerValue<'ctx>> {
+        if p.get_type().get_address_space() == self.ptr.get_address_space() {
+            Ok(p)
+        } else {
+            b.build_address_space_cast(p, self.ptr, "").s()
+        }
+    }
+
+    /// A global's address as a plain pointer (GPU targets keep globals in
+    /// their own address space).
+    pub(crate) fn gaddr(&self, g: inkwell::values::GlobalValue<'ctx>) -> PointerValue<'ctx> {
+        let p = g.as_pointer_value();
+        if p.get_type().get_address_space() == self.ptr.get_address_space() { p } else { p.const_address_space_cast(self.ptr) }
+    }
+
+    pub(crate) fn fn_addr(&self, f: FunctionValue<'ctx>) -> PointerValue<'ctx> {
+        let p = f.as_global_value().as_pointer_value();
+        if p.get_type().get_address_space() == self.ptr.get_address_space() { p } else { p.const_address_space_cast(self.ptr) }
+    }
+
     fn fn_type(&self, params: &[Ty], ret: Ty) -> inkwell::types::FunctionType<'ctx> {
         let ps: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| self.repr(*t).into()).collect();
         self.repr(ret).fn_type(&ps, false)
@@ -603,7 +644,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn cstring(&self, s: &str) -> R<PointerValue<'ctx>> {
-        Ok(self.b.build_global_string_ptr(s, "s").s()?.as_pointer_value())
+        let g = self.b.build_global_string_ptr(s, "s").s()?;
+        Ok(self.gaddr(g))
     }
 
     fn intrinsic(&self, name: &str) -> R<FunctionValue<'ctx>> {
@@ -680,7 +722,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(i) => tmp.position_before(&i),
             None => tmp.position_at_end(entry),
         }
-        tmp.build_alloca(self.repr(t), name).s()
+        let a = tmp.build_alloca(self.repr(t), name).s()?;
+        self.to_generic(&tmp, a)
     }
 
     fn define(&mut self, k: &Key, kind: Kind) -> R<()> {
@@ -713,6 +756,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let n = decl.params.len() as u32;
                 let arr_ty = self.ptr.array_type(n.max(1));
                 let arr = self.b.build_alloca(arr_ty, "args").s()?;
+                let arr = self.to_generic(&self.b, arr)?;
                 let i64t = self.ctx.i64_type();
                 let mut temps = Vec::new();
                 for i in 0..n {
@@ -925,7 +969,7 @@ impl<'ctx> Cg<'ctx, '_> {
             g.set_linkage(Linkage::Internal);
             g.set_constant(true);
             g.set_initializer(&arr);
-            g.as_pointer_value()
+            self.gaddr(g)
         };
         let words = global(&self.module, "mimic_net_words", &enc.words);
         let offsets = global(&self.module, "mimic_net_offsets", &enc.offsets);
@@ -939,7 +983,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let n = self.p.fns[fid].arity();
             if n <= 6 {
                 let f = self.dispatch_thunk(fid)?;
-                fptrs[def as usize] = f.as_global_value().as_pointer_value();
+                fptrs[def as usize] = self.fn_addr(f);
                 arity[def as usize] = n as u64;
             }
         }
@@ -965,7 +1009,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let n = cg.i32c(ndefs as i32);
             cg.call_rt(
                 "mim_net_book_once",
-                &[words.into(), offsets.into(), n, gf.as_pointer_value().into(), ga.as_pointer_value().into(), gm.as_pointer_value().into()],
+                &[words.into(), offsets.into(), n, cg.gaddr(gf).into(), cg.gaddr(ga).into(), cg.gaddr(gm).into()],
             )?;
             cg.b.build_return(None).s()?;
             Ok(())
@@ -1286,7 +1330,7 @@ impl<'ctx> Cg<'ctx, '_> {
         g.set_initializer(&bytes);
         g.set_constant(true);
         g.set_linkage(Linkage::Private);
-        g.as_pointer_value()
+        self.gaddr(g)
     }
 
     /// The runtime descriptor (`mim_desc`) of a record type or union variant.
@@ -1304,7 +1348,7 @@ impl<'ctx> Cg<'ctx, '_> {
             g.set_initializer(&val);
             g.set_constant(true);
             g.set_linkage(Linkage::Private);
-            let p = g.as_pointer_value();
+            let p = self.gaddr(g);
             self.descs.insert((t, variant), p);
             return p;
         }
@@ -1327,7 +1371,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 g.set_initializer(&arr);
                 g.set_constant(true);
                 g.set_linkage(Linkage::Private);
-                (self.ptr.const_null(), 0, names.len() as u64, g.as_pointer_value())
+                (self.ptr.const_null(), 0, names.len() as u64, self.gaddr(g))
             }
         };
         let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
@@ -1336,7 +1380,7 @@ impl<'ctx> Cg<'ctx, '_> {
         g.set_initializer(&val);
         g.set_constant(true);
         g.set_linkage(Linkage::Private);
-        let p = g.as_pointer_value();
+        let p = self.gaddr(g);
         self.descs.insert((t, variant), p);
         p
     }
@@ -1371,7 +1415,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(i) => tmp.position_before(&i),
             None => tmp.position_at_end(entry),
         }
-        tmp.build_alloca(ty, "arr").s()
+        let a = tmp.build_alloca(ty, "arr").s()?;
+        self.to_generic(&tmp, a)
     }
 
     fn field_tys(&self, t: TypeId, v: usize) -> Vec<Ty> {
@@ -1413,7 +1458,7 @@ impl<'ctx> Cg<'ctx, '_> {
         tg.set_initializer(&ta);
         tg.set_constant(true);
         tg.set_linkage(Linkage::Private);
-        (parts.len() as u64, kg.as_pointer_value(), tg.as_pointer_value(), ncap)
+        (parts.len() as u64, self.gaddr(kg), self.gaddr(tg), ncap)
     }
 
     /// Emit the tests of a pattern against `val`; on failure jump to `fail`.
@@ -1725,7 +1770,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 g.set_linkage(Linkage::Internal);
                 g.set_initializer(&self.ptr.const_null());
                 let p = self.cstring(s)?;
-                let v = self.call_rt_ptr("mim_lit_str", &[g.as_pointer_value().into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?;
+                let v = self.call_rt_ptr("mim_lit_str", &[self.gaddr(g).into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?;
                 let V::P(x, _) = v else { unreachable!() };
                 Ok(V::P(x, false))
             }
@@ -1740,6 +1785,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     None => tmp.position_at_end(entry),
                 }
                 let arr = tmp.build_alloca(arr_ty, "elems").s()?;
+                let arr = self.to_generic(&tmp, arr)?;
                 let mut vals = Vec::new();
                 for (i, x) in xs.iter().enumerate() {
                     let v = self.expr(x)?;
@@ -1898,7 +1944,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         }
                     };
                     let pure = self.purity.operand_is_pure(self.p, self.cur_mod, &args[1]);
-                    self.call_rt_ptr("mim_each", &[self.basic(a).into(), f.as_global_value().as_pointer_value().into(), self.i32c(pure as i32)])?
+                    self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;
                     let b = self.boxed(b)?;
@@ -1986,7 +2032,7 @@ impl<'ctx> Cg<'ctx, '_> {
                             g.set_linkage(Linkage::Internal);
                             g.set_initializer(&self.ptr.const_null());
                             let p = self.cstring(t)?;
-                            let V::P(x, _) = self.call_rt_ptr("mim_lit_str", &[g.as_pointer_value().into(), p.into(), i64t.const_int(t.len() as u64, false).into()])? else { unreachable!() };
+                            let V::P(x, _) = self.call_rt_ptr("mim_lit_str", &[self.gaddr(g).into(), p.into(), i64t.const_int(t.len() as u64, false).into()])? else { unreachable!() };
                             V::P(x, false)
                         }
                         InterpPart::Expr(x) => {

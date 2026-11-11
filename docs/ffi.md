@@ -51,7 +51,7 @@ fn main() {
   ```mimic
   pub extern fn mm_sum(xs: ptr[f64], n: usize) -> f64 { … }
   ```
-  `mimic build --emit-header` writes `target/<profile>/<name>.h`. Together with `lib<name>.a`, this makes Mimic libraries usable from C, Zig, Rust and any other language that can call C.
+  `mimic build --emit-header` writes `target/<profile>/<name>.h`. Together with `lib<name>.a`, this makes Mimic libraries usable from C, C++, Rust and any other language that can call C.
 * **M4: `mimic ffi bind header.h`.** This reads a C header through libclang and generates an `extern "C"` block, mapping `char*` to `cstr`, `T*` to `ptr[T]`, and structs.
 * **M4: callbacks.** A Mimic function is passed as a C function pointer through a generated trampoline, which in the net becomes a `REF` node.
 * **M4: structs and unions** declared with `#[repr(C)]`-equivalent layout.

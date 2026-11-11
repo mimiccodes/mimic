@@ -13,6 +13,19 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = "1.2.5";
 
+/// The musl targets that build and link complete static executables
+/// (architecture × musl ABI, as musl supports them).
+pub const TARGETS: &[&str] = &[
+    "aarch64-linux-musl", "aarch64_be-linux-musl",
+    "arm-linux-musleabi", "arm-linux-musleabihf", "armeb-linux-musleabi", "armeb-linux-musleabihf",
+    "thumb-linux-musleabi", "thumb-linux-musleabihf", "thumbeb-linux-musleabi", "thumbeb-linux-musleabihf",
+    "loongarch64-linux-musl", "loongarch64-linux-muslf32", "loongarch64-linux-muslsf",
+    "mips-linux-musleabi", "mips-linux-musleabihf", "mipsel-linux-musleabi", "mipsel-linux-musleabihf",
+    "mips64-linux-muslabi64", "mips64-linux-muslabin32", "mips64el-linux-muslabi64", "mips64el-linux-muslabin32",
+    "powerpc-linux-musleabi", "powerpc-linux-musleabihf", "powerpc64-linux-musl", "powerpc64le-linux-musl",
+    "riscv64-linux-musl", "s390x-linux-musl", "x86-linux-musl", "x86_64-linux-musl", "x86_64-linux-muslx32",
+];
+
 /// musl's name for the architecture of an LLVM triple, if musl supports it.
 pub fn arch(triple: &str) -> Option<&'static str> {
     let (a, rest) = triple.split_once('-')?;
@@ -26,7 +39,7 @@ pub fn arch(triple: &str) -> Option<&'static str> {
         "riscv64" => "riscv64",
         // riscv32 needs quad-precision soft-float helpers for musl's 128-bit
         // `long double`; compiler-rt only has them with 128-bit integers
-        // (not on 32-bit targets), so it stays on the Zig fallback for now.
+        // (not on 32-bit targets), so riscv32 is not supported yet.
         "riscv32" => return None,
         "loongarch64" => "loongarch64",
         "powerpc64" | "powerpc64le" | "ppc64" | "ppc64le" => "powerpc64",
@@ -258,5 +271,6 @@ mod tests {
         assert_eq!(arch("aarch64_be-unknown-linux-musl"), Some("aarch64"));
         assert_eq!(arch("armebv7a-unknown-linux-musleabi"), Some("arm"));
         assert_eq!(arch("wasm32-unknown-wasi"), None);
+        assert_eq!(TARGETS.len(), 30);
     }
 }
