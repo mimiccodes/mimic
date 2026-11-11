@@ -1,0 +1,74 @@
+---
+title: Tooling
+description: Checking code, understanding error codes, automatic fixes and machine-readable diagnostics.
+order: 14
+---
+
+# Tooling
+
+## Check without building
+
+```sh
+mimic check                 # the whole project
+mimic check file.mim        # one file
+```
+
+`check` reports every error at once, with the exact source location and, where possible, a suggestion:
+
+```text
+error[E0501]: `match` does not cover every case: missing `Dot`
+  --> src/main.mim:5:5
+   |
+ 5 |     match s {
+   |     ^^^^^^^^^
+  = note: add the missing arms, or a final `_ => …`
+  = fix: add the missing arms
+```
+
+A `fix:` line means `mimic check --fix` can make the change for you.
+
+## Error codes
+
+Every error has a code. `mimic explain` describes what the code means and how to fix it, with an example:
+
+```sh
+mimic explain E0501
+mimic explain               # list every code
+```
+
+## Automatic fixes
+
+Many errors come with a fix the compiler can apply for you. It can rename `myType` to `MyType`, insert missing `match` arms, and more:
+
+```sh
+mimic check --fix
+```
+
+## For editors and scripts
+
+`--emit-json` prints the result as JSON on stdout, including diagnostics, locations and suggested fixes. It works with `check`, `build` and `run`:
+
+```sh
+mimic check --emit-json
+```
+
+The format is described in [docs/diagnostics.md](../docs/diagnostics.md).
+
+## Glyphs at a glance
+
+```sh
+mimic glyphs                # glyph ↔ word ↔ ASCII digraph for everything
+```
+
+## Useful build flags
+
+| Flag | Effect |
+|---|---|
+| `--debug` / `--release` | Debug: fast to compile, extra checks. Release: fastest code. `build` defaults to release, `run` to debug. |
+| `--target <triple>` | Cross-compile ([chapter 13](13-targets.mdx)) |
+| `--cpu <name>` | Tune for a CPU, or `portable` |
+| `--emit-ir`, `--emit-net` | Write the LLVM IR or the interaction nets next to the binary |
+| `--emit-header` | Write a C header for `extern "C" fn` exports |
+| `--no-net` | Compile everything as plain native code |
+
+That's the tour. For every detail, see the reference in [`docs/`](../docs/).

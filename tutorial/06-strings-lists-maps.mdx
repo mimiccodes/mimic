@@ -1,0 +1,147 @@
+---
+title: Strings, lists and maps
+description: The standard library functions every program can use without imports.
+order: 6
+---
+
+# Strings, lists and maps
+
+Everything in this chapter is available in every file, with no import. The functions have no side effects, so code that uses them still runs in parallel.
+
+## Strings
+
+```mimic run
+module main
+
+fn main() {
+    let line = "  ada,grace , alan  "
+    print(line ▷ trim ▷ split(","))
+    print(split("a-b-c", "-") ▷ join("+"))
+    print(upper("mimic") + "!")
+    print(replace("2024-01-05", "-", "/"))
+    print(starts_with("mimic.mim", "mimic"))
+    print(contains("hello", "ell"))
+    print(repeat("ab", 3))
+    print(≢ "héllo")            // length in bytes
+    print(chars("héllo"))       // characters stay whole
+}
+```
+
+```output
+["ada" "grace " " alan"]
+a+b+c
+MIMIC!
+2024/01/05
+true
+true
+ababab
+6
+["h" "é" "l" "l" "o"]
+```
+
+Two strings compare as whole values with `==` `!=` `<` `>` `<=` `>=`. The ordering is alphabetical, by byte. Insert values into text with `{…}`:
+
+```mimic run
+module main
+
+fn main() {
+    let name = "Ada"
+    print("{name} has {≢ name} letters")
+    print("apple" < "banana")
+    print(sort(["pear" "apple" "fig"]))
+    print(string(42) + "!")
+}
+```
+
+```output
+Ada has 3 letters
+true
+["apple" "fig" "pear"]
+42!
+```
+
+## Parsing
+
+`parse_int` and `parse_float` return an `Option`, which is `Some(value)` or `None` ([chapter 7](07-errors.mdx)):
+
+```mimic run
+module main
+
+fn main() {
+    print(parse_int("42"))
+    print(parse_int("4x2"))
+    print(parse_float("2.5"))
+    print(find("hello", "ll"))
+}
+```
+
+```output
+Some(42)
+None
+Some(2.5)
+Some(2)
+```
+
+## Lists
+
+```mimic run
+module main
+
+fn main() {
+    let xs = [3 1 2]
+    print(push(xs, 4))
+    print(concat(xs, [9 9]))
+    print(sort(xs))
+    print(contains(xs, 2))
+    print(xs)                  // unchanged: lists are values
+}
+```
+
+```output
+[3 1 2 4]
+[3 1 2 9 9]
+[1 2 3]
+true
+[3 1 2]
+```
+
+## Maps
+
+A map links keys to values. Keys can be numbers, bools or strings:
+
+```mimic run
+module main
+
+fn main() {
+    let born = ["ada": 1815, "alan": 1912]
+    print(born["alan"])
+    print(get(born, "linus"))         // None: get is the safe lookup
+    print(has(born, "ada"))
+    print(keys(born))
+    let mut m = born
+    m["grace"] = 1906                  // copy-on-write; born is unchanged
+    print(≢ m)
+    print(≢ born)
+    print(put(born, "linus", 1969) ▷ keys)
+    print(remove(born, "ada"))
+}
+```
+
+```output
+1912
+None
+true
+["ada" "alan"]
+3
+2
+["ada" "alan" "linus"]
+["alan": 1912]
+```
+
+How maps behave:
+* **Order.** Maps keep their keys in insertion order.
+* **Lookups.** Indexing `m[k]` with a missing key stops the program. Use `get` when a key may be absent.
+
+See the full list in the [standard library reference](../docs/std.md).
+
+Next: [errors without exceptions](07-errors.mdx).

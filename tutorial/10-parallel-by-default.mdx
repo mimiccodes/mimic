@@ -1,0 +1,74 @@
+---
+title: Parallel by default
+description: What Mimic runs in parallel without being asked, why it is safe, and how to look under the hood.
+order: 10
+---
+
+# Parallel by default
+
+Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compiler finds the work that can run at the same time and spreads it over all your cores. You write ordinary code.
+
+## What runs in parallel
+
+| Code | Runs in parallel when |
+|---|---|
+| `xs + ys`, `xs * 2`, `xs > 0`, `+/`, `⌈/`, … | the arrays are large enough to be worth splitting |
+| chains like `(xs * 2 + 1) ▷ +/` | always fused into **one** pass over memory, then split across cores |
+| `xs ¨ f` | `f` is pure |
+| `gather`, `trail`, `arms` | the function or body is pure |
+| `f(a) + g(b)` inside a pure function | always: independent calls run at the same time |
+
+**Pure** means the code never prints, never calls C and never does other input or output. The compiler works this out itself; you never annotate it.
+
+```mimic run
+module main
+
+fn main() {
+    // both recursive calls run at once, all the way down
+    print(fib(30))
+
+    // one fused, parallel loop: no temporary arrays are built
+    let xs = ⍳ 10000000
+    print((xs * 2 + 1) ▷ +/)
+
+    // a pure function mapped over a list: all cores
+    print([25 26 27 28] ¨ fib)
+}
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+```
+
+```output
+832040
+100000000000000
+[75025 121393 196418 317811]
+```
+
+## Why it is safe
+
+Parallel code usually goes wrong when two threads change the same data. In Mimic that cannot happen:
+* **Immutability.** Values are immutable unless declared `let mut`, and a `mut` variable belongs to one function. Lambdas cannot change captured variables.
+* **Copy-on-write.** Updating an array or record changes it in place only if nobody else holds it. Otherwise the update goes to a fresh copy.
+* **Isolated effects.** Input and output make a function impure. Impure code runs in program order, so output is never interleaved.
+
+## How it works
+
+Mimic compiles each pure function in two ways:
+* **Native code**, for the straight-line parts.
+* **An interaction net**, a graph form in which every independent piece of work can be reduced by any core at any time. Recursion like `fib(n - 1) + fib(n - 2)` becomes a tree of independent tasks that a work-stealing scheduler spreads over your cores.
+
+Array operations are **fused**. `(xs * 2 + 1) ▷ +/` becomes a single loop that reads `xs` once. The loop is split into chunks across cores and vectorized with your CPU's SIMD instructions.
+
+## Looking under the hood
+
+```sh
+mimic build --emit-net     # write the interaction nets: target/release/<name>.mnet
+mimic build --emit-ir      # write the LLVM IR
+mimic build --no-net       # compile everything as plain native code, to compare
+```
+
+Benchmarks live in `BENCHMARK.md` at the root of the Mimic repository.
+
+Next: [projects and modules](11-projects-and-modules.mdx).

@@ -131,7 +131,7 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 | `⌿` | `keep` | 2 | replicate / filter by mask |
 | `¨` | `each` | 2 | map a function over elements |
 | `‥` | `range` | 2 | `lo ‥ hi` → `[lo … hi-1]` |
-| `⌈` | `max` | 2 | larger of two values (elementwise) |
+| `⌈` | `max` | 2 | larger of two values (elementwise); `(max)` / `gather(max)` as a function value |
 | `⌊` | `min` | 2 | smaller of two values (elementwise) |
 | `∣` | `abs` | 1 | absolute value (elementwise) |
 
@@ -256,7 +256,7 @@ Tuple types are tracked statically: `(i64, str)` keeps its `i64` unboxed.
 
 ## Errors without exceptions: `Option`, `Result` and `let … else`
 
-The prelude, available everywhere, defines `Option = Some(any) | None` and `Result = Ok(any) | Err(any)`.
+The prelude, available everywhere, defines `type Option[T] = Some(T) | None` and `type Result[T, E] = Ok(T) | Err(E)` (see [Generics](#generics)).
 
 ```mimic
 fn name_of(id: i64) -> str {
@@ -266,7 +266,7 @@ fn name_of(id: i64) -> str {
 ```
 
 * The `else` block runs on `None` / `Err`, and must end with `return`.
-* Until generics arrive (M4), `Some` and `Ok` carry dynamically typed payloads. Annotate the binding (`let u: User = …`) to get a checked, statically typed value back.
+* The unwrapped value keeps its static type. For example, `let n = parse_int(s) else { … }` gives an `i64`.
 
 ## Durations
 

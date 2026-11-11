@@ -1,0 +1,189 @@
+---
+title: Records, unions and match
+description: Declare your own types and take them apart with pattern matching.
+order: 5
+---
+
+# Records, unions and match
+
+## Naming rule
+
+Types and variants start with an **Uppercase** letter. Variables and functions start with a **lowercase** one. This is how Mimic tells `Inc` (a variant) from `inc` (a variable) without any extra syntax.
+
+## Records
+
+A record groups named fields:
+
+```mimic run
+module main
+
+type User = { name: str, age: i64 }
+
+fn main() {
+    let ada = User { name: "Ada", age: 36 }
+    print(ada)
+    print(ada.name)
+    let older = { ada with age: ada.age + 1 }   // a copy with one field changed
+    print(older.age)
+    print(ada.age)                              // ada is unchanged
+    print(older == ada)                         // records compare field by field
+}
+```
+
+```output
+User { name: "Ada", age: 36 }
+Ada
+37
+36
+false
+```
+
+## Unions
+
+A union is a value that is exactly one of several *variants*, and each variant can carry data:
+
+```mimic run
+module main
+
+type Shape =
+    | Circle(f64)
+    | Rect(f64, f64)
+    | Dot
+
+fn main() {
+    let shapes = [Circle(1.0), Rect(2.0, 3.0), Dot]
+    print(shapes ¨ area)
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.14159 * r * r,
+        Rect(w, h) => w * h,
+        Dot => 0.0,
+    }
+}
+```
+
+```output
+[3.14159 6.0 0.0]
+```
+
+`match` must be **exhaustive**. Leave out `Dot` and the compiler names the missing case. `mimic check --fix` can insert it for you.
+
+## Patterns
+
+Patterns can test and take apart values in one step:
+
+```mimic run
+module main
+
+type Point = { x: i64, y: i64 }
+
+fn main() {
+    print([¯5 0 7 120] ¨ describe)
+    print(quadrant(Point { x: 3, y: ¯4 }))
+    print(quadrant(Point { x: 0, y: 9 }))
+    print([[] [7] [1 2 3]] ¨ shape_of)
+}
+
+fn describe(n: i64) -> str {
+    match n {
+        0 => "zero",
+        x if x < 0 => "negative",          // a guard
+        1 ‥ 100 => "small",                // a range: 1 ≤ n < 100
+        _ => "large",
+    }
+}
+
+fn quadrant(p: Point) -> str {
+    match p {
+        Point { x: 0, .. } | Point { y: 0, .. } => "on an axis",   // `|`: either
+        Point { x, y } if x > 0 and y > 0 => "I",
+        Point { x, y } if x < 0 and y > 0 => "II",
+        Point { x, y } if x < 0 and y < 0 => "III",
+        _ => "IV",
+    }
+}
+
+fn shape_of(xs: [i64]) -> str {
+    match xs {
+        [] => "empty",
+        [x] => "just {x}",
+        [first, ..rest] => "{first} and {≢ rest} more",
+    }
+}
+```
+
+```output
+["negative" "zero" "small" "large"]
+IV
+on an axis
+["empty" "just 7" "1 and 2 more"]
+```
+
+| Pattern | Matches |
+|---|---|
+| `_` | anything |
+| `name` | anything, and names it |
+| `3`, `"hi"`, `true` | that value |
+| `1 ‥ 10` | a number from 1 up to (not including) 10 |
+| `Circle(r)` | a variant, naming its fields |
+| `Point { x, y: 0, .. }` | a record by field; `..` skips the rest |
+| `(a, b)` | a tuple |
+| `[a, b, ..rest]` | an array or string of at least two elements |
+| `A \| B` | either pattern |
+| `pat as name` | the pattern, also naming the whole value |
+| `pat if condition` | the pattern, only when the condition holds |
+
+## if let
+
+When you care about one case only:
+
+```mimic run
+module main
+
+fn main() {
+    let born = ["ada": 1815, "alan": 1912]
+    if let Some(year) = get(born, "ada") {
+        print("Ada was born in {year}")
+    }
+    if let Some(year) = get(born, "linus") { print(year) } else { print("unknown") }
+}
+```
+
+```output
+Ada was born in 1815
+unknown
+```
+
+## A small state machine
+
+Records and unions together describe application state well. This is the shape of a UI update function:
+
+```mimic run
+module main
+
+type State = { count: i64, label: str }
+type Msg = Inc | Dec | Reset | Add(i64)
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Inc => { s with count: s.count + 1 },
+        Dec => { s with count: s.count - 1 },
+        Reset => { s with count: 0 },
+        Add(n) => { s with count: s.count + n },
+    }
+}
+
+fn main() {
+    let s0 = State { count: 0, label: "clicks" }
+    let s1 = update(update(update(s0, Inc), Add(10)), Dec)
+    print(s1)
+}
+```
+
+```output
+State { count: 10, label: "clicks" }
+```
+
+Next: [strings, lists and maps](06-strings-lists-maps.mdx).

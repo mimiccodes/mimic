@@ -1,0 +1,119 @@
+---
+title: Functions as values
+description: Lambdas, closures, passing and returning functions, and operators as values.
+order: 8
+---
+
+# Functions as values
+
+Functions are values. They can be stored in variables, passed to other functions and returned from them.
+
+## Lambdas
+
+`x => expression` is a function without a name. Use parentheses for several parameters, and `()` for none:
+
+```mimic run
+module main
+
+fn main() {
+    let square = x => x * x
+    let add = (a, b) => a + b
+    let hello = () => "hello"
+    print(square(7))
+    print(add(2, 3))
+    print(hello())
+}
+```
+
+```output
+49
+5
+hello
+```
+
+## Passing functions
+
+A named function can be passed by its name. Write a function parameter's type as `fn(argument types) -> result`:
+
+```mimic run
+module main
+
+fn main() {
+    print(twice(inc, 5))
+    print(twice(x => x * 10, 5))
+    print([1 2 3] ¨ inc)
+}
+
+fn inc(x: i64) -> i64 { x + 1 }
+
+fn twice(f: fn(i64) -> i64, x: i64) -> i64 { f(f(x)) }
+```
+
+```output
+7
+500
+[2 3 4]
+```
+
+## Operators as values
+
+Wrap an operator in parentheses to use it as a two-argument function: `(+)`, `(*)`, `(==)`, `(max)`, `(⌈)`.
+
+```mimic run
+module main
+
+fn main() {
+    print(fold([1 2 3 4], (+), 0))
+    print(fold([1 2 3 4], (*), 1))
+    print(fold([3 9 2], (max), 0))
+}
+
+fn fold(xs, f, start) {
+    match xs {
+        [] => start,
+        [x, ..rest] => fold(rest, f, f(start, x)),
+    }
+}
+```
+
+```output
+10
+24
+9
+```
+
+## Closures
+
+A lambda can use variables from where it was created. It **captures** them by value, at that moment:
+
+```mimic run
+module main
+
+fn main() {
+    let add10 = make_adder(10)
+    let add100 = make_adder(100)
+    print(add10(1))
+    print(add100(1))
+    print(make_adder(5)(5))          // call the result directly
+
+    let rate = 3
+    print([1 2 3] ¨ (x => x * rate))
+}
+
+fn make_adder(n: i64) { x => x + n }
+```
+
+```output
+11
+101
+10
+[3 6 9]
+```
+
+Values are immutable, so a closure always sees the values it captured. A lambda may not change a variable of the function that created it. If it tries, the compiler reports error E0603.
+
+## Purity and parallelism
+
+The compiler records whether each function value is **pure**, meaning it never prints, calls C or does other input or output. `xs ¨ f` with a pure `f` runs on all cores, and you get this without writing anything.
+
+Next: [generics](09-generics.mdx).

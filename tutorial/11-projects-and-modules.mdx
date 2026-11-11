@@ -1,0 +1,102 @@
+---
+title: Projects and modules
+description: Project layout, mim.mim, modules and paths, visibility, and using libraries.
+order: 11
+---
+
+# Projects and modules
+
+## A project
+
+```sh
+mimic create shop            # a program
+mimic create money --lib     # a library
+mimic init                   # turn the current directory into a project
+```
+
+The manifest `mim.mim` is itself written in Mimic syntax:
+
+```mimic
+module mim
+
+project {
+    name = "shop"
+    version = "0.1.0"
+    license = "MIT"
+    edition = "2026"
+    kind = [bin]
+}
+
+dependencies {
+    money = { path = "../money" }                       // a local project
+    vision = { git = "github.com/harcorp/vision.git" }  // installed with `mimic install`
+}
+
+ffi {
+    link = []                                           // C libraries (chapter 12)
+}
+```
+
+Every dependency can be used from every file as `name::item`, with no import needed.
+
+## Modules
+
+Every file starts with `module <name>`. A file can also contain nested modules:
+
+```mimic run
+module main
+
+module geometry {
+    pub fn area(w: f64, h: f64) -> f64 { w * h }
+
+    pub module units {
+        pub fn cm_to_m(x: f64) -> f64 { x / 100.0 }
+    }
+
+    fn helper() -> i64 { 1 }        // private: only usable inside geometry
+}
+
+fn main() {
+    print(geometry::area(2.0, 3.0))
+    print(geometry::units::cm_to_m(250.0))
+}
+```
+
+```output
+6.0
+2.5
+```
+
+## Paths
+
+| Path | Means |
+|---|---|
+| `geometry::area` | an item of a module in the same project |
+| `money::format` | an item of the dependency `money` |
+| `self::helper` | an item of the current module |
+| `super::helper` | an item of the enclosing module |
+
+`use a::b::c` and `use a::b as x` are optional shortcuts. There are no wildcard imports, so every name is easy to trace back to where it comes from.
+
+## Visibility
+
+* **Private by default.** Everything is private except `fn main` in `module main`.
+* **`pub`.** Mark items `pub` to make them visible outside their module, or outside their package.
+* **Sub-modules.** Private items are still visible inside their own module and its sub-modules.
+
+## Libraries
+
+A library project exposes `module lib` from `src/lib.mim`. Users of the library call its items as `libname::item`:
+
+```sh
+mimic install github.com/harcorp/money.git   # → ~/.mimic/libraries
+mimic list
+mimic update money
+mimic uninstall money
+```
+
+## The module index
+
+`mod.mim` is generated: `check`, `build` and `run` keep it current. It lists every module and function, with signature hashes, plus the exact revision of each dependency. Commit it with your code. `mimic mod list` prints it in readable form.
+
+Next: [calling C](12-calling-c.mdx).

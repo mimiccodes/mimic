@@ -27,4 +27,6 @@ fn main() {
     print(total)                                     // 499999500000
     let k = 7
     print(⋔ (n = 10) { if n == 0 { k } else { arm(n - 1) + 1 } })   // captures k: 17
+    print(prices ▷ gather(max))                      // 9: max/min are values too
+    print(prices ▷ trail(⌊))                         // running minimum
 }

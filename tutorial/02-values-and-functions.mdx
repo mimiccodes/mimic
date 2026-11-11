@@ -1,0 +1,193 @@
+---
+title: Values and functions
+description: Numbers, booleans, strings, let bindings, functions and if.
+order: 2
+---
+
+# Values and functions
+
+## Numbers, booleans and text
+
+```mimic run
+module main
+
+fn main() {
+    print(7 + 2 * 3)        // 13: the usual precedence
+    print(7 / 2)            // 3.5: `/` always gives a float
+    print(7 div 2)          // 3: integer division (rounds down)
+    print(¯7 div 2)         // -4: ¯ is a negative sign on a literal
+    print(7 % 3)            // 1
+    print(0xFF + 0b101)     // hex and binary literals
+    print(1_000_000)        // underscores for readability
+    print(3 > 2 and 2 > 1)  // and, or, not
+    print("tea" + " time")  // + joins strings
+}
+```
+
+```output
+13
+3.5
+3
+-4
+1
+260
+1000000
+true
+tea time
+```
+
+Integers are 64-bit `i64`, floats are `f64` and truth values are `bool`. Text is `str`.
+
+## Let bindings
+
+`let` gives a value a name. Bindings are **immutable**:
+
+```mimic run
+module main
+
+fn main() {
+    let width = 4
+    let height = 3
+    let mut area = width * height    // `mut` allows reassignment
+    area = area + 1
+    print(area)
+}
+```
+
+```output
+13
+```
+
+Mimic has no shadowing: you cannot declare the same name twice in one function. To change a value, ask for it explicitly with `let mut`.
+
+## Functions
+
+```mimic run
+module main
+
+fn main() {
+    print(square(9))
+    print(hypot(3.0, 4.0))
+    print(greet("Ada"))
+}
+
+fn square(x: i64) -> i64 { x * x }
+
+// the last expression is the result; `return` is only for leaving early
+fn hypot(a: f64, b: f64) -> f64 {
+    let s = a * a + b * b
+    sqrt(s)
+}
+
+fn greet(name: str) -> str { "hello, {name}!" }
+
+trusted extern "C" {
+    fn sqrt(x: f64) -> f64
+}
+```
+
+```output
+81
+5.0
+hello, Ada!
+```
+
+Notes:
+* **Annotations are optional.** Parameter and return types document intent and are checked, but you can leave them out. Mimic infers types and compiles a specialized copy of each function for every combination of argument types it is called with.
+* **`{…}` inside a string** inserts any expression: `"{name}"`, `"{a + b}"`.
+* **C functions.** The `sqrt` declaration borrows a function from the C library. [Chapter 12](12-calling-c.mdx) explains this.
+
+## Named and default arguments
+
+```mimic run
+module main
+
+fn main() {
+    print(label("title"))
+    print(label("title", size: 24))
+    print(label(size: 9, text: "note"))
+}
+
+fn label(text: str, size: i64 = 16) -> str { "{text}@{size}" }
+```
+
+```output
+title@16
+title@24
+note@9
+```
+
+## if is an expression
+
+`if` produces a value, so it can sit anywhere an expression can:
+
+```mimic run
+module main
+
+fn main() {
+    print(sign(-5))
+    print(sign(0))
+    let kind = if 10 % 2 == 0 { "even" } else { "odd" }
+    print(kind)
+}
+
+fn sign(n: i64) -> str {
+    if n < 0 {
+        "negative"
+    } else if n == 0 {
+        "zero"
+    } else {
+        "positive"
+    }
+}
+```
+
+```output
+negative
+zero
+even
+```
+
+## Tuples
+
+Group a few values without declaring a type:
+
+```mimic run
+module main
+
+fn main() {
+    let (q, r) = divmod(17, 5)
+    print(q)
+    print(r)
+    print(divmod(9, 4))
+}
+
+fn divmod(a: i64, b: i64) { (a div b, a % b) }
+```
+
+```output
+3
+2
+(2, 1)
+```
+
+## Durations
+
+Time literals are integers in nanoseconds, so arithmetic on them just works:
+
+```mimic run
+module main
+
+fn main() {
+    let timeout = 1.5min
+    print(timeout div 1s)      // 90 seconds
+    print(250ms + 1s)
+}
+```
+
+```output
+90
+1250000000
+```
+
+Next: [arrays and glyphs](03-arrays-and-glyphs.mdx).

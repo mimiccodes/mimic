@@ -134,9 +134,16 @@ fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
         }
         (Prim::Abs, 1) => ExprKind::Unary { op: UnOp::Abs, expr: Box::new(args.pop().unwrap()) },
         // gather(+) and gather(×) are the fused, typed sum and product
-        (Prim::Gather, 2) if matches!(args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul)) => {
+        // gather(+), gather(×), gather(max), gather(min): the fused, typed reductions
+        (Prim::Gather, 2) if matches!(args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul | BinOp::Max | BinOp::Min)) => {
             let ExprKind::OpRef(op) = args.pop().unwrap().kind else { unreachable!() };
-            ExprKind::Prim { prim: if op == BinOp::Add { Prim::Sum } else { Prim::Product }, args }
+            let prim = match op {
+                BinOp::Add => Prim::Sum,
+                BinOp::Mul => Prim::Product,
+                BinOp::Max => Prim::Maximum,
+                _ => Prim::Minimum,
+            };
+            ExprKind::Prim { prim, args }
         }
         _ => ExprKind::Prim { prim, args },
     };
@@ -863,6 +870,9 @@ impl Parser {
             Tok::Shl => BinOp::Shl,
             Tok::Shr => BinOp::Shr,
             Tok::UShr => BinOp::UShr,
+            // `max` / `min` (⌈ ⌊) as values: `gather(max)`, `(max)`
+            Tok::Prim(Prim::Max) => BinOp::Max,
+            Tok::Prim(Prim::Min) => BinOp::Min,
             _ => return None,
         })
     }

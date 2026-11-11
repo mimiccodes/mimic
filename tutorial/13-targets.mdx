@@ -1,0 +1,64 @@
+---
+title: Building for other platforms
+description: Cross-compile to Linux, Windows, iOS, WebAssembly and every CPU LLVM supports, from one machine.
+order: 13
+---
+
+# Building for other platforms
+
+`mimic` contains LLVM, Clang, a linker and the C libraries it needs. It can build for other operating systems and CPUs from the machine you're on, with nothing else installed.
+
+## Pick a target
+
+```sh
+mimic build --target x86_64-linux-musl      # a static Linux binary
+mimic build --target aarch64-linux-musl     # Linux on ARM (Raspberry Pi, Graviton…)
+mimic build --target wasm32-wasi            # WebAssembly for WASI runtimes
+mimic build --target aarch64-ios-macabi     # Mac Catalyst
+```
+
+Cross builds are written to `target/<profile>/<target>/`.
+
+To build for several targets with one command, list them in `build.mim`:
+
+```mimic
+targets = ["x86_64-linux-musl", "aarch64-linux-musl", "wasm32-wasi"]
+```
+
+Then build them all at once:
+
+```sh
+mimic build --all-targets
+```
+
+## What is available
+
+```sh
+mimic targets               # everything, grouped by how well it is tested
+mimic targets --check wasm32-wasi
+mimic targets --cpus aarch64   # CPU models of an architecture, for --cpu
+mimic targets --json        # for tools
+```
+
+Targets are grouped into tiers:
+
+| Tier | Meaning |
+|---|---|
+| **stable** | Programs run and pass Mimic's full test suite |
+| **runs** | Programs run, but the full suite is not run there |
+| **links** | Complete executables are produced but not tested on that platform yet |
+| **compiles** | Object files are produced. You link them with that platform's own tools. |
+
+Apple targets (iOS, watchOS, tvOS, visionOS) use the Apple SDKs, so building them requires Xcode.
+
+## Choosing the CPU
+
+By default, `mimic build` tunes for **the exact CPU of the machine you are on**, which gives the fastest binary for that machine. To ship a binary that runs on any CPU of its family, ask for portable code:
+
+```sh
+mimic build --cpu portable           # the oldest model of the family (apple-m1, x86-64-v2): runs on all of them
+mimic build --cpu apple-m3           # a specific CPU
+mimic build --target x86_64-linux-musl --cpu x86-64-v3
+```
+
+Next: [tooling](14-tooling.mdx).
