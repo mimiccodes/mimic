@@ -1,5 +1,6 @@
 //! `mimic` — compiler, project manager, code checker and package manager.
 
+mod cc;
 mod driver;
 mod modfile;
 mod report;
@@ -231,26 +232,7 @@ fn main() -> ExitCode {
     }
     if let Some(tool) = argv.get(1).map(String::as_str) {
         if tool == "cc" || tool == "c++" {
-            let mut args = vec![if tool == "cc" { "clang".to_string() } else { "clang++".to_string() }];
-            // driver mode only: `mimic cc -cc1 …` is Clang re-running itself
-            let driver_mode = !argv.get(2).is_some_and(|a| a.starts_with("-cc1"));
-            // Clang's own headers (stddef.h, …) are bundled in mimic
-            if driver_mode
-                && !argv.iter().any(|a| a.starts_with("-resource-dir"))
-                && let Ok(dir) = mimic_toolchain::resource_dir(&packages::cache_dir().join("libc"))
-            {
-                args.push("-resource-dir".into());
-                args.push(dir.display().to_string());
-            }
-            // link with the embedded LLD, not whatever linker the system has
-            if driver_mode
-                && !argv.iter().any(|a| a.starts_with("-fuse-ld") || a.starts_with("--ld-path"))
-                && let Some(ld) = tool_link(lld_flavour(&argv[2..]))
-            {
-                args.push(format!("--ld-path={}", ld.display()));
-            }
-            args.extend(argv[2..].iter().cloned());
-            return ExitCode::from(mimic_toolchain::clang_main(&args).clamp(0, 255) as u8);
+            return ExitCode::from(cc::main(tool == "c++", &argv[2..]).clamp(0, 255) as u8);
         }
         if mimic_toolchain::LLD_FLAVOURS.contains(&tool) {
             return ExitCode::from(mimic_toolchain::lld_main(&argv[1..]).clamp(0, 255) as u8);
@@ -269,47 +251,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// The LLD flavour Clang should link with, from `--target`/`-target`.
-fn lld_flavour(args: &[String]) -> &'static str {
-    let target = args
-        .iter()
-        .enumerate()
-        .find_map(|(i, a)| a.strip_prefix("--target=").map(String::from).or_else(|| (a == "-target").then(|| args.get(i + 1).cloned()).flatten()))
-        .unwrap_or_else(|| if cfg!(target_os = "macos") { "apple-darwin".into() } else { "linux".into() });
-    if target.contains("apple") || target.contains("darwin") || target.contains("macos") {
-        "ld64.lld"
-    } else if target.contains("windows-msvc") || (target.contains("windows") && !target.contains("gnu")) {
-        "lld-link"
-    } else if target.starts_with("wasm") {
-        "wasm-ld"
-    } else {
-        "ld.lld"
-    }
-}
-
-/// `<cache>/bin/<name>`: a link to this binary, so tools that run a linker by
-/// path (Clang's driver) get the embedded one.
-fn tool_link(name: &str) -> Option<PathBuf> {
-    if !mimic_toolchain::EMBEDDED {
-        return None;
-    }
-    let me = std::env::current_exe().ok()?;
-    let me = std::fs::canonicalize(&me).unwrap_or(me);
-    let dir = packages::cache_dir().join("bin");
-    let link = dir.join(name);
-    if std::fs::read_link(&link).ok().as_deref() == Some(me.as_path()) {
-        return Some(link);
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    let tmp = dir.join(format!(".{name}.{}", std::process::id()));
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&me, &tmp).ok()?;
-    #[cfg(not(unix))]
-    std::fs::copy(&me, &tmp).ok()?;
-    std::fs::rename(&tmp, &link).ok()?;
-    Some(link)
 }
 
 fn status(verb: &str, msg: impl AsRef<str>) {

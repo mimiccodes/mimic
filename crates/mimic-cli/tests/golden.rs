@@ -276,3 +276,26 @@ fn every_backend_compiles() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `mimic cc` is Clang with the target's C library filled in.
+#[test]
+fn mimic_cc() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = dir.join("hello.c");
+    std::fs::write(&c, "#include <stdio.h>\n#include <math.h>\nint main(void){printf(\"%.3f\\n\", sqrt(2.0));return 0;}\n").unwrap();
+    // native: compile, link with the embedded LLD, run
+    let exe = dir.join("hello");
+    let out = mimic().current_dir(&dir).args(["cc", "-O2", "hello.c", "-o"]).arg(&exe).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&std::process::Command::new(&exe).output().unwrap().stdout), "1.414\n");
+    // cross: a static Linux executable with no flags beyond --target
+    let out = mimic().current_dir(&dir).args(["cc", "--target=aarch64-linux", "hello.c", "-lm", "-o", "hello-linux"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let elf = std::fs::read(dir.join("hello-linux")).unwrap();
+    assert_eq!(&elf[..4], b"\x7fELF");
+    assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 183, "aarch64");
+    assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2, "static executable");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

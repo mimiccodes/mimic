@@ -87,6 +87,7 @@ pub fn ensure(cache: &Path, triple: &str) -> Result<Sysroot, String> {
     if done.is_file() {
         return Ok(Sysroot { root });
     }
+    eprintln!("    Building musl {VERSION} for {triple} (first use; cached afterwards)");
     let src = bundle::unpack(bundle::MUSL, &cache.join(format!("src/musl-{VERSION}")))?.join(format!("musl-{VERSION}"));
     let work = root.join("obj");
     let _ = fs::remove_dir_all(&root);

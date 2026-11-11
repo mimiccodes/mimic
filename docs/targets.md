@@ -10,6 +10,23 @@
 
 No other compiler, linker or SDK has to be installed for the targets that produce **complete executables** (see below).
 
+## Compiling C: `mimic cc`
+
+`mimic cc` (and `mimic c++`) is Clang, with everything a target needs filled in. These are its flags as usual, plus:
+
+* `--target` is understood like `mimic build` understands it, so `aarch64-linux` means musl.
+* For targets with a bundled C library, the C library, start-up files and compiler-rt are added automatically. The C library is built from the bundled sources the first time it is needed.
+* Clang's own headers come from inside `mimic`, and linking uses the embedded LLD.
+
+```sh
+mimic cc -O2 hello.c -o hello                          # native
+mimic cc --target=aarch64-linux hello.c -lm -o hello   # static Linux arm64 executable
+mimic cc --target=x86_64-macos hello.c -o hello        # Intel macOS, from Apple silicon
+mimic cc --target=x86_64-windows -ffreestanding -c f.c # objects for any LLVM target
+```
+
+C++ compiles too, but libc++ is not bundled yet, so the C++ standard library is not available.
+
 ## Writing a target
 
 A target is an LLVM triple. The vendor may be left out.
