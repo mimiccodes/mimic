@@ -1055,8 +1055,8 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         let params: Vec<BasicMetadataTypeEnum> = decl.params.iter().map(|(_, t)| self.ctype(t).into()).collect();
         let ty = match &decl.ret {
-            Some(t) => self.ctype(t).fn_type(&params, false),
-            None => self.ctx.void_type().fn_type(&params, false),
+            Some(t) => self.ctype(t).fn_type(&params, decl.variadic),
+            None => self.ctx.void_type().fn_type(&params, decl.variadic),
         };
         self.module.add_function(&decl.name, ty, Some(Linkage::External))
     }
@@ -1861,6 +1861,20 @@ impl<'ctx> Cg<'ctx, '_> {
                     let mut argv = Vec::new();
                     for (v, (_, t)) in vals.iter().zip(&decl.params) {
                         argv.push(self.mimic_to_c(*v, t)?);
+                    }
+                    // varargs: C's default argument promotions
+                    for (i, v) in vals.iter().enumerate().skip(decl.params.len()) {
+                        let ty = self.ty_of(&args[i]);
+                        argv.push(match (ty, v) {
+                            (Ty::F64, _) | (_, V::F(_)) => self.to_f64(*v)?.into(),
+                            (Ty::Bool, _) | (_, V::B(_)) => {
+                                let b = self.truth(*v)?;
+                                self.b.build_int_z_extend(b, self.ctx.i32_type(), "").s()?.into()
+                            }
+                            (Ty::Arr(mimic_check::types::El::Char), V::P(p, _)) => self.call_rt("mim_cstr", &[(*p).into()])?.unwrap().into(),
+                            (Ty::Arr(_), V::P(p, _)) => self.call_rt("mim_dataptr", &[(*p).into()])?.unwrap().into(),
+                            _ => self.to_i64(*v)?.into(),
+                        });
                     }
                     let r = self.b.build_call(f, &argv, "").s()?;
                     let out = match (&decl.ret, r.try_as_basic_value().basic()) {

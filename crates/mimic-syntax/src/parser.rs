@@ -341,7 +341,16 @@ impl Parser {
                     self.expect(&Tok::LParen)?;
                     self.nl_ignore += 1;
                     let mut params = Vec::new();
+                    let mut variadic = false;
                     while !self.at(&Tok::RParen) {
+                        // `...`: C varargs, after the fixed parameters
+                        if self.at(&Tok::Dot) {
+                            for _ in 0..3 {
+                                self.expect(&Tok::Dot)?;
+                            }
+                            variadic = true;
+                            break;
+                        }
                         let (pn, ps) = self.ident()?;
                         if !self.eat(&Tok::Colon) {
                             self.nl_ignore -= 1;
@@ -355,7 +364,7 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, ret, span: fstart });
                 }
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
             }

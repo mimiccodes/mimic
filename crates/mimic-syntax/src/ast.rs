@@ -171,6 +171,8 @@ pub struct ExternFn {
     pub name: String,
     pub is_pub: bool,
     pub params: Vec<(String, Type)>,
+    /// `fn printf(fmt: cstr, ...)`: more arguments may follow the fixed ones.
+    pub variadic: bool,
     pub ret: Option<Type>,
     pub span: Span,
 }

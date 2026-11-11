@@ -981,7 +981,8 @@ impl Checker<'_> {
                             }
                             Ok(Resolved::Fn(f)) => {
                                 let func = &self.p.fns[f];
-                                if func.arity() != args.len() {
+                                let variadic = matches!(&func.kind, FnKind::Extern { decl, .. } if decl.variadic);
+                                if func.arity() != args.len() && !(variadic && args.len() >= func.arity()) {
                                     self.err(Diag::new(&C::ARG_COUNT, 
                                         format!("`{}` takes {} argument(s) but {} were supplied", path.join("::"), func.arity(), args.len()),
                                         e.span,

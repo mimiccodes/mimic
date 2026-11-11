@@ -1,0 +1,13 @@
+module main
+
+// C varargs: printf-style functions, imported or declared with `...`.
+// Mimic integers are 64-bit, so they match %lld; floats match %f; strings %s;
+// bools are promoted to int (%d).
+extern "C" include "stdio.h"
+
+fn main() {
+    unsafe { printf("%s has %lld cores\n", "mimic", 12) }
+    unsafe { printf("pi ~ %.3f, big %lld, neg %lld\n", 3.14159, 9000000000, ¯5) }
+    unsafe { printf("flag %d, text %s\n", true, "ok") }
+    print("after printf")
+}

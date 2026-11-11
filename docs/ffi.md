@@ -83,7 +83,6 @@ How the import works:
   | Skipped | Reason |
   |---|---|
   | Functions that take unions by value, or structs with array, union or function-pointer fields | Rest of B2 |
-  | Varargs (`printf`) | B3 |
   | Function pointers | B4 |
   | `long double` | No Mimic type |
   | `static inline` functions | No symbol to link |
@@ -92,6 +91,30 @@ How the import works:
 
 * **Caching.** Results are cached per header, target and modification time in `~/.mimic/cache/cimport`, so only the first build pays the roughly 1 s that Clang takes.
 * **Errors.** A header that cannot be read is error E0805, with Clang's message.
+
+### Varargs
+
+Variadic C functions (`printf`, `snprintf`, `open`) are imported, and can be declared by hand with `...`:
+
+```mimic
+extern "C" {
+    fn snprintf(buf: ptr[u8], n: usize, fmt: cstr, ...) -> i32
+}
+
+unsafe { printf("%s has %lld cores, pi ~ %.3f\n", "mimic", 12, 3.14159) }
+```
+
+The extra arguments get C's default promotions:
+
+| Mimic | Passed to C as | Format |
+|---|---|---|
+| Integers (64-bit) | `long long` | `%lld` |
+| `f64` | `double` | `%f` |
+| `bool` | `int` | `%d` |
+| `str` | `char *` | `%s` |
+| Arrays | a pointer to their data | |
+
+As in C, the format must match the argument. `%d` for a Mimic integer may *appear* to work on arm64 and x86-64, where variadic arguments travel in registers, but it reads the wrong bytes on wasm32 and on other platforms. Use `%lld`.
 
 ### Structs by value
 
@@ -172,7 +195,6 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 ## Planned work (Phase B of the roadmap)
 
 * **B2 (rest):** unions; array fields; reading and writing structs through pointers.
-* **B3: varargs** (`printf`-style).
 * **B4: callbacks.** A Mimic function is passed as a C function pointer through a generated trampoline, including closures with a context pointer.
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
 * **B6: exporting Mimic to C.** `pub extern fn mm_sum(xs: ptr[f64], n: usize) -> f64 { … }` plus `mimic build --emit-header`, which writes `target/<profile>/<name>.h`.

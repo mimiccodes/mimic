@@ -5,7 +5,7 @@
 //! of `long`, of pointers) comes from Clang's own predefined macros. Every
 //! function the header makes visible (as C's `#include` does) whose signature
 //! Mimic's FFI can express becomes an extern declaration; the rest are skipped with a reason
-//! (structs by value, varargs and callbacks are the next FFI steps).
+//! (callbacks and unions are the next FFI steps).
 //! Results are cached per header, target and modification time.
 
 use crate::targets::Target;
@@ -21,6 +21,7 @@ pub struct CFn {
     pub name: String,
     pub params: Vec<String>,
     pub ret: Option<String>,
+    pub variadic: bool,
 }
 
 /// A function that takes or returns a struct by value. It is called through a
@@ -66,6 +67,7 @@ impl Imported {
                 name: f.name.clone(),
                 is_pub,
                 params: f.params.iter().enumerate().map(|(i, p)| (format!("a{i}"), ty(p))).collect(),
+                variadic: f.variadic,
                 ret: f.ret.as_deref().map(ty),
                 span,
             })
@@ -89,7 +91,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v6|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v7|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -261,10 +263,7 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             out.skipped.push(skip("static/inline: no symbol to link (wrappers come with the next FFI step)"));
             continue;
         }
-        if node["variadic"].as_bool() == Some(true) {
-            out.skipped.push(skip("variadic (printf-style): FFI step B3"));
-            continue;
-        }
+        let variadic = node["variadic"].as_bool() == Some(true);
         let ftype = node["type"]["qualType"].as_str().unwrap_or("");
         let ret_c = resolve(ftype.split('(').next().unwrap_or("").trim());
         // structs by value: through generated wrappers
@@ -280,6 +279,10 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             })
             .collect();
         if ctx.struct_name(&ret_c).is_some() || parms.iter().any(|(_, d)| ctx.struct_name(d).is_some()) {
+            if variadic {
+                out.skipped.push(skip("varargs together with structs by value"));
+                continue;
+            }
             let ret_q = ftype.split('(').next().unwrap_or("").trim();
             match ctx.wrap(name, (ret_q, &ret_c), &parms) {
                 Ok((f, used)) => {
@@ -319,7 +322,7 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             out.skipped.push(skip(&why));
             continue;
         }
-        out.fns.push(CFn { name: name.to_string(), params, ret });
+        out.fns.push(CFn { name: name.to_string(), params, ret, variadic });
     }
     out
 }
@@ -674,7 +677,7 @@ fn scalar(t: &str, m: &DataModel) -> Option<String> {
 
 fn to_cache(i: &Imported) -> Value {
     serde_json::json!({
-        "fns": i.fns.iter().map(|f| serde_json::json!({"name": f.name, "params": f.params, "ret": f.ret})).collect::<Vec<_>>(),
+        "fns": i.fns.iter().map(|f| serde_json::json!({"name": f.name, "params": f.params, "ret": f.ret, "variadic": f.variadic})).collect::<Vec<_>>(),
         "struct_fns": i.struct_fns.iter().map(|f| serde_json::json!({"name": f.name, "mimic": f.mimic, "c": f.c, "uses": f.uses})).collect::<Vec<_>>(),
         "records": i.records,
         "include": i.include_line,
@@ -693,6 +696,7 @@ fn from_cache(v: &Value) -> Imported {
                 name: s(&f["name"]),
                 params: f["params"].as_array().into_iter().flatten().map(s).collect(),
                 ret: f["ret"].as_str().map(String::from),
+                variadic: f["variadic"].as_bool() == Some(true),
             })
             .collect(),
         struct_fns: v["struct_fns"]
