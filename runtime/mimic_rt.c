@@ -28,6 +28,13 @@
 #include <unistd.h>
 #endif
 
+/* Platform BLAS, looked up at run time (no link-time dependency): Apple's
+ * Accelerate everywhere on Apple systems, OpenBLAS when installed on Linux. */
+#if (defined(__APPLE__) || defined(__linux__)) && !defined(__wasi__)
+#define MIM_DLBLAS 1
+#include <dlfcn.h>
+#endif
+
 /* BOXED: a vector of handles (nested arrays, lists of strings/records).
  * OBJ: a record or union variant — `len` field handles plus a descriptor. */
 typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7 } mim_dtype;
@@ -77,7 +84,8 @@ enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT
 #define SHR64(x, y) ((x) >> ((y) & 63))
 #define USHR64(x, y) ((int64_t)((uint64_t)(x) >> ((y) & 63)))
 enum { UOP_NEG, UOP_NOT, UOP_ABS, UOP_BNOT };
-enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRINT, P_TAKE, P_DROP, P_KEEP, P_EACH, P_RANGE };
+enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRINT, P_TAKE, P_DROP, P_KEEP, P_EACH, P_RANGE,
+       P_RESHAPE = 21, P_TRANSPOSE = 22, P_MATMUL = 23 };
 
 void mim_panic(const char *msg);
 
@@ -369,6 +377,7 @@ static void dealloc(mim_val *v) {
         for (int64_t i = 0; i < v->len; i++) mim_release(h[i]);
     }
     if (v->dtype == MIM_MAP) map_dealloc_meta(v);
+    else if (v->rank >= 2) free((void *)v->desc); /* the shape of a matrix */
     size_t bytes = (size_t)v->len * elsize(v->dtype) + 1;
     __atomic_store_n(&live_slot()->n, live_slot()->n - 1, __ATOMIC_RELAXED);
     if (bytes <= SMALL_BYTES && t_free_len < FREE_LIST_CAP) {
@@ -622,6 +631,75 @@ static void retain_children(mim_val *v) {
     for (int64_t i = 0; i < v->len; i++) mim_retain(h[i]);
 }
 
+/* ==== shapes (rank ≥ 2) ===================================================
+ * Elements of every array are stored flat, in row-major order, so all the
+ * elementwise kernels work unchanged. Arrays of rank ≥ 2 keep their
+ * dimensions in a side table hung off `desc` (unused by plain arrays). */
+
+#define SHAPE(v) ((int64_t *)(void *)(v)->desc)
+
+/* dimension k of an array (rank ≥ 1) */
+static int64_t dim_of(const mim_val *v, int k) { return v->rank >= 2 ? SHAPE(v)[k] : v->len; }
+
+static void set_shape(mim_val *r, int rank, const int64_t *dims) {
+    r->rank = rank;
+    if (rank >= 2) {
+        int64_t *s = (int64_t *)malloc(sizeof(int64_t) * (size_t)rank);
+        if (!s) mim_panic("out of memory");
+        memcpy(s, dims, sizeof(int64_t) * (size_t)rank);
+        r->desc = (const mim_desc *)(void *)s;
+    }
+}
+
+static mim_val *alloc_shaped(int dt, int rank, const int64_t *dims) {
+    int64_t n = 1;
+    for (int k = 0; k < rank; k++) n *= dims[k];
+    mim_val *r = alloc(dt, rank < 2 ? rank : 1, n);
+    if (rank >= 2) set_shape(r, rank, dims);
+    return r;
+}
+
+/* a fresh array of dtype dt with the shape of src */
+static mim_val *alloc_like(int dt, const mim_val *src) {
+    if (src->rank < 2) return alloc(dt, src->rank, src->len);
+    return alloc_shaped(dt, src->rank, SHAPE(src));
+}
+
+static int same_shape(const mim_val *a, const mim_val *b) {
+    if (a->rank != b->rank) return 0;
+    if (a->rank < 2) return a->len == b->len;
+    return memcmp(SHAPE(a), SHAPE(b), sizeof(int64_t) * (size_t)a->rank) == 0;
+}
+
+static void fmt_shape(char *buf, size_t cap, const mim_val *v) {
+    size_t o = (size_t)snprintf(buf, cap, "[");
+    for (int k = 0; k < v->rank && o < cap; k++) o += (size_t)snprintf(buf + o, cap - o, k ? " %lld" : "%lld", (long long)dim_of(v, k));
+    if (o < cap) snprintf(buf + o, cap - o, "]");
+}
+
+/* rows from..from+n of an array (the leading axis), keeping the other axes */
+static mim_val *slice_rows(mim_val *a, int64_t from, int64_t n) {
+    int64_t cell = a->len / (dim_of(a, 0) ? dim_of(a, 0) : 1);
+    int64_t dims[16];
+    for (int k = 0; k < a->rank; k++) dims[k] = dim_of(a, k);
+    dims[0] = n;
+    mim_val *r = alloc_shaped(a->dtype, a->rank, dims);
+    size_t es = elsize(a->dtype);
+    memcpy(r->data, (char *)a->data + (size_t)(from * cell) * es, (size_t)(n * cell) * es);
+    retain_children(r);
+    return r;
+}
+
+/* the cell at leading index i: rank r-1 */
+static mim_val *cell_at(mim_val *a, int64_t i) {
+    int64_t cell = a->len / dim_of(a, 0);
+    mim_val *r = alloc_shaped(a->dtype, a->rank - 1, SHAPE(a) + 1);
+    size_t es = elsize(a->dtype);
+    memcpy(r->data, (char *)a->data + (size_t)(i * cell) * es, (size_t)cell * es);
+    retain_children(r);
+    return r;
+}
+
 mim_val *mim_array_lit(int64_t n, mim_val **elems) {
     if (n == 0) return alloc(MIM_I64, 1, 0);
     int dt = -1, boxed = 0;
@@ -799,18 +877,25 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         return r;
     }
     int64_t n;
-    int rank;
-    if (a->rank == 0 && b->rank == 0) { n = 1; rank = 0; }
-    else if (a->rank == 0) { n = b->len; rank = 1; }
-    else if (b->rank == 0) { n = a->len; rank = 1; }
+    const mim_val *like = NULL; /* the operand whose shape the result takes */
+    if (a->rank == 0 && b->rank == 0) n = 1;
+    else if (a->rank == 0) { n = b->len; like = b; }
+    else if (b->rank == 0) { n = a->len; like = a; }
     else {
-        if (a->len != b->len) {
-            char buf[128];
-            snprintf(buf, sizeof buf, "length mismatch: %lld vs %lld", (long long)a->len, (long long)b->len);
+        if (!same_shape(a, b)) {
+            char buf[200];
+            if (a->rank == 1 && b->rank == 1) {
+                snprintf(buf, sizeof buf, "length mismatch: %lld vs %lld", (long long)a->len, (long long)b->len);
+            } else {
+                char sa[80], sb[80];
+                fmt_shape(sa, sizeof sa, a);
+                fmt_shape(sb, sizeof sb, b);
+                snprintf(buf, sizeof buf, "shape mismatch: %s vs %s", sa, sb);
+            }
             mim_panic(buf);
         }
         n = a->len;
-        rank = 1;
+        like = a;
     }
     int floaty = a->dtype == MIM_F64 || b->dtype == MIM_F64;
     int dt = is_cmp(op) ? MIM_BOOL : (op == OP_DIV || floaty) ? MIM_F64 : MIM_I64;
@@ -819,7 +904,7 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         /* bool & bool stays bool (non-short-circuit logic on masks) */
         dt = (a->dtype == MIM_BOOL && b->dtype == MIM_BOOL && op <= OP_BXOR) ? MIM_BOOL : MIM_I64;
     }
-    mim_val *r = alloc(dt, rank, n);
+    mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
     binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1};
     /* the fast loops index x[i] for vectors and x[0] for scalars */
     parallel_for(n, binop_range, &c);
@@ -846,7 +931,7 @@ mim_val *mim_unop(int32_t op, mim_val *a) {
     need(a, "operator");
     if (op == UOP_BNOT && (a->dtype == MIM_F64 || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
     int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (a->dtype == MIM_F64 ? MIM_F64 : MIM_I64);
-    mim_val *r = alloc(dt, a->rank, a->len);
+    mim_val *r = alloc_like(dt, a);
     unop_ctx c = {op, a, r};
     parallel_for(a->len, unop_range, &c);
     return r;
@@ -939,6 +1024,37 @@ static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
         if (quoted) sb_str(b, "\"");
         sb_put(b, (const char *)v->data, (size_t)v->len);
         if (quoted) sb_str(b, "\"");
+        return;
+    }
+    if (v->rank >= 2) {
+        /* one row per line, a bracket per axis, a blank line between blocks:
+         * [[1 2 3]
+         *  [4 5 6]]                                                        */
+        int R = v->rank;
+        int64_t row = dim_of(v, R - 1), nrows = row ? v->len / row : 0;
+        if (nrows == 0) { sb_str(b, "[]"); return; }
+        int64_t S[16], acc = 1; /* S[j]: elements in one block of level j */
+        for (int j = R - 1; j >= 0; j--) { acc *= dim_of(v, j); S[j] = acc; }
+        for (int64_t r = 0; r < nrows; r++) {
+            int64_t flat = r * row;
+            int open = 0, close = 0;
+            for (int j = 0; j <= R - 2; j++) {
+                if (flat % S[j] == 0) open++;
+                if ((flat + row) % S[j] == 0) close++;
+            }
+            if (r) {
+                sb_str(b, "\n");
+                for (int k = 0; k < open; k++) sb_str(b, "\n");
+                for (int k = 0; k < R - 1 - open; k++) sb_str(b, " ");
+            }
+            for (int k = 0; k <= open; k++) sb_str(b, "[");
+            for (int64_t i = 0; i < row; i++) {
+                if (i) sb_str(b, " ");
+                if (v->dtype == MIM_BOXED) fmt_val(b, ((mim_val **)v->data)[flat + i], 1);
+                else fmt_elem(b, v, flat + i);
+            }
+            for (int k = 0; k <= close; k++) sb_str(b, "]");
+        }
         return;
     }
     sb_str(b, "[");
@@ -1212,9 +1328,54 @@ static void reduce_range(void *vc, int64_t lo, int64_t hi) {
     }
 }
 
+typedef struct { int prim; const mim_val *a; mim_val *r; int64_t row; } rows_ctx;
+
+/* reduce each row (the last axis) of a rank ≥ 2 array */
+static void reduce_rows_range(void *vc, int64_t lo, int64_t hi) {
+    rows_ctx *c = (rows_ctx *)vc;
+    int64_t row = c->row;
+    for (int64_t i = lo; i < hi; i++) {
+        int64_t base = i * row;
+        if (c->r->dtype == MIM_F64) {
+            double acc = c->prim == P_PRODUCT ? 1.0 : c->prim == P_SUM ? 0.0 : getf(c->a, base);
+            for (int64_t j = 0; j < row; j++) {
+                double x = getf(c->a, base + j);
+                switch (c->prim) {
+                case P_SUM: acc += x; break;
+                case P_PRODUCT: acc *= x; break;
+                case P_MAX: acc = x > acc ? x : acc; break;
+                case P_MIN: acc = x < acc ? x : acc; break;
+                }
+            }
+            ((double *)c->r->data)[i] = acc;
+        } else {
+            int64_t acc = c->prim == P_PRODUCT ? 1 : c->prim == P_SUM ? 0 : geti(c->a, base);
+            for (int64_t j = 0; j < row; j++) {
+                int64_t x = geti(c->a, base + j);
+                switch (c->prim) {
+                case P_SUM: acc = (int64_t)((uint64_t)acc + (uint64_t)x); break;
+                case P_PRODUCT: acc = (int64_t)((uint64_t)acc * (uint64_t)x); break;
+                case P_MAX: acc = x > acc ? x : acc; break;
+                case P_MIN: acc = x < acc ? x : acc; break;
+                }
+            }
+            ((int64_t *)c->r->data)[i] = acc;
+        }
+    }
+}
+
 static mim_val *reduce(int prim, mim_val *a) {
     if (IS_HANDLES(a)) mim_panic("cannot reduce a list of records/strings/lists with an arithmetic primitive");
     if (a->rank == 0) { mim_retain(a); return a; }
+    if (a->rank >= 2) {
+        /* +/ ×/ ⌈/ ⌊/ on a matrix reduce each row: the result drops the last axis */
+        int64_t row = dim_of(a, a->rank - 1);
+        if (row == 0 && (prim == P_MAX || prim == P_MIN)) mim_panic("maximum/minimum of empty rows");
+        mim_val *r = alloc_shaped(a->dtype == MIM_F64 ? MIM_F64 : MIM_I64, a->rank - 1, SHAPE(a));
+        rows_ctx c = {prim, a, r, row};
+        parallel_for(r->len, reduce_rows_range, &c);
+        return r;
+    }
     if (a->len == 0) {
         if (prim == P_SUM) return mim_int(0);
         if (prim == P_PRODUCT) return mim_int(1);
@@ -1271,6 +1432,226 @@ static void iota_range(void *vc, int64_t lo, int64_t hi) {
     for (int64_t i = lo; i < hi; i++) d[i] = i;
 }
 
+/* ⍉: reverse the order of the axes (rows ↔ columns for a matrix) */
+typedef struct { const mim_val *a; mim_val *r; } tr_ctx;
+
+static void transpose2_range(void *vc, int64_t lo, int64_t hi) {
+    tr_ctx *c = (tr_ctx *)vc;
+    int64_t rows = dim_of(c->a, 0), cols = dim_of(c->a, 1);
+    size_t es = elsize(c->a->dtype);
+    for (int64_t j = lo; j < hi; j++) /* result row j = source column j */
+        for (int64_t i = 0; i < rows; i++)
+            memcpy((char *)c->r->data + (size_t)(j * rows + i) * es, (char *)c->a->data + (size_t)(i * cols + j) * es, es);
+}
+
+static mim_val *transpose(mim_val *a) {
+    if (a->rank < 2) { mim_retain(a); return a; }
+    int R = a->rank;
+    int64_t dims[16];
+    for (int k = 0; k < R; k++) dims[k] = dim_of(a, R - 1 - k);
+    mim_val *r = alloc_shaped(a->dtype, R, dims);
+    if (R == 2) {
+        tr_ctx c = {a, r};
+        parallel_for(dim_of(a, 1), transpose2_range, &c);
+    } else {
+        /* general rank: walk the result, map each index back */
+        size_t es = elsize(a->dtype);
+        int64_t stride[16], idx[16] = {0};
+        stride[R - 1] = 1;
+        for (int k = R - 2; k >= 0; k--) stride[k] = stride[k + 1] * dim_of(a, k + 1);
+        for (int64_t f = 0; f < r->len; f++) {
+            int64_t src = 0;
+            for (int k = 0; k < R; k++) src += idx[k] * stride[R - 1 - k];
+            memcpy((char *)r->data + (size_t)f * es, (char *)a->data + (size_t)src * es, es);
+            for (int k = R - 1; k >= 0; k--) {
+                if (++idx[k] < dims[k]) break;
+                idx[k] = 0;
+            }
+        }
+    }
+    retain_children(r);
+    return r;
+}
+
+/* data ⥊ dims: the elements of `data` (flat, repeated as needed) in a new shape */
+static mim_val *reshape(mim_val *a, mim_val *b) {
+    if (a->dtype == MIM_OBJ || a->dtype == MIM_MAP || a->dtype == MIM_FN)
+        mim_panic("⥊ (reshape) works on arrays of numbers, bools, characters and strings");
+    if (b->dtype == MIM_F64 || IS_HANDLES(b) || b->rank > 1) mim_panic("⥊ (reshape): the new shape must be a list of integers, e.g. [2 3]");
+    int R = b->rank == 0 ? 1 : (int)b->len;
+    if (R == 0) mim_panic("⥊ (reshape): the shape needs at least one dimension");
+    if (R > 16) mim_panic("⥊ (reshape): at most 16 dimensions");
+    int64_t dims[16];
+    for (int k = 0; k < R; k++) {
+        dims[k] = geti(b, b->rank == 0 ? 0 : k);
+        if (dims[k] < 0) mim_panic("⥊ (reshape): negative dimension");
+    }
+    mim_val *r = alloc_shaped(a->dtype, R, dims);
+    if (r->len == 0) return r;
+    int64_t n = a->rank == 0 ? 1 : a->len;
+    if (n == 0) mim_panic("⥊ (reshape): cannot fill a shape from an empty array");
+    size_t es = elsize(a->dtype);
+    if (n >= r->len) {
+        memcpy(r->data, a->data, (size_t)r->len * es);
+    } else {
+        for (int64_t f = 0; f < r->len; f += n) {
+            int64_t m = r->len - f < n ? r->len - f : n;
+            memcpy((char *)r->data + (size_t)f * es, a->data, (size_t)m * es);
+        }
+    }
+    retain_children(r);
+    return r;
+}
+
+/* a ⊠ b: matrix product. Vectors act as a row (left) or a column (right);
+ * two vectors give their dot product. Rows of the result run in parallel. */
+typedef struct { const double *x, *y; double *z; int64_t n, k, m; } mm_f_ctx;
+typedef struct { const int64_t *x, *y; int64_t *z; int64_t n, k, m; } mm_i_ctx;
+
+/* The fallback kernel: each task takes a range of 8-column panels of y,
+ * packs the panel contiguously (one cache line per step instead of one
+ * page) and computes 4×8 tiles of z in registers. Copies of the context in
+ * locals + `restrict` let the compiler keep everything in vector registers. */
+#define MM_MR 4
+#define MM_NR 8
+#define MM_KERNEL(NAME, CTX, T, MADD)                                                              \
+    static void NAME(void *vc, int64_t lo, int64_t hi) {                                           \
+        const CTX *c = (const CTX *)vc;                                                            \
+        const T *restrict x = c->x, *restrict y = c->y;                                            \
+        T *restrict z = c->z;                                                                      \
+        const int64_t n = c->n, k = c->k, m = c->m;                                                \
+        T *pk = (T *)malloc(sizeof(T) * (size_t)(k ? k : 1) * MM_NR);                              \
+        for (int64_t q = lo; q < hi; q++) {                                                        \
+            const int64_t j0 = q * MM_NR, w = m - j0 < MM_NR ? m - j0 : MM_NR;                     \
+            if (w == MM_NR) {                                                                      \
+                for (int64_t p = 0; p < k; p++)                                                    \
+                    for (int cc = 0; cc < MM_NR; cc++) pk[p * MM_NR + cc] = y[p * m + j0 + cc];    \
+                int64_t i = 0;                                                                     \
+                for (; i + MM_MR <= n; i += MM_MR) {                                               \
+                    T acc[MM_MR][MM_NR] = {{0}};                                                   \
+                    const T *x0 = x + i * k;                                                       \
+                    for (int64_t p = 0; p < k; p++) {                                              \
+                        const T *yr = pk + p * MM_NR;                                              \
+                        for (int r = 0; r < MM_MR; r++) {                                          \
+                            const T xv = x0[r * k + p];                                            \
+                            for (int cc = 0; cc < MM_NR; cc++) acc[r][cc] = MADD(acc[r][cc], xv, yr[cc]); \
+                        }                                                                          \
+                    }                                                                              \
+                    for (int r = 0; r < MM_MR; r++)                                                \
+                        for (int cc = 0; cc < MM_NR; cc++) z[(i + r) * m + j0 + cc] = acc[r][cc];  \
+                }                                                                                  \
+                for (; i < n; i++) {                                                               \
+                    T acc[MM_NR] = {0};                                                            \
+                    for (int64_t p = 0; p < k; p++)                                                \
+                        for (int cc = 0; cc < MM_NR; cc++) acc[cc] = MADD(acc[cc], x[i * k + p], pk[p * MM_NR + cc]); \
+                    for (int cc = 0; cc < MM_NR; cc++) z[i * m + j0 + cc] = acc[cc];               \
+                }                                                                                  \
+            } else { /* the last, narrower panel */                                                \
+                for (int64_t i = 0; i < n; i++)                                                    \
+                    for (int64_t j = j0; j < m; j++) {                                             \
+                        T a = 0;                                                                   \
+                        for (int64_t p = 0; p < k; p++) a = MADD(a, x[i * k + p], y[p * m + j]);   \
+                        z[i * m + j] = a;                                                          \
+                    }                                                                              \
+            }                                                                                      \
+        }                                                                                          \
+        free(pk);                                                                                  \
+    }
+
+#define MADD_F(a, x, y) ((a) + (x) * (y))
+#define MADD_I(a, x, y) ((int64_t)((uint64_t)(a) + (uint64_t)(x) * (uint64_t)(y)))
+MM_KERNEL(mm_f_range, mm_f_ctx, double, MADD_F)
+MM_KERNEL(mm_i_range, mm_i_ctx, int64_t, MADD_I)
+
+#ifdef MIM_DLBLAS
+typedef void (*dgemm_fn)(int, int, int, int, int, int, double, const double *, int, const double *, int, double, double *, int);
+static dgemm_fn blas_dgemm(void) {
+    static dgemm_fn fn;
+    static int tried;
+    if (__atomic_load_n(&tried, __ATOMIC_ACQUIRE)) return fn;
+    if (!getenv("MIMIC_NO_BLAS")) {
+        const char *libs[] = {
+#ifdef __APPLE__
+            "/System/Library/Frameworks/Accelerate.framework/Accelerate",
+#else
+            "libopenblas.so.0", "libopenblas.so", "libblis.so.4",
+#endif
+            NULL};
+        for (int i = 0; libs[i] && !fn; i++) {
+            void *h = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
+            if (h) fn = (dgemm_fn)dlsym(h, "cblas_dgemm");
+        }
+    }
+    __atomic_store_n(&tried, 1, __ATOMIC_RELEASE);
+    return fn;
+}
+#endif
+
+/* the elements of v as a dense f64 or i64 buffer (borrowed when already so) */
+static void *dense(const mim_val *v, int as_f64, int *owned) {
+    int native = as_f64 ? v->dtype == MIM_F64 : v->dtype == MIM_I64;
+    *owned = !native;
+    if (native) return v->data;
+    void *buf = malloc((size_t)(v->len ? v->len : 1) * 8);
+    for (int64_t i = 0; i < v->len; i++) {
+        if (as_f64) ((double *)buf)[i] = getf(v, i);
+        else ((int64_t *)buf)[i] = geti(v, i);
+    }
+    return buf;
+}
+
+static mim_val *matmul(mim_val *a, mim_val *b) {
+    if (IS_HANDLES(a) || IS_HANDLES(b) || a->dtype == MIM_CHAR || b->dtype == MIM_CHAR)
+        mim_panic("⊠ (matmul) works on arrays of numbers");
+    if (a->rank == 0 || b->rank == 0 || a->rank > 2 || b->rank > 2) mim_panic("⊠ (matmul) multiplies vectors and matrices");
+    int64_t n = a->rank == 2 ? dim_of(a, 0) : 1, k = a->rank == 2 ? dim_of(a, 1) : a->len;
+    int64_t k2 = b->rank == 2 ? dim_of(b, 0) : b->len, m = b->rank == 2 ? dim_of(b, 1) : 1;
+    if (k != k2) {
+        char buf[200], sa[80], sb[80];
+        fmt_shape(sa, sizeof sa, a);
+        fmt_shape(sb, sizeof sb, b);
+        snprintf(buf, sizeof buf, "⊠ (matmul): shapes %s and %s do not fit (%lld columns vs %lld rows)", sa, sb, (long long)k, (long long)k2);
+        mim_panic(buf);
+    }
+    int f = a->dtype == MIM_F64 || b->dtype == MIM_F64;
+    int oa, ob;
+    void *x = dense(a, f, &oa), *y = dense(b, f, &ob);
+    /* result shape: [n m], dropping the axes that came from vectors */
+    int64_t dims[2];
+    int R = 0;
+    if (a->rank == 2) dims[R++] = n;
+    if (b->rank == 2) dims[R++] = m;
+    mim_val *r = R == 0 ? alloc(f ? MIM_F64 : MIM_I64, 0, 1) : alloc_shaped(f ? MIM_F64 : MIM_I64, R, dims);
+    int done = 0;
+#ifdef MIM_DLBLAS
+    /* large float products: the platform BLAS (on Apple: the matrix units) */
+    if (f && n * k * m >= 32768 && n < INT32_MAX && k < INT32_MAX && m < INT32_MAX) {
+        dgemm_fn g = blas_dgemm();
+        if (g) {
+            /* 101 = row-major, 111 = no transpose */
+            g(101, 111, 111, (int)n, (int)m, (int)k, 1.0, (const double *)x, (int)k, (const double *)y, (int)m, 0.0, (double *)r->data, (int)m);
+            done = 1;
+        }
+    }
+#endif
+    if (!done) {
+        /* tasks are 8-column panels; about 256k multiply-adds per task */
+        int64_t panels = (m + MM_NR - 1) / MM_NR, per = n * k * MM_NR;
+        int64_t grain = per > 0 ? (262144 + per - 1) / per : panels;
+        if (grain < 1) grain = 1;
+        if (f) {
+            mm_f_ctx c = {(const double *)x, (const double *)y, (double *)r->data, n, k, m};
+            parallel_for_grain(panels, grain, mm_f_range, &c);
+        } else {
+            mm_i_ctx c = {(const int64_t *)x, (const int64_t *)y, (int64_t *)r->data, n, k, m};
+            parallel_for_grain(panels, grain, mm_i_range, &c);
+        }
+    }
+    if (oa) free(x);
+    if (ob) free(y);
+    return r;
+}
+
 mim_val *mim_prim1(int32_t prim, mim_val *a) {
     if (prim == P_PRINT) {
         print_val(a);
@@ -1289,12 +1670,25 @@ mim_val *mim_prim1(int32_t prim, mim_val *a) {
     }
     case P_SHAPE: {
         if (a->rank == 0) return alloc(MIM_I64, 1, 0);
+        if (a->rank >= 2) {
+            mim_val *r = alloc(MIM_I64, 1, a->rank);
+            memcpy(r->data, SHAPE(a), sizeof(int64_t) * (size_t)a->rank);
+            return r;
+        }
         mim_val *r = alloc(MIM_I64, 1, 1);
         ((int64_t *)r->data)[0] = a->len;
         return r;
     }
     case P_REVERSE: {
         if (a->rank == 0) { mim_retain(a); return a; }
+        if (a->rank >= 2) { /* reverse the rows (leading axis) */
+            int64_t n = dim_of(a, 0), cell = a->len / (n ? n : 1);
+            mim_val *r = alloc_like(a->dtype, a);
+            size_t cb = (size_t)cell * elsize(a->dtype);
+            for (int64_t i = 0; i < n; i++) memcpy((char *)r->data + (size_t)i * cb, (char *)a->data + (size_t)(n - 1 - i) * cb, cb);
+            retain_children(r);
+            return r;
+        }
         mim_val *r = alloc(a->dtype, 1, a->len);
         size_t es = elsize(a->dtype);
         for (int64_t i = 0; i < a->len; i++)
@@ -1308,7 +1702,8 @@ mim_val *mim_prim1(int32_t prim, mim_val *a) {
     case P_MIN: return reduce(prim, a);
     case P_LEN:
         if (a->dtype == MIM_MAP) return mim_int(((const int64_t *)(const void *)a->desc)[0]);
-        return mim_int(a->rank == 0 ? 1 : a->len);
+        return mim_int(a->rank == 0 ? 1 : dim_of(a, 0)); /* the leading axis */
+    case P_TRANSPOSE: return transpose(a);
     }
     mim_panic("unknown monadic primitive");
     return NULL;
@@ -1322,12 +1717,18 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     case P_DROP: {
         if (b->rank != 0 || b->dtype == MIM_F64) mim_panic("take/drop count must be an integer scalar");
         if (a->rank == 0) mim_panic("take/drop expects a vector on the left");
-        int64_t n = geti(b, 0), len = a->len;
+        int64_t n = geti(b, 0), len = dim_of(a, 0);
         int64_t k = n < 0 ? -n : n;
         if (k > len) k = len;
+        if (a->rank >= 2) { /* rows */
+            if (prim == P_TAKE) return n >= 0 ? slice_rows(a, 0, k) : slice_rows(a, len - k, k);
+            return n >= 0 ? slice_rows(a, k, len - k) : slice_rows(a, 0, len - k);
+        }
         if (prim == P_TAKE) return n >= 0 ? slice(a, 0, k) : slice(a, len - k, k);
         return n >= 0 ? slice(a, k, len - k) : slice(a, 0, len - k);
     }
+    case P_RESHAPE: return reshape(a, b);
+    case P_MATMUL: return matmul(a, b);
     case P_RANGE: {
         if (a->rank != 0 || b->rank != 0 || a->dtype == MIM_F64 || b->dtype == MIM_F64)
             mim_panic("‥ (range) expects two integer scalars");
@@ -1338,6 +1739,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     }
     case P_KEEP: {
         if (a->rank == 0 || b->rank == 0) mim_panic("⌿ (keep) expects two vectors");
+        if (a->rank >= 2 || b->rank >= 2) mim_panic("⌿ (keep) works on vectors; select rows with indexing or ↑ ↓");
         if (a->len != b->len) mim_panic("⌿ (keep): length mismatch");
         int64_t total = 0;
         for (int64_t i = 0; i < b->len; i++) {
@@ -1411,6 +1813,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     mim_val *r = mim_array_lit(n, tmp);
     for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
     free(tmp);
+    if (xs->rank >= 2) set_shape(r, xs->rank, SHAPE(xs)); /* ¨ keeps the shape */
     return r;
 }
 
@@ -1444,6 +1847,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
     mim_val *r = mim_array_lit(n, tmp);
     for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
     free(tmp);
+    if (xs->rank >= 2) set_shape(r, xs->rank, SHAPE(xs)); /* ¨ keeps the shape */
     return r;
 }
 
@@ -1497,6 +1901,7 @@ static int64_t loop_chunks(int64_t n) {
  * order), which gives the same result as a left fold when f is associative. */
 mim_val *mim_gather(mim_val *xs, mim_val *f) {
     need(xs, "gather");
+    if (xs->rank >= 2) mim_panic("gather works on lists; for a matrix reduce its rows with +/ ×/ ⌈/ ⌊/, or reshape it with ⥊");
     if (xs->rank == 0) {
         mim_retain(xs);
         return xs;
@@ -1557,6 +1962,7 @@ static void trail_fix(void *vc, int64_t lo, int64_t hi) {
  * A pure f runs as a two-pass parallel prefix (f associative). */
 mim_val *mim_trail(mim_val *xs, mim_val *f) {
     need(xs, "trail");
+    if (xs->rank >= 2) mim_panic("trail works on lists; for a matrix reduce its rows with +/ ×/ ⌈/ ⌊/, or reshape it with ⥊");
     if (xs->rank == 0) {
         mim_retain(xs);
         return xs;
@@ -1638,8 +2044,79 @@ static int64_t check_index(mim_val *xs, mim_val *i) {
 static mim_val *map_get(mim_val *m, mim_val *k);
 static void map_set(mim_val **slot, mim_val *k, mim_val *v);
 
+/* an unshared copy with the same shape */
+static mim_val *copy_whole(mim_val *a) {
+    mim_val *r = alloc_like(a->dtype, a);
+    memcpy(r->data, a->data, (size_t)a->len * elsize(a->dtype));
+    retain_children(r);
+    return r;
+}
+
+/* a scalar index into the leading axis */
+static int64_t check_index_dim(mim_val *xs, mim_val *i) {
+    need(i, "index");
+    if (i->rank != 0 || i->dtype == MIM_F64 || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
+    int64_t k = geti(i, 0), d = dim_of(xs, 0);
+    if (k < 0 || k >= d) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "index %lld out of bounds for %lld rows", (long long)k, (long long)d);
+        mim_panic(buf);
+    }
+    return k;
+}
+
+/* `m[i, j, …]`: the index is a tuple. Returns how many indices it holds and
+ * the flat offset of the cell they select (`*cell` elements long). */
+static int is_tuple(const mim_val *v) {
+    return v && v->dtype == MIM_OBJ && v->rank == 0 && v->desc && v->desc->variant && v->desc->variant[0] == 0 &&
+           strcmp(v->desc->type_name, "tuple") == 0;
+}
+
+static int64_t multi_offset(mim_val *xs, mim_val *t, int *nidx, int64_t *cell) {
+    need(xs, "index");
+    int n = (int)t->len;
+    if (xs->rank == 0) mim_panic("cannot index a scalar");
+    if (n > xs->rank) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "%d indices for an array with %d dimension(s)", n, xs->rank);
+        mim_panic(buf);
+    }
+    mim_val **h = (mim_val **)t->data;
+    int64_t off = 0, stride = xs->len;
+    for (int k = 0; k < n; k++) {
+        mim_val *ik = h[k];
+        if (ik->rank != 0 || ik->dtype == MIM_F64 || IS_HANDLES(ik)) mim_panic("index must be an integer scalar");
+        int64_t d = dim_of(xs, k), v = geti(ik, 0);
+        if (v < 0 || v >= d) {
+            char buf[160];
+            snprintf(buf, sizeof buf, "index %lld out of bounds for dimension %d of length %lld", (long long)v, k, (long long)d);
+            mim_panic(buf);
+        }
+        stride /= d ? d : 1;
+        off += v * stride;
+    }
+    *nidx = n;
+    *cell = stride;
+    return off;
+}
+
 mim_val *mim_index(mim_val *xs, mim_val *i) {
     if (xs && xs->dtype == MIM_MAP) return map_get(xs, i);
+    if (is_tuple(i)) {
+        int n;
+        int64_t cell, off = multi_offset(xs, i, &n, &cell);
+        if (n == xs->rank) return scalar_at(xs, off);
+        /* fewer indices than dimensions: the sub-array they select */
+        mim_val *r = alloc_shaped(xs->dtype, xs->rank - n, SHAPE(xs) + n);
+        size_t es = elsize(xs->dtype);
+        memcpy(r->data, (char *)xs->data + (size_t)off * es, (size_t)cell * es);
+        retain_children(r);
+        return r;
+    }
+    if (xs && xs->rank >= 2) {
+        int64_t k = check_index_dim(xs, i);
+        return cell_at(xs, k);
+    }
     return scalar_at(xs, check_index(xs, i));
 }
 
@@ -1667,11 +2144,20 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         return;
     }
     mim_val *xs = *slot;
-    int64_t k = check_index(xs, i);
+    int64_t k;
+    if (is_tuple(i)) {
+        int n;
+        int64_t cell;
+        k = multi_offset(xs, i, &n, &cell);
+        if (n != xs->rank) mim_panic("indexed assignment needs one index per dimension: m[i, j] = v");
+    } else {
+        if (xs && xs->rank >= 2) mim_panic("indexed assignment on a matrix needs one index per dimension: m[i, j] = v");
+        k = check_index(xs, i);
+    }
     need(v, "indexed assignment");
     if (xs->dtype == MIM_BOXED) { /* a list of handles: replace one (copy-on-write) */
         if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
-            mim_val *c = slice(xs, 0, xs->len);
+            mim_val *c = copy_whole(xs);
             mim_release(xs);
             *slot = xs = c;
         }
@@ -1685,7 +2171,7 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     int newdt = xs->dtype;
     if (v->dtype == MIM_F64 && xs->dtype != MIM_F64) newdt = MIM_F64;
     if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
-        mim_val *c = alloc(newdt, 1, xs->len);
+        mim_val *c = alloc_like(newdt, xs);
         for (int64_t j = 0; j < xs->len; j++) {
             if (newdt == MIM_F64) setf(c, j, getf(xs, j));
             else seti(c, j, geti(xs, j));

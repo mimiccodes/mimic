@@ -264,6 +264,7 @@ mim_val *mim_std_to_float(mim_val *s) {
 mim_val *mim_std_push(mim_val *xs, mim_val *x) {
     need(xs, "push");
     if (xs->rank == 0) mim_panic("push: expected a list or array");
+    if (xs->rank >= 2) mim_panic("push: expected a list, found a matrix (reshape it with ⥊ first)");
     int64_t n = xs->len;
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = scalar_at(xs, i);
@@ -284,6 +285,7 @@ mim_val *mim_std_concat(mim_val *xs, mim_val *ys) {
         ((char *)r->data)[xs->len + ys->len] = 0;
         return r;
     }
+    if (xs->rank >= 2 || ys->rank >= 2) mim_panic("concat: expected lists, found a matrix (reshape it with ⥊ first)");
     int64_t n = xs->rank == 0 ? 1 : xs->len, m = ys->rank == 0 ? 1 : ys->len;
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + m + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = xs->rank == 0 ? (mim_retain(xs), xs) : scalar_at(xs, i);
@@ -316,6 +318,7 @@ static int cmp_handles(const void *x, const void *y) { return cmp_vals(*(mim_val
 /* sort(xs): ascending; numbers or strings (stable for equal elements) */
 mim_val *mim_std_sort(mim_val *xs) {
     need(xs, "sort");
+    if (xs->rank >= 2) mim_panic("sort: expected a list, found a matrix");
     if (xs->rank == 0) {
         mim_retain(xs);
         return xs;
@@ -409,6 +412,7 @@ int64_t mim_equal(const mim_val *a, const mim_val *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->rank != b->rank) return 0;
+    if (a->rank >= 2 && a->dtype != MIM_MAP && !same_shape(a, b)) return 0;
     if (a->dtype == MIM_FN || b->dtype == MIM_FN) return 0;
     if (a->dtype == MIM_MAP || b->dtype == MIM_MAP) return a->dtype == b->dtype && map_equal(a, b);
     if (a->dtype == MIM_OBJ && a->rank == 0) {

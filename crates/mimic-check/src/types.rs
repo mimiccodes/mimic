@@ -913,6 +913,9 @@ impl Walk<'_, '_> {
             ExprKind::Index { base, index } => {
                 let b = self.expr(base);
                 self.expr(index);
+                if matches!(index.kind, ExprKind::Tuple(_)) {
+                    return if b == Ty::Never { Ty::Never } else { Ty::Dyn }; // m[i, j]
+                }
                 match b {
                     Ty::Arr(el) => Ty::of_el(el),
                     Ty::Never => Ty::Never,
@@ -1356,6 +1359,8 @@ pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
             _ => Ty::Dyn,
         },
         Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle => Ty::Dyn,
+        // rank ≥ 2 arrays are dynamic values for now (the runtime knows their shape)
+        Prim::Reshape | Prim::Transpose | Prim::MatMul => Ty::Dyn,
         Prim::Each | Prim::Max | Prim::Min | Prim::Abs => {
             let _ = b;
             Ty::Dyn

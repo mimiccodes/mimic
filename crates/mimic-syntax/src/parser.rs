@@ -1042,12 +1042,25 @@ impl Parser {
                 let span = e.span.to(self.prev_span());
                 e = Expr { kind: ExprKind::Field { base: Box::new(e), name }, span };
             } else if self.at(&Tok::LBracket) && self.adjacent() {
-                self.next();
+                let open = self.next().span;
                 self.nl_ignore += 1;
-                let idx = self.expr();
+                // `m[i, j]`: several indices are one tuple index
+                let r = (|| {
+                    let mut xs = vec![self.expr()?];
+                    while self.eat(&Tok::Comma) {
+                        xs.push(self.expr()?);
+                    }
+                    Ok(xs)
+                })();
                 self.nl_ignore -= 1;
-                let idx = idx?;
+                let mut xs = r?;
                 self.expect(&Tok::RBracket)?;
+                let idx = if xs.len() == 1 {
+                    xs.pop().unwrap()
+                } else {
+                    let span = open.to(self.prev_span());
+                    Expr { kind: ExprKind::Tuple(xs), span }
+                };
                 let span = e.span.to(self.prev_span());
                 e = Expr { kind: ExprKind::Index { base: Box::new(e), index: Box::new(idx) }, span };
             } else {

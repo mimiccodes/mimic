@@ -134,10 +134,40 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 | `⌈` | `max` | 2 | larger of two values (elementwise); `(max)` / `gather(max)` as a function value |
 | `⌊` | `min` | 2 | smaller of two values (elementwise) |
 | `∣` | `abs` | 1 | absolute value (elementwise) |
+| `⥊` | `reshape` | 2 | `xs ⥊ [2 3]` → a 2×3 matrix of the elements of `xs`, repeated to fill |
+| `⍉` | `transpose` | 1 | reverse the axes: rows ↔ columns |
+| `⊠` | `matmul` | 2 | matrix product; a vector acts as a row (left) or a column (right) |
 
 `⌈` and `⌊` on their own are max and min. Followed by `/` (`⌈/`, `⌊/`), they are the reductions.
 
 Arithmetic and comparison broadcast a scalar against a vector, and work elementwise on two vectors of equal length.
+
+### Arrays of rank 2 and more
+
+```mimic
+let m = ⍳ 6 ⥊ [2 3]        // [[0 1 2]
+                           //  [3 4 5]]
+⍴ m                        // [2 3]
+≢ m                        // 2: the leading axis (rows)
+m[1]                       // [3 4 5]: a row
+m[1, 2]                    // 5
+m + 10, m * m, m > 2       // elementwise, same shapes (or a scalar)
+m ▷ +/                     // [3 12]: reductions work along each row
+⍉ m ▷ +/                   // [3 5 7]: column sums
+m ⊠ ⍉ m                    // matrix product
+m ↑ 1, ⌽ m                 // take / drop / reverse act on rows
+m ¨ f                      // keeps the shape
+let mut g = 0 ⥊ [3 3]
+g[1, 1] = 5                // one index per dimension
+```
+
+How matrices behave:
+* **Storage.** Elements are stored flat in row-major order, so elementwise operations are the same fused, parallel loops as for vectors.
+* **Shapes must match.** Operands of an elementwise operation must have the same shape, or one of them must be a scalar. A mismatch stops the program with `shape mismatch: [2 3] vs [3 2]`.
+* **Primitives bind tightly.** Like every dyadic primitive, `⥊` binds tighter than arithmetic: `(⍳ 6) * 2 ⥊ [2 3]` reshapes `2`. Use parentheses, or the pipe, which binds loosest: `(⍳ 6) * 2 ▷ reshape([2 3])`.
+* **Matrix product speed.** `⊠` on floats uses the platform BLAS where one exists (Apple's Accelerate, which uses the matrix units, or OpenBLAS on Linux). Otherwise it uses Mimic's own packed, register-blocked kernel on all cores.
+* **List functions refuse matrices.** `push`, `concat`, `sort`, `gather` and `trail` work on lists and stop on a matrix. Reshape it first.
+* **Typing.** Matrices are checked at run time for now. A matrix passed to a `[f64]` parameter is a type error, because `[f64]` means a vector.
 
 **Parallelism is automatic.** Nothing needs to be declared:
 * Primitives over large arrays run on all cores.

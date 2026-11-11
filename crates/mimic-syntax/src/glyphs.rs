@@ -30,6 +30,10 @@ pub enum Prim {
     Trail = 18,
     Evolve = 19,
     Settle = 20,
+    /// Arrays of rank ≥ 2.
+    Reshape = 21,
+    Transpose = 22,
+    MatMul = 23,
 }
 
 pub struct PrimInfo {
@@ -66,6 +70,9 @@ pub const PRIMS: &[PrimInfo] = &[
     PrimInfo { prim: Prim::Trail, glyph: "⍀", word: "trail", digraph: Some("\\t"), ascii: None, arity: 2, doc: "xs ▷ trail(f) → running results of f (parallel prefix; f associative)" },
     PrimInfo { prim: Prim::Evolve, glyph: "⍣", word: "evolve", digraph: Some("\\P"), ascii: None, arity: 3, doc: "x ▷ evolve(n, f) → apply f to the state n times" },
     PrimInfo { prim: Prim::Settle, glyph: "⍥", word: "settle", digraph: Some("\\s"), ascii: None, arity: 3, doc: "x ▷ settle(f, done) → apply f until done(x) holds" },
+    PrimInfo { prim: Prim::Reshape, glyph: "⥊", word: "reshape", digraph: Some("\\R"), ascii: None, arity: 2, doc: "xs ⥊ [2 3] → the elements of xs as a 2×3 matrix (repeated to fill)" },
+    PrimInfo { prim: Prim::Transpose, glyph: "⍉", word: "transpose", digraph: Some("\\T"), ascii: None, arity: 1, doc: "⍉ m → rows become columns (reverses the axes)" },
+    PrimInfo { prim: Prim::MatMul, glyph: "⊠", word: "matmul", digraph: Some("\\X"), ascii: None, arity: 2, doc: "a ⊠ b → matrix product (vectors act as a row or a column)" },
 ];
 
 impl Prim {

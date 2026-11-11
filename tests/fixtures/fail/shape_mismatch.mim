@@ -1,0 +1,3 @@
+// expect-panic: shape mismatch: [2 3] vs [3 2]
+module main
+fn main() { print((⍳ 6 ⥊ [2 3]) + (⍳ 6 ⥊ [3 2])) }

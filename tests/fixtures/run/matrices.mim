@@ -1,0 +1,51 @@
+module main
+
+// Arrays of rank 2 and more: reshape ⥊, transpose ⍉, matrix product ⊠,
+// m[i, j] indexing, row reductions, and every elementwise operator.
+fn main() {
+    let m = ⍳ 6 ⥊ [2 3]
+    print(m)
+    print(⍴ m)
+    print(≢ m)
+    print(m[1])
+    print(m[1, 2])
+    print(m * 10 + 1)
+    print(m ▷ +/)
+    print(⍉ m)
+    print(⍉ m ▷ +/)
+    print(m ⊠ ⍉ m)
+    print([1 2 3] ⊠ ⍉ m)
+    print([1.5 2.0] ⊠ m)
+    print([1 2] ⊠ [3 4])
+    print(⌽ m)
+    print(m ↑ 1)
+    print(m ↓ 1)
+    print(m ¨ (x => x * x))
+    print(m == (⍳ 6 ⥊ [2 3]))
+    print(m == ⍉ ⍉ m)
+    let mut g = 0 ⥊ [3 3]
+    g[1, 1] = 5
+    g[0, 2] = 7
+    print(g)
+    print(⍳ 24 ⥊ [2 3 4])
+    print((⍳ 24 ⥊ [2 3 4])[1, 2])
+    print(⍉ (⍳ 6 ⥊ [1 2 3]))
+    print(["a" "b" "c" "d"] ⥊ [2 2])
+    print(iota 4 |> reshape([2 2]) |> transpose)
+    print(identity(3))
+    let fib = [1 1 1 0] ⥊ [2 2]
+    print(power(fib, 50)[0, 1])                      // matrices through a pure (net) function
+    let a = (⍳ 35) % 9 * 0.5 ▷ reshape([5 7])
+    let b = (⍳ 77) % 4 - 1.5 ▷ reshape([7 11])
+    print(a ⊠ b ▷ +/)                                // odd shapes: edge tiles of the kernel
+    let big = (⍳ 40000) % 13 * 0.5 ▷ reshape([200 200])
+    print(big ⊠ big ▷ +/ ▷ +/)                       // large: the platform BLAS where available
+}
+
+fn identity(n: i64) { ((⍳ (n * n)) % (n + 1) == 0) ⥊ [n n] }
+
+fn power(m, n: i64) {
+    if n == 1 { m }
+    else if n % 2 == 0 { let h = power(m, n div 2); h ⊠ h }
+    else { m ⊠ power(m, n - 1) }
+}
