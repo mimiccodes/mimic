@@ -179,17 +179,11 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
         return Err(report);
     }
     // C headers named by `extern "C" include "…"`
-    let mut include_dirs: Vec<PathBuf> = Vec::new();
-    if let Input::Project(p) = input {
-        include_dirs.push(p.root.clone());
-        include_dirs.extend(p.manifest.ffi_include.iter().map(|d| p.root.join(d)));
-    }
+    let mut wrappers: Vec<String> = Vec::new();
     for sf in &mut files {
-        let here = sf.path.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-        let mut dirs = vec![here];
-        dirs.extend(include_dirs.iter().cloned());
+        let dirs = header_dirs(input, Some(&sf.path));
         let mut errs = Vec::new();
-        import_headers(&mut sf.ast.module.items, &dirs, target, &mut errs);
+        import_headers(&mut sf.ast.module.items, &dirs, target, &mut errs, &mut wrappers);
         for (msg, span) in errs {
             report.push_in(Some(&sf.path), &sf.display, &sf.src, mimic_syntax::Diag::new(&C::CIMPORT, msg, span));
         }
@@ -199,6 +193,17 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
     }
     files.push(prelude_file());
     let (mut program, diags) = Program::build(files, &pkg);
+    if !wrappers.is_empty() {
+        // one C file with every struct wrapper, named by its content
+        let text = wrappers.join("\n");
+        let dir = packages::cache_dir().join("cimport");
+        let path = dir.join(format!("wrap-{:016x}.c", mimic_syntax::fnv1a(text.as_bytes())));
+        if !path.is_file() {
+            let _ = fs::create_dir_all(&dir);
+            mimic_toolchain::jobs::write_atomic(&path, text.as_bytes()).map_err(|e| Report::plain(&C::CIMPORT, e))?;
+        }
+        program.c_sources.push(path);
+    }
     if !diags.is_empty() {
         return Err(Report::from_program(&program, diags));
     }
@@ -327,10 +332,32 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     d
 }
 
+/// Where C headers are looked for: next to `file`, the project root, `ffi.include`.
+fn header_dirs(input: &Input, file: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(f) = file {
+        dirs.push(f.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+    }
+    if let Input::Project(p) = input {
+        dirs.push(p.root.clone());
+        dirs.extend(p.manifest.ffi_include.iter().map(|d| p.root.join(d)));
+    }
+    dirs
+}
+
 /// Fill `extern "C" include` blocks (in every module, nested ones too) with the
 /// functions the header makes visible. Names the module already defines (its
 /// own functions, types, modules, hand-written externs) win over imported ones.
-fn import_headers(items: &mut [mimic_syntax::ast::Item], dirs: &[PathBuf], target: &Target, errs: &mut Vec<(String, mimic_syntax::Span)>) {
+/// Functions taking or returning structs by value get generated Mimic wrappers
+/// (added to the module) and C wrappers (collected in `wrappers`); they are
+/// only generated for `trusted` imports, since the wrapper hides the C call.
+fn import_headers(
+    items: &mut Vec<mimic_syntax::ast::Item>,
+    dirs: &[PathBuf],
+    target: &Target,
+    errs: &mut Vec<(String, mimic_syntax::Span)>,
+    wrappers: &mut Vec<String>,
+) {
     use mimic_syntax::ast::Item;
     let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in items.iter() {
@@ -350,9 +377,10 @@ fn import_headers(items: &mut [mimic_syntax::ast::Item], dirs: &[PathBuf], targe
             Item::Extern(b) => taken.extend(b.fns.iter().map(|f| f.name.clone())),
         }
     }
+    let mut generated = String::new();
     for item in items.iter_mut() {
         match item {
-            Item::Module(m) => import_headers(&mut m.items, dirs, target, errs),
+            Item::Module(m) => import_headers(&mut m.items, dirs, target, errs, wrappers),
             Item::Extern(b) if !b.includes.is_empty() => {
                 for (header, span) in b.includes.clone() {
                     match crate::cimport::import(&header, dirs, target) {
@@ -362,12 +390,41 @@ fn import_headers(items: &mut [mimic_syntax::ast::Item], dirs: &[PathBuf], targe
                                     b.fns.push(f);
                                 }
                             }
+                            if !b.trusted {
+                                continue; // struct wrappers hide the unsafe call: trusted imports only
+                            }
+                            let pubkw = if b.is_pub { "pub " } else { "" };
+                            let mut c = String::new();
+                            for f in &imp.struct_fns {
+                                if !taken.insert(f.name.clone()) {
+                                    continue;
+                                }
+                                for r in &f.uses {
+                                    let decl = &imp.records[r];
+                                    let tname = decl.split_whitespace().nth(2).unwrap_or("").to_string();
+                                    if taken.insert(tname) {
+                                        generated.push_str(&decl.replacen("PUB ", pubkw, 1));
+                                        generated.push('\n');
+                                    }
+                                }
+                                generated.push_str(&f.mimic.replace("PUB ", pubkw));
+                                c.push_str(&f.c);
+                            }
+                            if !c.is_empty() {
+                                wrappers.push(format!("{}\n{c}", imp.include_line));
+                            }
                         }
                         Err(e) => errs.push((e, span)),
                     }
                 }
             }
             _ => {}
+        }
+    }
+    if !generated.is_empty() {
+        match mimic_syntax::parser::parse_file(&format!("module generated\n{generated}")) {
+            Ok(f) => items.extend(f.module.items),
+            Err(d) => errs.push((format!("internal error in generated C bindings: {}\n{generated}", d.msg), d.span)),
         }
     }
 }
@@ -456,10 +513,7 @@ fn codegen_and_link(
         Err(why) => return Err(why),
     };
     let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref())?;
-    let c_objects = match input {
-        Input::Project(p) => compile_c_sources(p, &tc, target, profile, &dir)?,
-        Input::File(_) => Vec::new(),
-    };
+    let c_objects = compile_c_sources(input, &program.c_sources, &header_dirs(input, None), &tc, target, profile, &dir)?;
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
         let mut objects = vec![obj, rt];
@@ -485,23 +539,33 @@ fn codegen_and_link(
 /// Compile the project's C sources (`ffi { sources = [...] }`) for the target,
 /// in parallel; an object is reused while it is newer than its source and was
 /// built with the same flags.
-fn compile_c_sources(p: &Project, tc: &Toolchain, target: &Target, profile: &Profile, dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if p.manifest.ffi_sources.is_empty() {
+fn compile_c_sources(
+    input: &Input,
+    extra: &[PathBuf],
+    include_dirs: &[PathBuf],
+    tc: &Toolchain,
+    target: &Target,
+    profile: &Profile,
+    dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let (mut sources, mut cflags): (Vec<(String, PathBuf)>, Vec<String>) = (Vec::new(), Vec::new());
+    if let Input::Project(p) = input {
+        sources.extend(p.manifest.ffi_sources.iter().map(|s| (s.clone(), p.root.join(s))));
+        cflags.extend(p.manifest.ffi_cflags.iter().cloned());
+    }
+    sources.extend(extra.iter().map(|e| (e.file_name().unwrap_or_default().to_string_lossy().into_owned(), e.clone())));
+    if sources.is_empty() {
         return Ok(Vec::new());
     }
     let out_dir = dir.join("c");
     fs::create_dir_all(&out_dir).map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
     let mut flags: Vec<String> = vec![if profile.release { "-O2".into() } else { "-O0".into() }, "-g".into()];
-    flags.push(format!("-I{}", p.root.display()));
-    flags.extend(p.manifest.ffi_include.iter().map(|d| format!("-I{}", p.root.join(d).display())));
-    flags.extend(p.manifest.ffi_cflags.iter().cloned());
+    flags.extend(include_dirs.iter().filter(|d| !d.as_os_str().is_empty()).map(|d| format!("-I{}", d.display())));
+    flags.extend(cflags);
     let stamp = format!("{:016x}", mimic_syntax::fnv1a(format!("{flags:?}{:?}", target.llvm).as_bytes()));
-    let jobs: Vec<(PathBuf, PathBuf)> = p
-        .manifest
-        .ffi_sources
-        .iter()
-        .map(|s| {
-            let src = p.root.join(s);
+    let jobs: Vec<(PathBuf, PathBuf)> = sources
+        .into_iter()
+        .map(|(s, src)| {
             let obj = out_dir.join(format!("{}-{stamp}.o", s.replace(['/', '\\', '.'], "_")));
             (src, obj)
         })

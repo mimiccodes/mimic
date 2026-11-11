@@ -497,3 +497,45 @@ fn c_sources_in_project() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// C structs by value, both ways, nested and anonymous-typedef'd: the
+/// importer turns them into records and generates wrappers Clang compiles.
+#[test]
+fn c_structs_by_value() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cstruct-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "geo"]).status().unwrap().success());
+    let proj = dir.join("geo");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/geo.h"),
+        "struct vec2 { double x, y; };\ntypedef struct { int w; int h; } size2;\ntypedef struct rect { struct vec2 origin; size2 size; unsigned char flags; } rect_t;\n\
+         double vlen(struct vec2 v);\nstruct vec2 vadd(struct vec2 a, struct vec2 b);\nrect_t mkrect(double x, double y, int w, int h);\nint area(rect_t r);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("c/geo.c"),
+        "#include <math.h>\n#include \"geo.h\"\ndouble vlen(struct vec2 v) { return sqrt(v.x * v.x + v.y * v.y); }\n\
+         struct vec2 vadd(struct vec2 a, struct vec2 b) { struct vec2 r = { a.x + b.x, a.y + b.y }; return r; }\n\
+         rect_t mkrect(double x, double y, int w, int h) { rect_t r; r.origin.x = x; r.origin.y = y; r.size.w = w; r.size.h = h; r.flags = 7; return r; }\n\
+         int area(rect_t r) { return r.size.w * r.size.h; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/geo.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"geo.h\"\n\nfn main() {\n    print(vlen(Vec2 { x: 3.0, y: 4.0 }))\n    print(vadd(Vec2 { x: 3.0, y: 4.0 }, Vec2 { x: 1.0, y: 1.0 }))\n\
+         \n    let r = mkrect(1.5, 2.5, 640, 480)\n    print(r)\n    print(area(r))\n}\n",
+    )
+    .unwrap();
+    let want = "5.0\nVec2 { x: 4.0, y: 5.0 }\nRect { origin: Vec2 { x: 1.5, y: 2.5 }, size: Size2 { w: 640, h: 480 }, flags: 7 }\n307200\n";
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{}", String::from_utf8_lossy(&out.stderr));
+    for t in ["aarch64-linux", "x86-linux", "wasm32-wasi"] {
+        let out = mimic().current_dir(&proj).args(["build", "--target", t]).output().unwrap();
+        assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
