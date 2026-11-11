@@ -500,10 +500,17 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
     if let Some(t) = check {
         let tg = Target::parse(t)?;
         let s = support_str(&tg);
+        let tier = toolchain::tier(&tg);
         if json {
-            println!("{}", json!({"target": tg.name(), "llvm": tg.llvm, "arch": tg.arch, "os": tg.os, "env": tg.env, "support": s}));
+            println!(
+                "{}",
+                json!({"target": tg.name(), "llvm": tg.llvm, "arch": tg.arch, "os": tg.os, "env": tg.env,
+                       "support": s, "tier": tier.as_str()})
+            );
         } else {
-            println!("{} → {} ({s})", tg.name(), tg.llvm.as_deref().unwrap_or("native"));
+            println!("{} → {}", tg.name(), tg.llvm.as_deref().unwrap_or("native"));
+            println!("  tier:    {} ({})", tier.as_str(), tier.meaning());
+            println!("  output:  {s}");
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -535,6 +542,7 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
             "oses": oses,
             "environments": envs,
             "executables": exes,
+            "tiers": exes.iter().filter_map(|e| Target::parse(e).ok().map(|t| json!({"target": e, "tier": toolchain::tier(&t).as_str()}))).collect::<Vec<_>>(),
         });
         println!("{v}");
         return Ok(ExitCode::SUCCESS);
@@ -552,10 +560,20 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
     println!("\nOperating systems ({}):\n  {}", oses.len(), oses.join(" "));
     println!("\nEnvironments / ABIs ({}):\n  {}", envs.len(), envs.join(" "));
     println!("\nVendors ({}):\n  {}", vendors.len(), vendors.join(" "));
-    println!("\nComplete executables ({}): any other target compiles to objects", exes.len());
-    for e in &exes {
-        println!("  {e}");
+    println!("\nTargets by tier (any other CPU target: compiles):");
+    for tier in [toolchain::Tier::Stable, toolchain::Tier::Runs, toolchain::Tier::Links] {
+        let list: Vec<&str> = exes
+            .iter()
+            .filter(|e| Target::parse(e).is_ok_and(|t| toolchain::tier(&t) == tier))
+            .map(String::as_str)
+            .collect();
+        println!("  {:<8} {} ({})", tier.as_str(), list.len(), tier.meaning());
+        for chunk in list.chunks(4) {
+            println!("           {}", chunk.join("  "));
+        }
     }
+    println!("  {:<8} the other CPU architectures ({})", "compiles", toolchain::Tier::Compiles.meaning());
+    println!("  {:<8} amdgpu r600 spirv spirv32 spirv64 ({})", "not yet", toolchain::Tier::NotYet.meaning());
     println!("\nWrite a target as an LLVM triple, vendor optional: x86_64-linux-musl, aarch64-linux, x86_64-apple-macosx13.0.");
     println!("`mimic targets --check <target>` shows how a target is understood and what it can build.");
     Ok(ExitCode::SUCCESS)

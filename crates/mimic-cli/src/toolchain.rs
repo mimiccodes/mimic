@@ -43,6 +43,63 @@ pub fn select(target: &Target) -> Result<Toolchain, String> {
     })
 }
 
+/// How well a target is proven. Kept in step with what the golden tests check.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Programs run on the development machine and pass every golden test.
+    Stable,
+    /// A program ran on the target (simulator), not the whole suite.
+    Runs,
+    /// Complete executables are built and checked, but not run yet.
+    Links,
+    /// Object files (or assembly) only: no bundled C library yet.
+    Compiles,
+    /// The architecture needs the GPU backend (roadmap F8).
+    NotYet,
+}
+
+impl Tier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Stable => "stable",
+            Tier::Runs => "runs",
+            Tier::Links => "links",
+            Tier::Compiles => "compiles",
+            Tier::NotYet => "not yet",
+        }
+    }
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Tier::Stable => "programs run and pass every golden test",
+            Tier::Runs => "a program ran on it (simulator); the full test suite not yet",
+            Tier::Links => "complete executables are built and checked, not run yet",
+            Tier::Compiles => "object files or assembly only; no C library bundled yet",
+            Tier::NotYet => "GPU architecture: needs the GPU backend (roadmap F8)",
+        }
+    }
+}
+
+pub fn tier(target: &Target) -> Tier {
+    if target.is_device_only() {
+        return Tier::NotYet;
+    }
+    let arch = target.arch.as_str();
+    let apple_arm = matches!(arch, "aarch64" | "arm64");
+    match (target.os.as_str(), target.env.as_str()) {
+        // native builds, and the targets the golden tests run here:
+        // macOS arm64 and x86_64 (Rosetta), Mac Catalyst, WASI (Node)
+        _ if target.name.is_none() => Tier::Stable,
+        ("macosx", _) if apple_arm || arch == "x86_64" => Tier::Stable,
+        ("ios", "macabi") if apple_arm => Tier::Stable,
+        ("wasi" | "wasip1", _) if arch == "wasm32" => Tier::Stable,
+        ("ios", "simulator") if apple_arm => Tier::Runs,
+        _ => match support(target) {
+            Support::Bundled | Support::Sdk => Tier::Links,
+            Support::NotYet(_) => Tier::Compiles,
+        },
+    }
+}
+
 /// How `mimic` provides the C library for a target.
 pub enum Support {
     /// Built from sources bundled in `mimic` (musl, …).

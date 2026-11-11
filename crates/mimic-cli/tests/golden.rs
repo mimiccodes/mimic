@@ -370,7 +370,7 @@ fn apple_platforms() {
         return;
     }
     let f = fixtures("run").into_iter().find(|p| p.ends_with("basics.mim")).unwrap();
-    for t in ["aarch64-ios-simulator", "aarch64-ios", "aarch64-tvos", "arm64_32-watchos", "aarch64-xros-simulator", "aarch64-ios-macabi"] {
+    for t in ["aarch64-ios-simulator", "aarch64-ios", "aarch64-tvos", "arm64_32-watchos", "aarch64-xros-simulator", "aarch64-ios-macabi", "x86_64-macos"] {
         let probe = std::process::Command::new("xcrun").args(["--sdk", sdk_of(t), "--show-sdk-path"]).output();
         if !probe.is_ok_and(|o| o.status.success()) {
             eprintln!("skipping {t}: SDK not installed");
@@ -382,6 +382,14 @@ fn apple_platforms() {
         let exe = v["artifacts"][0]["path"].as_str().unwrap().to_string();
         let bytes = std::fs::read(&exe).unwrap();
         assert!(bytes[..4] == [0xcf, 0xfa, 0xed, 0xfe] || bytes[..4] == [0xce, 0xfa, 0xed, 0xfe], "{t}: Mach-O");
+        // x86_64 macOS runs under Rosetta, when it is installed
+        if t == "x86_64-macos" {
+            if std::process::Command::new("arch").args(["-x86_64", "/usr/bin/true"]).status().is_ok_and(|s| s.success()) {
+                let run = std::process::Command::new("arch").arg("-x86_64").arg(&exe).output().unwrap();
+                assert_eq!(String::from_utf8_lossy(&run.stdout), std::fs::read_to_string(f.with_extension("out")).unwrap(), "{t}");
+            }
+            continue;
+        }
         if t.ends_with("macabi") {
             let run = std::process::Command::new(&exe).output().unwrap();
             assert_eq!(String::from_utf8_lossy(&run.stdout), std::fs::read_to_string(f.with_extension("out")).unwrap(), "{t}");
@@ -391,6 +399,7 @@ fn apple_platforms() {
 
 fn sdk_of(t: &str) -> &'static str {
     match t {
+        t if t.ends_with("macos") => "macosx",
         t if t.ends_with("macabi") => "macosx",
         t if t.contains("ios-simulator") => "iphonesimulator",
         t if t.contains("ios") => "iphoneos",
