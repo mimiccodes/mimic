@@ -264,6 +264,12 @@ fn every_backend_compiles() {
     for a in v["arches"].as_array().unwrap().iter().filter(|a| !a["backend"].is_null()) {
         let name = a["name"].as_str().unwrap();
         let t = format!("{name}-unknown-unknown");
+        // backends LLVM ships that cannot compile Mimic code yet say so
+        if name == "arc" {
+            let out = mimic().arg("build").arg(&f).args(["--target", &t]).output().unwrap();
+            assert!(String::from_utf8_lossy(&out.stderr).contains("experimental ARC backend"), "{t}");
+            continue;
+        }
         if DEVICE.contains(&name) {
             let out = mimic().arg("build").arg(&f).args(["--target", &t]).output().unwrap();
             assert!(String::from_utf8_lossy(&out.stderr).contains("GPU target"), "{t}");

@@ -140,3 +140,14 @@ LLVM's triple parser knows more architectures than this build has backends for, 
 `tools/deps.sh` downloads the LLVM 23.1.4 sources, musl 1.2.5 and the wasi-sdk 34 sysroot (trimmed to its wasm32-wasip1 C library, 8.9 MB), checks their sha256 against the published values, and builds static LLD into `~/.mimic/deps`. The Rust build then compiles the Clang driver from those sources and links everything statically.
 
 If those inputs are missing, `mimic` still builds without the embedded tools. In that case native builds use the system C compiler, and cross targets produce object files only.
+
+**Which LLVM.** Cargo links against the LLVM that the git-ignored `.llvm` link in the repository root points at. `tools/deps.sh` points it at Homebrew's LLVM 23.1.4 if nothing is linked yet. `tools/build-llvm.sh` builds a static LLVM with Clang and LLD into `~/.mimic/deps/llvm-23.1.4`, using all backends including the experimental ones, and then points `.llvm` at it. This takes about 3 hours on 4 cores; `JOBS` and `NICE` control the load. With that build, the release `mimic` binary depends on system libraries only:
+
+```sh
+otool -L target/release/mimic   # libSystem, libc++, libffi, libiconv, libxcselect: all in /usr/lib
+```
+
+**Backends that cannot compile Mimic code yet:**
+* **ARC** (experimental): LLVM's instruction selection fails on Mimic's code. `mimic targets --check arc-unknown-unknown` reports this.
+* **eBPF** defaults to CPU `v4` (Linux 6.6 and later), the first generation with the signed division that `div` and `%` need.
+* **Xtensa** is compiled without position-independent code, because it has no PIC model.

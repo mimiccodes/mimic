@@ -98,3 +98,11 @@ if [ ! -d "$WASI_OUT/lib/wasm32-wasip1" ]; then
     rm -rf "$DEPS/wasi-extract"
 fi
 echo "wasi: $WASI_OUT"
+
+# the LLVM this repository builds against (.cargo/config.toml): keep a static
+# build from tools/build-llvm.sh if one is linked, else use $LLVM_PREFIX
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+if [ ! -e "$REPO/.llvm" ]; then
+    ln -sfn "$LLVM_PREFIX" "$REPO/.llvm"
+    echo "linked .llvm -> $LLVM_PREFIX"
+fi

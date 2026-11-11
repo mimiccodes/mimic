@@ -20,7 +20,9 @@ fn main() {
     let deps = std::env::var("MIMIC_DEPS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".mimic/deps"));
-    let lld = deps.join(format!("lld-{LLVM_VERSION}"));
+    // LLD: part of the LLVM install when it was built by tools/build-llvm.sh,
+    // otherwise the standalone build from tools/deps.sh
+    let lld = if llvm.join("lib/liblldELF.a").is_file() { llvm.clone() } else { deps.join(format!("lld-{LLVM_VERSION}")) };
     println!("cargo:rustc-env=MIMIC_LLVM_PREFIX={}", llvm.display());
     println!("cargo:rustc-env=MIMIC_LLVM_MAJOR={}", LLVM_VERSION.split('.').next().unwrap());
     let driver = deps.join(format!("llvm-project-{LLVM_VERSION}.src/clang/tools/driver"));

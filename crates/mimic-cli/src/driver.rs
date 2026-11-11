@@ -514,6 +514,9 @@ fn codegen_and_link(
             target.name()
         ));
     }
+    if let Some(why) = target.backend_gap() {
+        return Err(format!("`{}`: {why}", target.name()));
+    }
     let dir = out_dir(input, profile, target);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let name = input.name();
@@ -548,6 +551,11 @@ fn codegen_and_link(
             cpu = Some(c.to_string());
             features = None;
         }
+    }
+    // eBPF: v4 (Linux 6.6+) is the first generation with signed division,
+    // which floored `div` and `%` need
+    if target.arch.starts_with("bpf") && cpu.as_deref().is_none_or(|c| c == "generic") {
+        cpu = Some("v4".into());
     }
     let obj = mimic_codegen::compile(
         program,

@@ -1,3 +1,8 @@
 [env]
-# inkwell/llvm-sys link against the Homebrew LLVM 23 install.
-LLVM_SYS_231_PREFIX = { value = "/opt/homebrew/opt/llvm", force = false }
+# inkwell/llvm-sys and the embedded Clang/LLD link against the LLVM that the
+# `.llvm` link in the repository root points at (git-ignored, machine-local):
+#   tools/build-llvm.sh  points it at the static LLVM it builds (release builds:
+#                        `mimic` then depends on system libraries only)
+#   tools/deps.sh        points it at Homebrew's LLVM if nothing is there yet
+# An LLVM_SYS_231_PREFIX set in the environment still wins.
+LLVM_SYS_231_PREFIX = { value = ".llvm", relative = true, force = false }

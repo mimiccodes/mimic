@@ -80,7 +80,7 @@ impl Tier {
 }
 
 pub fn tier(target: &Target) -> Tier {
-    if target.is_device_only() {
+    if target.is_device_only() || target.backend_gap().is_some() {
         return Tier::NotYet;
     }
     let arch = target.arch.as_str();
@@ -223,7 +223,7 @@ fn apple_platform(target: &Target) -> Option<(&'static str, &'static str)> {
 }
 
 /// An Xcode SDK: `$SDKROOT` for macOS, else what `xcrun` reports.
-fn xcode_sdk(name: &str) -> Option<PathBuf> {
+pub(crate) fn xcode_sdk(name: &str) -> Option<PathBuf> {
     if name == "macosx"
         && let Some(s) = std::env::var_os("SDKROOT").map(PathBuf::from).filter(|p| p.is_dir())
     {

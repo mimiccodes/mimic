@@ -518,7 +518,8 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
             );
         } else {
             println!("{} → {}", tg.name(), tg.llvm.as_deref().unwrap_or("native"));
-            println!("  tier:    {} ({})", tier.as_str(), tier.meaning());
+            let why = tg.backend_gap().map(str::to_string).unwrap_or_else(|| tier.meaning().to_string());
+            println!("  tier:    {} ({why})", tier.as_str());
             println!("  output:  {s}");
         }
         return Ok(ExitCode::SUCCESS);

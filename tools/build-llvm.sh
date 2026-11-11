@@ -50,3 +50,6 @@ cmake -S "$SRC/llvm" -B "$BUILD" -G "Unix Makefiles" \
 nice -n "$NICE" cmake --build "$BUILD" -j "$JOBS"
 cmake --install "$BUILD"
 echo "llvm: $OUT"
+# make it the LLVM this repository builds against (.cargo/config.toml)
+ln -sfn "$OUT" "$(cd "$(dirname "$0")/.." && pwd)/.llvm"
+echo "linked .llvm -> $OUT"

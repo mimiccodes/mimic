@@ -116,7 +116,8 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         .set_cpu(&cpu)
         .set_features(&features)
         .set_level(level)
-        .set_reloc_mode(RelocMode::PIC)
+        // embedded Xtensa has no position-independent code model
+        .set_reloc_mode(if triple.as_str().to_string_lossy().starts_with("xtensa") { RelocMode::Static } else { RelocMode::PIC })
         .set_code_model(CodeModel::Default);
     if let Some(abi) = &settings.abi {
         opts = opts.set_abi(abi);

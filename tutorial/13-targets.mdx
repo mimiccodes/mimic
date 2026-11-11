@@ -51,6 +51,8 @@ Targets are grouped into tiers:
 
 Apple targets (iOS, watchOS, tvOS, visionOS) use the Apple SDKs, so building them requires Xcode.
 
+A few backends have special rules. eBPF code targets CPU `v4` (Linux 6.6 and later) by default. LLVM's experimental ARC backend cannot compile Mimic programs yet, and `mimic targets --check arc-unknown-unknown` says so.
+
 ## Choosing the CPU
 
 By default, `mimic build` tunes for **the exact CPU of the machine you are on**, which gives the fastest binary for that machine. To ship a binary that runs on any CPU of its family, ask for portable code:

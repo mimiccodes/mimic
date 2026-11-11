@@ -92,6 +92,12 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
             // no bundled C library: freestanding C still compiles
             Err(why) => eprintln!("note: {}", why.replace("cannot build executables for", "no C library (headers, libc) for")),
         }
+    } else if cfg!(target_os = "macos")
+        && !user.iter().any(|a| a == "-isysroot" || a.starts_with("--sysroot"))
+        && let Some(sdk) = toolchain::xcode_sdk("macosx")
+    {
+        // native macOS: the SDK's headers and libraries (Clang finds no default)
+        pre.extend(["-isysroot".into(), path(&sdk)]);
     }
 
     let cache = packages::cache_dir().join("libc");

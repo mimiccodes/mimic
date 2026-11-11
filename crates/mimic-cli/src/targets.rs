@@ -169,6 +169,14 @@ impl Target {
         matches!(self.arch.as_str(), "amdgcn" | "amdgpu" | "r600" | "spirv" | "spirv32" | "spirv64" | "dxil")
     }
 
+    /// Backends LLVM ships but that cannot compile Mimic programs yet.
+    pub fn backend_gap(&self) -> Option<&'static str> {
+        match self.arch.as_str() {
+            "arc" => Some("LLVM's experimental ARC backend cannot compile Mimic's generated code yet (instruction selection fails)"),
+            _ => None,
+        }
+    }
+
     pub fn exe_suffix(&self) -> &'static str {
         match self.os.as_str() {
             "windows" | "uefi" => ".exe",
