@@ -56,7 +56,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | B3 | Varargs: imported variadic functions and `...` in extern declarations; arguments get C's default promotions; true variadic calls | ✅ |
 | B6 | `extern "C" fn` exports Mimic functions to C (C types, C ABI, runtime starts itself), `mimic build --emit-header` | ✅ |
 | B8 | ABI conformance suite (`tests/abi`): 1-byte, HFA, mixed-class, 64-byte, padded, nested structs and stack spill, checked on native arm64, Catalyst, x86-64 (Rosetta), WebAssembly; linked for 6 Linux ABIs | ✅ |
-| B (rest) | B4 callbacks (with functions as values, Phase D), unions, array fields, arrays from C, shared libraries | |
+| B4 | Callbacks: Mimic functions, lambdas and closures passed to C as function pointers through generated trampolines (synchronous; nested) | ✅ |
+| B (rest) | Callbacks C keeps for later, unions, array fields, arrays from C, shared libraries | |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |
 | E | Standard library and I/O (M3 step 6, M5, M6) | |

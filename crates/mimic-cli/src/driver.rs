@@ -329,6 +329,13 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     d
 }
 
+/// What generated callback trampolines need from Mimic's runtime.
+const CALLBACK_PRELUDE: &str = "typedef struct mim_val mim_val;\n\
+mim_val *mim_call(mim_val *f, int f_argc, mim_val **args);\n\
+mim_val *mim_int(long long x);\nmim_val *mim_float(double x);\nmim_val *mim_bool(long long x);\n\
+mim_val *mim_from_cstr(const char *s);\nlong long mim_as_i64(mim_val *v);\ndouble mim_as_f64(mim_val *v);\n\
+void mim_release(mim_val *v);\n";
+
 /// Where C headers are looked for: next to `file`, the project root, `ffi.include`.
 fn header_dirs(input: &Input, file: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -386,6 +393,10 @@ fn import_headers(
                                 if taken.insert(f.name.clone()) {
                                     b.fns.push(f);
                                 }
+                            }
+                            // callback trampolines: the externs keep their unsafe rule
+                            if !imp.callback_c.is_empty() {
+                                wrappers.push(format!("{}\n{CALLBACK_PRELUDE}{}", imp.include_line, imp.callback_c));
                             }
                             if !b.trusted {
                                 continue; // struct wrappers hide the unsafe call: trusted imports only

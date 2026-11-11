@@ -204,7 +204,7 @@ pub struct Program {
 }
 
 pub const C_TYPES: &[&str] =
-    &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "bool", "c_char", "cstr", "cptr"];
+    &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "bool", "c_char", "cstr", "cptr", "fnref"];
 
 fn mangle(segs: &[String]) -> String {
     format!("_mimic_{}", segs.join("__"))

@@ -378,7 +378,7 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, ret, span: fstart });
                 }
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
             }

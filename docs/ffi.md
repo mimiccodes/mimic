@@ -83,7 +83,6 @@ How the import works:
   | Skipped | Reason |
   |---|---|
   | Functions that take unions by value, or structs with array, union or function-pointer fields | Rest of B2 |
-  | Function pointers | B4 |
   | `long double` | No Mimic type |
   | `static inline` functions | No symbol to link |
   | Names starting with an uppercase letter | Mimic reserves those for types and variants |
@@ -91,6 +90,47 @@ How the import works:
 
 * **Caching.** Results are cached per header, target and modification time in `~/.mimic/cache/cimport`, so only the first build pays the roughly 1 s that Clang takes.
 * **Errors.** A header that cannot be read is error E0805, with Clang's message.
+
+### Callbacks: Mimic functions passed to C
+
+A C parameter of function-pointer type takes any Mimic function value: a named function, a lambda, or a closure.
+
+```c
+// cb.h
+typedef double (*real_fn)(double);
+double integrate(real_fn f, double a, double b, int n);
+void count_up(int n, void (*visit)(int i, void *ud), void *ud);
+```
+
+```mimic
+trusted extern "C" include "cb.h"
+
+fn square(x: f64) -> f64 { x × x }
+
+integrate(square, 0.0, 3.0, 1000)            // a named function
+let k = 10
+integrate(x => x + k, 0.0, 1.0, 10)          // a closure
+count_up(3, (i, ud) => print("visit {i}"), 0)
+```
+
+**How it works.** For each such function `mimic` generates a C *trampoline*: a function with the callback's exact signature that converts the C arguments to Mimic values, calls the Mimic function, and converts the result back. Clang compiles it for the target.
+
+**How values cross:**
+
+| Direction | C type | Mimic value |
+|---|---|---|
+| Argument | Integers and `enum`s | `i64` |
+| Argument | Floating point | `f64` |
+| Argument | `char *` | `str` |
+| Argument | Any other pointer | `cptr` address |
+| Result | Number | Converted back to the C type |
+| Result | Pointer | Converted back to a pointer, except `char *` |
+
+**Safety.** The C function keeps its own name and `unsafe` rule, so callbacks work in untrusted imports too.
+
+**Limits:**
+* Callbacks must be called while the C function runs, on its thread: comparators, integrators, iterators, `sqlite3_exec`. Nested callbacks are supported.
+* A C library that keeps a callback for later (`pthread_create`, `signal`, `atexit`) needs the function value kept alive. That is not supported yet.
 
 ### Varargs
 
@@ -243,7 +283,7 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 ## Planned work (Phase B of the roadmap)
 
 * **B2 (rest):** unions; array fields; reading and writing structs through pointers.
-* **B4: callbacks.** A Mimic function is passed as a C function pointer through a generated trampoline, including closures with a context pointer.
+* **B4 (rest):** callbacks that C keeps after the call returns (`pthread_create`, `signal`).
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
 * **B6 (rest):** receiving arrays from C (`ptr[T]` with a length), shared libraries (`.so`/`.dylib`/`.dll`).
 * **B8 (rest):** run the ABI suite on Linux and Windows machines (CI), and add unions.

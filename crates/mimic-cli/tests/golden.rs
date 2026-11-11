@@ -633,3 +633,43 @@ fn abi_conformance() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// C callbacks: Mimic functions, lambdas and closures passed to C as
+/// function pointers through generated trampolines (nested calls included).
+#[test]
+fn c_callbacks() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "cbp"]).status().unwrap().success());
+    let proj = dir.join("cbp");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/cb.h"),
+        "typedef double (*real_fn)(double);\ndouble integrate(real_fn f, double a, double b, int n);\n\
+         long long apply_twice(long long (*f)(long long), long long x);\nvoid count_up(int n, void (*visit)(int i, void *ud), void *ud);\n\
+         int sum_mapped(int n, int (*f)(int));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("c/cb.c"),
+        "#include \"cb.h\"\ndouble integrate(real_fn f, double a, double b, int n) { double h = (b - a) / n, s = 0; for (int i = 0; i < n; i++) s += f(a + (i + 0.5) * h) * h; return s; }\n\
+         long long apply_twice(long long (*f)(long long), long long x) { return f(f(x)); }\n\
+         void count_up(int n, void (*visit)(int, void *), void *ud) { for (int i = 0; i < n; i++) visit(i, ud); }\n\
+         int sum_mapped(int n, int (*f)(int)) { int s = 0; for (int i = 1; i <= n; i++) s += f(i); return s; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/cb.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\nextern \"C\" include \"cb.h\"\n\nfn square(x: f64) -> f64 { x × x }\n\nfn main() {\n\
+         \x20   print(unsafe { integrate(x => 2.0 × x, 0.0, 1.0, 10) })\n    let k = 10\n    print(unsafe { apply_twice(x => x + k, 1) })\n\
+         \x20   unsafe { count_up(3, (i, ud) => print(\"visit {i}\"), 0) }\n    print(unsafe { sum_mapped(4, i => unsafe { apply_twice(j => j × 2, i) }) })\n\
+         \x20   print(unsafe { integrate(square, 0.0, 1.0, 4) })\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1.0\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

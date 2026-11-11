@@ -1141,7 +1141,9 @@ impl<'ctx> Cg<'ctx, '_> {
     // ---- FFI ------------------------------------------------------------
 
     fn extern_fn(&self, decl: &ExternFn) -> FunctionValue<'ctx> {
-        if let Some(f) = self.module.get_function(&decl.name) {
+        if decl.link_name.is_none()
+            && let Some(f) = self.module.get_function(&decl.name)
+        {
             return f;
         }
         let params: Vec<BasicMetadataTypeEnum> = decl.params.iter().map(|(_, t)| self.ctype(t).into()).collect();
@@ -1149,7 +1151,11 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(t) => self.ctype(t).fn_type(&params, decl.variadic),
             None => self.ctx.void_type().fn_type(&params, decl.variadic),
         };
-        self.module.add_function(&decl.name, ty, Some(Linkage::External))
+        let symbol = decl.link_name.as_deref().unwrap_or(&decl.name);
+        if let Some(f) = self.module.get_function(symbol) {
+            return f;
+        }
+        self.module.add_function(symbol, ty, Some(Linkage::External))
     }
 
     fn ctype(&self, t: &Type) -> BasicTypeEnum<'ctx> {
@@ -1161,7 +1167,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "f32" => self.ctx.f32_type().into(),
                 "f64" => self.ctx.f64_type().into(),
                 "bool" => self.ctx.bool_type().into(),
-                "cstr" | "cptr" => self.ptr.into(),
+                "cstr" | "cptr" | "fnref" => self.ptr.into(),
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
@@ -1180,6 +1186,11 @@ impl<'ctx> Cg<'ctx, '_> {
             Type::Named(n, _) if n == "cstr" => {
                 let V::P(p, _) = v else { return Err("FFI: cstr expects a string".into()) };
                 self.call_rt("mim_cstr", &[p.into()])?.unwrap().into()
+            }
+            // a Mimic function for a C callback: the generated wrapper gets the value itself
+            Type::Named(n, _) if n == "fnref" => {
+                let b = self.boxed(v)?;
+                self.basic(b).into()
             }
             // an opaque C pointer travels through Mimic as its address (an integer)
             Type::Named(n, _) if n == "cptr" => {

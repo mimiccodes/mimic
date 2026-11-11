@@ -22,6 +22,8 @@ pub struct CFn {
     pub params: Vec<String>,
     pub ret: Option<String>,
     pub variadic: bool,
+    /// Called through a generated wrapper (callbacks): its symbol.
+    pub link_name: Option<String>,
 }
 
 /// A function that takes or returns a struct by value. It is called through a
@@ -48,6 +50,8 @@ pub struct Imported {
     pub records: std::collections::BTreeMap<String, String>,
     /// The `#include` line wrappers start with.
     pub include_line: String,
+    /// C for the callback trampolines and wrappers (empty when there are none).
+    pub callback_c: String,
     /// (name, why it was skipped)
     pub skipped: Vec<(String, String)>,
 }
@@ -68,6 +72,7 @@ impl Imported {
                 is_pub,
                 params: f.params.iter().enumerate().map(|(i, p)| (format!("a{i}"), ty(p))).collect(),
                 variadic: f.variadic,
+                link_name: f.link_name.clone(),
                 ret: f.ret.as_deref().map(ty),
                 span,
             })
@@ -91,7 +96,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v7|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v8|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -278,6 +283,22 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
                 (q, d)
             })
             .collect();
+        // function-pointer parameters: trampolines that call Mimic function values
+        if parms.iter().any(|(_, d)| is_fn_ptr(d)) {
+            if variadic || ctx.struct_name(&ret_c).is_some() || parms.iter().any(|(_, d)| ctx.struct_name(d).is_some()) {
+                out.skipped.push(skip("callbacks together with varargs or structs by value"));
+                continue;
+            }
+            let ret_q = ftype.split('(').next().unwrap_or("").trim().to_string();
+            match callback_wrapper(name, &ret_q, &ret_c, &parms, m) {
+                Ok((f, c)) => {
+                    out.fns.push(f);
+                    out.callback_c.push_str(&c);
+                }
+                Err(why) => out.skipped.push(skip(&why)),
+            }
+            continue;
+        }
         if ctx.struct_name(&ret_c).is_some() || parms.iter().any(|(_, d)| ctx.struct_name(d).is_some()) {
             if variadic {
                 out.skipped.push(skip("varargs together with structs by value"));
@@ -322,12 +343,131 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             out.skipped.push(skip(&why));
             continue;
         }
-        out.fns.push(CFn { name: name.to_string(), params, ret, variadic });
+        out.fns.push(CFn { name: name.to_string(), params, ret, variadic, link_name: None });
     }
     out
 }
 
 use std::collections::HashMap;
+
+fn is_fn_ptr(t: &str) -> bool {
+    t.contains("(*)")
+}
+
+/// `int (*)(const void *, const void *)` → ("int", ["const void *", "const void *"]).
+fn split_fn_ptr(t: &str) -> Option<(String, Vec<String>)> {
+    let star = t.find("(*)")?;
+    let ret = t[..star].trim().to_string();
+    let rest = t[star + 3..].trim();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    if inner.contains('(') {
+        return None; // callbacks taking callbacks
+    }
+    let params: Vec<String> = match inner.trim() {
+        "" | "void" => Vec::new(),
+        x => x.split(',').map(|p| p.trim().to_string()).collect(),
+    };
+    Some((ret, params))
+}
+
+/// How a C value becomes a Mimic value inside a trampoline.
+fn to_mimic(c: &str, v: &str, m: &DataModel) -> Option<String> {
+    let base = c.trim().trim_start_matches("const ").trim();
+    if base.ends_with('*') {
+        let pointee = base.trim_end_matches('*').trim().trim_start_matches("const ").trim();
+        return Some(if pointee == "char" && base.matches('*').count() == 1 {
+            format!("mim_from_cstr({v})")
+        } else {
+            format!("mim_int((long long)(__INTPTR_TYPE__){v})")
+        });
+    }
+    if base.starts_with("enum ") {
+        return Some(format!("mim_int((long long){v})"));
+    }
+    Some(match scalar(base, m)?.as_str() {
+        "f32" | "f64" => format!("mim_float((double){v})"),
+        "bool" => format!("mim_bool((long long){v})"),
+        _ => format!("mim_int((long long){v})"),
+    })
+}
+
+/// How a Mimic value becomes the callback's C result.
+fn from_mimic(c: &str, v: &str, m: &DataModel) -> Option<String> {
+    let base = c.trim().trim_start_matches("const ").trim();
+    if base.ends_with('*') {
+        if base.trim_end_matches('*').trim() == "char" {
+            return None; // a Mimic string cannot outlive the callback
+        }
+        return Some(format!("({c})(__INTPTR_TYPE__)mim_as_i64({v})"));
+    }
+    if base.starts_with("enum ") {
+        return Some(format!("({c})mim_as_i64({v})"));
+    }
+    Some(match scalar(base, m)?.as_str() {
+        "f32" | "f64" => format!("({c})mim_as_f64({v})"),
+        _ => format!("({c})mim_as_i64({v})"),
+    })
+}
+
+/// A function with function-pointer parameters: each becomes `fnref` (a Mimic
+/// function value), passed to a C wrapper that installs it in a thread-local
+/// slot (nesting-safe) and hands C a trampoline with the callback's own
+/// signature. Callbacks must be called during the C call, on its thread.
+fn callback_wrapper(name: &str, ret_q: &str, ret_c: &str, parms: &[(String, String)], m: &DataModel) -> Result<(CFn, String), String> {
+    let w = format!("mimicw_{name}");
+    let mut c = String::new();
+    let mut wparams = Vec::new();
+    let mut call_args = Vec::new();
+    let mut ffi = Vec::new();
+    let mut installs = String::new();
+    let mut restores = String::new();
+    for (i, (q, d)) in parms.iter().enumerate() {
+        let a = format!("a{i}");
+        if is_fn_ptr(d) {
+            let (cret, cps) = split_fn_ptr(d).ok_or_else(|| format!("callback type `{q}` is not supported yet"))?;
+            let slot = format!("{w}_cb{i}");
+            let tramp = format!("{w}_t{i}");
+            let tparams: Vec<String> = cps.iter().enumerate().map(|(j, t)| format!("{t} p{j}")).collect();
+            let mut body = format!("    mim_val *args[{}];\n", cps.len().max(1));
+            for (j, t) in cps.iter().enumerate() {
+                let conv = to_mimic(t, &format!("p{j}"), m).ok_or_else(|| format!("callback argument type `{t}` cannot become a Mimic value yet"))?;
+                body.push_str(&format!("    args[{j}] = {conv};\n"));
+            }
+            body.push_str(&format!("    mim_val *r = mim_call({slot}, {}, args);\n", cps.len()));
+            body.push_str(&format!("    for (int i = 0; i < {}; i++) mim_release(args[i]);\n", cps.len()));
+            if cret == "void" {
+                body.push_str("    mim_release(r);\n");
+            } else {
+                let conv = from_mimic(&cret, "r", m).ok_or_else(|| format!("callback result type `{cret}` cannot come from Mimic yet"))?;
+                body.push_str(&format!("    {cret} out = {conv};\n    mim_release(r);\n    return out;\n"));
+            }
+            c.push_str(&format!("static _Thread_local mim_val *{slot};\n"));
+            c.push_str(&format!("static {cret} {tramp}({}) {{\n{body}}}\n", if tparams.is_empty() { "void".into() } else { tparams.join(", ") }));
+            wparams.push(format!("mim_val *{a}"));
+            installs.push_str(&format!("    mim_val *saved{i} = {slot}; {slot} = {a};\n"));
+            restores.push_str(&format!("    {slot} = saved{i};\n"));
+            call_args.push(format!("{a} ? {tramp} : 0"));
+            ffi.push("fnref".to_string());
+        } else {
+            let t = map_type(q, Some(d), m, false)?;
+            wparams.push(format!("{q} {a}"));
+            call_args.push(a);
+            ffi.push(t);
+        }
+    }
+    let (ret, call) = if ret_c.trim() == "void" {
+        (None, format!("    {name}({});\n", call_args.join(", ")))
+    } else {
+        (Some(map_type(ret_c, None, m, true)?), format!("    {ret_q} r = {name}({});\n", call_args.join(", ")))
+    };
+    let tail = if ret.is_some() { "    return r;\n" } else { "" };
+    c.push_str(&format!(
+        "{} {w}({}) {{\n{installs}{call}{restores}{tail}}}\n",
+        if ret.is_some() { ret_q } else { "void" },
+        if wparams.is_empty() { "void".into() } else { wparams.join(", ") }
+    ));
+    Ok((CFn { name: name.to_string(), params: ffi, ret, variadic: false, link_name: Some(w) }, c))
+}
 
 struct CRecord {
     /// How C names the type in a declaration: `struct vec2`, or a typedef name.
@@ -677,7 +817,8 @@ fn scalar(t: &str, m: &DataModel) -> Option<String> {
 
 fn to_cache(i: &Imported) -> Value {
     serde_json::json!({
-        "fns": i.fns.iter().map(|f| serde_json::json!({"name": f.name, "params": f.params, "ret": f.ret, "variadic": f.variadic})).collect::<Vec<_>>(),
+        "fns": i.fns.iter().map(|f| serde_json::json!({"name": f.name, "params": f.params, "ret": f.ret, "variadic": f.variadic, "link": f.link_name})).collect::<Vec<_>>(),
+        "callback_c": i.callback_c,
         "struct_fns": i.struct_fns.iter().map(|f| serde_json::json!({"name": f.name, "mimic": f.mimic, "c": f.c, "uses": f.uses})).collect::<Vec<_>>(),
         "records": i.records,
         "include": i.include_line,
@@ -697,6 +838,7 @@ fn from_cache(v: &Value) -> Imported {
                 params: f["params"].as_array().into_iter().flatten().map(s).collect(),
                 ret: f["ret"].as_str().map(String::from),
                 variadic: f["variadic"].as_bool() == Some(true),
+                link_name: f["link"].as_str().map(String::from),
             })
             .collect(),
         struct_fns: v["struct_fns"]
@@ -712,6 +854,7 @@ fn from_cache(v: &Value) -> Imported {
             .collect(),
         records: v["records"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), s(v))).collect()).unwrap_or_default(),
         include_line: s(&v["include"]),
+        callback_c: s(&v["callback_c"]),
         skipped: v["skipped"].as_array().into_iter().flatten().map(|p| (s(&p[0]), s(&p[1]))).collect(),
     }
 }
