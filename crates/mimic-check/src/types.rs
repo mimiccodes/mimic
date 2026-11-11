@@ -723,6 +723,31 @@ impl Walk<'_, '_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
+                let elem = |t: Ty| match t {
+                    Ty::Arr(x) => Ty::of_el(x),
+                    t => t,
+                };
+                let whole = |t: Ty| matches!(elem(t), Ty::Obj(_) | Ty::Tup(_));
+                if matches!(op, BinOp::Eq | BinOp::Ne) && (whole(a) || whole(b)) {
+                    // structural equality: same type, compared field by field
+                    // (elementwise when either side is a list)
+                    let (x, y) = (elem(a), elem(b));
+                    let comparable = x == y || matches!(x, Ty::Dyn | Ty::Never) || matches!(y, Ty::Dyn | Ty::Never);
+                    if !comparable {
+                        let p = self.inf.p;
+                        self.err(
+                            Diag::new(&C::TYPE_MISMATCH, format!("comparing a {} with a {} is always false", show(p, a), show(p, b)), e.span)
+                                .help("`==` compares values of the same type, field by field"),
+                        );
+                    }
+                    return if a == Ty::Never || b == Ty::Never {
+                        Ty::Never
+                    } else if matches!(a, Ty::Arr(_)) || matches!(b, Ty::Arr(_)) {
+                        Ty::Arr(El::Bool)
+                    } else {
+                        Ty::Bool
+                    };
+                }
                 if matches!(a, Ty::Obj(_)) || matches!(b, Ty::Obj(_)) {
                     self.err(Diag::new(&C::NO_OPERATOR, format!("operator `{}` is not defined for records and variants (use `match`)", op.symbol()), e.span));
                     return Ty::Dyn;

@@ -390,6 +390,66 @@ static int vals_equal(const mim_val *a, const mim_val *b) {
     return 0;
 }
 
+/* ==== structural equality ================================================ */
+
+static int map_equal(const mim_val *a, const mim_val *b);
+
+/* Element i of an array as a comparable scalar: 0 = int, 1 = float, 2 = char. */
+static int elem_num(const mim_val *v, int64_t i, int64_t *iv, double *fv) {
+    if (v->dtype == MIM_F64) { *fv = getf(v, i); return 1; }
+    *iv = geti(v, i);
+    *fv = (double)*iv;
+    return v->dtype == MIM_CHAR ? 2 : 0;
+}
+
+/* `a == b` on whole values: numbers by value (1 == 1.0), strings and arrays
+ * by length and elements, records/variants/tuples by type and fields, maps by
+ * their key → value pairs (in any order), functions by identity. */
+int64_t mim_equal(const mim_val *a, const mim_val *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->rank != b->rank) return 0;
+    if (a->dtype == MIM_FN || b->dtype == MIM_FN) return 0;
+    if (a->dtype == MIM_MAP || b->dtype == MIM_MAP) return a->dtype == b->dtype && map_equal(a, b);
+    if (a->dtype == MIM_OBJ && a->rank == 0) {
+        if (b->dtype != MIM_OBJ || a->desc != b->desc || a->len != b->len) return 0;
+        mim_val **x = (mim_val **)a->data, **y = (mim_val **)b->data;
+        for (int64_t i = 0; i < a->len; i++)
+            if (!mim_equal(x[i], y[i])) return 0;
+        return 1;
+    }
+    if (b->dtype == MIM_OBJ && b->rank == 0) return 0;
+    if (a->len != b->len) return 0;
+    int ha = IS_HANDLES(a), hb = IS_HANDLES(b);
+    if (ha || hb) {
+        if (ha && hb) {
+            mim_val **x = (mim_val **)a->data, **y = (mim_val **)b->data;
+            for (int64_t i = 0; i < a->len; i++)
+                if (!mim_equal(x[i], y[i])) return 0;
+            return 1;
+        }
+        /* a list of handles against a flat array: compare element by element */
+        for (int64_t i = 0; i < a->len; i++) {
+            mim_val *ea = scalar_at(a, i), *eb = scalar_at(b, i);
+            int eq = (int)mim_equal(ea, eb);
+            mim_release(ea);
+            mim_release(eb);
+            if (!eq) return 0;
+        }
+        return 1;
+    }
+    if ((a->dtype == MIM_CHAR) != (b->dtype == MIM_CHAR)) return 0; /* text is not numbers */
+    if (a->dtype == b->dtype && a->dtype != MIM_F64)
+        return memcmp(a->data, b->data, (size_t)a->len * (size_t)(a->dtype == MIM_I64 ? 8 : 1)) == 0;
+    for (int64_t i = 0; i < a->len; i++) {
+        int64_t xi, yi;
+        double xf, yf;
+        int ka = elem_num(a, i, &xi, &xf), kb = elem_num(b, i, &yi, &yf);
+        if (ka == 1 || kb == 1 ? xf != yf : xi != yi) return 0;
+    }
+    return 1;
+}
+
 static mim_val *map_alloc(int64_t cap) {
     if (cap < 4) cap = 4;
     int64_t ns = 8;
@@ -474,6 +534,16 @@ mim_val *mim_map_lit(int64_t n, mim_val **keys, mim_val **vals) {
         map_put_raw(m, keys[i], vals[i]);
     }
     return m;
+}
+
+static int map_equal(const mim_val *a, const mim_val *b) {
+    if (MAP_META(a)->count != MAP_META(b)->count) return 0;
+    mim_val **h = (mim_val **)a->data, **g = (mim_val **)b->data;
+    for (int64_t e = 0; e < MAP_META(a)->count; e++) {
+        int64_t f = map_find(b, h[2 * e], NULL);
+        if (f < 0 || !mim_equal(h[2 * e + 1], g[2 * f + 1])) return 0;
+    }
+    return 1;
 }
 
 static mim_val *map_get(mim_val *m, mim_val *k) {

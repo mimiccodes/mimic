@@ -226,6 +226,10 @@ if let Some(year) = get(born, "ada") { print(year) } else { print("unknown") }
 * **Alternatives** must all bind the same names (E0505). Inside a larger pattern, alternatives cannot bind names yet.
 * **`if let pat = value { … } else { … }`** is a two-arm `match`, and `else if` / `else if let` chain as usual.
 * **Strings compare as whole values** with `==` and `!=`.
+* **Records, variants and tuples compare structurally** with `==` and `!=`. Two values are equal when they have the same type (and variant) and equal fields, compared deeply through nested records, strings, lists and maps. `parse_int(s) == Some(42)` and `find(s, "x") == None` just work.
+  * **Same type only.** Comparing values of two different types is a compile error (E0401), because the result would always be false.
+  * **Lists compare elementwise.** `points == origin` gives a list of bools, the same as for numbers.
+  * **What counts as equal.** Numbers compare by value, so `1 == 1.0`. Maps are equal when they have the same keys and values, in any order. Functions are equal only to themselves.
 * **Under the hood:** records and variants are immutable, reference-counted values. `with` updates in place when nothing else shares the record, and copies otherwise.
 
 ## Strings

@@ -665,7 +665,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
-            "mim_str_eq" => self.ctx.i64_type().fn_type(&[p, p], false),
+            "mim_str_eq" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
@@ -2516,6 +2516,22 @@ impl<'ctx> Cg<'ctx, '_> {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
                 let r = self.call_rt("mim_str_eq", &[self.basic(a).into(), self.basic(b).into()])?.unwrap().into_int_value();
+                self.drop_tmp(a)?;
+                self.drop_tmp(b)?;
+                let pred = if *op == BinOp::Eq { IntPredicate::NE } else { IntPredicate::EQ };
+                Ok(V::B(self.b.build_int_compare(pred, r, i64t.const_zero(), "").s()?))
+            }
+            // records, variants and tuples: structural equality
+            ExprKind::Binary { op, lhs, rhs }
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && ty == Ty::Bool
+                    && (matches!(self.ty_of(lhs), Ty::Obj(_) | Ty::Tup(_)) || matches!(self.ty_of(rhs), Ty::Obj(_) | Ty::Tup(_))) =>
+            {
+                let a = self.expr(lhs)?;
+                let a = self.boxed(a)?;
+                let b = self.expr(rhs)?;
+                let b = self.boxed(b)?;
+                let r = self.call_rt("mim_equal", &[self.basic(a).into(), self.basic(b).into()])?.unwrap().into_int_value();
                 self.drop_tmp(a)?;
                 self.drop_tmp(b)?;
                 let pred = if *op == BinOp::Eq { IntPredicate::NE } else { IntPredicate::EQ };

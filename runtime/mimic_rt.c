@@ -760,6 +760,8 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
 }
 
 mim_val *mim_std_concat(mim_val *xs, mim_val *ys);
+int64_t mim_equal(const mim_val *a, const mim_val *b);
+static mim_val *scalar_at(const mim_val *xs, int64_t i);
 
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     need(a, "operator");
@@ -770,7 +772,26 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         int eq = a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
         return mim_bool(op == OP_EQ ? eq : !eq);
     }
-    if (IS_HANDLES(a) || IS_HANDLES(b)) mim_panic("arithmetic is not defined on records or lists of values");
+    if (IS_HANDLES(a) || IS_HANDLES(b)) {
+        /* == / != compare records, variants, tuples and maps as whole values;
+         * on two lists (or a list and one value) they compare elementwise */
+        if (op != OP_EQ && op != OP_NE) mim_panic("arithmetic is not defined on records or lists of values");
+        if (a->dtype == MIM_MAP || b->dtype == MIM_MAP || (a->rank == 0 && b->rank == 0)) {
+            int eq = (int)mim_equal(a, b);
+            return mim_bool(op == OP_EQ ? eq : !eq);
+        }
+        if (a->rank == 1 && b->rank == 1 && a->len != b->len) mim_panic("length mismatch in ==");
+        int64_t n = a->rank == 1 ? a->len : b->len;
+        mim_val *r = alloc(MIM_BOOL, 1, n);
+        for (int64_t i = 0; i < n; i++) {
+            mim_val *ea = a->rank == 1 ? scalar_at(a, i) : a, *eb = b->rank == 1 ? scalar_at(b, i) : b;
+            int eq = (int)mim_equal(ea, eb);
+            if (ea != a) mim_release(ea);
+            if (eb != b) mim_release(eb);
+            seti(r, i, op == OP_EQ ? eq : !eq);
+        }
+        return r;
+    }
     int64_t n;
     int rank;
     if (a->rank == 0 && b->rank == 0) { n = 1; rank = 0; }

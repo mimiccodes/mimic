@@ -1,0 +1,52 @@
+module main
+
+type Point = { x: i64, y: f64 }
+type Shape = Circle(f64) | Rect(f64, f64) | Dot
+type Tree = Leaf | Node(Tree, i64, Tree)
+type Doc = { title: str, tags: [str] }
+
+// == and != compare records, variants and tuples as whole values
+fn main() {
+    let p = Point { x: 1, y: 2.5 }
+    print(p == Point { x: 1, y: 2.5 })
+    print(p == { p with x: 2 })
+    print(p != { p with y: 2.0 })
+
+    print(Circle(1.0) == Circle(1.0))
+    print(Circle(1.0) == Circle(2.0))
+    print(Rect(1.0, 2.0) == Circle(1.0))
+    print(Dot == Dot)
+
+    print((1, "a") == (1, "a"))
+    print((1, "a") != (1, "b"))
+
+    // deep: nested variants, strings, lists and maps inside records
+    print(tree(3) == tree(3))
+    print(tree(3) == tree(4))
+    let d = Doc { title: "notes", tags: ["a" "b"] }
+    print(d == Doc { title: "notes", tags: ["a" "b"] })
+    print(d == { d with tags: ["a"] })
+    print(["v": 1, "w": 2] == ["w": 2, "v": 1])          // maps: order does not matter
+    print(["v": 1, "w": 2] == ["v": 1, "w": 3])
+
+    // Option and Result values
+    print(parse_int("42") == Some(42))
+    print(parse_int("x") == None)
+    print(find("hello", "z") != None)
+
+    // lists of records compare elementwise, like numbers
+    let ps = [Point { x: 1, y: 0.0 }, Point { x: 2, y: 0.0 }]
+    print(ps == Point { x: 2, y: 0.0 })
+    print(same(ps, ps))
+
+    // inside pure functions (interaction nets) too
+    print(count_dots([Dot, Circle(1.0), Dot, Rect(1.0, 1.0)]))
+}
+
+fn tree(n: i64) -> Tree {
+    if n == 0 { Leaf } else { Node(tree(n - 1), n, tree(n - 1)) }
+}
+
+fn same(a: [Point], b: [Point]) -> bool { (a == b) ▷ ⌊/ == 1 }
+
+fn count_dots(xs: [Shape]) -> i64 { xs ¨ (s => if s == Dot { 1 } else { 0 }) ▷ +/ }

@@ -1,0 +1,5 @@
+// expect-error: E0401 comparing a Point with a Size is always false
+module main
+type Point = { x: i64 }
+type Size = { x: i64 }
+fn main() { print(Point { x: 1 } == Size { x: 1 }) }
