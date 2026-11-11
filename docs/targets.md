@@ -75,6 +75,8 @@ mimic targets --cpus aarch64                            # the models LLVM knows
 
 A name LLVM does not accept is an error, with a suggestion for the closest name. `--cpu native` means "this machine" and applies only to native builds.
 
+`--cpu portable` builds for the oldest model of the target's CPU family, so the binary runs on every machine of that family: `apple-m1` for Apple silicon (M1 to M5), `x86-64-v2` for x86-64. Native builds default to `native`, the fastest binary for the machine that builds it; use `portable` for binaries you distribute.
+
 ## Tiers
 
 `mimic targets` groups targets by how well they are proven, and `mimic targets --check <target>` shows a target's tier.

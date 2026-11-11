@@ -317,12 +317,22 @@ impl Parser {
                 if abi != "C" {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
-                self.expect(&Tok::LBrace)?;
                 let mut fns = Vec::new();
+                let mut includes = Vec::new();
+                // `extern "C" include "math.h"`: a whole header, no braces
+                if let Some(inc) = self.include_directive()? {
+                    includes.push(inc);
+                    return Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }));
+                }
+                self.expect(&Tok::LBrace)?;
                 loop {
                     self.skip_newlines();
                     if self.eat(&Tok::RBrace) {
                         break;
+                    }
+                    if let Some(inc) = self.include_directive()? {
+                        includes.push(inc);
+                        continue;
                     }
                     let fstart = self.span();
                     let fpub = self.eat(&Tok::Pub) || is_pub;
@@ -347,12 +357,24 @@ impl Parser {
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
                     fns.push(ExternFn { name, is_pub: fpub, params, ret, span: fstart });
                 }
-                Ok(Item::Extern(ExternBlock { abi, trusted, fns, span: start }))
+                Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
             }
             other => Err(Diag::new(&C::UNEXPECTED_TOKEN, 
                 format!("expected an item (`fn`, `module`, `use`, `extern`), found {}", other.describe()),
                 start,
             )),
+        }
+    }
+
+    /// `include "header.h"` inside (or right after) `extern "C"`.
+    fn include_directive(&mut self) -> PResult<Option<(String, Span)>> {
+        if !matches!(self.peek(), Tok::Ident(w) if w == "include") {
+            return Ok(None);
+        }
+        self.next();
+        match self.next() {
+            Token { tok: Tok::Str(h), span, .. } => Ok(Some((h, span))),
+            t => Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected a header name in quotes, e.g. include \"math.h\"", t.span)),
         }
     }
 

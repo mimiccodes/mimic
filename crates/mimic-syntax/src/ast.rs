@@ -158,6 +158,11 @@ pub struct ExternBlock {
     pub abi: String,
     pub trusted: bool,
     pub fns: Vec<ExternFn>,
+    /// `include "math.h"`: C headers whose declarations are imported
+    /// (filled into `fns` by the C importer before checking).
+    pub includes: Vec<(String, Span)>,
+    /// `pub extern …`: imported declarations are public.
+    pub is_pub: bool,
     pub span: Span,
 }
 

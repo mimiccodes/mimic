@@ -406,6 +406,13 @@ is Phase B of the roadmap.";
 "Raw pointers exist only at the C boundary. Mimic code uses arrays, which the
 compiler passes to C as pointers.";
 
+    CIMPORT = "E0805" "c-import-failed" "a C header in `extern \"C\" include` could not be read"
+"`include \"header.h\"` reads the header with the embedded Clang, for the
+target being built. The header is looked for next to the source file, in the
+project root and in `ffi { include = [...] }` of mim.mim, then among the
+target's system headers (`<header.h>`). The message contains Clang's error,
+for example a missing file or a syntax error in the header.";
+
     // ---- E09xx project, files and toolchain ----------------------------------
     PROJECT = "E0901" "project-config" "an error in mim.mim, build.mim or the project layout"
 "The project files could not be read as a valid project: a malformed or

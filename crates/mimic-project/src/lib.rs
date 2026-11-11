@@ -43,6 +43,8 @@ pub struct Manifest {
     pub ffi_link: Vec<String>,
     /// Extra library search paths (`-L<dir>`).
     pub ffi_search: Vec<String>,
+    /// Header search paths for `extern "C" include` (`-I<dir>`), relative to the project.
+    pub ffi_include: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +150,7 @@ pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
         dependencies: deps,
         ffi_link: strings(ffi.and_then(|f| f.get("link"))),
         ffi_search: strings(ffi.and_then(|f| f.get("search"))),
+        ffi_include: strings(ffi.and_then(|f| f.get("include"))),
     })
 }
 

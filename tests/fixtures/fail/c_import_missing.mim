@@ -1,0 +1,8 @@
+// expect-error: E0805 cannot read C header `no_such_header.h`
+module main
+
+extern "C" include "no_such_header.h"
+
+fn main() {
+    print(1)
+}

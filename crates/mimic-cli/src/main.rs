@@ -1,6 +1,7 @@
 //! `mimic` — compiler, project manager, code checker and package manager.
 
 mod cc;
+mod cimport;
 mod driver;
 mod modfile;
 mod report;
@@ -44,8 +45,9 @@ struct ProfileArgs {
     /// Do not compile pure functions to interaction nets (everything native)
     #[arg(long)]
     no_net: bool,
-    /// Generate code for this CPU model, e.g. apple-m3, x86-64-v3, cortex-a72
-    /// (`native` = this machine; `mimic targets --cpus <arch>` lists them)
+    /// Generate code for this CPU model, e.g. apple-m3, x86-64-v3, cortex-a72;
+    /// `native` = this machine (the default for native builds); `portable` =
+    /// the oldest model of the family (apple-m1, x86-64-v2), runs on all of them
     #[arg(long, value_name = "CPU")]
     cpu: Option<String>,
 }

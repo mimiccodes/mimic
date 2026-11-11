@@ -100,8 +100,14 @@ fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) 
     }
 }
 
-/// Load, parse, resolve and check. Errors come back as a structured report.
+/// Load, parse, resolve and check for the host. Errors come back as a structured report.
 pub fn load(input: &Input) -> Result<Program, Report> {
+    load_for(input, &Target::host())
+}
+
+/// Like [`load`], for a target: C headers (`extern "C" include`) are read as
+/// that target sees them.
+pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
     let mut report = Report::default();
     let mut files = Vec::new();
     let pkg = input.name();
@@ -172,6 +178,25 @@ pub fn load(input: &Input) -> Result<Program, Report> {
     if !report.entries.is_empty() {
         return Err(report);
     }
+    // C headers named by `extern "C" include "…"`
+    let mut include_dirs: Vec<PathBuf> = Vec::new();
+    if let Input::Project(p) = input {
+        include_dirs.push(p.root.clone());
+        include_dirs.extend(p.manifest.ffi_include.iter().map(|d| p.root.join(d)));
+    }
+    for sf in &mut files {
+        let here = sf.path.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let mut dirs = vec![here];
+        dirs.extend(include_dirs.iter().cloned());
+        let mut errs = Vec::new();
+        import_headers(&mut sf.ast.module.items, &dirs, target, &mut errs);
+        for (msg, span) in errs {
+            report.push_in(Some(&sf.path), &sf.display, &sf.src, mimic_syntax::Diag::new(&C::CIMPORT, msg, span));
+        }
+    }
+    if !report.entries.is_empty() {
+        return Err(report);
+    }
     files.push(prelude_file());
     let (mut program, diags) = Program::build(files, &pkg);
     if !diags.is_empty() {
@@ -201,6 +226,9 @@ use crate::toolchain::{self, LinkJob, Toolchain};
 
 /// Compile (and cache) the C runtime for a target.
 pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Option<&str>) -> Result<PathBuf, String> {
+    let portable = cpu == Some("portable");
+    let resolved = if portable { portable_cpu(target) } else { cpu.map(String::from) };
+    let cpu = resolved.as_deref().or(if portable { Some("") } else { None });
     let key = mimic_syntax::fnv1a(
         format!(
             "{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}{:?}{cpu:?}",
@@ -232,6 +260,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
         Some("native") | None if release && target.name.is_none() => {
             c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
         }
+        Some("") => {} // portable without a family baseline: the target default
         Some(cpu) if cpu != "native" => {
             // x86 names a CPU with -march; every other architecture with -mcpu
             let x86 = matches!(target.arch.as_str(), "x86_64" | "x86" | "i386" | "i686");
@@ -298,8 +327,53 @@ pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     d
 }
 
+/// Fill `extern "C" include` blocks (in every module, nested ones too) with the
+/// functions the header makes visible. Names the module already defines (its
+/// own functions, types, modules, hand-written externs) win over imported ones.
+fn import_headers(items: &mut [mimic_syntax::ast::Item], dirs: &[PathBuf], target: &Target, errs: &mut Vec<(String, mimic_syntax::Span)>) {
+    use mimic_syntax::ast::Item;
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in items.iter() {
+        match item {
+            Item::Fn(f) => {
+                taken.insert(f.name.clone());
+            }
+            Item::Type(t) => {
+                taken.insert(t.name.clone());
+            }
+            Item::Module(m) => {
+                taken.insert(m.name.clone());
+            }
+            Item::Use(u) => {
+                taken.insert(u.alias.clone().unwrap_or_else(|| u.path.last().cloned().unwrap_or_default()));
+            }
+            Item::Extern(b) => taken.extend(b.fns.iter().map(|f| f.name.clone())),
+        }
+    }
+    for item in items.iter_mut() {
+        match item {
+            Item::Module(m) => import_headers(&mut m.items, dirs, target, errs),
+            Item::Extern(b) if !b.includes.is_empty() => {
+                for (header, span) in b.includes.clone() {
+                    match crate::cimport::import(&header, dirs, target) {
+                        Ok(imp) => {
+                            for f in imp.extern_fns(b.is_pub, span) {
+                                if taken.insert(f.name.clone()) {
+                                    b.fns.push(f);
+                                }
+                            }
+                        }
+                        Err(e) => errs.push((e, span)),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, Report> {
-    let program = load(input)?;
+    let program = load_for(input, target)?;
     if let Input::Project(p) = input {
         crate::modfile::sync(p, &program)?;
     }
@@ -336,7 +410,16 @@ fn codegen_and_link(
         None => (None, None, None),
     };
     // --cpu: a named model replaces the defaults (its features follow from it)
-    match profile.cpu.as_deref() {
+    let portable = profile.cpu.as_deref() == Some("portable");
+    let cpu_choice = if portable { portable_cpu(target) } else { profile.cpu.clone() };
+    match cpu_choice.as_deref() {
+        None if portable => {
+            // no family baseline known: the target's default CPU is already portable
+            if target.name.is_none() {
+                cpu = Some("generic".into());
+                features = Some(String::new());
+            }
+        }
         None => {}
         Some("native") if target.name.is_none() => {}
         Some("native") => return Err(format!("--cpu native only applies to native builds, not `{}`", target.name())),
@@ -389,6 +472,18 @@ fn codegen_and_link(
         let _ = fs::remove_file(&lib);
         toolchain::archive(&tc, target, &lib, &[obj, rt])?;
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
+    }
+}
+
+/// `--cpu portable`: the oldest model of the target's CPU family, so one binary
+/// runs on every machine of that family.
+fn portable_cpu(target: &Target) -> Option<String> {
+    let arch = if target.name.is_none() { std::env::consts::ARCH } else { target.arch.as_str() };
+    let apple = target.name.is_none() && cfg!(target_os = "macos") || target.is_apple();
+    match arch {
+        "aarch64" | "arm64" if apple => Some("apple-m1".into()),
+        "x86_64" => Some("x86-64-v2".into()),
+        _ => None,
     }
 }
 
