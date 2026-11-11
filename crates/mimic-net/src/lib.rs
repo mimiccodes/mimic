@@ -73,6 +73,7 @@ pub enum Op {
     Neg,
     Not,
     Abs,
+    BitNot,
     Prim1(Prim),
     Prim2(Prim),
     /// `xs[i]`
@@ -85,9 +86,10 @@ impl Op {
     pub fn code(self) -> u32 {
         match self {
             Op::Bin(b) => b as u32,
-            Op::Neg => 16,
-            Op::Not => 17,
-            Op::Abs => 18,
+            Op::Neg => 24,
+            Op::Not => 25,
+            Op::Abs => 26,
+            Op::BitNot => 27,
             Op::Prim1(p) => 32 + p as u32,
             Op::Prim2(p) => 64 + p as u32,
             Op::Index => 96,
@@ -96,7 +98,7 @@ impl Op {
     }
 
     pub fn is_unary(self) -> bool {
-        matches!(self, Op::Neg | Op::Not | Op::Abs | Op::Prim1(_) | Op::Check(..))
+        matches!(self, Op::Neg | Op::Not | Op::Abs | Op::BitNot | Op::Prim1(_) | Op::Check(..))
     }
 
     pub fn name(self) -> String {
@@ -105,6 +107,7 @@ impl Op {
             Op::Neg => "neg".into(),
             Op::Not => "not".into(),
             Op::Abs => "abs".into(),
+            Op::BitNot => "bnot".into(),
             Op::Prim1(p) | Op::Prim2(p) => p.info().word.into(),
             Op::Index => "index".into(),
             Op::Check(ty, msg) => format!("check{ty}_{msg}"),
@@ -119,6 +122,7 @@ impl Op {
             "neg" => return Some(Op::Neg),
             "not" => return Some(Op::Not),
             "abs" => return Some(Op::Abs),
+            "bnot" => return Some(Op::BitNot),
             "index" => return Some(Op::Index),
             c if c.starts_with("check") => {
                 let (ty, msg) = c[5..].split_once('_')?;
@@ -153,6 +157,12 @@ const BIN_OPS: &[(&str, BinOp)] = &[
     ("div", BinOp::IntDiv),
     ("max", BinOp::Max),
     ("min", BinOp::Min),
+    ("band", BinOp::BitAnd),
+    ("bor", BinOp::BitOr),
+    ("bxor", BinOp::BitXor),
+    ("shl", BinOp::Shl),
+    ("shr", BinOp::Shr),
+    ("ushr", BinOp::UShr),
 ];
 
 // ---- printing ---------------------------------------------------------------

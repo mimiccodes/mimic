@@ -47,9 +47,13 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 | pipeline | `a ▷ f`, `a ▷ f(b)` = `f(a, b)`, `a ▷ ↑ 3`, `a ▷ (x ⇒ …)` |
 | or / and | `∨` `or`, `∧` `and` (elementwise) |
 | compare | `==` `≠`/`!=` `<` `≤`/`<=` `>` `≥`/`>=` (not chainable) |
+| bitwise or | `\|` |
+| bitwise xor | `^` |
+| bitwise and | `&` |
+| shift | `<<` `>>` (arithmetic) `>>>` (logical) |
 | additive | `+` `-` |
 | multiplicative | `×`/`*` `÷`/`/` (always f64) `div`/`⫽` (floored integer division) `%` (floored mod) |
-| unary | `-x`, `¬x`/`not x` |
+| unary | `-x`, `¬x`/`not x`, `~x` (bitwise complement) |
 | **train** | postfix monadic prims `xs ⌽`, infix dyadic prims `xs ↑ 3`, `xs ¨ f` |
 | prefix | `⍳ 10`, `⌽ ⍳ 5`, call form `take(xs, 3)` |
 | postfix | `f(x)`, `xs[i]` (no space before `(` / `[`) |
@@ -58,6 +62,14 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 **Trains read left to right.** `⍳ 10 ⌽ ↑ 3 +/` means "iota 10, reversed, take 3, sum", which is 24. A prefix primitive binds to the next operand only, so `⍳ 5 + 1` is `(⍳ 5) + 1`. After a pipeline stage, reading continues left to right: `xs ▷ +/ ÷ 2` is `(sum xs) ÷ 2`.
 
 **Literals.** Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
+
+**Integer literals** can be written in hexadecimal `0xFF`, binary `0b1010` or octal `0o17`, with `_` separators anywhere: `1_000_000`, `0xFFFF_0000`. A hex/binary/octal literal may use all 64 bits, so `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
+
+**Bitwise operators** work on integers, elementwise on arrays, and in fused kernels, nets and `¨` like every other operator:
+* **Where they bind.** They bind tighter than comparisons, unlike C, so `x & mask == 0` means `(x & mask) == 0`. They bind looser than `+` and `*`, so `1 + 2 << 3` is `24`.
+* **Shifts.** `>>` is arithmetic and keeps the sign: `¯16 >> 2` is `-4`. `>>>` is logical and fills with zeros. A shift amount uses its low 6 bits, exactly as the hardware does, so every shift is a single instruction and `x << 64` is `x`.
+* **Bools.** `& | ^ ~` also work on bools, without short-circuiting, which is handy for masks: `(xs > 2) & (xs < 6)`.
+* **Floats and text** are a compile error (E0407).
 
 **Loops are words.** Mimic has no loop statements. These words, and recursion, replace them:
 

@@ -820,6 +820,12 @@ impl Parser {
             Tok::Ge => BinOp::Ge,
             Tok::And => BinOp::And,
             Tok::Or => BinOp::Or,
+            Tok::Amp => BinOp::BitAnd,
+            Tok::Bar => BinOp::BitOr,
+            Tok::Caret => BinOp::BitXor,
+            Tok::Shl => BinOp::Shl,
+            Tok::Shr => BinOp::Shr,
+            Tok::UShr => BinOp::UShr,
             _ => return None,
         })
     }
@@ -850,12 +856,20 @@ impl Parser {
                 Tok::Le => (BinOp::Le, 3),
                 Tok::Gt => (BinOp::Gt, 3),
                 Tok::Ge => (BinOp::Ge, 3),
-                Tok::Plus => (BinOp::Add, 4),
-                Tok::Minus => (BinOp::Sub, 4),
-                Tok::Star => (BinOp::Mul, 5),
-                Tok::Slash => (BinOp::Div, 5),
-                Tok::Percent => (BinOp::Mod, 5),
-                Tok::IntDiv => (BinOp::IntDiv, 5),
+                // bitwise operators bind tighter than comparisons:
+                // `x & mask == 0` is `(x & mask) == 0`
+                Tok::Bar => (BinOp::BitOr, 4),
+                Tok::Caret => (BinOp::BitXor, 5),
+                Tok::Amp => (BinOp::BitAnd, 6),
+                Tok::Shl => (BinOp::Shl, 7),
+                Tok::Shr => (BinOp::Shr, 7),
+                Tok::UShr => (BinOp::UShr, 7),
+                Tok::Plus => (BinOp::Add, 8),
+                Tok::Minus => (BinOp::Sub, 8),
+                Tok::Star => (BinOp::Mul, 9),
+                Tok::Slash => (BinOp::Div, 9),
+                Tok::Percent => (BinOp::Mod, 9),
+                Tok::IntDiv => (BinOp::IntDiv, 9),
                 _ => break,
             };
             if prec < min_prec {
@@ -879,6 +893,7 @@ impl Parser {
         let op = match self.peek() {
             Tok::Minus => UnOp::Neg,
             Tok::Not => UnOp::Not,
+            Tok::Tilde => UnOp::BitNot,
             _ => return self.train(),
         };
         self.next();

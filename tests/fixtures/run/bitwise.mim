@@ -1,0 +1,48 @@
+module main
+
+// Bitwise operators: & | ^ << >> >>> and ~, on integers (and & | ^ on bools).
+fn main() {
+    print(0xFF & 0b1010)                 // 10
+    print(0o17 | 0x100)                  // 271
+    print(6 ^ 3)                         // 5
+    print(1 << 40)                       // 1099511627776
+    print(¯16 >> 2)                      // -4: arithmetic shift keeps the sign
+    print(¯16 >>> 60)                    // 15: logical shift fills with zeros
+    print((~0, ~5))                      // (-1, -6)
+    print((1 << 64, 1 << 65))            // shift amounts use their low 6 bits: (1, 2)
+    print(0xFFFF_FFFF_FFFF_FFFF)         // all 64 bits: -1
+    print(x_and_mask(12))                // precedence: (x & 4) == 4 → true
+    print(1 + 2 << 3)                    // + binds tighter than <<: 24
+    print((true & false, true | false, true ^ true, ~true))
+
+    // elementwise over arrays, fused into one parallel loop
+    let xs = ⍳ 8
+    print(xs & 1)
+    print(1 << xs)
+    print(xs ^ (xs >> 1))                // Gray code
+    print((xs > 2) & (xs < 6))
+    print(~xs)
+    print(xs ¨ (x => x | 0x10))
+
+    // pure functions compile to interaction nets: same results there
+    print((popcount(0xF0F0), parity(7), hash(12345)))
+    print([1 2 3] ¨ popcount)
+    print(reduce_xor(⍳ 100))
+}
+
+fn x_and_mask(x: i64) -> bool { x & 4 == 4 }
+
+fn popcount(n: i64) -> i64 {
+    if n == 0 { 0 } else { (n & 1) + popcount(n >>> 1) }
+}
+
+fn parity(n: i64) -> i64 { popcount(n) & 1 }
+
+// FNV-1a style mixing over the 8 bytes of n
+fn hash(n: i64) -> i64 { mix(0xcbf29ce484222325, n, 0) }
+
+fn mix(h: i64, n: i64, i: i64) -> i64 {
+    if i == 8 { h } else { mix((h ^ ((n >> (i * 8)) & 0xFF)) * 0x100000001b3, n, i + 1) }
+}
+
+fn reduce_xor(xs: [i64]) -> i64 { xs ▷ gather(^) }

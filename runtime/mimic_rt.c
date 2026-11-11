@@ -69,8 +69,14 @@ typedef struct mim_val {
 
 typedef mim_val *(*mim_fn1)(mim_val *);
 
-enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_IDIV, OP_MAX2, OP_MIN2 };
-enum { UOP_NEG, UOP_NOT, UOP_ABS };
+enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_IDIV, OP_MAX2, OP_MIN2,
+       OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR, OP_USHR };
+#define IS_BITOP(op) ((op) >= OP_BAND && (op) <= OP_USHR)
+/* shift amounts use their low 6 bits, as the hardware does */
+#define SHL64(x, y) ((int64_t)((uint64_t)(x) << ((y) & 63)))
+#define SHR64(x, y) ((x) >> ((y) & 63))
+#define USHR64(x, y) ((int64_t)((uint64_t)(x) >> ((y) & 63)))
+enum { UOP_NEG, UOP_NOT, UOP_ABS, UOP_BNOT };
 enum { P_IOTA, P_SHAPE, P_REVERSE, P_SUM, P_PRODUCT, P_MAX, P_MIN, P_LEN, P_PRINT, P_TAKE, P_DROP, P_KEEP, P_EACH, P_RANGE };
 
 void mim_panic(const char *msg);
@@ -682,6 +688,12 @@ static int binop_fast(binop_ctx *c, int64_t lo, int64_t hi) {
         case OP_LT: ARITH_LOOP(int64_t, uint8_t, X < Y); return 1;
         case OP_GT: ARITH_LOOP(int64_t, uint8_t, X > Y); return 1;
         case OP_EQ: ARITH_LOOP(int64_t, uint8_t, X == Y); return 1;
+        case OP_BAND: ARITH_LOOP(int64_t, int64_t, X & Y); return 1;
+        case OP_BOR: ARITH_LOOP(int64_t, int64_t, X | Y); return 1;
+        case OP_BXOR: ARITH_LOOP(int64_t, int64_t, X ^ Y); return 1;
+        case OP_SHL: ARITH_LOOP(int64_t, int64_t, SHL64(X, Y)); return 1;
+        case OP_SHR: ARITH_LOOP(int64_t, int64_t, SHR64(X, Y)); return 1;
+        case OP_USHR: ARITH_LOOP(int64_t, int64_t, USHR64(X, Y)); return 1;
         }
     }
     return 0;
@@ -736,6 +748,12 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
             case OP_IDIV: seti(r, i, floordiv(x, y)); break;
             case OP_MAX2: seti(r, i, x > y ? x : y); break;
             case OP_MIN2: seti(r, i, x < y ? x : y); break;
+            case OP_BAND: seti(r, i, x & y); break;
+            case OP_BOR: seti(r, i, x | y); break;
+            case OP_BXOR: seti(r, i, x ^ y); break;
+            case OP_SHL: seti(r, i, SHL64(x, y)); break;
+            case OP_SHR: seti(r, i, SHR64(x, y)); break;
+            case OP_USHR: seti(r, i, USHR64(x, y)); break;
             }
         }
     }
@@ -769,6 +787,11 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     }
     int floaty = a->dtype == MIM_F64 || b->dtype == MIM_F64;
     int dt = is_cmp(op) ? MIM_BOOL : (op == OP_DIV || floaty) ? MIM_F64 : MIM_I64;
+    if (IS_BITOP(op)) {
+        if (floaty || a->dtype == MIM_CHAR || b->dtype == MIM_CHAR) mim_panic("bitwise operators need integers");
+        /* bool & bool stays bool (non-short-circuit logic on masks) */
+        dt = (a->dtype == MIM_BOOL && b->dtype == MIM_BOOL && op <= OP_BXOR) ? MIM_BOOL : MIM_I64;
+    }
     mim_val *r = alloc(dt, rank, n);
     binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1};
     /* the fast loops index x[i] for vectors and x[0] for scalars */
@@ -782,6 +805,7 @@ static void unop_range(void *vc, int64_t lo, int64_t hi) {
     unop_ctx *c = (unop_ctx *)vc;
     for (int64_t i = lo; i < hi; i++) {
         if (c->op == UOP_NOT) seti(c->r, i, getf(c->a, i) == 0);
+        else if (c->op == UOP_BNOT) seti(c->r, i, c->a->dtype == MIM_BOOL ? !geti(c->a, i) : ~geti(c->a, i));
         else if (c->op == UOP_ABS) {
             if (c->a->dtype == MIM_F64) setf(c->r, i, fabs(getf(c->a, i)));
             else { int64_t x = geti(c->a, i); seti(c->r, i, x < 0 ? -x : x); }
@@ -793,7 +817,9 @@ static void unop_range(void *vc, int64_t lo, int64_t hi) {
 
 mim_val *mim_unop(int32_t op, mim_val *a) {
     need(a, "operator");
-    mim_val *r = alloc(op == UOP_NOT ? MIM_BOOL : (a->dtype == MIM_F64 ? MIM_F64 : MIM_I64), a->rank, a->len);
+    if (op == UOP_BNOT && (a->dtype == MIM_F64 || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
+    int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (a->dtype == MIM_F64 ? MIM_F64 : MIM_I64);
+    mim_val *r = alloc(dt, a->rank, a->len);
     unop_ctx c = {op, a, r};
     parallel_for(a->len, unop_range, &c);
     return r;

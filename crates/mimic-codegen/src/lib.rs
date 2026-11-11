@@ -1970,6 +1970,9 @@ impl<'ctx> Cg<'ctx, '_> {
             let y = self.truth(b)?;
             return Ok(V::B(if op == And { bld.build_and(x, y, "").s()? } else { bld.build_or(x, y, "").s()? }));
         }
+        if op.is_bitwise() {
+            return self.bitwise(op, a, b);
+        }
         let float = matches!(a, V::F(_)) || matches!(b, V::F(_)) || op == Div;
         if float {
             let x = self.to_f64(a)?;
@@ -1996,7 +1999,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 Le => cmp(FloatPredicate::OLE),
                 Gt => cmp(FloatPredicate::OGT),
                 Ge => cmp(FloatPredicate::OGE),
-                And | Or => unreachable!(),
+                And | Or | BitAnd | BitOr | BitXor | Shl | Shr | UShr => unreachable!(),
             };
         }
         let x = self.to_i64(a)?;
@@ -2058,14 +2061,52 @@ impl<'ctx> Cg<'ctx, '_> {
             Le => cmp(IntPredicate::SLE),
             Gt => cmp(IntPredicate::SGT),
             Ge => cmp(IntPredicate::SGE),
-            Div | And | Or => unreachable!(),
+            Div | And | Or | BitAnd | BitOr | BitXor | Shl | Shr | UShr => unreachable!(),
         }
+    }
+
+    /// `& | ^ << >> >>>`. Shift amounts use their low 6 bits (`x << 64` is
+    /// `x << 0`), which is what the hardware does, so a shift is one instruction.
+    fn bitwise(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
+        use BinOp::*;
+        let bld = &self.b;
+        if matches!(a, V::F(_)) || matches!(b, V::F(_)) {
+            return Err(format!("`{}` needs integers, not floats", op.symbol()));
+        }
+        if let (V::B(x), V::B(y)) = (a, b)
+            && matches!(op, BitAnd | BitOr | BitXor)
+        {
+            return Ok(V::B(match op {
+                BitAnd => bld.build_and(x, y, "").s()?,
+                BitOr => bld.build_or(x, y, "").s()?,
+                _ => bld.build_xor(x, y, "").s()?,
+            }));
+        }
+        let x = self.to_i64(a)?;
+        let y = self.to_i64(b)?;
+        let i64t = self.ctx.i64_type();
+        Ok(V::I(match op {
+            BitAnd => bld.build_and(x, y, "").s()?,
+            BitOr => bld.build_or(x, y, "").s()?,
+            BitXor => bld.build_xor(x, y, "").s()?,
+            _ => {
+                let k = bld.build_and(y, i64t.const_int(63, false), "").s()?;
+                match op {
+                    Shl => bld.build_left_shift(x, k, "").s()?,
+                    Shr => bld.build_right_shift(x, k, true, "").s()?,
+                    _ => bld.build_right_shift(x, k, false, "").s()?,
+                }
+            }
+        }))
     }
 
     pub(crate) fn scalar_unary(&self, op: UnOp, a: V<'ctx>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         Ok(match (op, a) {
             (UnOp::Not, _) => V::B(self.b.build_not(self.truth(a)?, "").s()?),
+            (UnOp::BitNot, V::B(x)) => V::B(self.b.build_not(x, "").s()?),
+            (UnOp::BitNot, V::F(_)) => return Err("`~` needs an integer, not a float".into()),
+            (UnOp::BitNot, _) => V::I(self.b.build_not(self.to_i64(a)?, "").s()?),
             (UnOp::Neg, V::F(f)) => V::F(self.b.build_float_neg(f, "").s()?),
             (UnOp::Neg, _) => V::I(self.b.build_int_neg(self.to_i64(a)?, "").s()?),
             (UnOp::Abs, V::F(f)) => {

@@ -47,12 +47,13 @@ enum { NK_INT = 0, NK_BOX = 1, NK_BOOL = 2, NK_CHAR = 3 };
 #define NONE (~(Port)0)
 #define ERA_P MK(T_ERA, 0)
 
-/* OPR aux: op | flip << 8. Ops 0..12 = binary (BinOp), 16/17 = neg/not,
+/* OPR aux: op | flip << 8. Ops 0..21 = binary (BinOp), 24..27 = neg/not/abs/bnot,
  * 32+p = monadic primitive p, 64+p = dyadic primitive p. */
 #define OP_FLIP 0x100
-#define OP_NEG 16
-#define OP_NOT 17
-#define OP_ABS 18
+#define OP_NEG 24
+#define OP_NOT 25
+#define OP_ABS 26
+#define OP_BNOT 27
 #define OP_PRIM1 32
 #define OP_PRIM2 64
 #define OP_INDEX 96
@@ -274,6 +275,20 @@ static Port port_from_owned_val(NetAlloc *al, mim_val *v) {
 /* ==== scalar arithmetic (same semantics as the array kernels) ============ */
 
 static Port scalar_binop(NetAlloc *al, int op, numv a, numv b) {
+    if (IS_BITOP(op)) {
+        if (a.dtype == MIM_F64 || b.dtype == MIM_F64 || a.dtype == MIM_CHAR || b.dtype == MIM_CHAR)
+            mim_panic("bitwise operators need integers");
+        int64_t x = a.i, y = b.i;
+        int both_bool = a.dtype == MIM_BOOL && b.dtype == MIM_BOOL;
+        switch (op) {
+        case OP_BAND: return both_bool ? num_bool(x & y) : num_int(al, x & y);
+        case OP_BOR: return both_bool ? num_bool(x | y) : num_int(al, x | y);
+        case OP_BXOR: return both_bool ? num_bool(x ^ y) : num_int(al, x ^ y);
+        case OP_SHL: return num_int(al, SHL64(x, y));
+        case OP_SHR: return num_int(al, SHR64(x, y));
+        case OP_USHR: return num_int(al, USHR64(x, y));
+        }
+    }
     if (a.dtype == MIM_F64 || b.dtype == MIM_F64 || op == OP_DIV) {
         double x = a.f, y = b.f;
         switch (op) {
@@ -336,9 +351,13 @@ static Port apply2(NetAlloc *al, int op, Port a, Port b) {
 }
 
 static Port apply1(NetAlloc *al, int op, Port a) {
-    if (P_TAG(a) == T_NUM && (op == OP_NEG || op == OP_NOT || op == OP_ABS)) {
+    if (P_TAG(a) == T_NUM && (op == OP_NEG || op == OP_NOT || op == OP_ABS || op == OP_BNOT)) {
         numv v = num_peek(a);
         value_drop(al, a);
+        if (op == OP_BNOT) {
+            if (v.dtype == MIM_F64 || v.dtype == MIM_CHAR) mim_panic("`~` needs an integer");
+            return v.dtype == MIM_BOOL ? num_bool(!v.i) : num_int(al, ~v.i);
+        }
         if (op == OP_NOT) return num_bool(v.f == 0);
         if (op == OP_ABS) return v.dtype == MIM_F64 ? num_f64(al, fabs(v.f)) : num_int(al, v.i < 0 ? -v.i : v.i);
         return v.dtype == MIM_F64 ? num_f64(al, -v.f) : num_int(al, -v.i);
@@ -370,7 +389,7 @@ static Port apply_check(NetAlloc *al, uint32_t aux, Port a) {
 }
 
 static int op_is_unary(int op) {
-    return op == OP_NEG || op == OP_NOT || op == OP_ABS || (op >= OP_PRIM1 && op < OP_PRIM2) || (op >= OP_CHECK && op < OP_CHECK + 16);
+    return op == OP_NEG || op == OP_NOT || op == OP_ABS || op == OP_BNOT || (op >= OP_PRIM1 && op < OP_PRIM2) || (op >= OP_CHECK && op < OP_CHECK + 16);
 }
 
 /* ==== the book (global definitions) ====================================== */

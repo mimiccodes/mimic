@@ -698,8 +698,17 @@ impl Walk<'_, '_> {
             }
             ExprKind::Unary { op, expr } => {
                 let t = self.expr(expr);
+                if *op == UnOp::BitNot
+                    && matches!(t, Ty::F64 | Ty::Char | Ty::Arr(El::F64 | El::Char | El::Str))
+                {
+                    self.err(Diag::new(&C::NO_OPERATOR, "`~` needs an integer (or a bool)", expr.span));
+                    return Ty::Dyn;
+                }
                 let scalar = |s: Ty| match (op, s) {
                     (UnOp::Not, _) => Ty::Bool,
+                    (UnOp::BitNot, Ty::Bool) => Ty::Bool,
+                    (UnOp::BitNot, Ty::Dyn) => Ty::Dyn,
+                    (UnOp::BitNot, _) => Ty::I64,
                     (_, Ty::F64) => Ty::F64,
                     (_, Ty::Dyn) => Ty::Dyn,
                     _ => Ty::I64,
@@ -715,8 +724,29 @@ impl Walk<'_, '_> {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
                 if matches!(a, Ty::Obj(_)) || matches!(b, Ty::Obj(_)) {
-                    self.err(Diag::new(&C::NO_OPERATOR, format!("operator `{op:?}` is not defined for records and variants (use `match`)"), e.span));
+                    self.err(Diag::new(&C::NO_OPERATOR, format!("operator `{}` is not defined for records and variants (use `match`)", op.symbol()), e.span));
                     return Ty::Dyn;
+                }
+                if op.is_bitwise() {
+                    let el = |t: Ty| match t {
+                        Ty::Arr(x) => Ty::of_el(x),
+                        t => t,
+                    };
+                    for (t, side) in [(a, lhs), (b, rhs)] {
+                        let t = el(t);
+                        if matches!(t, Ty::F64 | Ty::Char | Ty::Arr(_)) || (t == Ty::Bool && op.is_shift()) {
+                            let what = match t {
+                                Ty::F64 => "a float",
+                                Ty::Bool => "a bool",
+                                _ => "text",
+                            };
+                            self.err(
+                                Diag::new(&C::NO_OPERATOR, format!("`{}` needs integers, but this is {what}", op.symbol()), side.span)
+                                    .help("bitwise operators work on integers (and `& | ^` also on bools)"),
+                            );
+                            return Ty::Dyn;
+                        }
+                    }
                 }
                 binary_ty(*op, a, b)
             }
@@ -968,6 +998,9 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
     let scalar = |x: Ty, y: Ty| -> Ty {
         match op {
             Eq | Ne | Lt | Le | Gt | Ge | And | Or => Ty::Bool,
+            BitAnd | BitOr | BitXor if x == Ty::Bool && y == Ty::Bool => Ty::Bool,
+            BitAnd | BitOr | BitXor | Shl | Shr | UShr if x == Ty::Dyn || y == Ty::Dyn => Ty::Dyn,
+            BitAnd | BitOr | BitXor | Shl | Shr | UShr => Ty::I64,
             Div => Ty::F64,
             _ if x == Ty::Dyn || y == Ty::Dyn => Ty::Dyn,
             _ if x == Ty::F64 || y == Ty::F64 => Ty::F64,

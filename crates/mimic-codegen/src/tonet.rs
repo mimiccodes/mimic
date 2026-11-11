@@ -575,6 +575,7 @@ impl Gen<'_> {
                     UnOp::Neg => Op::Neg,
                     UnOp::Not => Op::Not,
                     UnOp::Abs => Op::Abs,
+                    UnOp::BitNot => Op::BitNot,
                 };
                 self.op_node(rg, op, a, Tree::Era)
             }

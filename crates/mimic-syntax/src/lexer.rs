@@ -78,6 +78,12 @@ pub enum Tok {
     And,
     Or,
     Not,
+    Amp,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    UShr,
     Eof,
 }
 
@@ -150,6 +156,12 @@ fn tok_text(t: &Tok) -> &'static str {
         Tok::And => "and",
         Tok::Or => "or",
         Tok::Not => "not",
+        Tok::Amp => "&",
+        Tok::Caret => "^",
+        Tok::Tilde => "~",
+        Tok::Shl => "<<",
+        Tok::Shr => ">>",
+        Tok::UShr => ">>>",
         _ => "?",
     }
 }
@@ -327,6 +339,22 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::Ne
             }
+            '<' if next == Some('<') => {
+                self.bump();
+                Tok::Shl
+            }
+            '>' if next == Some('>') => {
+                self.bump();
+                if self.peek() == Some('>') {
+                    self.bump();
+                    Tok::UShr
+                } else {
+                    Tok::Shr
+                }
+            }
+            '&' => Tok::Amp,
+            '^' => Tok::Caret,
+            '~' => Tok::Tilde,
             '<' if next == Some('=') => {
                 self.bump();
                 Tok::Le
@@ -422,6 +450,35 @@ impl<'a> Lexer<'a> {
     }
 
     fn number(&mut self, start: Span, negative: bool) -> Result<Tok, Diag> {
+        // 0xFF, 0b1010, 0o17 (underscores allowed); the full 64-bit pattern is
+        // accepted, so 0xFFFF_FFFF_FFFF_FFFF is -1
+        if self.peek() == Some('0')
+            && let Some(radix) = match self.peek2() {
+                Some('x' | 'X') => Some(16),
+                Some('b' | 'B') => Some(2),
+                Some('o' | 'O') => Some(8),
+                _ => None,
+            }
+        {
+            self.bump();
+            self.bump();
+            let ds = self.pos;
+            while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                self.bump();
+            }
+            let mut span = start;
+            span.end = self.pos;
+            let text: String = self.src[ds..self.pos].chars().filter(|c| *c != '_').collect();
+            let v = u64::from_str_radix(&text, radix).map_err(|_| {
+                let what = match radix {
+                    16 => "hexadecimal",
+                    2 => "binary",
+                    _ => "octal",
+                };
+                Diag::new(&C::BAD_NUMBER, format!("invalid {what} literal (at most 64 bits)"), span)
+            })? as i64;
+            return Ok(Tok::Int(if negative { v.wrapping_neg() } else { v }));
+        }
         let digits_start = self.pos;
         let mut is_float = false;
         while let Some(c) = self.peek() {
@@ -559,6 +616,22 @@ mod tests {
     fn numbers() {
         assert_eq!(toks("¯3 2.5 1_000 1e3"), vec![Tok::Int(-3), Tok::Float(2.5), Tok::Int(1000), Tok::Float(1000.0), Tok::Eof]);
         assert_eq!(toks("2s 500ms 1.5min"), vec![Tok::Int(2_000_000_000), Tok::Int(500_000_000), Tok::Int(90_000_000_000), Tok::Eof]);
+        assert_eq!(toks("0xFF 0b1010 0o17 0xFFFF_FFFF_FFFF_FFFF ¯0x10"), vec![Tok::Int(255), Tok::Int(10), Tok::Int(15), Tok::Int(-1), Tok::Int(-16), Tok::Eof]);
+        assert!(lex("0x1_0000_0000_0000_0000").is_err());
+        assert!(lex("0b102").is_err());
+    }
+
+    #[test]
+    fn bitwise_operators() {
+        assert_eq!(
+            toks("a & b | c ^ ~d << e >> f >>> g"),
+            vec![
+                Tok::Ident("a".into()), Tok::Amp, Tok::Ident("b".into()), Tok::Bar, Tok::Ident("c".into()), Tok::Caret,
+                Tok::Tilde, Tok::Ident("d".into()), Tok::Shl, Tok::Ident("e".into()), Tok::Shr, Tok::Ident("f".into()),
+                Tok::UShr, Tok::Ident("g".into()), Tok::Eof
+            ]
+        );
+        assert_eq!(toks("a <= b >= c"), vec![Tok::Ident("a".into()), Tok::Le, Tok::Ident("b".into()), Tok::Ge, Tok::Ident("c".into()), Tok::Eof]);
     }
 
     #[test]

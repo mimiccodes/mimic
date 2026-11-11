@@ -238,6 +238,54 @@ pub enum BinOp {
     IntDiv = 13,
     Max = 14,
     Min = 15,
+    BitAnd = 16,
+    BitOr = 17,
+    BitXor = 18,
+    Shl = 19,
+    /// arithmetic (sign-propagating) shift right
+    Shr = 20,
+    /// logical (zero-filling) shift right
+    UShr = 21,
+}
+
+impl BinOp {
+    /// How the operator is written in source.
+    pub fn symbol(self) -> &'static str {
+        use BinOp::*;
+        match self {
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            Mod => "%",
+            Eq => "==",
+            Ne => "!=",
+            Lt => "<",
+            Le => "<=",
+            Gt => ">",
+            Ge => ">=",
+            And => "and",
+            Or => "or",
+            IntDiv => "div",
+            Max => "max",
+            Min => "min",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Shl => "<<",
+            Shr => ">>",
+            UShr => ">>>",
+        }
+    }
+
+    /// `& | ^ << >> >>>`: integer-only operators.
+    pub fn is_bitwise(self) -> bool {
+        matches!(self, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr)
+    }
+
+    pub fn is_shift(self) -> bool {
+        matches!(self, BinOp::Shl | BinOp::Shr | BinOp::UShr)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +293,8 @@ pub enum UnOp {
     Neg = 0,
     Not = 1,
     Abs = 2,
+    /// `~x`: bitwise complement
+    BitNot = 3,
 }
 
 #[derive(Clone, Debug)]
