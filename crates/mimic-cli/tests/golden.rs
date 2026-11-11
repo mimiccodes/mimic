@@ -299,3 +299,49 @@ fn mimic_cc() {
     assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2, "static executable");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Every run fixture, compiled to WebAssembly (WASI) and run in Node's WASI
+/// implementation, prints exactly what the native build prints.
+#[test]
+fn wasi_fixtures() {
+    let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
+        eprintln!("skipping: node is not installed");
+        return;
+    };
+    assert!(node.status.success());
+    let dir = std::env::temp_dir().join(format!("mimic-golden-wasi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let runner = dir.join("run.mjs");
+    std::fs::write(
+        &runner,
+        "import { WASI } from 'node:wasi';\nimport { readFileSync } from 'node:fs';\nconst f = process.argv[2];\n\
+         const wasi = new WASI({ version: 'preview1', args: [f], env: {}, returnOnExit: true });\n\
+         const m = await WebAssembly.compile(readFileSync(f));\n\
+         process.exitCode = wasi.start(await WebAssembly.instantiate(m, wasi.getImportObject()));\n",
+    )
+    .unwrap();
+    let mut failures = Vec::new();
+    for f in fixtures("run") {
+        let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+        let out = mimic().arg("build").arg(&f).args(["--target", "wasm32-wasi", "--emit-json"]).output().unwrap();
+        let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(_) => {
+                failures.push(format!("{stem}: build failed\n{}", String::from_utf8_lossy(&out.stderr)));
+                continue;
+            }
+        };
+        let Some(wasm) = v["artifacts"][0]["path"].as_str() else {
+            failures.push(format!("{stem}: {v}"));
+            continue;
+        };
+        let run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
+        let got = String::from_utf8_lossy(&run.stdout);
+        if got != want {
+            failures.push(format!("{stem}\n--- want\n{want}--- got\n{got}--- stderr\n{}", String::from_utf8_lossy(&run.stderr)));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

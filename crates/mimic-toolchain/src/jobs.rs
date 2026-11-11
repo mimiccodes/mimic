@@ -17,6 +17,8 @@ pub fn run(jobs: &[Job], tolerate: bool) -> Result<Vec<PathBuf>, String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let next = AtomicUsize::new(0);
     let failed: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+    // could not run at all: always an error, even when tolerating failures
+    let hard: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     std::thread::scope(|s| {
         for _ in 0..threads {
@@ -24,22 +26,53 @@ pub fn run(jobs: &[Job], tolerate: bool) -> Result<Vec<PathBuf>, String> {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(j) = jobs.get(i) else { break };
-                    if !failed.lock().unwrap().is_empty() && !tolerate {
+                    if !hard.lock().unwrap().is_empty() || (!failed.lock().unwrap().is_empty() && !tolerate) {
                         break;
                     }
                     if let Some(d) = j.out.parent() {
                         let _ = std::fs::create_dir_all(d);
                     }
-                    let out = Command::new(&me).arg("cc").args(&j.args).arg("-c").arg(&j.src).arg("-o").arg(&j.out).output();
-                    match out {
-                        Ok(o) if o.status.success() => {}
-                        Ok(o) => failed.lock().unwrap().push((j.src.clone(), String::from_utf8_lossy(&o.stderr).into_owned())),
-                        Err(e) => failed.lock().unwrap().push((j.src.clone(), e.to_string())),
+                    // a job that could not start or was killed (system load,
+                    // process limits) is retried; it is never "not applicable"
+                    let mut attempt = 0;
+                    loop {
+                        attempt += 1;
+                        let out = Command::new(&me)
+                            .env(crate::RAW_CC_ENV, "1")
+                            .arg("cc")
+                            .args(&j.args)
+                            .arg("-c")
+                            .arg(&j.src)
+                            .arg("-o")
+                            .arg(&j.out)
+                            .output();
+                        let infra = match &out {
+                            Ok(o) if o.status.success() => break,
+                            Ok(o) => o.status.code().is_none(), // killed by a signal
+                            Err(_) => true,                     // could not spawn
+                        };
+                        if infra && attempt < 4 {
+                            std::thread::sleep(std::time::Duration::from_millis(200 * attempt));
+                            continue;
+                        }
+                        let msg = match out {
+                            Ok(o) => String::from_utf8_lossy(&o.stderr).into_owned(),
+                            Err(e) => e.to_string(),
+                        };
+                        if infra {
+                            hard.lock().unwrap().push((j.src.clone(), msg));
+                        } else {
+                            failed.lock().unwrap().push((j.src.clone(), msg));
+                        }
+                        break;
                     }
                 }
             });
         }
     });
+    if let Some((src, err)) = hard.into_inner().unwrap().first() {
+        return Err(format!("could not run the compiler for {} (system busy?): {err}", src.display()));
+    }
     let failed = failed.into_inner().unwrap();
     if !tolerate && let Some((src, err)) = failed.first() {
         return Err(format!("compiling {} failed:\n{err}", src.display()));

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 const LLVM_VERSION: &str = "23.1.4";
+const WASI_SDK: &str = "34";
 
 fn main() {
     println!("cargo:rerun-if-changed=src/shim.cpp");
@@ -112,6 +113,8 @@ fn bundle(deps: &Path, llvm: &Path) {
     let bytes = std::fs::read(&musl).unwrap_or_default();
     std::fs::write(out.join("musl.tar.gz"), bytes).unwrap();
     pack(&src.join("compiler-rt/lib/builtins"), "builtins", &out.join("compiler-rt.tar.gz"));
+    // wasi-libc (wasm32-wasip1), trimmed by tools/deps.sh
+    pack(&deps.join(format!("wasi-sysroot-{WASI_SDK}")), "wasi-sysroot", &out.join("wasi.tar.gz"));
     let major = LLVM_VERSION.split('.').next().unwrap();
     pack(&llvm.join("lib/clang").join(major).join("include"), "include", &out.join("clang-include.tar.gz"));
 }

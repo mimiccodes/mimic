@@ -8,6 +8,7 @@ pub mod bundle;
 pub mod compiler_rt;
 pub mod jobs;
 pub mod musl;
+pub mod wasi;
 
 use std::ffi::{CString, c_char, c_int};
 
@@ -34,6 +35,11 @@ pub const LLVM_MAJOR: &str = env!("MIMIC_LLVM_MAJOR");
 pub fn resource_dir(cache: &std::path::Path) -> Result<std::path::PathBuf, String> {
     bundle::unpack(bundle::CLANG_INCLUDE, &cache.join(format!("clang-{LLVM_MAJOR}")))
 }
+
+/// Set on `mimic cc` processes that mimic starts itself (runtime, libc and
+/// compiler-rt builds, target queries): they run Clang exactly as given and
+/// never prepare a sysroot, which would recurse into building one.
+pub const RAW_CC_ENV: &str = "MIMIC_CC_RAW";
 
 /// True when this binary contains the real tools (not the stubs).
 pub const EMBEDDED: bool = cfg!(mimic_toolchain_embedded);

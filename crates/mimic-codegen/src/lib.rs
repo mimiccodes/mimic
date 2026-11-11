@@ -172,6 +172,11 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         b: ctx.create_builder(),
         p,
         ptr: ctx.ptr_type(AddressSpace::default()),
+        size: match tm.get_target_data().get_pointer_byte_size(None) {
+            2 => ctx.i16_type(),
+            4 => ctx.i32_type(),
+            _ => ctx.i64_type(),
+        },
         specs,
         fns: HashMap::new(),
         thunks: HashMap::new(),
@@ -259,6 +264,8 @@ struct Cg<'ctx, 'p> {
     b: Builder<'ctx>,
     p: &'p Program,
     ptr: PointerType<'ctx>,
+    /// C's `size_t` / `usize`: as wide as a pointer (32 bits on wasm32, …).
+    size: inkwell::types::IntType<'ctx>,
     specs: HashMap<Key, Rc<Spec>>,
     fns: HashMap<(Key, Kind), FunctionValue<'ctx>>,
     thunks: HashMap<(Key, Kind), FunctionValue<'ctx>>,
@@ -1019,7 +1026,10 @@ impl<'ctx> Cg<'ctx, '_> {
     fn emit_main(&mut self, entry: FunctionValue<'ctx>, leak_check: bool) -> R<()> {
         let i32t = self.ctx.i32_type();
         let ty = i32t.fn_type(&[i32t.into(), self.ptr.into()], false);
-        let main = self.module.add_function("main", ty, None);
+        // WebAssembly's C ABI names a `main(argc, argv)` `__main_argc_argv`
+        // (Clang renames it; the WASI start code calls that name)
+        let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+        let main = self.module.add_function(if wasm { "__main_argc_argv" } else { "main" }, ty, None);
         let bb = self.ctx.append_basic_block(main, "entry");
         self.b.position_at_end(bb);
         let argc = main.get_nth_param(0).unwrap();
@@ -1058,6 +1068,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "f64" => self.ctx.f64_type().into(),
                 "bool" => self.ctx.bool_type().into(),
                 "cstr" => self.ptr.into(),
+                "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
             Type::Ptr(..) | Type::Array(..) => self.ptr.into(),

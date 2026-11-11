@@ -509,6 +509,7 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
     let vendors: Vec<String> = llvm_names(Names::Vendors).into_iter().map(|x| x.0).collect();
     // complete executables: the bundled-musl targets, plus macOS with its SDK
     let mut exes: Vec<String> = mimic_toolchain::musl::TARGETS.iter().map(|t| t.to_string()).collect();
+    exes.push("wasm32-wasi".into());
     if cfg!(target_os = "macos") {
         exes.extend(["aarch64-apple-macosx".to_string(), "x86_64-apple-macosx".to_string()]);
     }

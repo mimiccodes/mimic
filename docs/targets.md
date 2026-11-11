@@ -22,6 +22,7 @@ No other compiler, linker or SDK has to be installed for the targets that produc
 mimic cc -O2 hello.c -o hello                          # native
 mimic cc --target=aarch64-linux hello.c -lm -o hello   # static Linux arm64 executable
 mimic cc --target=x86_64-macos hello.c -o hello        # Intel macOS, from Apple silicon
+mimic cc --target=wasm32-wasi hello.c -o hello.wasm    # WebAssembly + WASI
 mimic cc --target=x86_64-windows -ffreestanding -c f.c # objects for any LLVM target
 ```
 
@@ -72,8 +73,8 @@ The 5 GPU architectures (amdgpu, r600, spirv, spirv32, spirv64) take compute ker
 
 | Output | Targets |
 |---|---|
-| **Complete executable** | Native macOS, and macOS cross-builds between arm64 and x86_64, using the SDK on the machine.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
-| **Object file** | Any other target on a CPU architecture: Windows, WASI, glibc Linux, Android, the BSDs, UEFI, bare metal (`riscv32-unknown-elf`), AVR, MSP430, BPF, Hexagon, … |
+| **Complete executable** | Native macOS, and macOS cross-builds between arm64 and x86_64, using the SDK on the machine.<br>`wasm32-wasi` (WASI preview 1): a `.wasm` command module, using wasi-libc from wasi-sdk 34 and compiler-rt. It runs in any WASI runtime (Node, wasmtime, browsers via a shim). All golden tests produce the same output as native builds. It is single-threaded for now; `wasm32-wasip1-threads` comes later.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
+| **Object file** | Any other target on a CPU architecture: Windows, glibc Linux, Android, the BSDs, UEFI, bare metal (`riscv32-unknown-elf`), AVR, MSP430, BPF, Hexagon, … |
 | **Assembly** | Backends that do not write object files: PTX for `nvptx`/`nvptx64`, `.s` for `xcore`. |
 
 These are the 30 Linux musl targets:
@@ -95,7 +96,6 @@ These are the 30 Linux musl targets:
 These will turn object-only targets into complete executables:
 * glibc stubs for linking against any glibc version;
 * mingw-w64 (Windows);
-* wasi-libc (WASI);
 * the BSDs' and Android's libcs;
 * Apple SDK stubs, so that macOS no longer needs the SDK installed.
 
@@ -109,6 +109,6 @@ LLVM's triple parser knows more architectures than this build has backends for, 
 
 ## Building `mimic` itself
 
-`tools/deps.sh` downloads the LLVM 23.1.4 sources and musl 1.2.5, checks their sha256 against the published values, and builds static LLD into `~/.mimic/deps`. The Rust build then compiles the Clang driver from those sources and links everything statically.
+`tools/deps.sh` downloads the LLVM 23.1.4 sources, musl 1.2.5 and the wasi-sdk 34 sysroot (trimmed to its wasm32-wasip1 C library, 8.9 MB), checks their sha256 against the published values, and builds static LLD into `~/.mimic/deps`. The Rust build then compiles the Clang driver from those sources and links everything statically.
 
 If those inputs are missing, `mimic` still builds without the embedded tools. In that case native builds use the system C compiler, and cross targets produce object files only.

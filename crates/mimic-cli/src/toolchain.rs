@@ -23,6 +23,8 @@ pub enum Sysroot {
     Darwin { sdk: PathBuf, min_os: String, sdk_version: String },
     /// Linux with musl, built from the bundled sources: fully static executables.
     Musl { triple: String, root: PathBuf, compiler_rt: PathBuf },
+    /// WebAssembly with WASI (preview 1): wasi-libc, a `.wasm` command module.
+    Wasi { root: PathBuf, compiler_rt: PathBuf },
 }
 
 pub fn select(target: &Target) -> Result<Toolchain, String> {
@@ -63,6 +65,9 @@ pub fn support(target: &Target) -> Support {
     }
     if target.os == "macosx" && cfg!(target_os = "macos") {
         return Support::Sdk;
+    }
+    if is_wasi(target) {
+        return Support::Bundled;
     }
     let os = if target.os.is_empty() { "unknown" } else { target.os.as_str() };
     let what = match (os, target.env.as_str()) {
@@ -107,7 +112,17 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
         let compiler_rt = mimic_toolchain::compiler_rt::ensure(&cache, triple, &flags)?;
         return Ok(Some(Sysroot::Musl { triple: triple.clone(), root: musl.root, compiler_rt }));
     }
+    if is_wasi(target) {
+        let cache = libc_cache();
+        let w = mimic_toolchain::wasi::ensure(&cache, &mimic_toolchain::resource_dir(&cache)?)?;
+        return Ok(Some(Sysroot::Wasi { root: w.root, compiler_rt: w.compiler_rt }));
+    }
     Ok(None)
+}
+
+/// WASI preview 1 on wasm32: what wasi-libc covers.
+fn is_wasi(target: &Target) -> bool {
+    target.arch == "wasm32" && matches!(target.os.as_str(), "wasi" | "wasip1")
 }
 
 /// Where target libraries (libc, compiler-rt, headers) are built and kept.
@@ -146,9 +161,9 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
     match tc {
         Toolchain::Embedded(sys) => {
             let mut c = Command::new(self_exe());
-            c.arg("cc").arg("-resource-dir").arg(resource_dir());
+            c.env(mimic_toolchain::RAW_CC_ENV, "1").arg("cc").arg("-resource-dir").arg(resource_dir());
             if let Some(t) = &target.llvm
-                && !matches!(sys, Sysroot::Musl { .. })
+                && !matches!(sys, Sysroot::Musl { .. } | Sysroot::Wasi { .. })
             {
                 c.arg(format!("--target={t}"));
             }
@@ -158,6 +173,9 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
                 }
                 Sysroot::Musl { triple, root, .. } => {
                     c.args(mimic_toolchain::musl::target_flags(triple)).arg(format!("--sysroot={}", root.display()));
+                }
+                Sysroot::Wasi { root, .. } => {
+                    c.args(mimic_toolchain::wasi::cflags(root));
                 }
             }
             c
@@ -219,6 +237,21 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             }
             c.arg(lib.join("libc.a")).arg(compiler_rt).arg("--end-group");
             c.arg(lib.join("crtn.o"));
+            c
+        }
+        Toolchain::Embedded(Sysroot::Wasi { root, compiler_rt }) => {
+            let lib = root.join("lib").join(mimic_toolchain::wasi::CLANG_TRIPLE);
+            let mut c = Command::new(self_exe());
+            c.arg("wasm-ld").args(["-m", "wasm32"]).arg("--gc-sections").arg("-o").arg(job.output);
+            c.arg(lib.join("crt1-command.o")).args(job.objects);
+            c.arg(format!("-L{}", lib.display()));
+            for s in &job.search {
+                c.arg(format!("-L{}", s.display()));
+            }
+            for l in &job.libs {
+                c.arg(format!("-l{l}"));
+            }
+            c.arg("-lc").arg(compiler_rt);
             c
         }
         Toolchain::System => {
@@ -285,6 +318,7 @@ pub fn clang_defaults(triple: &str) -> Option<(String, String, Option<String>)> 
         Ok(t) => t,
         Err(_) => {
             let out = Command::new(self_exe())
+                .env(mimic_toolchain::RAW_CC_ENV, "1")
                 .args(["cc", &format!("--target={triple}"), "-###", "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
                 .output()
                 .ok()?;

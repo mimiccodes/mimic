@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 pub static MUSL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/musl.tar.gz"));
 /// compiler-rt's builtins (`builtins/…`): integer, float and atomic helpers.
 pub static COMPILER_RT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compiler-rt.tar.gz"));
+/// wasi-libc from wasi-sdk 34 (`wasi-sysroot/{include,lib}/wasm32-wasip1…`).
+pub static WASI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wasi.tar.gz"));
 /// Clang's resource headers (`include/…`): stddef.h, stdarg.h, intrinsics.
 pub static CLANG_INCLUDE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clang-include.tar.gz"));
 

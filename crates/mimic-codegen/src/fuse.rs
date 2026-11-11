@@ -450,8 +450,11 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn call_malloc(&self, bytes: IntValue<'ctx>) -> R<PointerValue<'ctx>> {
         let f = self.module.get_function("malloc").unwrap_or_else(|| {
-            self.module.add_function("malloc", self.ptr.fn_type(&[self.ctx.i64_type().into()], false), Some(Linkage::External))
+            self.module.add_function("malloc", self.ptr.fn_type(&[self.size.into()], false), Some(Linkage::External))
         });
+        // the byte count is computed in 64 bits; size_t may be narrower (wasm32)
+        let bytes =
+            if self.size.get_bit_width() < 64 { self.b.build_int_truncate(bytes, self.size, "").s()? } else { bytes };
         Ok(self.b.build_call(f, &[bytes.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
     }
 

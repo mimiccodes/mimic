@@ -16,6 +16,8 @@ SRC=$DEPS/llvm-project-$LLVM_VERSION.src
 TARBALL=$DEPS/llvm-project-$LLVM_VERSION.src.tar.xz
 URL=https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/llvm-project-$LLVM_VERSION.src.tar.xz
 LLVM_SHA256=819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2
+WASI_SDK=34
+WASI_SHA256=9d813544eeebe38b7b8f2244ed591de46b6db812c6dd1a257ff9f0d2a905a2be
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
@@ -71,3 +73,28 @@ echo "lld: $LLD_OUT"
 # ---- musl (C library for the *-linux-musl* targets) ----------------------------
 fetch "https://musl.libc.org/releases/musl-$MUSL_VERSION.tar.gz" "$DEPS/musl-$MUSL_VERSION.tar.gz" "$MUSL_SHA256"
 echo "musl: $DEPS/musl-$MUSL_VERSION.tar.gz"
+
+# ---- wasi-libc (the C library of the wasm32-wasi targets), from wasi-sdk ------
+# The sysroot is WebAssembly bytecode, the same on every host; only the
+# wasm32-wasip1 (and -threads) parts are kept and bundled.
+WASI_TGZ=$DEPS/wasi-sysroot-$WASI_SDK.0.tar.gz
+fetch "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK/wasi-sysroot-$WASI_SDK.0.tar.gz" "$WASI_TGZ" "$WASI_SHA256"
+WASI_OUT=$DEPS/wasi-sysroot-$WASI_SDK
+if [ ! -d "$WASI_OUT/lib/wasm32-wasip1" ]; then
+    rm -rf "$WASI_OUT" "$DEPS/wasi-extract"
+    mkdir -p "$DEPS/wasi-extract"
+    tar -xzf "$WASI_TGZ" -C "$DEPS/wasi-extract"
+    top=$(ls "$DEPS/wasi-extract")
+    mkdir -p "$WASI_OUT/include" "$WASI_OUT/lib"
+    for t in wasm32-wasip1 wasm32-wasip1-threads; do
+        cp -R "$DEPS/wasi-extract/$top/include/$t" "$WASI_OUT/include/$t"
+        cp -R "$DEPS/wasi-extract/$top/lib/$t" "$WASI_OUT/lib/$t"
+    done
+    # C++ headers and libraries stay for later (libc++)
+    rm -rf "$WASI_OUT"/include/*/c++ "$WASI_OUT"/include/*/eh "$WASI_OUT"/include/*/noeh \
+        "$WASI_OUT"/lib/*/libc++* "$WASI_OUT"/lib/*/eh "$WASI_OUT"/lib/*/noeh "$WASI_OUT"/lib/*/llvm-lto
+    # static linking only
+    rm -f "$WASI_OUT"/lib/*/*.so
+    rm -rf "$DEPS/wasi-extract"
+fi
+echo "wasi: $WASI_OUT"

@@ -14,11 +14,23 @@ use std::path::{Path, PathBuf};
 /// everything after the subcommand.
 pub fn main(cxx: bool, rest: &[String]) -> i32 {
     let mut args = vec![if cxx { "clang++".to_string() } else { "clang".to_string() }];
-    // `mimic cc -cc1 …` is Clang re-running itself: pass it straight through
-    if rest.first().is_some_and(|a| a.starts_with("-cc1")) {
+    // `mimic cc -cc1 …` is Clang re-running itself, and mimic's own compile
+    // jobs say exactly what they want: pass both straight through
+    let raw = std::env::var_os(mimic_toolchain::RAW_CC_ENV).is_some();
+    if raw || rest.first().is_some_and(|a| a.starts_with("-cc1")) {
         args.extend(rest.iter().cloned());
         return mimic_toolchain::clang_main(&args);
     }
+    // guard (driver mode only): preparing a sysroot runs `mimic cc` again (raw); if anything ever
+    // re-enters this path, stop instead of multiplying processes
+    let depth: u32 = std::env::var("MIMIC_CC_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(0);
+    if depth >= 2 {
+        eprintln!("error: mimic cc re-entered itself while preparing a target (internal error)");
+        return 1;
+    }
+    // SAFETY: single-threaded at this point (before any tool runs)
+    unsafe { std::env::set_var("MIMIC_CC_DEPTH", (depth + 1).to_string()) };
+
     let mut user: Vec<String> = rest.to_vec();
     let mut pre: Vec<String> = Vec::new();
     let mut post: Vec<String> = Vec::new();
@@ -36,7 +48,10 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
         // normalised: `aarch64-linux` means musl, like `mimic build`
         match at {
             TargetAt::Joined(i) => user[i] = format!("--target={triple}"),
-            TargetAt::Split(i) => user[i + 1] = triple.clone(),
+            TargetAt::Split(i) => {
+                user[i] = format!("--target={triple}");
+                user.remove(i + 1);
+            }
         }
         flavour_target = Some(triple.clone());
         match toolchain::select(&t) {
@@ -54,6 +69,18 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
                     post.push(path(&compiler_rt));
                     post.push("-Wl,--end-group".into());
                     post.push(path(&lib.join("crtn.o")));
+                }
+            }
+            Ok(Toolchain::Embedded(Sysroot::Wasi { root, compiler_rt })) => {
+                // clang's WASI driver finds crt1, -lc and the headers under the sysroot
+                if let Some(i) = at_index(&user) {
+                    user[i] = format!("--target={}", mimic_toolchain::wasi::CLANG_TRIPLE);
+                }
+                pre.push(format!("--sysroot={}", root.display()));
+                if links(&user) {
+                    post.push(path(&compiler_rt));
+                    pre.push("-nodefaultlibs".into());
+                    post.push("-lc".into());
                 }
             }
             Ok(Toolchain::Embedded(Sysroot::Darwin { sdk, .. })) => {
@@ -79,12 +106,22 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
         && !user.iter().any(|a| a.starts_with("-fuse-ld") || a.starts_with("--ld-path"))
         && let Some(ld) = tool_link(lld_flavour(flavour_target.as_deref()))
     {
-        args.push(format!("--ld-path={}", ld.display()));
+        if ld.ends_with("wasm-ld") {
+            // Clang's WebAssembly driver looks `wasm-ld` up by name
+            args.push(format!("-B{}", ld.parent().unwrap().display()));
+        } else {
+            args.push(format!("--ld-path={}", ld.display()));
+        }
     }
     args.extend(pre);
     args.extend(user);
     args.extend(post);
     mimic_toolchain::clang_main(&args)
+}
+
+/// Where `--target` is, after normalisation (always the joined form).
+fn at_index(args: &[String]) -> Option<usize> {
+    args.iter().position(|a| a.starts_with("--target="))
 }
 
 enum TargetAt {
