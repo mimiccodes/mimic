@@ -151,6 +151,16 @@ fn main() {
 
 **Why only in `trusted` imports:** the generated Mimic function hides the `unsafe` C call. In an untrusted import, these functions are not generated.
 
+**ABI conformance.** `tests/abi` passes struct shapes whose rules differ between platforms. It covers:
+* a 1-byte struct;
+* float and double HFAs, which go in vector registers on arm64;
+* int+double, which x86-64 classifies separately;
+* a 64-byte struct, which goes in memory;
+* padded and nested structs;
+* ten struct arguments, which spill to the stack.
+
+The test checks every value on native arm64, Mac Catalyst, x86-64 (under Rosetta) and WebAssembly, and links the program for six Linux ABIs.
+
 ### Example: SQLite with no binding code
 
 ```mimic
@@ -236,4 +246,4 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 * **B4: callbacks.** A Mimic function is passed as a C function pointer through a generated trampoline, including closures with a context pointer.
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
 * **B6 (rest):** receiving arrays from C (`ptr[T]` with a length), shared libraries (`.so`/`.dylib`/`.dll`).
-* **B8: ABI conformance tests** on every stable target.
+* **B8 (rest):** run the ABI suite on Linux and Windows machines (CI), and add unions.

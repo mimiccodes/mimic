@@ -1,0 +1,17 @@
+module main
+
+trusted extern "C" include "abi.h"
+
+fn main() {
+    print(tiny_echo(Tiny { c: 64 }))
+    print(pair_swap(PairF { a: 1.5, b: 2.5 }))
+    print(quad_sum(QuadD { a: 1.0, b: 2.0, c: 3.0, d: 4.0 }))
+    print(quad_scale(QuadD { a: 1.0, b: 2.0, c: 3.0, d: 4.0 }, 0.5))
+    print(mixed_bump(Mixed { i: 41, d: 1.0 }))
+    print(big_sum(big_make(100)))
+    print(odd_echo(Odd { a: 1, b: 300, c: 5, d: 70000 }))
+    print(nest_make(0.25, 0.75, 9, 1e10))
+    let p = PairF { a: 1.0, b: 2.0 }
+    let m = Mixed { i: 10, d: 0.5 }
+    print(many(p, p, p, p, p, m, m, m, 100.0, 1000))
+}

@@ -573,3 +573,63 @@ fn export_to_c() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "5.0 499500 10\nhello, C\n");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// C ABI conformance: struct shapes whose passing rules differ by platform
+/// (1-byte, float/double HFAs, int+float, 64-byte, padded, nested, stack
+/// spill) round-trip exactly on every stable target.
+#[test]
+fn abi_conformance() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/abi");
+    let want = std::fs::read_to_string(src.join("expected.out")).unwrap();
+    let dir = std::env::temp_dir().join(format!("mimic-golden-abi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "abi"]).status().unwrap().success());
+    let proj = dir.join("abi");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    for f in ["abi.h", "abi.c"] {
+        std::fs::copy(src.join(f), proj.join("c").join(f)).unwrap();
+    }
+    std::fs::copy(src.join("main.mim"), proj.join("src/main.mim")).unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/abi.c\"]\n    include = [\"c\"]")).unwrap();
+
+    let build = |t: Option<&str>| -> String {
+        let mut c = mimic();
+        c.current_dir(&proj).args(["build", "--emit-json"]);
+        if let Some(t) = t {
+            c.args(["--target", t]);
+        }
+        let out = c.output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{t:?}: {}", String::from_utf8_lossy(&out.stderr)));
+        v["artifacts"][0]["path"].as_str().unwrap_or_else(|| panic!("{t:?}: {v}")).to_string()
+    };
+    let check = |name: &str, out: std::process::Output| {
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    // native
+    check("native", std::process::Command::new(build(None)).output().unwrap());
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        check("catalyst", std::process::Command::new(build(Some("aarch64-ios-macabi"))).output().unwrap());
+        if std::process::Command::new("arch").args(["-x86_64", "/usr/bin/true"]).status().is_ok_and(|s| s.success()) {
+            check("x86_64 (Rosetta)", std::process::Command::new("arch").arg("-x86_64").arg(build(Some("x86_64-macos"))).output().unwrap());
+        }
+    }
+    // WebAssembly, when node is available
+    if std::process::Command::new("node").arg("--version").output().is_ok() {
+        let wasm = build(Some("wasm32-wasi"));
+        let runner = dir.join("run.mjs");
+        std::fs::write(
+            &runner,
+            "import { WASI } from 'node:wasi';\nimport { readFileSync } from 'node:fs';\nconst wasi = new WASI({ version: 'preview1', args: [process.argv[2]], env: {}, returnOnExit: true });\n\
+             const m = await WebAssembly.compile(readFileSync(process.argv[2]));\nprocess.exitCode = wasi.start(await WebAssembly.instantiate(m, wasi.getImportObject()));\n",
+        )
+        .unwrap();
+        check("wasm32-wasi", std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap());
+    }
+    // links for the other ABIs
+    for t in ["aarch64-linux", "x86_64-linux", "riscv64-linux", "arm-linux", "x86-linux", "powerpc64le-linux"] {
+        build(Some(t));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
