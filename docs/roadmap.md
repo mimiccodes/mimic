@@ -47,6 +47,7 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | A1, A2, A5 | Embedded LLD and Clang (`mimic cc`, `mimic ld.lld`), in-process archive writer; native macOS builds | ✅ |
 | A3 (musl), A4, A6 | 30 musl Linux targets self-contained (bundled musl 1.2.5 and compiler-rt, built on first use); targets are LLVM triples, and every one of the 39 CPU architectures with an LLVM backend compiles Mimic programs (objects, or PTX/assembly); GPU architectures wait for the GPU backend (F8); `mimic targets` lists LLVM's architectures, OSes, environments and backends; Mimic code uses Clang's CPU/ABI per target | ✅ |
 | A3 (WASI) | `wasm32-wasi`: bundled wasi-libc, `wasm-ld`; all golden tests pass in Node's WASI; `mimic cc` fills in the C library for every bundled target | ✅ |
+| A3 (Apple) | Every Apple platform with an installed SDK: macOS, Mac Catalyst, iOS, tvOS, watchOS, visionOS, devices and simulators; ad-hoc signed. Catalyst runs every golden test here; an iOS-simulator build ran in the simulator | ✅ |
 | A (rest) | More C libraries for complete executables (glibc stubs, mingw-w64, BSD, Android, Apple SDK stubs); `--cpu`; our own static LLVM build with every backend enabled, including the experimental ones (no Homebrew z3/zstd); one static `mimic` binary | |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |

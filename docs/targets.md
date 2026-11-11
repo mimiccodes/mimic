@@ -37,6 +37,7 @@ mimic build --target x86_64-linux-musl           # static Linux executable
 mimic build --target aarch64-linux               # environment defaults to musl on Linux
 mimic build --target riscv64-unknown-linux-musl  # full triple
 mimic build --target x86_64-apple-macosx13.0     # minimum macOS 13.0
+mimic build --target aarch64-ios-simulator       # iPhone simulator (Xcode's SDK)
 mimic build --target nvptx64-nvidia-cuda         # GPU: writes PTX
 mimic build --target avr-unknown-unknown         # microcontroller: object file
 
@@ -54,7 +55,7 @@ mimic targets --json                # everything, for tools
 | Linux, no environment given | `musl`, producing fully static executables. 32-bit ARM, MIPS and PowerPC use `musleabihf`; MIPS64 uses `muslabi64`. |
 | Windows, no environment given | `gnu` (MinGW). |
 | 32-bit ARM and Thumb | ARMv7-A is the baseline CPU. |
-| Apple OSes without a version | macOS 11.0, iOS and tvOS 14.0, watchOS 7.0, visionOS 1.0. |
+| Apple OSes without a version | macOS 11.0, iOS and tvOS 14.0, watchOS 7.0, visionOS 1.0. Add `-simulator` for a simulator build, `-macabi` for Mac Catalyst. |
 | glibc version | Written after the environment, e.g. `x86_64-linux-gnu.2.17`. |
 
 ### CPU and ABI
@@ -73,7 +74,7 @@ The 5 GPU architectures (amdgpu, r600, spirv, spirv32, spirv64) take compute ker
 
 | Output | Targets |
 |---|---|
-| **Complete executable** | Native macOS, and macOS cross-builds between arm64 and x86_64, using the SDK on the machine.<br>`wasm32-wasi` (WASI preview 1): a `.wasm` command module, using wasi-libc from wasi-sdk 34 and compiler-rt. It runs in any WASI runtime (Node, wasmtime, browsers via a shim). All golden tests produce the same output as native builds. It is single-threaded for now; `wasm32-wasip1-threads` comes later.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
+| **Complete executable** | Every Apple platform whose SDK is installed with Xcode: macOS (arm64, x86_64), Mac Catalyst, iOS (device and simulator), tvOS, watchOS (including `arm64_32`), visionOS, each with and without the simulator. Binaries are ad-hoc signed. Checks so far: Mac Catalyst builds run here with every golden test matching, and an iOS-simulator build ran in the iPhone simulator; the other platforms are checked for the right platform tag in the binary.<br>`wasm32-wasi` (WASI preview 1): a `.wasm` command module, using wasi-libc from wasi-sdk 34 and compiler-rt. It runs in any WASI runtime (Node, wasmtime, browsers via a shim). All golden tests produce the same output as native builds. It is single-threaded for now; `wasm32-wasip1-threads` comes later.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
 | **Object file** | Any other target on a CPU architecture: Windows, glibc Linux, Android, the BSDs, UEFI, bare metal (`riscv32-unknown-elf`), AVR, MSP430, BPF, Hexagon, … |
 | **Assembly** | Backends that do not write object files: PTX for `nvptx`/`nvptx64`, `.s` for `xcore`. |
 

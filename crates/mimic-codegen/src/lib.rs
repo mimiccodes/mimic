@@ -411,6 +411,8 @@ fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
 
 /// Native recursion is bounded: deeper calls go to the heap-allocated net.
 const NATIVE_LIMIT: u64 = 2048;
+/// On WebAssembly (one ~1 MB engine stack); must match runtime/mimic_net.c.
+const NATIVE_LIMIT_WASM: u64 = 256;
 
 /// Runtime type codes (`TY_*` in mimic_rt.c) for checked unboxing.
 fn type_code(t: Ty) -> i32 {
@@ -792,7 +794,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Native => {
                 // Bounded native recursion: past the limit, hand the call to the net.
                 let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
-                let limit = self.ctx.i32_type().const_int(NATIVE_LIMIT, false);
+                let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+                let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
                 let is_deep = self.b.build_int_compare(IntPredicate::UGT, depth, limit, "deep").s()?;
                 let deep_bb = self.ctx.append_basic_block(fv, "deep");
                 let body_bb = self.ctx.append_basic_block(fv, "body");

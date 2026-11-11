@@ -336,12 +336,58 @@ fn wasi_fixtures() {
             continue;
         };
         let run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        let status = run.status;
         let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
         let got = String::from_utf8_lossy(&run.stdout);
         if got != want {
-            failures.push(format!("{stem}\n--- want\n{want}--- got\n{got}--- stderr\n{}", String::from_utf8_lossy(&run.stderr)));
+            failures.push(format!(
+                "{stem} ({status}, {wasm})\n--- want\n{want}--- got\n{got}--- stderr\n{}",
+                String::from_utf8_lossy(&run.stderr)
+            ));
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+    if !failures.is_empty() {
+        let _ = std::fs::write(std::env::temp_dir().join("mimic-wasi-failures.log"), failures.join("\n"));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Apple platforms with an installed SDK: every variant links, with the right
+/// platform in the binary; Mac Catalyst builds run here and must match.
+#[test]
+fn apple_platforms() {
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return;
+    }
+    let f = fixtures("run").into_iter().find(|p| p.ends_with("basics.mim")).unwrap();
+    for t in ["aarch64-ios-simulator", "aarch64-ios", "aarch64-tvos", "arm64_32-watchos", "aarch64-xros-simulator", "aarch64-ios-macabi"] {
+        let probe = std::process::Command::new("xcrun").args(["--sdk", sdk_of(t), "--show-sdk-path"]).output();
+        if !probe.is_ok_and(|o| o.status.success()) {
+            eprintln!("skipping {t}: SDK not installed");
+            continue;
+        }
+        let out = mimic().arg("build").arg(&f).args(["--target", t, "--emit-json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{t}: {}", String::from_utf8_lossy(&out.stderr)));
+        assert_eq!(v["artifacts"][0]["kind"], "executable", "{t}: {v}");
+        let exe = v["artifacts"][0]["path"].as_str().unwrap().to_string();
+        let bytes = std::fs::read(&exe).unwrap();
+        assert!(bytes[..4] == [0xcf, 0xfa, 0xed, 0xfe] || bytes[..4] == [0xce, 0xfa, 0xed, 0xfe], "{t}: Mach-O");
+        if t.ends_with("macabi") {
+            let run = std::process::Command::new(&exe).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&run.stdout), std::fs::read_to_string(f.with_extension("out")).unwrap(), "{t}");
+        }
+    }
+}
+
+fn sdk_of(t: &str) -> &'static str {
+    match t {
+        t if t.ends_with("macabi") => "macosx",
+        t if t.contains("ios-simulator") => "iphonesimulator",
+        t if t.contains("ios") => "iphoneos",
+        t if t.contains("tvos") => "appletvos",
+        t if t.contains("watchos") => "watchos",
+        t if t.contains("xros-simulator") => "xrsimulator",
+        _ => "xros",
+    }
 }

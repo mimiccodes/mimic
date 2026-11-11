@@ -427,7 +427,13 @@ typedef mim_val *(*nat6)(mim_val *, mim_val *, mim_val *, mim_val *, mim_val *, 
 static void *const *g_native = NULL;
 static const uint8_t *g_native_arity = NULL;
 
+/* WebAssembly engines give wasm one ~1 MB native stack (V8): hand deep
+ * recursion to the heap-based reducer much sooner there. Must match codegen. */
+#ifdef __wasm__
+#define NATIVE_LIMIT 256
+#else
 #define NATIVE_LIMIT 2048
+#endif
 static _Thread_local int32_t t_native_depth = 0;
 
 /* Compiled native code tracks its recursion depth in a hidden argument and

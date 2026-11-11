@@ -510,8 +510,17 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
     // complete executables: the bundled-musl targets, plus macOS with its SDK
     let mut exes: Vec<String> = mimic_toolchain::musl::TARGETS.iter().map(|t| t.to_string()).collect();
     exes.push("wasm32-wasi".into());
-    if cfg!(target_os = "macos") {
-        exes.extend(["aarch64-apple-macosx".to_string(), "x86_64-apple-macosx".to_string()]);
+    // Apple platforms whose SDK is installed (Xcode)
+    for t in [
+        "aarch64-macos", "x86_64-macos", "aarch64-ios-macabi", "aarch64-ios", "aarch64-ios-simulator",
+        "x86_64-ios-simulator", "aarch64-tvos", "aarch64-tvos-simulator", "arm64_32-watchos",
+        "aarch64-watchos-simulator", "aarch64-xros", "aarch64-xros-simulator",
+    ] {
+        if let Ok(tg) = Target::parse(t)
+            && matches!(toolchain::support(&tg), Support::Sdk)
+        {
+            exes.push(t.to_string());
+        }
     }
     if json {
         let v = json!({

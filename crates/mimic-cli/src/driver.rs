@@ -217,10 +217,12 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<
     // each runtime version gets its own directory: mimic_rt.c #includes mimic_net.c
     let src_dir = dir.join(format!("src-{key:016x}"));
     fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
+    // written atomically: other mimic processes may compile from here at the
+    // same time (the header lives beside the sources, one copy per version)
     let src = src_dir.join("mimic_rt.c");
-    fs::write(&src, RUNTIME_C).map_err(|e| e.to_string())?;
-    fs::write(src_dir.join("mimic_net.c"), RUNTIME_NET_C).map_err(|e| e.to_string())?;
-    fs::write(dir.join("mimic_rt.h"), RUNTIME_H).map_err(|e| e.to_string())?;
+    mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);
     c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);

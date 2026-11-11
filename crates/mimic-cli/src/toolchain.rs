@@ -19,8 +19,9 @@ pub enum Toolchain {
 
 /// What the embedded tools need to know about a target's libc.
 pub enum Sysroot {
-    /// macOS: an SDK (headers and libSystem stubs).
-    Darwin { sdk: PathBuf, min_os: String, sdk_version: String },
+    /// Apple platforms: an SDK (headers and libSystem stubs) from Xcode.
+    /// `platform` is ld64's name for it (`macos`, `ios-simulator`, …).
+    Darwin { sdk: PathBuf, min_os: String, sdk_version: String, platform: &'static str },
     /// Linux with musl, built from the bundled sources: fully static executables.
     Musl { triple: String, root: PathBuf, compiler_rt: PathBuf },
     /// WebAssembly with WASI (preview 1): wasi-libc, a `.wasm` command module.
@@ -63,7 +64,10 @@ pub fn support(target: &Target) -> Support {
             Support::NotYet(format!("musl has no port for {}", target.arch))
         };
     }
-    if target.os == "macosx" && cfg!(target_os = "macos") {
+    if let Some((sdk, _)) = apple_platform(target)
+        && cfg!(target_os = "macos")
+        && xcode_sdk(sdk).is_some()
+    {
         return Support::Sdk;
     }
     if is_wasi(target) {
@@ -76,7 +80,7 @@ pub fn support(target: &Target) -> Support {
         ("windows", _) => "mingw-w64 is not bundled yet",
         ("wasi", _) => "wasi-libc is not bundled yet",
         ("freebsd" | "netbsd" | "openbsd" | "dragonfly", _) => "BSD libc stubs are not bundled yet",
-        ("macosx" | "ios" | "tvos" | "watchos" | "xros" | "driverkit", _) => "Apple SDK stubs are not bundled yet",
+        ("macosx" | "ios" | "tvos" | "watchos" | "xros" | "driverkit", _) => "the Apple SDK for it is not installed (Xcode), and SDK stubs are not bundled yet",
         ("cuda" | "amdhsa" | "amdpal" | "mesa3d" | "nvcl" | "vulkan" | "opencl" | "shadermodel", _) => {
             "a GPU target: mimic produces device code, to be loaded by a host program"
         }
@@ -87,16 +91,22 @@ pub fn support(target: &Target) -> Support {
 }
 
 fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
-    if target.os == "macosx" && cfg!(target_os = "macos") {
-        let Some(sdk) = macos_sdk() else { return Ok(None) };
-        let sdk_version = tool_output("xcrun", &["--sdk", "macosx", "--show-sdk-version"]).unwrap_or_else(|| "11.0".into());
+    if let Some((sdk_name, platform)) = apple_platform(target)
+        && cfg!(target_os = "macos")
+    {
+        let Some(sdk) = xcode_sdk(sdk_name) else { return Ok(None) };
+        let sdk_version = tool_output("xcrun", &["--sdk", sdk_name, "--show-sdk-version"]).unwrap_or_else(|| "11.0".into());
         // native builds target this machine's OS; cross builds the triple's minimum
         let min_os = match &target.llvm {
-            Some(t) => t.split('-').nth(2).map(|os| os.trim_start_matches("macosx").to_string()).filter(|v| !v.is_empty()),
+            Some(t) => t
+                .split('-')
+                .nth(2)
+                .map(|os| os.trim_start_matches(|c: char| c.is_ascii_alphabetic()).to_string())
+                .filter(|v| !v.is_empty()),
             None => tool_output("sw_vers", &["-productVersion"]),
         }
         .unwrap_or_else(|| "11.0".into());
-        return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version }));
+        return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version, platform }));
     }
     if let Some(triple) = &target.llvm
         && target.os == "linux"
@@ -135,12 +145,33 @@ fn tool_output(cmd: &str, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// The macOS SDK: `$SDKROOT`, else what `xcrun` reports.
-fn macos_sdk() -> Option<PathBuf> {
-    if let Some(s) = std::env::var_os("SDKROOT").map(PathBuf::from).filter(|p| p.is_dir()) {
+/// (Xcode SDK name, ld64 platform name) of an Apple target.
+fn apple_platform(target: &Target) -> Option<(&'static str, &'static str)> {
+    let sim = target.env == "simulator";
+    Some(match target.os.as_str() {
+        "macosx" | "darwin" => ("macosx", "macos"),
+        "ios" if target.env == "macabi" => ("macosx", "mac-catalyst"),
+        "ios" if sim => ("iphonesimulator", "ios-simulator"),
+        "ios" => ("iphoneos", "ios"),
+        "tvos" if sim => ("appletvsimulator", "tvos-simulator"),
+        "tvos" => ("appletvos", "tvos"),
+        "watchos" if sim => ("watchsimulator", "watchos-simulator"),
+        "watchos" => ("watchos", "watchos"),
+        "xros" if sim => ("xrsimulator", "xros-simulator"),
+        "xros" => ("xros", "xros"),
+        "driverkit" => ("driverkit", "driverkit"),
+        _ => return None,
+    })
+}
+
+/// An Xcode SDK: `$SDKROOT` for macOS, else what `xcrun` reports.
+fn xcode_sdk(name: &str) -> Option<PathBuf> {
+    if name == "macosx"
+        && let Some(s) = std::env::var_os("SDKROOT").map(PathBuf::from).filter(|p| p.is_dir())
+    {
         return Some(s);
     }
-    tool_output("xcrun", &["--sdk", "macosx", "--show-sdk-path"]).map(PathBuf::from).filter(|p| p.is_dir())
+    tool_output("xcrun", &["--sdk", name, "--show-sdk-path"]).map(PathBuf::from).filter(|p| p.is_dir())
 }
 
 fn self_exe() -> PathBuf {
@@ -169,7 +200,11 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
             }
             match sys {
                 Sysroot::Darwin { sdk, min_os, .. } => {
-                    c.arg("-isysroot").arg(sdk).arg(format!("-mmacosx-version-min={min_os}"));
+                    c.arg("-isysroot").arg(sdk);
+                    // cross targets carry the minimum OS in the triple
+                    if target.llvm.is_none() {
+                        c.arg(format!("-mmacosx-version-min={min_os}"));
+                    }
                 }
                 Sysroot::Musl { triple, root, .. } => {
                     c.args(mimic_toolchain::musl::target_flags(triple)).arg(format!("--sysroot={}", root.display()));
@@ -196,9 +231,10 @@ pub struct LinkJob<'a> {
 /// The command that links `job` for `target`.
 pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
     match tc {
-        Toolchain::Embedded(Sysroot::Darwin { sdk, min_os, sdk_version }) => {
+        Toolchain::Embedded(Sysroot::Darwin { sdk, min_os, sdk_version, platform }) => {
             let arch = match target.llvm.as_deref().map(|t| t.split('-').next().unwrap_or("")) {
                 Some("x86_64") => "x86_64",
+                Some("arm64_32" | "aarch64_32") => "arm64_32",
                 Some(_) => "arm64",
                 None if cfg!(target_arch = "x86_64") => "x86_64",
                 None => "arm64",
@@ -206,13 +242,17 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             let mut c = Command::new(self_exe());
             c.arg("ld64.lld")
                 .args(["-arch", arch])
-                .args(["-platform_version", "macos", min_os, sdk_version])
+                .args(["-platform_version", platform, min_os, sdk_version])
                 .arg("-syslibroot")
                 .arg(sdk)
                 .arg("-dead_strip")
                 .arg("-o")
                 .arg(job.output)
                 .args(job.objects);
+            // arm64 Apple code must be signed to run; LLD signs only macOS by default
+            if arch != "x86_64" {
+                c.arg("-adhoc_codesign");
+            }
             for s in &job.search {
                 c.arg(format!("-L{}", s.display()));
             }
@@ -242,7 +282,8 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
         Toolchain::Embedded(Sysroot::Wasi { root, compiler_rt }) => {
             let lib = root.join("lib").join(mimic_toolchain::wasi::CLANG_TRIPLE);
             let mut c = Command::new(self_exe());
-            c.arg("wasm-ld").args(["-m", "wasm32"]).arg("--gc-sections").arg("-o").arg(job.output);
+            // 8 MB C stack in linear memory, like a native thread (the default is 64 KB)
+            c.arg("wasm-ld").args(["-m", "wasm32", "-z", "stack-size=8388608"]).arg("--gc-sections").arg("-o").arg(job.output);
             c.arg(lib.join("crt1-command.o")).args(job.objects);
             c.arg(format!("-L{}", lib.display()));
             for s in &job.search {
