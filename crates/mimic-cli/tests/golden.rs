@@ -466,3 +466,34 @@ fn main() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n0\n100\nmimic\n42\n0\n", "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// C sources listed in mim.mim are compiled for the target and linked in;
+/// their header is imported directly.
+#[test]
+fn c_sources_in_project() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-csrc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "cv"]).status().unwrap().success());
+    let proj = dir.join("cv");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(proj.join("c/vec.h"), "double dot(const double *a, const double *b, int n);\nconst char *greeting(void);\n").unwrap();
+    std::fs::write(
+        proj.join("c/vec.c"),
+        "#include \"vec.h\"\ndouble dot(const double *a, const double *b, int n) { double s = 0; for (int i = 0; i < n; i++) s += a[i] * b[i]; return s; }\nconst char *greeting(void) { return \"hello from C\"; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/vec.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"vec.h\"\n\nfn main() {\n    print(dot([1.0 2.0 3.0], [4.0 5.0 6.0], 3))\n    print(greeting())\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "32.0\nhello from C\n", "{}", String::from_utf8_lossy(&out.stderr));
+    // the same project, cross-compiled: the C file is built for the target too
+    let out = mimic().current_dir(&proj).args(["build", "--target", "aarch64-linux"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

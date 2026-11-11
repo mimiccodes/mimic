@@ -44,6 +44,9 @@ dependencies {
 ffi {
     link = ["m", "portaudio"]   // -l flags
     search = ["vendor/lib"]     // -L flags, relative to the project root
+    include = ["c", "vendor"]   // where `extern "C" include "x.h"` looks (-I)
+    sources = ["c/vec.c"]       // C files compiled into the program, for every target
+    cflags = ["-DFAST=1"]       // extra flags for those C files
 }
 ```
 
@@ -55,7 +58,6 @@ Every declared dependency is in scope in every file of the project as `name::…
 |---|---|
 | `bin { name, path }` | Multiple binaries. |
 | `features { simd = [], gpu = ["dep/gpu"] }` | Conditional compilation. |
-| `ffi.headers` | Generate bindings with `mimic ffi bind`. |
 | `dev-dependencies` | Test-only dependencies. |
 | `workspace { members = [...] }` | Multi-project workspaces. |
 | `targets` per project | Platform-specific dependencies. |

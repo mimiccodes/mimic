@@ -456,9 +456,14 @@ fn codegen_and_link(
         Err(why) => return Err(why),
     };
     let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref())?;
+    let c_objects = match input {
+        Input::Project(p) => compile_c_sources(p, &tc, target, profile, &dir)?,
+        Input::File(_) => Vec::new(),
+    };
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
-        let objects = [obj, rt];
+        let mut objects = vec![obj, rt];
+        objects.extend(c_objects);
         let mut job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !profile.release };
         if let Input::Project(p) = input {
             job.search = p.manifest.ffi_search.iter().map(|s| p.root.join(s)).collect();
@@ -470,9 +475,66 @@ fn codegen_and_link(
         // library: static archive of the program object + runtime
         let lib = dir.join(format!("lib{name}.a"));
         let _ = fs::remove_file(&lib);
-        toolchain::archive(&tc, target, &lib, &[obj, rt])?;
+        let mut members = vec![obj, rt];
+        members.extend(c_objects);
+        toolchain::archive(&tc, target, &lib, &members)?;
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
     }
+}
+
+/// Compile the project's C sources (`ffi { sources = [...] }`) for the target,
+/// in parallel; an object is reused while it is newer than its source and was
+/// built with the same flags.
+fn compile_c_sources(p: &Project, tc: &Toolchain, target: &Target, profile: &Profile, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    if p.manifest.ffi_sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let out_dir = dir.join("c");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    let mut flags: Vec<String> = vec![if profile.release { "-O2".into() } else { "-O0".into() }, "-g".into()];
+    flags.push(format!("-I{}", p.root.display()));
+    flags.extend(p.manifest.ffi_include.iter().map(|d| format!("-I{}", p.root.join(d).display())));
+    flags.extend(p.manifest.ffi_cflags.iter().cloned());
+    let stamp = format!("{:016x}", mimic_syntax::fnv1a(format!("{flags:?}{:?}", target.llvm).as_bytes()));
+    let jobs: Vec<(PathBuf, PathBuf)> = p
+        .manifest
+        .ffi_sources
+        .iter()
+        .map(|s| {
+            let src = p.root.join(s);
+            let obj = out_dir.join(format!("{}-{stamp}.o", s.replace(['/', '\\', '.'], "_")));
+            (src, obj)
+        })
+        .collect();
+    let errors = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for (src, obj) in &jobs {
+            let (flags, errors) = (&flags, &errors);
+            scope.spawn(move || {
+                let fresh = match (fs::metadata(src).and_then(|m| m.modified()), fs::metadata(obj).and_then(|m| m.modified())) {
+                    (Ok(s), Ok(o)) => o >= s,
+                    (Err(e), _) => {
+                        errors.lock().unwrap().push(format!("cannot read C source {}: {e}", src.display()));
+                        return;
+                    }
+                    _ => false,
+                };
+                if fresh {
+                    return;
+                }
+                let mut c = toolchain::cc(tc, target);
+                c.args(flags).arg("-c").arg(src).arg("-o").arg(obj);
+                if let Err(e) = run_tool(c, &format!("compiling {}", src.display())) {
+                    errors.lock().unwrap().push(e);
+                }
+            });
+        }
+    });
+    let errors = errors.into_inner().unwrap();
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    Ok(jobs.into_iter().map(|(_, o)| o).collect())
 }
 
 /// `--cpu portable`: the oldest model of the target's CPU family, so one binary
