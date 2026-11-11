@@ -665,7 +665,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
-            "mim_str_eq" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
+            "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
@@ -1185,7 +1185,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
-            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) => self.ptr.into(),
+            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) | Type::App(..) => self.ptr.into(),
         }
     }
 
@@ -2511,14 +2511,23 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.as_ty(r, ty, "operator result")
             }
             ExprKind::Binary { op, lhs, rhs }
-                if matches!(op, BinOp::Eq | BinOp::Ne) && self.ty_of(lhs) == Ty::Arr(El::Char) && self.ty_of(rhs) == Ty::Arr(El::Char) =>
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && self.ty_of(lhs) == Ty::Arr(El::Char)
+                    && self.ty_of(rhs) == Ty::Arr(El::Char) =>
             {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
-                let r = self.call_rt("mim_str_eq", &[self.basic(a).into(), self.basic(b).into()])?.unwrap().into_int_value();
+                let (f, pred) = match op {
+                    BinOp::Eq => ("mim_str_eq", IntPredicate::NE),
+                    BinOp::Ne => ("mim_str_eq", IntPredicate::EQ),
+                    BinOp::Lt => ("mim_str_cmp", IntPredicate::SLT),
+                    BinOp::Le => ("mim_str_cmp", IntPredicate::SLE),
+                    BinOp::Gt => ("mim_str_cmp", IntPredicate::SGT),
+                    _ => ("mim_str_cmp", IntPredicate::SGE),
+                };
+                let r = self.call_rt(f, &[self.basic(a).into(), self.basic(b).into()])?.unwrap().into_int_value();
                 self.drop_tmp(a)?;
                 self.drop_tmp(b)?;
-                let pred = if *op == BinOp::Eq { IntPredicate::NE } else { IntPredicate::EQ };
                 Ok(V::B(self.b.build_int_compare(pred, r, i64t.const_zero(), "").s()?))
             }
             // records, variants and tuples: structural equality
@@ -2686,7 +2695,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i, false).into()])?
                     }
                     Ty::Obj(t) => {
-                        let i = self.p.types[t as usize].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                        let i = self.p.types[types::obj_tid(t)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
                         self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?
                     }
                     _ => {
@@ -2703,7 +2712,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 // mim_obj_with consumes its record: hand it an owned reference
                 let mut cur = self.own(self.boxed(b)?)?;
                 for (n, x, _) in fields {
-                    let i = self.p.types[t as usize].field_index(n).ok_or("unknown field")?;
+                    let i = self.p.types[types::obj_tid(t)].field_index(n).ok_or("unknown field")?;
                     let v = self.expr(x)?;
                     let v = self.boxed(v)?;
                     cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(i as u64, false).into(), self.basic(v).into()])?;

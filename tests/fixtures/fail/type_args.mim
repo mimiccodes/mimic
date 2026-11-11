@@ -1,0 +1,5 @@
+// expect-error: E0411 `Pair` takes 2 type argument(s), got 1
+module main
+type Pair[A, B] = { first: A, second: B }
+fn main() { print(f(Pair { first: 1, second: 2 })) }
+fn f(p: Pair[i64]) -> i64 { p.first }

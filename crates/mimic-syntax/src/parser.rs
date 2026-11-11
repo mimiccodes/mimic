@@ -417,6 +417,7 @@ impl Parser {
                 crate::Applicability::MaybeIncorrect,
             ));
         }
+        let params = self.type_params()?;
         self.expect(&Tok::Assign)?;
         // record: `{ field: Type, … }`
         if self.at(&Tok::LBrace) {
@@ -439,7 +440,7 @@ impl Parser {
             self.nl_ignore -= 1;
             let fields = r?;
             self.expect(&Tok::RBrace)?;
-            return Ok(TypeDecl { name, is_pub, kind: TypeKind::Record(fields), span: start });
+            return Ok(TypeDecl { name, params, is_pub, kind: TypeKind::Record(fields), span: start });
         }
         // union: `A | B(T, T) | C`, one variant per line allowed
         let mut variants = Vec::new();
@@ -493,12 +494,13 @@ impl Parser {
                 break;
             }
         }
-        Ok(TypeDecl { name, is_pub, kind: TypeKind::Union(variants), span: start })
+        Ok(TypeDecl { name, params, is_pub, kind: TypeKind::Union(variants), span: start })
     }
 
     fn fn_decl(&mut self, is_pub: bool, start: Span) -> PResult<FnDecl> {
         self.expect(&Tok::Fn)?;
         let (name, _) = self.ident()?;
+        let type_params = self.type_params()?;
         self.expect(&Tok::LParen)?;
         self.nl_ignore += 1;
         let mut params = Vec::new();
@@ -524,7 +526,31 @@ impl Parser {
         self.expect(&Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
         let body = self.block()?;
-        Ok(FnDecl { name, is_pub, params, ret, body, export_c: false, span: start })
+        Ok(FnDecl { name, type_params, is_pub, params, ret, body, export_c: false, span: start })
+    }
+
+    /// `[T, U]` after a type or function name: type parameters (uppercase names).
+    fn type_params(&mut self) -> PResult<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        if !self.eat(&Tok::LBracket) {
+            return Ok(out);
+        }
+        loop {
+            let (n, s) = self.ident()?;
+            if !is_upper(&n) {
+                let fixed = upper_first(&n);
+                return Err(Diag::new(&C::NAME_CASE, format!("type parameters start with an uppercase letter: `{fixed}`"), s));
+            }
+            if out.contains(&n) {
+                return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("type parameter `{n}` is declared twice"), s));
+            }
+            out.push(n);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RBracket)?;
+        Ok(out)
     }
 
     fn ty(&mut self) -> PResult<Type> {
@@ -554,6 +580,15 @@ impl Parser {
             let inner = self.ty()?;
             self.expect(&Tok::RBracket)?;
             return Ok(Type::Ptr(Box::new(inner), s));
+        }
+        // `Option[i64]`: type arguments
+        if self.eat(&Tok::LBracket) {
+            let mut args = vec![self.ty()?];
+            while self.eat(&Tok::Comma) {
+                args.push(self.ty()?);
+            }
+            self.expect(&Tok::RBracket)?;
+            return Ok(Type::App(n, args, s.to(self.prev_span())));
         }
         Ok(Type::Named(n, s))
     }

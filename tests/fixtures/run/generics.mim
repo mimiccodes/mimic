@@ -1,0 +1,121 @@
+module main
+
+// generic records and unions
+type Pair[A, B] = { first: A, second: B }
+type Tree[T] = Leaf | Node(Tree[T], T, Tree[T])
+type Stack[T] = { items: [T], size: i64 }
+
+fn main() {
+    // generic functions: one definition, specialised per argument type
+    print(first([3 1 2]))
+    print(first(["x" "y"]))
+    print(first([] ▷ ↑ 0))
+    print(or_else(first([5 6]), 0) + 1)            // Option[i64] → unboxed i64 arithmetic
+    print(or_else(first(["a"]), "?") + "!")
+
+    let p = Pair { first: 1, second: "one" }
+    print(p.first + 1)
+    print(swap(p))
+    print(swap(swap(p)) == p)
+
+    // a generic binary search tree
+    let t = [5 3 8 1 4 9] ▷ gather_into(Leaf)
+    print(to_list(t))
+    print((contains(t, 4), contains(t, 7)))
+    print(depth(t))
+
+    let names = ["mimic" "ada" "zig"] ▷ gather_into(Leaf)
+    print(to_list(names))
+
+    // a generic stack
+    let s = push_all(Stack { items: [], size: 0 }, [1 2 3])
+    print((s.size, peek(s)))
+
+    // Result[T, E] and let-else: the unwrapped value keeps its type
+    print(halve(10))
+    print(halve(7))
+    print(total([4 8 12]))
+    print(total([4 7]))
+}
+
+fn first[T](xs: [T]) -> Option[T] {
+    match xs {
+        [x, ..] => Some(x),
+        _ => None,
+    }
+}
+
+fn or_else[T](o: Option[T], fallback: T) -> T {
+    match o {
+        Some(x) => x,
+        None => fallback,
+    }
+}
+
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] { Pair { first: p.second, second: p.first } }
+
+fn insert[T](t: Tree[T], x: T) -> Tree[T] {
+    match t {
+        Leaf => Node(Leaf, x, Leaf),
+        Node(l, v, r) if x < v => Node(insert(l, x), v, r),
+        Node(l, v, r) if x > v => Node(l, v, insert(r, x)),
+        _ => t,
+    }
+}
+
+fn gather_into[T](xs: [T], t: Tree[T]) -> Tree[T] {
+    match xs {
+        [] => t,
+        [x, ..rest] => gather_into(rest, insert(t, x)),
+    }
+}
+
+fn to_list[T](t: Tree[T]) -> [T] {
+    match t {
+        Leaf => [],
+        Node(l, v, r) => concat(push(to_list(l), v), to_list(r)),
+    }
+}
+
+fn contains[T](t: Tree[T], x: T) -> bool {
+    match t {
+        Leaf => false,
+        Node(l, v, r) => if x == v { true } else if x < v { contains(l, x) } else { contains(r, x) },
+    }
+}
+
+fn depth[T](t: Tree[T]) -> i64 {
+    match t {
+        Leaf => 0,
+        Node(l, _, r) => 1 + (depth(l) ⌈ depth(r)),
+    }
+}
+
+fn push_all[T](s: Stack[T], xs: [T]) -> Stack[T] {
+    match xs {
+        [] => s,
+        [x, ..rest] => push_all(Stack { items: push(s.items, x), size: s.size + 1 }, rest),
+    }
+}
+
+fn peek[T](s: Stack[T]) -> Option[T] {
+    match s.items {
+        [] => None,
+        xs => Some(xs[s.size - 1]),
+    }
+}
+
+fn halve(n: i64) -> Result[i64, str] {
+    if n % 2 == 0 { Ok(n div 2) } else { Err("{n} is odd") }
+}
+
+fn total(xs: [i64]) -> Result[i64, str] {
+    match xs {
+        [] => Ok(0),
+        [x, ..rest] => {
+            let h = halve(x) else { return Err("cannot halve {x}") }
+            let r = total(rest) else { return Err("rest failed") }
+            Ok(h + r)
+        }
+    }
+}

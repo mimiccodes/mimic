@@ -1,0 +1,4 @@
+// expect-error: E0401 type parameter `T` is i64 in one place and str in another
+module main
+fn main() { print(or_else(Some(1), "s")) }
+fn or_else[T](o: Option[T], d: T) -> T { match o { Some(x) => x, None => d } }

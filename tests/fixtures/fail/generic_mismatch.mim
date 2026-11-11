@@ -1,0 +1,6 @@
+// expect-error: E0401 expected Option[str], found Option[i64]
+module main
+fn main() {
+    let o: Option[str] = Some(3)
+    print(o)
+}

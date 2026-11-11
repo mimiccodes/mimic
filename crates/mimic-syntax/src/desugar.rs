@@ -190,7 +190,7 @@ fn lift_fn(f: &mut FnDecl, counter: &mut usize, out: &mut Vec<FnDecl>) -> Result
         let span = e.span;
         let mut fparams: Vec<Param> = pnames.iter().map(|n| Param { name: n.clone(), ty: None, default: None, span }).collect();
         fparams.extend(caps.iter().map(|c| Param { name: c.clone(), ty: None, default: None, span }));
-        out.push(FnDecl { name: name.clone(), is_pub: false, params: fparams, ret: None, body, export_c: false, span });
+        out.push(FnDecl { name: name.clone(), type_params: f.type_params.clone(), is_pub: false, params: fparams, ret: None, body, export_c: false, span });
         // the `arms` expression itself: the first call
         let mut args: Vec<Expr> = params.iter().map(|(_, x)| x.clone()).collect();
         args.extend(caps.iter().map(|c| path(c, span)));

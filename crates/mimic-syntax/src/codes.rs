@@ -297,6 +297,15 @@ defaults are planned). The message lists the missing ones.";
 "The type is part of the design but not implemented yet (for example arrays
 of some element kinds in annotations). The message names the limitation.";
 
+    TYPE_ARGS = "E0411" "type-args" "a generic type used with the wrong number of type arguments"
+"A generic type takes exactly as many type arguments as it declares
+parameters:
+
+    type Pair[A, B] = { first: A, second: B }
+    let p: Pair[i64] = …          // error: Pair takes 2 type arguments
+
+Written without arguments (`Pair`), a generic type means any instance.";
+
     // ---- E05xx patterns and match ----------------------------------------------
     NON_EXHAUSTIVE = "E0501" "non-exhaustive-match" "a `match` that does not cover every case"
 "Every possible value must be handled. For unions, every variant needs an arm

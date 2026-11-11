@@ -313,6 +313,33 @@ Array literals can hold strings, records or other arrays: `["ada" "bob"]`, `[u, 
 The annotation types are:
 * scalar C dtypes: `i8 … i64`, `u8 … u64`, `isize`, `usize`, `f32`, `f64`, `bool`;
 * `str`;
-* arrays: `[i64]`, `[f64]`, `[bool]`.
+* arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`;
+* records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
+* function types: `fn(i64) -> i64`.
+
+### Generics
+
+Types and functions can take type parameters, written in `[ ]` after the name, the same brackets as array types. Type parameters start with an uppercase letter.
+
+```mimic
+type Pair[A, B] = { first: A, second: B }
+type Tree[T] = Leaf | Node(Tree[T], T, Tree[T])
+
+fn first[T](xs: [T]) -> Option[T] {
+    match xs { [x, ..] => Some(x), _ => None }
+}
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] { Pair { first: p.second, second: p.first } }
+
+first([3 1 2])            // Some(3): an Option[i64]
+first(["x" "y"])          // Some("x"): an Option[str]
+```
+
+* **Type arguments are inferred.** You never write `first[i64](…)`. `Some(42)` is an `Option[i64]`, and `Pair { first: 1, second: "one" }` is a `Pair[i64, str]`. `None` and `Leaf` take their type arguments from where they are used.
+* **Mismatches are compile errors.** For example, `let o: Option[str] = Some(3)` is an error (E0401). So is calling `or_else(Some(1), "s")` against `fn or_else[T](o: Option[T], d: T)`, because `T` would have to be both `i64` and `str`. The wrong number of type arguments is E0411.
+* **Generic code runs as fast as hand-written code.** Every function is compiled once per combination of argument types it is called with, so `first` on `[i64]` and `first` on `[str]` are separate, fully typed functions. A value taken out of an `Option[i64]`, by `match`, `let … else` or `or_else`, is a plain machine integer.
+* **Values look the same whatever their type arguments.** An `Option[i64]` and an `Option[str]` share one runtime layout, so generic types add no code size.
+* **A generic type named without arguments means any instance.** `fn f(o: Option)` accepts every `Option`.
+* **`Option[T]` and `Result[T, E]`** in the prelude are ordinary generic unions: `type Option[T] = Some(T) | None`.
+* **`<`, `<=`, `>`, `>=` on two strings** compare them as whole values, in byte-wise lexicographic order, the same way `==` does. A sorted tree of strings therefore works with the same code as a tree of numbers.
 
 In M1, annotations on parameters, return values and `let` are checked at runtime. A violation is a `type error` panic.

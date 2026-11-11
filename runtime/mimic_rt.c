@@ -760,6 +760,7 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
 }
 
 mim_val *mim_std_concat(mim_val *xs, mim_val *ys);
+int64_t mim_str_cmp(mim_val *a, mim_val *b);
 int64_t mim_equal(const mim_val *a, const mim_val *b);
 static mim_val *scalar_at(const mim_val *xs, int64_t i);
 
@@ -771,6 +772,11 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     if ((op == OP_EQ || op == OP_NE) && a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->rank == 1 && b->rank == 1) {
         int eq = a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
         return mim_bool(op == OP_EQ ? eq : !eq);
+    }
+    /* strings order as whole values (byte-wise lexicographic) */
+    if (op >= OP_LT && op <= OP_GE && a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->rank == 1 && b->rank == 1) {
+        int64_t c = mim_str_cmp(a, b);
+        return mim_bool(op == OP_LT ? c < 0 : op == OP_LE ? c <= 0 : op == OP_GT ? c > 0 : c >= 0);
     }
     if (IS_HANDLES(a) || IS_HANDLES(b)) {
         /* == / != compare records, variants, tuples and maps as whole values;
@@ -974,6 +980,16 @@ mim_val *mim_concat(int64_t n, mim_val **parts) {
         o += parts[i]->len;
     }
     return r;
+}
+
+/* -1, 0 or 1: byte-wise lexicographic order of two strings */
+int64_t mim_str_cmp(mim_val *a, mim_val *b) {
+    need(a, "string comparison");
+    need(b, "string comparison");
+    int64_t n = a->len < b->len ? a->len : b->len;
+    int c = memcmp(a->data, b->data, (size_t)n);
+    if (c != 0) return c < 0 ? -1 : 1;
+    return a->len < b->len ? -1 : a->len > b->len ? 1 : 0;
 }
 
 int64_t mim_str_eq(mim_val *a, mim_val *b) {

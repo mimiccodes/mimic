@@ -639,7 +639,16 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                         diags.push(FileDiag { file: f.file, diag: e });
                     }
                 }
-                let mut c = Checker { p, module: f.module, file: f.file, scopes: Vec::new(), lambda_floor: 0, unsafe_depth: 0, diags: &mut diags };
+                let mut c = Checker {
+                    p,
+                    module: f.module,
+                    file: f.file,
+                    scopes: Vec::new(),
+                    lambda_floor: 0,
+                    unsafe_depth: 0,
+                    type_params: d.type_params.clone(),
+                    diags: &mut diags,
+                };
                 c.check_fn(d);
             }
             // runtime intrinsics take Mimic types, checked like annotations
@@ -655,6 +664,23 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                         diags.push(FileDiag { file: f.file, diag: e });
                     }
             }
+        }
+    }
+    // field types of records and variants (type parameters in scope)
+    for td in &p.types {
+        let mut c = Checker {
+            p,
+            module: td.module,
+            file: td.file,
+            scopes: Vec::new(),
+            lambda_floor: 0,
+            unsafe_depth: 0,
+            type_params: td.decl.params.clone(),
+            diags: &mut diags,
+        };
+        match &td.decl.kind {
+            TypeKind::Record(fs) => fs.iter().for_each(|(_, t, _)| c.check_ann(t)),
+            TypeKind::Union(vs) => vs.iter().flat_map(|v| &v.fields).for_each(|t| c.check_ann(t)),
         }
     }
     // validate `use` targets
@@ -681,6 +707,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
             check_ctype(inner, false)
         }
         Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
+        Type::App(n, _, s) => Err(Diag::new(&C::NOT_C_TYPE, format!("`{n}[…]` is not a C type; use one of {}", C_TYPES.join(", ")), *s)),
         Type::Fn(_, _, s) => Err(Diag::new(&C::FFI_UNSUPPORTED, "C callbacks (function pointers) are not supported yet", *s)),
     }
 }
@@ -704,6 +731,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
         },
         Type::Ptr(_, s) => return Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
         Type::Fn(..) => 9, // TY_FN: any function value
+        Type::App(n, _, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("`{n}[…]` is checked statically"), *s)),
     })
 }
 
@@ -721,6 +749,8 @@ struct Checker<'a> {
     /// scopes below this index belong to an enclosing function (lambda captures)
     lambda_floor: usize,
     unsafe_depth: usize,
+    /// type parameters in scope (`fn first[T]`, `type Pair[A, B]`)
+    type_params: Vec<String>,
     diags: &'a mut Vec<FileDiag>,
 }
 
@@ -758,6 +788,20 @@ impl Checker<'_> {
             return Ok(());
         }
         match t {
+            Type::Named(n, _) if self.type_params.contains(n) => Ok(()),
+            Type::App(n, args, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
+                Ok(Resolved::Type(id)) => {
+                    let want = self.p.types[id].decl.params.len();
+                    if want == 0 {
+                        return Err(Diag::new(&C::TYPE_ARGS, format!("`{n}` is not generic; write it without `[…]`"), *s));
+                    }
+                    if args.len() != want {
+                        return Err(Diag::new(&C::TYPE_ARGS, format!("`{n}` takes {want} type argument(s), got {}", args.len()), *s));
+                    }
+                    args.iter().try_for_each(|a| self.ann_result(a))
+                }
+                _ => self.ann_result(&Type::Named(n.clone(), *s)),
+            },
             Type::Named(n, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
                 Ok(Resolved::Type(_)) => Ok(()),
                 _ if n == "str" || n == "any" => Ok(()),

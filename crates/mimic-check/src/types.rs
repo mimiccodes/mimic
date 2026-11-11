@@ -34,6 +34,136 @@ pub fn tuple_elems(id: u32) -> Vec<Ty> {
     TUPLES.lock().unwrap()[id as usize].clone()
 }
 
+/// Generic instances (`Option[i64]`), interned so `Ty::Obj` stays a small
+/// copyable id. A type without arguments is `Ty::Obj(type id)`; an instance is
+/// `Ty::Obj(INST | index)`. Values are represented the same whatever the
+/// arguments (fields are boxed handles), so instances only sharpen types.
+static INSTANCES: Mutex<Vec<(usize, Vec<Ty>)>> = Mutex::new(Vec::new());
+const INST: u32 = 1 << 31;
+
+/// The record/union type `tid` with type arguments `args` (`Never` = not known yet).
+pub fn obj(tid: usize, args: &[Ty]) -> Ty {
+    if args.is_empty() {
+        return Ty::Obj(tid as u32);
+    }
+    let mut t = INSTANCES.lock().unwrap();
+    let key = (tid, args.to_vec());
+    let i = match t.iter().position(|e| *e == key) {
+        Some(i) => i,
+        None => {
+            t.push(key);
+            t.len() - 1
+        }
+    };
+    Ty::Obj(INST | i as u32)
+}
+
+/// The declared type behind a `Ty::Obj` id.
+pub fn obj_tid(id: u32) -> usize {
+    if id & INST == 0 { id as usize } else { INSTANCES.lock().unwrap()[(id & !INST) as usize].0 }
+}
+
+/// The type arguments of a `Ty::Obj` id (empty for non-generic types).
+pub fn obj_args(id: u32) -> Vec<Ty> {
+    if id & INST == 0 { Vec::new() } else { INSTANCES.lock().unwrap()[(id & !INST) as usize].1.clone() }
+}
+
+/// Type-parameter bindings of an instance: `T → i64`. Unknown arguments are dynamic.
+pub fn inst_env(p: &Program, id: u32) -> Vec<(String, Ty)> {
+    let td = &p.types[obj_tid(id)];
+    let args = obj_args(id);
+    td.decl
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), args.get(i).copied().filter(|t| *t != Ty::Never).unwrap_or(Ty::Dyn)))
+        .collect()
+}
+
+/// Type of a field declared as `ft` in a value of type `of` (an instance or `Dyn`).
+pub fn field_type(p: &Program, tid: usize, of: Ty, ft: &Type) -> Ty {
+    let env = match of {
+        Ty::Obj(id) if obj_tid(id) == tid => inst_env(p, id),
+        _ => p.types[tid].decl.params.iter().map(|n| (n.clone(), Ty::Dyn)).collect(),
+    };
+    ann_env(p, p.types[tid].module, ft, &env).unwrap_or(Ty::Dyn)
+}
+
+/// Can a value of type `b` stand where `a` is expected (and vice versa)?
+/// Unknown parts (`Dyn`, `Never`) are compatible with anything.
+pub fn compatible(a: Ty, b: Ty) -> bool {
+    match (a, b) {
+        _ if a == b => true,
+        (Ty::Dyn | Ty::Never, _) | (_, Ty::Dyn | Ty::Never) => true,
+        (Ty::Obj(x), Ty::Obj(y)) => {
+            obj_tid(x) == obj_tid(y) && {
+                let (p, q) = (obj_args(x), obj_args(y));
+                p.is_empty() || q.is_empty() || p.iter().zip(&q).all(|(s, t)| compatible(*s, *t))
+            }
+        }
+        (Ty::Arr(x), Ty::Arr(y)) => x == El::Dyn || y == El::Dyn || compatible(Ty::of_el(x), Ty::of_el(y)),
+        (Ty::Tup(x), Ty::Tup(y)) => {
+            let (p, q) = (tuple_elems(x), tuple_elems(y));
+            p.len() == q.len() && p.iter().zip(&q).all(|(s, t)| compatible(*s, *t))
+        }
+        _ => false,
+    }
+}
+
+/// The more precise of two compatible types (`Option[i64]` over `Option[?]`).
+pub fn refine(a: Ty, got: Ty) -> Ty {
+    match (a, got) {
+        (Ty::Dyn | Ty::Never, g) => g,
+        (Ty::Obj(x), Ty::Obj(y)) if obj_tid(x) == obj_tid(y) => {
+            let (p, q) = (obj_args(x), obj_args(y));
+            if p.is_empty() || q.is_empty() || p.len() != q.len() {
+                return a;
+            }
+            let r: Vec<Ty> = p.iter().zip(&q).map(|(s, t)| refine(*s, *t)).collect();
+            obj(obj_tid(x), &r)
+        }
+        (Ty::Arr(El::Dyn), g @ Ty::Arr(_)) => g,
+        _ => a,
+    }
+}
+
+/// Bind type parameters by matching annotation `t` against an actual type.
+/// A parameter seen with two different concrete types reports a conflict.
+pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], env: &mut Vec<(String, Ty)>, conflict: &mut Option<String>) {
+    if got == Ty::Never {
+        return;
+    }
+    match t {
+        Type::Named(n, _) if params.contains(n) => match env.iter_mut().find(|(m, _)| m == n) {
+            Some((_, b)) => {
+                if compatible(*b, got) {
+                    *b = refine(*b, got);
+                } else if conflict.is_none() {
+                    *conflict = Some(format!("type parameter `{n}` is {} in one place and {} in another", show(p, *b), show(p, got)));
+                }
+            }
+            None => env.push((n.clone(), got)),
+        },
+        Type::Array(inner, _) => {
+            if let Ty::Arr(el) = got
+                && el != El::Dyn
+            {
+                unify(p, module, inner, Ty::of_el(el), params, env, conflict);
+            }
+        }
+        Type::App(n, targs, _) => {
+            if let (Ok(Resolved::Type(tid)), Ty::Obj(id)) = (p.resolve(module, std::slice::from_ref(n)), got)
+                && obj_tid(id) == tid
+            {
+                for (ta, ga) in targs.iter().zip(obj_args(id)) {
+                    unify(p, module, ta, ga, params, env, conflict);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Element type of an array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum El {
@@ -103,6 +233,14 @@ impl Ty {
             (Ty::Never, x) | (x, Ty::Never) => x,
             (a, b) if a == b => a,
             (Ty::Arr(_), Ty::Arr(_)) => Ty::Arr(El::Dyn),
+            (Ty::Obj(a), Ty::Obj(b)) if obj_tid(a) == obj_tid(b) => {
+                let (x, y) = (obj_args(a), obj_args(b));
+                if x.len() != y.len() {
+                    return Ty::Obj(obj_tid(a) as u32);
+                }
+                let j: Vec<Ty> = x.iter().zip(&y).map(|(p, q)| p.join(*q)).collect();
+                obj(obj_tid(a), &j)
+            }
             (Ty::Tup(a), Ty::Tup(b)) => {
                 let (x, y) = (tuple_elems(a), tuple_elems(b));
                 if x.len() != y.len() {
@@ -204,22 +342,42 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             Ty::Bool => Ty::Arr(El::Bool),
             _ => return None,
         },
-        Type::Ptr(..) => return None,
+        Type::Ptr(..) | Type::App(..) => return None,
         Type::Fn(..) => Ty::Dyn, // function values are handles
     })
 }
 
 /// An annotation's type, resolving record/union names from `module`.
 pub fn ann_in(p: &Program, module: ModId, t: &Type) -> Option<Ty> {
+    ann_env(p, module, t, &[])
+}
+
+/// An annotation's type with type parameters bound by `env` (`T → i64`).
+pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Option<Ty> {
+    if let Type::Named(n, _) = t
+        && let Some((_, b)) = env.iter().find(|(m, _)| m == n)
+    {
+        return Some(*b);
+    }
     if let Some(x) = ann_ty(t) {
         return Some(x);
     }
     match t {
         Type::Named(n, _) => match p.resolve(module, std::slice::from_ref(n)) {
-            Ok(Resolved::Type(id)) => Some(Ty::Obj(id as u32)),
+            // a generic type named without arguments: any instance
+            Ok(Resolved::Type(id)) => Some(obj(id, &vec![Ty::Dyn; p.types[id].decl.params.len()])),
             _ => None,
         },
-        Type::Array(inner, _) => Some(Ty::Arr(ann_in(p, module, inner)?.el())),
+        Type::App(n, args, _) => match p.resolve(module, std::slice::from_ref(n)) {
+            Ok(Resolved::Type(id)) => {
+                let want = p.types[id].decl.params.len();
+                let mut a: Vec<Ty> = args.iter().map(|x| ann_env(p, module, x, env).unwrap_or(Ty::Dyn)).collect();
+                a.resize(want, Ty::Dyn);
+                Some(obj(id, &a))
+            }
+            _ => None,
+        },
+        Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el())),
         Type::Ptr(..) => None,
         Type::Fn(..) => Some(Ty::Dyn),
     }
@@ -227,23 +385,45 @@ pub fn ann_in(p: &Program, module: ModId, t: &Type) -> Option<Ty> {
 
 /// Coerce a value of type `got` into a slot annotated `ann` (user types allowed).
 pub fn coerce_in(p: &Program, module: ModId, ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
+    coerce_env(p, module, ann, got, &[])
+}
+
+/// [`coerce_in`] with type parameters bound by `env`.
+pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: &[(String, Ty)]) -> Result<Ty, String> {
     let Some(t) = ann else { return Ok(got) };
-    match ann_in(p, module, t) {
-        Some(a @ (Ty::Obj(_) | Ty::Arr(El::Obj(_) | El::Str))) => match got {
+    match ann_env(p, module, t, env) {
+        Some(a) => coerce_to(p, a, got),
+        None => coerce(ann, got),
+    }
+}
+
+/// Coerce a value of type `got` into a slot of type `a`.
+pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
+    match a {
+        Ty::Dyn => Ok(Ty::Dyn),
+        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
-            g if g == a => Ok(a),
             Ty::Arr(El::Dyn) if matches!(a, Ty::Arr(_)) => Ok(a),
+            g if compatible(a, g) => Ok(refine(a, g)),
             g => Err(format!("expected {}, found {}", show(p, a), show(p, g))),
         },
-        _ => coerce(ann, got),
+        _ => coerce_ty(a, got),
     }
 }
 
 /// A type for messages, naming user types.
 pub fn show(p: &Program, t: Ty) -> String {
     match t {
-        Ty::Obj(id) => p.types[id as usize].name.clone(),
-        Ty::Arr(El::Obj(id)) => format!("[{}]", p.types[id as usize].name),
+        Ty::Obj(id) => {
+            let name = &p.types[obj_tid(id)].name;
+            let args = obj_args(id);
+            if args.is_empty() || args.iter().all(|t| *t == Ty::Dyn) {
+                return name.clone();
+            }
+            let a: Vec<String> = args.iter().map(|t| if matches!(t, Ty::Never | Ty::Dyn) { "_".into() } else { show(p, *t) }).collect();
+            format!("{name}[{}]", a.join(", "))
+        }
+        Ty::Arr(El::Obj(id)) => format!("[{}]", show(p, Ty::Obj(id))),
         Ty::Arr(El::Str) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),
@@ -255,6 +435,11 @@ pub fn show(p: &Program, t: Ty) -> String {
 /// `Dyn` is accepted (checked at run time). Returns the slot's type.
 pub fn coerce(ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
     let Some(a) = ann.and_then(ann_ty) else { return Ok(got) };
+    coerce_ty(a, got)
+}
+
+/// [`coerce`] for an already-resolved scalar or array type.
+fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
     if a == Ty::Dyn {
         return Ok(Ty::Dyn); // `any` accepts every value (boxed)
     }
@@ -372,9 +557,27 @@ impl Infer<'_> {
                 scopes: vec![HashMap::new()],
                 ret: Ty::Never,
             };
+            // type parameters: bound from the argument types of this specialisation
+            let mut env: Vec<(String, Ty)> = Vec::new();
+            if !d.type_params.is_empty() {
+                let mut conflict = None;
+                for (prm, arg) in d.params.iter().zip(&k.1) {
+                    if let Some(t) = &prm.ty {
+                        unify(p, module, t, *arg, &d.type_params, &mut env, &mut conflict);
+                    }
+                }
+                if let Some(m) = conflict {
+                    w.err(Diag::new(&C::TYPE_MISMATCH, format!("in a call of `{path}`: {m}"), d.span));
+                }
+                for tp in &d.type_params {
+                    if !env.iter().any(|(n, _)| n == tp) {
+                        env.push((tp.clone(), Ty::Dyn));
+                    }
+                }
+            }
             // parameters (annotation coercion)
             for (prm, arg) in d.params.iter().zip(&k.1) {
-                let t = match coerce_in(p, module, prm.ty.as_ref(), *arg) {
+                let t = match coerce_env(p, module, prm.ty.as_ref(), *arg, &env) {
                     Ok(t) => t,
                     Err(m) => {
                         w.err(Diag::new(&C::TYPE_MISMATCH, format!("argument `{}` of `{path}`: {m}", prm.name), prm.span));
@@ -387,7 +590,7 @@ impl Infer<'_> {
             let body = w.block(&d.body);
             let mut ret = body.join(w.ret);
             if let Some(rt) = &d.ret {
-                match coerce_in(p, module, Some(rt), ret) {
+                match coerce_env(p, module, Some(rt), ret, &env) {
                     Ok(t) => ret = t,
                     Err(m) => w.err(Diag::new(&C::TYPE_MISMATCH, format!("return value of `{path}`: {m}"), d.span)),
                 }
@@ -511,16 +714,23 @@ impl Walk<'_, '_> {
                 }
                 Stmt::LetElse { name, ty, value, els, span } => {
                     let vt = self.expr(value);
+                    // the unwrapped value: the first type argument of Option[T] / Result[T, E]
+                    let mut inner = Ty::Dyn;
                     if let Ty::Obj(t) = vt {
-                        let tn = &self.inf.p.types[t as usize].name;
+                        let tn = &self.inf.p.types[obj_tid(t)].name;
                         if tn != "Option" && tn != "Result" {
                             self.err(Diag::new(&C::LET_ELSE_TYPE, format!("`let … else` needs an Option or Result, found `{tn}`"), *span));
+                        } else if let Some(a) = obj_args(t).first().copied().filter(|a| *a != Ty::Never) {
+                            inner = a;
                         }
                     }
                     self.block(els);
-                    let t = match coerce_in(self.inf.p, self.module, ty.as_ref(), Ty::Dyn) {
+                    let t = match coerce_in(self.inf.p, self.module, ty.as_ref(), inner) {
                         Ok(t) => t,
-                        Err(_) => Ty::Dyn,
+                        Err(m) => {
+                            self.err(Diag::new(&C::TYPE_MISMATCH, format!("`let {name}`: {m}"), *span));
+                            Ty::Dyn
+                        }
                     };
                     self.out.lets.insert(id(s), t);
                     self.scopes.last_mut().unwrap().insert(name.clone(), (id(s), t));
@@ -640,7 +850,8 @@ impl Walk<'_, '_> {
             ExprKind::Path(path) => match self.lookup(&path[0]) {
                 Some((_, t)) if path.len() == 1 => t,
                 _ => match self.inf.p.resolve(self.module, path) {
-                    Ok(Resolved::Variant(t, _)) => Ty::Obj(t as u32),
+                    // `None`: the type arguments are not known yet
+                    Ok(Resolved::Variant(t, _)) => obj(t, &vec![Ty::Never; self.inf.p.types[t].decl.params.len()]),
                     Ok(Resolved::Fn(f)) => {
                         self.fn_value(f);
                         Ty::Dyn
@@ -669,14 +880,26 @@ impl Walk<'_, '_> {
                             self.call_user(id(e), f, argt)
                         }
                         Ok(Resolved::Variant(t, v)) => {
-                            let td = &self.inf.p.types[t];
-                            let (fields, tm, vname) = (td.variants()[v].fields.clone(), td.module, td.variants()[v].name.clone());
+                            let p = self.inf.p;
+                            let td = &p.types[t];
+                            let (fields, tm, vname) = (&td.variants()[v].fields, td.module, &td.variants()[v].name);
+                            // `Some(42)`: bind the type parameters from the field values
+                            let mut env = Vec::new();
+                            let mut conflict = None;
+                            for (ft, at) in fields.iter().zip(&argt) {
+                                unify(p, tm, ft, *at, &td.decl.params, &mut env, &mut conflict);
+                            }
+                            if let Some(m) = conflict {
+                                self.err(Diag::new(&C::TYPE_MISMATCH, format!("`{vname}`: {m}"), e.span));
+                            }
                             for (i, (ft, at)) in fields.iter().zip(&argt).enumerate() {
-                                if let Err(m) = coerce_in(self.inf.p, tm, Some(ft), *at) {
+                                if let Err(m) = coerce_env(p, tm, Some(ft), *at, &env) {
                                     self.err(Diag::new(&C::TYPE_MISMATCH, format!("field {} of `{vname}`: {m}", i + 1), args[i].span));
                                 }
                             }
-                            Ty::Obj(t as u32)
+                            let targs: Vec<Ty> =
+                                td.decl.params.iter().map(|n| env.iter().find(|(m, _)| m == n).map(|(_, t)| *t).unwrap_or(Ty::Never)).collect();
+                            obj(t, &targs)
                         }
                         _ => Ty::Dyn,
                     },
@@ -732,7 +955,7 @@ impl Walk<'_, '_> {
                     // structural equality: same type, compared field by field
                     // (elementwise when either side is a list)
                     let (x, y) = (elem(a), elem(b));
-                    let comparable = x == y || matches!(x, Ty::Dyn | Ty::Never) || matches!(y, Ty::Dyn | Ty::Never);
+                    let comparable = compatible(x, y);
                     if !comparable {
                         let p = self.inf.p;
                         self.err(
@@ -799,15 +1022,27 @@ impl Walk<'_, '_> {
                 let Ok(Resolved::Type(t)) = p.resolve(self.module, path) else { return Ty::Dyn };
                 let td = &p.types[t];
                 let TypeKind::Record(decl) = &td.decl.kind else { return Ty::Dyn };
-                for (n, v, sp) in fields {
-                    let vt = self.expr(v);
+                let vts: Vec<Ty> = fields.iter().map(|(_, v, _)| self.expr(v)).collect();
+                let mut env = Vec::new();
+                let mut conflict = None;
+                for ((n, _, _), vt) in fields.iter().zip(&vts) {
+                    if let Some((_, ft, _)) = decl.iter().find(|(d, _, _)| d == n) {
+                        unify(p, td.module, ft, *vt, &td.decl.params, &mut env, &mut conflict);
+                    }
+                }
+                if let Some(m) = conflict {
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("`{}`: {m}", td.name), e.span));
+                }
+                for ((n, _, sp), vt) in fields.iter().zip(&vts) {
                     if let Some((_, ft, _)) = decl.iter().find(|(d, _, _)| d == n)
-                        && let Err(m) = coerce_in(p, td.module, Some(ft), vt)
+                        && let Err(m) = coerce_env(p, td.module, Some(ft), *vt, &env)
                     {
                         self.err(Diag::new(&C::TYPE_MISMATCH, format!("field `{n}` of `{}`: {m}", td.name), *sp));
                     }
                 }
-                Ty::Obj(t as u32)
+                let targs: Vec<Ty> =
+                    td.decl.params.iter().map(|n| env.iter().find(|(m, _)| m == n).map(|(_, t)| *t).unwrap_or(Ty::Never)).collect();
+                obj(t, &targs)
             }
             ExprKind::Field { base, name } => {
                 let b = self.expr(base);
@@ -819,11 +1054,12 @@ impl Walk<'_, '_> {
                     let vt = self.expr(v);
                     if let Ty::Obj(t) = b {
                         let p = self.inf.p;
-                        let td = &p.types[t as usize];
+                        let tid = obj_tid(t);
+                        let td = &p.types[tid];
                         match &td.decl.kind {
                             TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == n) {
                                 Some((_, ft, _)) => {
-                                    if let Err(m) = coerce_in(p, td.module, Some(ft), vt) {
+                                    if let Err(m) = coerce_to(p, field_type(p, tid, b, ft), vt) {
                                         self.err(Diag::new(&C::TYPE_MISMATCH, format!("field `{n}` of `{}`: {m}", td.name), *sp));
                                     }
                                 }
@@ -928,10 +1164,11 @@ impl Walk<'_, '_> {
             }
             Ty::Dyn => Ty::Dyn, // looked up by name at run time
             Ty::Obj(t) => {
-                let td = &p.types[t as usize];
+                let tid = obj_tid(t);
+                let td = &p.types[tid];
                 match &td.decl.kind {
                     TypeKind::Record(decl) => match decl.iter().find(|(d, _, _)| d == name) {
-                        Some((_, ft, _)) => ann_in(p, td.module, ft).unwrap_or(Ty::Dyn),
+                        Some((_, ft, _)) => field_type(p, tid, base, ft),
                         None => {
                             self.err(Diag::new(&C::NO_FIELD, format!("`{}` has no field `{name}`", td.name), span));
                             Ty::Dyn
@@ -996,11 +1233,11 @@ impl Walk<'_, '_> {
                 let Ok(Resolved::Variant(tid, v)) = p.resolve(self.module, path) else { return };
                 let td = &p.types[tid];
                 if let Ty::Obj(st) = t
-                    && st as usize != tid
+                    && obj_tid(st) != tid
                 {
-                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, show(p, t)), pat.span()));
                 }
-                let fts: Vec<Ty> = td.variants()[v].fields.iter().map(|f| ann_in(p, td.module, f).unwrap_or(Ty::Dyn)).collect();
+                let fts: Vec<Ty> = td.variants()[v].fields.iter().map(|f| field_type(p, tid, t, f)).collect();
                 for (a, ft) in args.iter().zip(fts) {
                     self.bind_pattern(a, ft);
                 }
@@ -1031,13 +1268,13 @@ impl Walk<'_, '_> {
                 let Ok(Resolved::Type(tid)) = p.resolve(self.module, path) else { return };
                 let td = &p.types[tid];
                 if let Ty::Obj(st) = t
-                    && st as usize != tid
+                    && obj_tid(st) != tid
                 {
-                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, show(p, t)), pat.span()));
                 }
                 let TypeKind::Record(fs) = &td.decl.kind else { return };
                 for (f, a) in fields {
-                    let ft = fs.iter().find(|(n, _, _)| n == f).and_then(|(_, ft, _)| ann_in(p, td.module, ft)).unwrap_or(Ty::Dyn);
+                    let ft = fs.iter().find(|(n, _, _)| n == f).map(|(_, ft, _)| field_type(p, tid, t, ft)).unwrap_or(Ty::Dyn);
                     self.bind_pattern(a, ft);
                 }
             }
@@ -1071,7 +1308,7 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
         return Ty::Never;
     }
     // strings compare as whole values
-    if matches!(op, Eq | Ne) && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
+    if matches!(op, Eq | Ne | Lt | Le | Gt | Ge) && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
         return Ty::Bool;
     }
     // "a" + "b" joins strings

@@ -31,6 +31,8 @@ pub enum Item {
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: String,
+    /// `fn first[T](xs: [T]) -> Option[T]`
+    pub type_params: Vec<String>,
     pub is_pub: bool,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
@@ -54,6 +56,8 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct TypeDecl {
     pub name: String,
+    /// `type Pair[A, B] = { first: A, second: B }`
+    pub params: Vec<String>,
     pub is_pub: bool,
     pub kind: TypeKind,
     pub span: Span,
@@ -142,6 +146,8 @@ impl Pattern {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
     Named(String, Span),
+    /// `Option[i64]`, `Pair[str, f64]`: a generic type with arguments
+    App(String, Vec<Type>, Span),
     Array(Box<Type>, Span),
     Ptr(Box<Type>, Span),
     /// `fn(i64, f64) -> bool`: a function value.
@@ -151,7 +157,7 @@ pub enum Type {
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named(_, s) | Type::Array(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
+            Type::Named(_, s) | Type::App(_, _, s) | Type::Array(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
         }
     }
 }
@@ -160,6 +166,10 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Named(n, _) => write!(f, "{n}"),
+            Type::App(n, args, _) => {
+                let a: Vec<String> = args.iter().map(|t| t.to_string()).collect();
+                write!(f, "{n}[{}]", a.join(", "))
+            }
             Type::Array(t, _) => write!(f, "[{t}]"),
             Type::Ptr(t, _) => write!(f, "ptr[{t}]"),
             Type::Fn(ps, r, _) => {

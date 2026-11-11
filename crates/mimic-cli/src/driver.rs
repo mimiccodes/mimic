@@ -71,10 +71,10 @@ impl Profile {
 pub const PRELUDE: &str = "module prelude
 
 // Optional values: `let x = find(…) else { return … }` unwraps Some.
-pub type Option = Some(any) | None
+pub type Option[T] = Some(T) | None
 
 // Results of operations that can fail: `else` unwraps Ok.
-pub type Result = Ok(any) | Err(any)
+pub type Result[T, E] = Ok(T) | Err(E)
 
 // Strings, lists and maps: implemented in Mimic's runtime (runtime/mimic_std.c).
 pub extern \"mimic\" {
