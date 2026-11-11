@@ -201,7 +201,7 @@ pub struct Program {
 }
 
 pub const C_TYPES: &[&str] =
-    &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "bool", "c_char", "cstr"];
+    &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "bool", "c_char", "cstr", "cptr"];
 
 fn mangle(segs: &[String]) -> String {
     format!("_mimic_{}", segs.join("__"))
@@ -658,7 +658,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
 pub fn type_code(t: &Type) -> Result<i32, Diag> {
     Ok(match t {
         Type::Named(n, s) => match n.as_str() {
-            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => 1,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr" => 1,
             "f32" | "f64" => 2,
             "bool" => 3,
             "c_char" | "char" => 4,
@@ -666,7 +666,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             other => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{other}`"), *s)),
         },
         Type::Array(inner, s) => match &**inner {
-            Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize") => 6,
+            Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr") => 6,
             Type::Named(n, _) if matches!(n.as_str(), "f32" | "f64") => 7,
             Type::Named(n, _) if n == "bool" => 8,
             _ => return Err(Diag::new(&C::UNSUPPORTED_TYPE, "only arrays of numbers or bools are supported in this version", *s)),

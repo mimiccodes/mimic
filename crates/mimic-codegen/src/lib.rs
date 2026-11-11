@@ -1070,7 +1070,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "f32" => self.ctx.f32_type().into(),
                 "f64" => self.ctx.f64_type().into(),
                 "bool" => self.ctx.bool_type().into(),
-                "cstr" => self.ptr.into(),
+                "cstr" | "cptr" => self.ptr.into(),
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
@@ -1089,6 +1089,11 @@ impl<'ctx> Cg<'ctx, '_> {
             Type::Named(n, _) if n == "cstr" => {
                 let V::P(p, _) = v else { return Err("FFI: cstr expects a string".into()) };
                 self.call_rt("mim_cstr", &[p.into()])?.unwrap().into()
+            }
+            // an opaque C pointer travels through Mimic as its address (an integer)
+            Type::Named(n, _) if n == "cptr" => {
+                let i = self.to_i64(v)?;
+                self.b.build_int_to_ptr(i, self.ptr, "").s()?.into()
             }
             Type::Ptr(..) => {
                 let V::P(p, _) = v else { return Err("FFI: ptr[T] expects an array".into()) };
@@ -1109,6 +1114,7 @@ impl<'ctx> Cg<'ctx, '_> {
             Type::Named(n, _) if n == "f32" => V::F(self.b.build_float_ext(r.into_float_value(), self.ctx.f64_type(), "").s()?),
             Type::Named(n, _) if n == "bool" => V::B(r.into_int_value()),
             Type::Named(n, _) if n == "cstr" => self.call_rt_ptr("mim_from_cstr", &[r.into()])?,
+            Type::Named(n, _) if n == "cptr" => V::I(self.b.build_ptr_to_int(r.into_pointer_value(), self.ctx.i64_type(), "").s()?),
             Type::Named(n, _) => {
                 let i = r.into_int_value();
                 V::I(if i.get_type().get_bit_width() < 64 {

@@ -190,7 +190,7 @@ impl TypeInfo {
 fn ann_ty(t: &Type) -> Option<Ty> {
     Some(match t {
         Type::Named(n, _) => match n.as_str() {
-            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => Ty::I64,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr" => Ty::I64,
             "f32" | "f64" => Ty::F64,
             "bool" => Ty::Bool,
             "char" | "c_char" => Ty::Char,

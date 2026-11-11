@@ -50,6 +50,7 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | A3 (Apple) | Every Apple platform with an installed SDK: macOS, Mac Catalyst, iOS, tvOS, watchOS, visionOS, devices and simulators; ad-hoc signed. Catalyst runs every golden test here; an iOS-simulator build ran in the simulator | ✅ |
 | A (rest) | More C libraries for complete executables (glibc stubs, mingw-w64, BSD, Android, Apple SDK stubs); `--cpu`; our own static LLVM build with every backend enabled, including the experimental ones (no Homebrew z3/zstd); one static `mimic` binary | |
 | B1 | `extern "C" include "header.h"`: C headers imported directly, read by the embedded Clang for the build's target, types mapped by the target's data model, cached; `--cpu portable` | ✅ |
+| B5 (handles) | `cptr` opaque C pointers (returned and passed), `T **` out-parameters, typedefs resolved; SQLite works with no binding code | ✅ |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |
 | E | Standard library and I/O (M3 step 6, M5, M6) | |

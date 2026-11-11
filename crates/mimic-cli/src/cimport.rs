@@ -68,7 +68,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v2|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v4|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -150,6 +150,29 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             None => f == header || f.ends_with(&format!("/{header}")),
         }
     };
+    // typedef name → what it stands for (Clang does not desugar return types)
+    let mut typedefs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for node in ast["inner"].as_array().into_iter().flatten() {
+        if node["kind"] == "TypedefDecl"
+            && let Some(name) = node["name"].as_str()
+        {
+            let t = &node["type"];
+            if let Some(u) = t["desugaredQualType"].as_str().or(t["qualType"].as_str()) {
+                typedefs.insert(name.to_string(), u.to_string());
+            }
+        }
+    }
+    let resolve = |t: &str| -> String {
+        let mut t = t.trim().to_string();
+        for _ in 0..16 {
+            let (base, stars) = (t.trim_end_matches(['*', ' ']).trim_start_matches("const ").trim(), t.matches('*').count());
+            match typedefs.get(base) {
+                Some(u) => t = format!("{u}{}", " *".repeat(stars)),
+                None => break,
+            }
+        }
+        t
+    };
     let mut seen = std::collections::HashSet::new();
     for node in ast["inner"].as_array().into_iter().flatten() {
         update_file(node, &mut cur);
@@ -182,8 +205,8 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             continue;
         }
         let ftype = node["type"]["qualType"].as_str().unwrap_or("");
-        let ret_c = ftype.split('(').next().unwrap_or("").trim();
-        let ret = match ret_c {
+        let ret_c = resolve(ftype.split('(').next().unwrap_or("").trim());
+        let ret = match ret_c.as_str() {
             "void" => None,
             r => match map_type(r, None, m, true) {
                 Ok(t) => Some(t),
@@ -197,8 +220,8 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
         let mut bad = None;
         for p in node["inner"].as_array().into_iter().flatten().filter(|p| p["kind"] == "ParmVarDecl") {
             let q = p["type"]["qualType"].as_str().unwrap_or("");
-            let d = p["type"]["desugaredQualType"].as_str();
-            match map_type(q, d, m, false) {
+            let d = p["type"]["desugaredQualType"].as_str().map(String::from).unwrap_or_else(|| resolve(q));
+            match map_type(q, Some(&d), m, false) {
                 Ok(t) => params.push(t),
                 Err(why) => {
                     bad = Some(why);
@@ -220,18 +243,24 @@ fn map_type(qual: &str, desugared: Option<&str>, m: &DataModel, is_ret: bool) ->
     let t = desugared.unwrap_or(qual).trim();
     let t = t.trim_start_matches("const ").trim_start_matches("volatile ").trim();
     let t = t.trim_end_matches(" restrict").trim_end_matches("restrict").trim();
+    if t.contains("(*)") || t.contains("(^)") {
+        return Err(format!("`{qual}`: function pointers (callbacks) come with FFI step B4"));
+    }
     if let Some(inner) = t.strip_suffix('*') {
-        let inner = inner.trim().trim_start_matches("const ").trim();
-        if inner == "char" {
+        let inner = inner.trim().trim_start_matches("const ").trim_end_matches(" const").trim();
+        // strings: char* both ways; unsigned char* when C returns it (sqlite3_column_text)
+        if inner == "char" || (is_ret && inner == "unsigned char") {
             return Ok("cstr".into());
         }
-        if is_ret {
-            return Err(format!("returns a pointer (`{qual}`): raw pointers come with FFI step B5"));
+        // T** out-parameters: a one-element array C writes a pointer into
+        if inner.ends_with('*') {
+            return Ok(if is_ret { "cptr".into() } else { format!("ptr[{}]", if m.ptr_bits == 64 { "cptr" } else { "i32" }) });
         }
-        return match scalar(inner, m) {
-            Some(s) => Ok(format!("ptr[{s}]")),
-            None => Err(format!("pointer to `{inner}`: FFI step B2/B5")),
-        };
+        if !is_ret && let Some(s) = scalar(inner, m) {
+            return Ok(format!("ptr[{s}]"));
+        }
+        // everything else is an opaque handle: sqlite3 *, FILE *, void *, returned buffers
+        return Ok("cptr".into());
     }
     if t.starts_with("enum ") {
         return Ok("i32".into());
@@ -304,7 +333,11 @@ mod tests {
         assert_eq!(map_type("size_t", Some("unsigned long"), &lp64, false).unwrap(), "u64");
         assert_eq!(map_type("const char *", None, &lp64, false).unwrap(), "cstr");
         assert_eq!(map_type("double *", None, &lp64, false).unwrap(), "ptr[f64]");
-        assert!(map_type("double *", None, &lp64, true).is_err());
+        assert_eq!(map_type("double *", None, &lp64, true).unwrap(), "cptr");
+        assert_eq!(map_type("sqlite3 *", None, &lp64, false).unwrap(), "cptr");
+        assert_eq!(map_type("sqlite3 **", None, &lp64, false).unwrap(), "ptr[cptr]");
+        assert_eq!(map_type("const unsigned char *", None, &lp64, true).unwrap(), "cstr");
+        assert!(map_type("int (*)(void *, int)", None, &lp64, false).is_err());
         assert!(map_type("struct timeval", None, &lp64, false).is_err());
         assert_eq!(map_type("enum color", None, &lp64, false).unwrap(), "i32");
     }

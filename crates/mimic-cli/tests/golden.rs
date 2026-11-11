@@ -425,3 +425,44 @@ fn cpu_flag() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("unknown CPU `znver44`") && err.contains("did you mean `znver4`?"), "{err}");
 }
+
+/// A real C library with no binding code: SQLite's header is imported, its
+/// handles are opaque `cptr` values, out-parameters are one-element arrays.
+#[test]
+fn c_import_sqlite() {
+    if !cfg!(target_os = "macos") {
+        return; // macOS ships SQLite (header in the SDK, library in the OS)
+    }
+    let dir = std::env::temp_dir().join(format!("mimic-golden-sqlite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "sq"]).status().unwrap().success());
+    let proj = dir.join("sq");
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "link = [\"sqlite3\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        r#"module main
+
+extern "C" include "sqlite3.h"
+
+fn main() {
+    let mut db_out = [0]
+    print(unsafe { sqlite3_open(":memory:", db_out) })
+    let db = db_out[0]
+    let mut stmt_out = [0]
+    let mut tail = [0]
+    print(unsafe { sqlite3_prepare_v2(db, "select 'mimic', 40 + 2", ¯1, stmt_out, tail) })
+    let stmt = stmt_out[0]
+    print(unsafe { sqlite3_step(stmt) })
+    print(unsafe { sqlite3_column_text(stmt, 0) })
+    print(unsafe { sqlite3_column_int64(stmt, 1) })
+    print(unsafe { sqlite3_finalize(stmt) } + unsafe { sqlite3_close(db) })
+}
+"#,
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n0\n100\nmimic\n42\n0\n", "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
