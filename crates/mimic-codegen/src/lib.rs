@@ -636,6 +636,9 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_each_fn" => ptr.fn_type(&[p, p], false),
+            "mim_gather" | "mim_trail" => ptr.fn_type(&[p, p], false),
+            "mim_evolve" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_settle" => ptr.fn_type(&[p, p, p], false),
             "mim_cstr_dup" => ptr.fn_type(&[p], false),
             "mim_rt_shutdown" => self.ctx.i32_type().fn_type(&[i32t], false),
             "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
@@ -2301,6 +2304,29 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(b)?;
                 self.as_ty(r, ty, "operator result")
             }
+            // loop words: runtime loops over function values
+            ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
+                let mut vals = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    let v = self.expr(a)?;
+                    // evolve's count is a plain integer
+                    vals.push(if *prim == Prim::Evolve && i == 1 { v } else { self.boxed(v)? });
+                }
+                let r = match prim {
+                    Prim::Gather => self.call_rt_ptr("mim_gather", &[self.basic(vals[0]).into(), self.basic(vals[1]).into()])?,
+                    Prim::Trail => self.call_rt_ptr("mim_trail", &[self.basic(vals[0]).into(), self.basic(vals[1]).into()])?,
+                    Prim::Evolve => {
+                        let n = self.to_i64(vals[1])?;
+                        self.call_rt_ptr("mim_evolve", &[self.basic(vals[0]).into(), n.into(), self.basic(vals[2]).into()])?
+                    }
+                    _ => self.call_rt_ptr("mim_settle", &[self.basic(vals[0]).into(), self.basic(vals[1]).into(), self.basic(vals[2]).into()])?,
+                };
+                for v in vals {
+                    self.drop_tmp(v)?;
+                }
+                self.as_ty(r, ty, "loop result")
+            }
+            ExprKind::Arms { .. } => Err("internal error: `arms` reached codegen".into()),
             ExprKind::Prim { prim, args } => {
                 let a = self.expr(&args[0])?;
                 let a = self.boxed(a)?;

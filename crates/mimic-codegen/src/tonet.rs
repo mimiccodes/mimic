@@ -241,7 +241,9 @@ impl Eligible<'_> {
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),
-            ExprKind::Prim { prim, args } => !matches!(prim, Prim::Each | Prim::Print) && args.iter().all(|a| self.expr(a)),
+            ExprKind::Prim { prim, args } => {
+                !matches!(prim, Prim::Each | Prim::Print | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle) && args.iter().all(|a| self.expr(a))
+            }
             ExprKind::Call { callee, args } => {
                 let ExprKind::Path(path) = &callee.kind else { return false };
                 match self.p.resolve(self.module, path) {

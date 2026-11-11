@@ -59,6 +59,27 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 
 **Literals.** Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
 
+**Loops are words.** Mimic has no loop statements. These words, and recursion, replace them:
+
+```mimic
+prices ▷ gather(+)                         // combine: 31   (∕ glyph, `\g`)
+prices ▷ trail(+)                          // running totals (⍀ glyph, `\t`)
+1 ▷ evolve(10, x => x × 2)                 // apply 10 times: 1024 (⍣)
+1.0 ▷ settle(newton, x => ∣(x × x - 2) < 1e-12)   // until done (⍥)
+arms (lo = 0, hi = 1000000) {              // divide and conquer (⋔), in parallel
+    if hi - lo < 1000 { lo ‥ hi ▷ gather(+) }
+    else {
+        let mid = (lo + hi) div 2
+        arm(lo, mid) + arm(mid, hi)
+    }
+}
+```
+
+**How each word works:**
+* **`gather` and `trail`** combine with any two-argument function. When the function is pure they run in parallel, so it must be associative; `gather(+)` and `gather(×)` become the fused `+/` and `×/`.
+* **`evolve` and `settle`** step a state. `settle` checks `done` before each step.
+* **`arms`** binds its parameters, and `arm(…)` recurses with new values. The body captures outer variables by value.
+
 **Functions are values.** Lambdas, named functions and operators can be stored, passed, returned and called:
 
 ```mimic

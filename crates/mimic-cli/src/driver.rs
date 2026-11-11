@@ -93,7 +93,7 @@ fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) 
             return None;
         }
     };
-    match parse_file(&src) {
+    match parse_file(&src).and_then(|mut ast| mimic_syntax::desugar::lift_arms(&mut ast).map(|_| ast)) {
         Ok(ast) => Some(SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() }),
         Err(d) => {
             report.push_in(Some(path), &display, &src, d);

@@ -1,5 +1,8 @@
 //! `mimic` — compiler, project manager, code checker and package manager.
 
+// Diagnostics are rich (labels, fixes) and only built on the error path.
+#![allow(clippy::result_large_err)]
+
 mod cc;
 mod cimport;
 mod driver;

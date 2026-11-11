@@ -25,6 +25,11 @@ pub enum Prim {
     Max = 14,
     Min = 15,
     Abs = 16,
+    /// Loop words: higher-order, with function operands (never runtime prims).
+    Gather = 17,
+    Trail = 18,
+    Evolve = 19,
+    Settle = 20,
 }
 
 pub struct PrimInfo {
@@ -57,6 +62,10 @@ pub const PRIMS: &[PrimInfo] = &[
     PrimInfo { prim: Prim::Max, glyph: "⌈", word: "max", digraph: Some("\\u"), ascii: None, arity: 2, doc: "a ⌈ b → larger of a and b (elementwise)" },
     PrimInfo { prim: Prim::Min, glyph: "⌊", word: "min", digraph: Some("\\d"), ascii: None, arity: 2, doc: "a ⌊ b → smaller of a and b (elementwise)" },
     PrimInfo { prim: Prim::Abs, glyph: "∣", word: "abs", digraph: Some("\\a"), ascii: None, arity: 1, doc: "∣ x → absolute value (elementwise)" },
+    PrimInfo { prim: Prim::Gather, glyph: "∕", word: "gather", digraph: Some("\\g"), ascii: None, arity: 2, doc: "xs ▷ gather(f) → combine everything with f (parallel tree; f associative)" },
+    PrimInfo { prim: Prim::Trail, glyph: "⍀", word: "trail", digraph: Some("\\t"), ascii: None, arity: 2, doc: "xs ▷ trail(f) → running results of f (parallel prefix; f associative)" },
+    PrimInfo { prim: Prim::Evolve, glyph: "⍣", word: "evolve", digraph: Some("\\P"), ascii: None, arity: 3, doc: "x ▷ evolve(n, f) → apply f to the state n times" },
+    PrimInfo { prim: Prim::Settle, glyph: "⍥", word: "settle", digraph: Some("\\s"), ascii: None, arity: 3, doc: "x ▷ settle(f, done) → apply f until done(x) holds" },
 ];
 
 impl Prim {
@@ -98,6 +107,7 @@ pub const SYNTAX_GLYPHS: &[SyntaxGlyph] = &[
     SyntaxGlyph { glyph: "¬", word: "not", digraph: Some("\\!"), doc: "logical not (elementwise)" },
     SyntaxGlyph { glyph: "¯", word: "-", digraph: Some("\\_"), doc: "high minus for negative literals: ¯3" },
     SyntaxGlyph { glyph: "⍝", word: "//", digraph: None, doc: "line comment" },
+    SyntaxGlyph { glyph: "⋔", word: "arms", digraph: Some("\\y"), doc: "arms (a = …) { … arm(x) … arm(y) }: parallel divide and conquer" },
 ];
 
 /// Expand a backslash digraph (`\i`) to its glyph.

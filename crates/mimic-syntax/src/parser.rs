@@ -133,6 +133,11 @@ fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
             ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
         }
         (Prim::Abs, 1) => ExprKind::Unary { op: UnOp::Abs, expr: Box::new(args.pop().unwrap()) },
+        // gather(+) and gather(×) are the fused, typed sum and product
+        (Prim::Gather, 2) if matches!(args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul)) => {
+            let ExprKind::OpRef(op) = args.pop().unwrap().kind else { unreachable!() };
+            ExprKind::Prim { prim: if op == BinOp::Add { Prim::Sum } else { Prim::Product }, args }
+        }
         _ => ExprKind::Prim { prim, args },
     };
     Expr { kind, span }
@@ -721,6 +726,19 @@ impl Parser {
             Tok::Prim(p) => {
                 self.next();
                 let mut args = vec![lhs];
+                // loop words: `x ▷ evolve(60, step)`, `xs ▷ gather(+)`
+                if matches!(p, Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle) && self.at(&Tok::LParen) {
+                    args.extend(self.call_args()?);
+                    if args.len() != p.arity() {
+                        return Err(Diag::new(
+                            &C::ARG_COUNT,
+                            format!("`{}` takes {} argument(s) after the piped value, got {}", p.info().word, p.arity() - 1, args.len() - 1),
+                            start,
+                        ));
+                    }
+                    let span = start.to(self.prev_span());
+                    return Ok(prim_expr(p, args, span));
+                }
                 if p.arity() == 2 {
                     args.push(self.prim_rhs(p)?);
                 }
@@ -778,9 +796,14 @@ impl Parser {
         }
     }
 
-    /// After a `(`: is this `op )`, an operator as a value?
-    fn op_ref_ahead(&self) -> Option<BinOp> {
-        let op = match self.toks.get(self.pos).map(|t| &t.tok)? {
+    /// In an argument list: an operator followed by `,` or `)`.
+    fn bare_op_arg(&self) -> Option<BinOp> {
+        let op = self.op_at(self.pos)?;
+        matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::RParen | Tok::Comma)).then_some(op)
+    }
+
+    fn op_at(&self, i: usize) -> Option<BinOp> {
+        Some(match self.toks.get(i).map(|t| &t.tok)? {
             Tok::Plus => BinOp::Add,
             Tok::Minus => BinOp::Sub,
             Tok::Star => BinOp::Mul,
@@ -796,7 +819,12 @@ impl Parser {
             Tok::And => BinOp::And,
             Tok::Or => BinOp::Or,
             _ => return None,
-        };
+        })
+    }
+
+    /// After a `(`: is this `op )`, an operator as a value?
+    fn op_ref_ahead(&self) -> Option<BinOp> {
+        let op = self.op_at(self.pos)?;
         matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::RParen)).then_some(op)
     }
 
@@ -979,6 +1007,11 @@ impl Parser {
                     let value = self.expr()?;
                     let span = ns.to(value.span);
                     args.push(Expr { kind: ExprKind::Named { name, value: Box::new(value) }, span });
+                } else if let Some(op) = self.bare_op_arg() {
+                    // `gather(+)`: an operator standing alone is a function value
+                    let sp = self.span();
+                    self.next();
+                    args.push(Expr { kind: ExprKind::OpRef(op), span: sp });
                 } else {
                     args.push(self.expr()?);
                 }
@@ -1020,6 +1053,24 @@ impl Parser {
                     return Ok(Expr { kind: ExprKind::Record { path: segs, fields }, span: span.to(self.prev_span()) });
                 }
                 ExprKind::Path(segs)
+            }
+            Tok::Arms => {
+                // `arms (lo = 0, hi = n) { … arm(a, b) … }`
+                self.expect(&Tok::LParen)?;
+                let mut params = Vec::new();
+                while !self.at(&Tok::RParen) {
+                    let (name, _) = self.ident()?;
+                    if !self.eat(&Tok::Assign) {
+                        return Err(Diag::new(&C::UNEXPECTED_TOKEN, "`arms` parameters start with a value: `arms (lo = 0, hi = n) { … }`", self.span()));
+                    }
+                    params.push((name, self.expr()?));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RParen)?;
+                let body = self.block()?;
+                return Ok(Expr { span: span.to(body.span), kind: ExprKind::Arms { params, body } });
             }
             Tok::LParen if self.lambda_params_ahead() => {
                 // `(a, b) => e`, `() => e`
@@ -1354,6 +1405,7 @@ mod tests {
             }
             ExprKind::Lambda { params, body } => format!("(λ {} {})", params.join(" "), sx(body)),
             ExprKind::OpRef(op) => format!("({op:?})"),
+            ExprKind::Arms { params, .. } => format!("(arms {})", params.iter().map(|(n, x)| format!("{n}={}", sx(x))).collect::<Vec<_>>().join(" ")),
             ExprKind::If { cond, .. } => format!("(if {})", sx(cond)),
             ExprKind::Block(_) => "{}".into(),
             ExprKind::Unsafe(_) => "unsafe{}".into(),

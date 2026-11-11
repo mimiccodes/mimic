@@ -30,7 +30,7 @@ Mimic's goals:
 | 3b | Tuples (typed) and tuple patterns, `Option`/`Result` prelude with `let … else`, duration literals, route patterns with typed captures | ✅ |
 | perf 1 | Kernel fusion, single-division floored modulo, power-of-two shifts/masks, real loops for tail recursion. **Result:** the showcase compute benchmark matches C on one core (4.61 s vs 4.81 s) and is 4.6× faster on all cores. | ✅ |
 | 4 | Closures that capture (by value), multi-parameter lambdas, functions and operators as values (`(+)`), calling any function value, `fn(…) -> T` types, parallel `¨` over pure function values | ✅ |
-| 5 | Loop words: `gather`, `trail`, `evolve`, `settle`, `arms`/`arm` | |
+| 5 | Loop words: `gather`, `trail`, `evolve`, `settle`, `arms`/`arm` (see below) | ✅ |
 | 6 | Concurrent I/O: values that wait automatically when used, streams, event loop | |
 | 7 | Performance: kernel fusion, compile-time reference-count elision, wider net subset, benchmark CI | |
 | 8 | Tooling: `mimic test`, `mimic fmt` | |
@@ -81,11 +81,16 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 |---|---|---|---|
 | transform every element | `each` | `¨` | yes |
 | keep some elements | `keep` | `⌿` | yes |
-| combine everything into one value | `gather` | `/` | yes (tree combine) |
-| running results | `trail` | `\` | yes (parallel prefix) |
+| combine everything into one value | `gather` | `∕` (and `+/` `×/` `⌈/` `⌊/`) | yes (tree combine, when the function is pure) |
+| running results | `trail` | `⍀` | yes (parallel prefix, when pure) |
 | step a state *n* times | `evolve` | `⍣` | inside each step |
 | step until a condition holds | `settle` | `⍥` | inside each step |
-| split work across arms | `arms` / `arm` | `⋔` | yes, one task per `arm` |
+| split work across arms | `arms` / `arm` | `⋔` | yes, one task per `arm` (when the body compiles to nets; see below) |
+
+**Implemented (M3 step 5)**, with these details:
+* **Glyphs for `gather` and `trail`.** These are `∕` (U+2215) and `⍀`. Plain `/` is division and `\` starts digraphs, so neither is free. Type them as `\g` and `\t`.
+* **The function must be associative.** `gather` and `trail` combine chunks in order. With an associative function (`+`, `⌈`, string join) the parallel result equals a left fold.
+* **How `arms` runs.** `arms` is lifted to a hidden named function, with captured variables passed as extra parameters. When that function is pure and uses only numbers, recursion and the reductions, it compiles to interaction nets and every `arm` runs in parallel. A 3-million-element Collatz sum took 3.39 s on one core and 0.32 s on all cores. A body that uses `¨`, strings or closures runs its recursion on one core for now. Fork-join scheduling for every `arms` is roadmap item F6.
 
 ```mimic
 let total   = prices ▷ gather(+)

@@ -39,6 +39,8 @@ pub enum Tok {
     False,
     Type,
     Match,
+    /// `arms` / `⋔`: parallel divide-and-conquer recursion
+    Arms,
     With,
     Dot,
     Bar,
@@ -111,6 +113,7 @@ fn tok_text(t: &Tok) -> &'static str {
         Tok::Trusted => "trusted",
         Tok::Type => "type",
         Tok::Match => "match",
+        Tok::Arms => "arms",
         Tok::With => "with",
         Tok::Dot => ".",
         Tok::Bar => "|",
@@ -190,6 +193,7 @@ fn keyword(w: &str) -> Option<Tok> {
         "trusted" => Tok::Trusted,
         "type" => Tok::Type,
         "match" => Tok::Match,
+        "arms" => Tok::Arms,
         "with" => Tok::With,
         "true" => Tok::True,
         "false" => Tok::False,
@@ -405,6 +409,7 @@ impl<'a> Lexer<'a> {
                     Tok::Ident(w.to_string())
                 }
             }
+            '⋔' => Tok::Arms,
             other => {
                 if let Some(p) = glyphs::PRIMS.iter().find(|p| p.glyph.chars().count() == 1 && p.glyph.starts_with(other)) {
                     Tok::Prim(p.prim)

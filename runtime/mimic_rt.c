@@ -1354,6 +1354,178 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
     return r;
 }
 
+/* ==== loop words: gather, trail, evolve, settle ========================== */
+
+int64_t mim_truthy(mim_val *v);
+
+static mim_val *call1(mim_val *f, mim_val *x) { return mim_call(f, 1, &x); }
+
+static mim_val *call2(mim_val *f, mim_val *a, mim_val *b) {
+    mim_val *args[2] = {a, b};
+    return mim_call(f, 2, args);
+}
+
+static int fn_pure(const mim_val *f) { return f && f->dtype == MIM_FN && FN_DESC(f)->pure; }
+
+/* Fold [lo, hi) of xs with f, left to right. */
+static mim_val *fold_range(mim_val *xs, mim_val *f, int64_t lo, int64_t hi) {
+    mim_val *acc = scalar_at(xs, lo);
+    for (int64_t i = lo + 1; i < hi; i++) {
+        mim_val *e = scalar_at(xs, i);
+        mim_val *r = call2(f, acc, e);
+        mim_release(acc);
+        mim_release(e);
+        acc = r;
+    }
+    return acc;
+}
+
+typedef struct {
+    mim_val *xs, *f;
+    int64_t n, chunk;
+    mim_val **part;
+} gather_ctx;
+
+static void gather_chunks(void *vc, int64_t lo, int64_t hi) {
+    gather_ctx *c = (gather_ctx *)vc;
+    for (int64_t k = lo; k < hi; k++) {
+        int64_t a = k * c->chunk, b = a + c->chunk < c->n ? a + c->chunk : c->n;
+        c->part[k] = fold_range(c->xs, c->f, a, b);
+    }
+}
+
+static int64_t loop_chunks(int64_t n) {
+    int64_t k = (int64_t)g_nthreads * 4;
+    return k < n ? k : n;
+}
+
+/* xs ▷ gather(f): combine every element with f. A pure f is applied as a
+ * parallel tree (chunks fold on all cores, partial results combine in
+ * order), which gives the same result as a left fold when f is associative. */
+mim_val *mim_gather(mim_val *xs, mim_val *f) {
+    need(xs, "gather");
+    if (xs->rank == 0) {
+        mim_retain(xs);
+        return xs;
+    }
+    int64_t n = xs->len;
+    if (n == 0) mim_panic("gather of an empty array: there is no first value to start from");
+    if (!fn_pure(f) || g_nthreads < 2 || n < 64) return fold_range(xs, f, 0, n);
+    int64_t nch = loop_chunks(n);
+    gather_ctx c = {xs, f, n, (n + nch - 1) / nch, NULL};
+    nch = (n + c.chunk - 1) / c.chunk;
+    c.part = (mim_val **)malloc(sizeof(mim_val *) * (size_t)nch);
+    parallel_for_grain(nch, 1, gather_chunks, &c);
+    mim_val *acc = c.part[0];
+    for (int64_t k = 1; k < nch; k++) {
+        mim_val *r = call2(f, acc, c.part[k]);
+        mim_release(acc);
+        mim_release(c.part[k]);
+        acc = r;
+    }
+    free(c.part);
+    return acc;
+}
+
+typedef struct {
+    mim_val *xs, *f;
+    int64_t n, chunk;
+    mim_val **out;
+    mim_val **offset; /* per chunk: the combined value of all earlier chunks */
+} trail_ctx;
+
+static void trail_local(void *vc, int64_t lo, int64_t hi) {
+    trail_ctx *c = (trail_ctx *)vc;
+    for (int64_t k = lo; k < hi; k++) {
+        int64_t a = k * c->chunk, b = a + c->chunk < c->n ? a + c->chunk : c->n;
+        c->out[a] = scalar_at(c->xs, a);
+        for (int64_t i = a + 1; i < b; i++) {
+            mim_val *e = scalar_at(c->xs, i);
+            c->out[i] = call2(c->f, c->out[i - 1], e);
+            mim_release(e);
+        }
+    }
+}
+
+static void trail_fix(void *vc, int64_t lo, int64_t hi) {
+    trail_ctx *c = (trail_ctx *)vc;
+    for (int64_t k = lo; k < hi; k++) {
+        if (k == 0) continue;
+        int64_t a = k * c->chunk, b = a + c->chunk < c->n ? a + c->chunk : c->n;
+        for (int64_t i = a; i < b; i++) {
+            mim_val *r = call2(c->f, c->offset[k], c->out[i]);
+            mim_release(c->out[i]);
+            c->out[i] = r;
+        }
+    }
+}
+
+/* xs ▷ trail(f): every running result [x0, f(x0,x1), f(f(x0,x1),x2), …].
+ * A pure f runs as a two-pass parallel prefix (f associative). */
+mim_val *mim_trail(mim_val *xs, mim_val *f) {
+    need(xs, "trail");
+    if (xs->rank == 0) {
+        mim_retain(xs);
+        return xs;
+    }
+    int64_t n = xs->len;
+    if (n == 0) return alloc(MIM_I64, 1, 0);
+    trail_ctx c = {xs, f, n, n, NULL, NULL};
+    c.out = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
+    if (!fn_pure(f) || g_nthreads < 2 || n < 64) {
+        trail_local(&c, 0, 1);
+    } else {
+        int64_t nch = loop_chunks(n);
+        c.chunk = (n + nch - 1) / nch;
+        nch = (n + c.chunk - 1) / c.chunk;
+        parallel_for_grain(nch, 1, trail_local, &c);
+        /* offsets: what all earlier chunks combine to (sequential, nch values) */
+        c.offset = (mim_val **)calloc((size_t)nch, sizeof(mim_val *));
+        for (int64_t k = 1; k < nch; k++) {
+            mim_val *last = c.out[k * c.chunk - 1];
+            if (k == 1) {
+                mim_retain(last);
+                c.offset[1] = last;
+            } else {
+                c.offset[k] = call2(f, c.offset[k - 1], last);
+            }
+        }
+        parallel_for_grain(nch, 1, trail_fix, &c);
+        for (int64_t k = 1; k < nch; k++) mim_release(c.offset[k]);
+        free(c.offset);
+    }
+    mim_val *r = mim_array_lit(n, c.out);
+    for (int64_t i = 0; i < n; i++) mim_release(c.out[i]);
+    free(c.out);
+    return r;
+}
+
+/* x ▷ evolve(n, step): apply step n times. */
+mim_val *mim_evolve(mim_val *x, int64_t n, mim_val *step) {
+    if (n < 0) mim_panic("evolve: the number of steps cannot be negative");
+    mim_retain(x);
+    for (int64_t i = 0; i < n; i++) {
+        mim_val *nx = call1(step, x);
+        mim_release(x);
+        x = nx;
+    }
+    return x;
+}
+
+/* x ▷ settle(step, done): apply step until done(x) holds (checked first). */
+mim_val *mim_settle(mim_val *x, mim_val *step, mim_val *done) {
+    mim_retain(x);
+    for (;;) {
+        mim_val *d = call1(done, x);
+        int64_t stop = mim_truthy(d);
+        mim_release(d);
+        if (stop) return x;
+        mim_val *nx = call1(step, x);
+        mim_release(x);
+        x = nx;
+    }
+}
+
 /* ==== indexing =========================================================== */
 
 static int64_t check_index(mim_val *xs, mim_val *i) {

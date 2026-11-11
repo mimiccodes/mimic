@@ -261,6 +261,9 @@ pub enum ExprKind {
     Lambda { params: Vec<String>, body: Box<Expr> },
     /// `(+)`: an operator as a function value.
     OpRef(BinOp),
+    /// `arms (lo = 0, hi = n) { … arm(a, b) … }`: divide-and-conquer
+    /// recursion; lifted to a hidden function before checking.
+    Arms { params: Vec<(String, Expr)>, body: Block },
     /// `u.name`
     Field { base: Box<Expr>, name: String },
     /// `User { name: "ada", age: 36 }`
@@ -325,6 +328,10 @@ impl Expr {
                 }
             }
             ExprKind::Block(b) | ExprKind::Unsafe(b) => block(b, f),
+            ExprKind::Arms { params, body } => {
+                params.iter().for_each(|(_, x)| x.walk(f));
+                block(body, f);
+            }
         }
     }
 }
@@ -354,6 +361,133 @@ impl Block {
         }
         if let Some(t) = &self.tail {
             t.walk(f);
+        }
+    }
+}
+
+impl Expr {
+    /// Visit every expression bottom-up (children before parents), mutably.
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match &mut self.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) => {}
+            ExprKind::Array(xs) | ExprKind::Tuple(xs) | ExprKind::Prim { args: xs, .. } => xs.iter_mut().for_each(|x| x.walk_mut(f)),
+            ExprKind::Call { callee, args } => {
+                callee.walk_mut(f);
+                args.iter_mut().for_each(|x| x.walk_mut(f));
+            }
+            ExprKind::Index { base, index } => {
+                base.walk_mut(f);
+                index.walk_mut(f);
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::Field { base: expr, .. } | ExprKind::Named { value: expr, .. } => expr.walk_mut(f),
+            ExprKind::Lambda { body, .. } => body.walk_mut(f),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                lhs.walk_mut(f);
+                rhs.walk_mut(f);
+            }
+            ExprKind::Record { fields, .. } => fields.iter_mut().for_each(|(_, x, _)| x.walk_mut(f)),
+            ExprKind::With { base, fields } => {
+                base.walk_mut(f);
+                fields.iter_mut().for_each(|(_, x, _)| x.walk_mut(f));
+            }
+            ExprKind::Match { scrut, arms } => {
+                scrut.walk_mut(f);
+                arms.iter_mut().for_each(|a| a.body.walk_mut(f));
+            }
+            ExprKind::Interp(parts) => parts.iter_mut().for_each(|p| {
+                if let InterpPart::Expr(x) = p {
+                    x.walk_mut(f)
+                }
+            }),
+            ExprKind::If { cond, then, els } => {
+                cond.walk_mut(f);
+                then.walk_mut(f);
+                if let Some(e) = els {
+                    e.walk_mut(f);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => b.walk_mut(f),
+            ExprKind::Arms { params, body } => {
+                params.iter_mut().for_each(|(_, x)| x.walk_mut(f));
+                body.walk_mut(f);
+            }
+        }
+        f(self);
+    }
+}
+
+impl Block {
+    /// See [`Expr::walk_mut`].
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        for s in &mut self.stmts {
+            match s {
+                Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) => value.walk_mut(f),
+                Stmt::Assign { index, value, .. } => {
+                    if let Some(i) = index {
+                        i.walk_mut(f);
+                    }
+                    value.walk_mut(f);
+                }
+                Stmt::Return(e, _) => {
+                    if let Some(e) = e {
+                        e.walk_mut(f);
+                    }
+                }
+                Stmt::LetElse { value, els, .. } => {
+                    value.walk_mut(f);
+                    els.walk_mut(f);
+                }
+            }
+        }
+        if let Some(t) = &mut self.tail {
+            t.walk_mut(f);
+        }
+    }
+
+    /// Every name this block binds anywhere inside it (lets, lambda and arms
+    /// parameters, pattern bindings).
+    pub fn bound_names(&self, out: &mut Vec<String>) {
+        for s in &self.stmts {
+            match s {
+                Stmt::Let { name, .. } | Stmt::LetElse { name, .. } => out.push(name.clone()),
+                Stmt::LetTuple { names, .. } => out.extend(names.iter().cloned()),
+                _ => {}
+            }
+            if let Stmt::LetElse { els, .. } = s {
+                els.bound_names(out);
+            }
+        }
+        self.walk(&mut |e| match &e.kind {
+            ExprKind::Lambda { params, .. } => out.extend(params.iter().cloned()),
+            ExprKind::Arms { params, body } => {
+                out.extend(params.iter().map(|(n, _)| n.clone()));
+                body.bound_names(out);
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => b.bound_names(out),
+            ExprKind::If { then, .. } => then.bound_names(out),
+            ExprKind::Match { arms, .. } => {
+                for a in arms {
+                    a.pat.bound_names(out);
+                }
+            }
+            _ => {}
+        });
+    }
+}
+
+impl Pattern {
+    pub fn bound_names(&self, out: &mut Vec<String>) {
+        match self {
+            Pattern::Bind(n, _) => out.push(n.clone()),
+            Pattern::Variant { args, .. } | Pattern::Tuple(args, _) => args.iter().for_each(|a| a.bound_names(out)),
+            Pattern::Route(parts, _) => {
+                for p in parts {
+                    if let RoutePart::Capture { name: n, .. } = p {
+                        out.push(n.clone());
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

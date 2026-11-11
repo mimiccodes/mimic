@@ -936,15 +936,21 @@ impl Checker<'_> {
     }
 
     fn fn_operand(&mut self, e: &Expr, want_arity: usize) {
+        self.fn_operand_named(e, want_arity, "¨")
+    }
+
+    /// A function operand of a higher-order primitive (`¨`, `gather`, …).
+    fn fn_operand_named(&mut self, e: &Expr, want_arity: usize, who: &str) {
+        let who = if who == "¨" { "`¨`".to_string() } else { format!("`{who}`") };
         match &e.kind {
             ExprKind::Lambda { params, body } => {
                 if params.len() != want_arity {
-                    self.err(Diag::new(&C::ARG_COUNT, format!("this lambda takes {} argument(s), but `¨` passes {want_arity}", params.len()), e.span));
+                    self.err(Diag::new(&C::ARG_COUNT, format!("this lambda takes {} argument(s), but {who} passes {want_arity}", params.len()), e.span));
                 }
                 self.lambda(params, body)
             }
             ExprKind::OpRef(_) if want_arity != 2 => {
-                self.err(Diag::new(&C::ARG_COUNT, format!("an operator takes 2 arguments, but `¨` passes {want_arity}"), e.span))
+                self.err(Diag::new(&C::ARG_COUNT, format!("an operator takes 2 arguments, but {who} passes {want_arity}"), e.span))
             }
             ExprKind::OpRef(_) => {}
             // a function value held in a variable: checked when called
@@ -955,7 +961,7 @@ impl Checker<'_> {
                     if func.is_extern() {
                         self.err(Diag::new(&C::FFI_UNSUPPORTED, "extern functions cannot be passed as values; wrap them in a Mimic function", e.span));
                     } else if func.arity() != want_arity {
-                        self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), but `¨` passes {want_arity}", path.join("::"), func.arity()), e.span));
+                        self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), but {who} passes {want_arity}", path.join("::"), func.arity()), e.span));
                     }
                 }
                 Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), e.span)),
@@ -1072,11 +1078,29 @@ impl Checker<'_> {
                     self.err(Diag::new(&C::ARG_COUNT, format!("`{}` takes {} argument(s), got {}", prim.info().word, prim.arity(), args.len()), e.span));
                     return;
                 }
-                if *prim == Prim::Each {
-                    self.expr(&args[0]);
-                    self.fn_operand(&args[1], 1);
-                } else {
-                    args.iter().for_each(|a| self.expr(a));
+                match prim {
+                    Prim::Each => {
+                        self.expr(&args[0]);
+                        self.fn_operand(&args[1], 1);
+                    }
+                    // xs ▷ gather(f), xs ▷ trail(f): f combines two values
+                    Prim::Gather | Prim::Trail => {
+                        self.expr(&args[0]);
+                        self.fn_operand_named(&args[1], 2, prim.info().word);
+                    }
+                    // x ▷ evolve(n, step)
+                    Prim::Evolve => {
+                        self.expr(&args[0]);
+                        self.expr(&args[1]);
+                        self.fn_operand_named(&args[2], 1, "evolve");
+                    }
+                    // x ▷ settle(step, done)
+                    Prim::Settle => {
+                        self.expr(&args[0]);
+                        self.fn_operand_named(&args[1], 1, "settle");
+                        self.fn_operand_named(&args[2], 1, "settle");
+                    }
+                    _ => args.iter().for_each(|a| self.expr(a)),
                 }
             }
             ExprKind::Field { base, .. } => self.expr(base),
@@ -1163,6 +1187,7 @@ impl Checker<'_> {
             }
             ExprKind::Lambda { params, body } => self.lambda(params, body),
             ExprKind::OpRef(_) => {}
+            ExprKind::Arms { .. } => {} // lifted to a function after parsing
             ExprKind::If { cond, then, els } => {
                 self.expr(cond);
                 self.block(then, true);
@@ -1515,6 +1540,7 @@ impl PurityWalk<'_> {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
             ExprKind::OpRef(_) => true,
+            ExprKind::Arms { .. } => false, // lifted after parsing
             ExprKind::Array(xs) => xs.iter().all(|x| self.expr(x)),
             ExprKind::Call { callee, args } => {
                 args.iter().all(|a| self.expr(a))
@@ -1532,6 +1558,25 @@ impl PurityWalk<'_> {
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
+            ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
+                // which arguments are functions: those must be known-pure functions
+                let fn_args: &[usize] = match prim {
+                    Prim::Gather | Prim::Trail => &[1],
+                    Prim::Evolve => &[2],
+                    _ => &[1, 2],
+                };
+                args.iter().enumerate().all(|(i, a)| {
+                    if !fn_args.contains(&i) {
+                        return self.expr(a);
+                    }
+                    match &a.kind {
+                        ExprKind::Lambda { body, .. } => self.expr(body),
+                        ExprKind::OpRef(_) => true,
+                        ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+                        _ => false, // a function value from elsewhere: unknown
+                    }
+                })
+            }
             ExprKind::Prim { prim, args } => {
                 *prim != Prim::Print
                     && if *prim == Prim::Each {

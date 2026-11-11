@@ -1,0 +1,30 @@
+module main
+
+fn newton(x: f64) -> f64 { (x + 2.0 / x) / 2.0 }
+
+fn close_enough(x: f64) -> bool { ∣ (x × x - 2.0) < 1e-12 }
+
+fn halve_or_triple(n: i64) -> i64 { if n % 2 == 0 { n div 2 } else { 3 × n + 1 } }
+
+fn main() {
+    let prices = [3 1 4 1 5 9 2 6]
+    print(prices ▷ gather(+))                       // 31: the fused sum
+    print(prices ▷ gather((a, b) => a ⌈ b))           // 9: any combining function
+    print(prices ▷ trail(+))                        // running totals
+    print(⍳ 10000 ▷ trail(+) ▷ gather((a, b) => a ⌈ b))   // parallel prefix, then parallel max
+    print(1 ▷ evolve(10, x => x × 2))               // 1024
+    print(1.0 ▷ settle(newton, close_enough))       // √2
+    print(27 ▷ settle(halve_or_triple, n => n == 1)) // Collatz reaches 1
+    let words = ["par" "al" "lel"]
+    print(words ▷ gather((a, b) => "{a}{b}"))        // strings
+    let total = arms (lo = 0, hi = 1000000) {
+        if hi - lo < 1000 { lo ‥ hi ▷ gather(+) }
+        else {
+            let mid = (lo + hi) div 2
+            arm(lo, mid) + arm(mid, hi)
+        }
+    }
+    print(total)                                     // 499999500000
+    let k = 7
+    print(⋔ (n = 10) { if n == 0 { k } else { arm(n - 1) + 1 } })   // captures k: 17
+}

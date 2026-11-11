@@ -1,0 +1,5 @@
+// expect-error: E0701 `arm` takes 2 argument(s) (one per `arms` parameter), got 1
+module main
+fn main() {
+    print(arms (lo = 0, hi = 10) { if hi - lo < 2 { lo } else { arm(lo) } })
+}

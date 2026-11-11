@@ -642,6 +642,7 @@ impl Walk<'_, '_> {
                 },
             },
             ExprKind::OpRef(_) => Ty::Dyn,
+            ExprKind::Arms { .. } => Ty::Dyn, // lifted after parsing
             ExprKind::Call { callee, args } => {
                 let mut argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
                 match &callee.kind {
@@ -810,6 +811,9 @@ impl Walk<'_, '_> {
                     };
                 }
                 let b = if args.len() > 1 { self.expr(&args[1]) } else { Ty::Unit };
+                for extra in args.iter().skip(2) {
+                    self.expr(extra);
+                }
                 if a == Ty::Never || b == Ty::Never {
                     return Ty::Never;
                 }
@@ -980,6 +984,7 @@ pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
             Ty::Arr(_) => a,
             _ => Ty::Dyn,
         },
+        Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle => Ty::Dyn,
         Prim::Each | Prim::Max | Prim::Min | Prim::Abs => {
             let _ = b;
             Ty::Dyn
