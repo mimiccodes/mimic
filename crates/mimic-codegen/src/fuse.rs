@@ -529,7 +529,10 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Field { base, .. } => self.uses_ok(name, base, false),
             ExprKind::Record { fields, .. } => fields.iter().all(|(_, v, _)| self.uses_ok(name, v, false)),
             ExprKind::With { base, fields } => self.uses_ok(name, base, false) && fields.iter().all(|(_, v, _)| self.uses_ok(name, v, false)),
-            ExprKind::Match { scrut, arms } => self.uses_ok(name, scrut, false) && arms.iter().all(|a| self.uses_ok(name, &a.body, false)),
+            ExprKind::Match { scrut, arms } => {
+                self.uses_ok(name, scrut, false)
+                    && arms.iter().all(|a| a.guard.as_ref().is_none_or(|g| self.uses_ok(name, g, false)) && self.uses_ok(name, &a.body, false))
+            }
             ExprKind::Interp(parts) => parts.iter().all(|p| match p {
                 InterpPart::Expr(x) => self.uses_ok(name, x, false),
                 InterpPart::Text(_) => true,

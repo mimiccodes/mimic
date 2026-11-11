@@ -189,12 +189,42 @@ fn area(s: Shape) -> f64 {
 ```
 
 * **Matching on a union must be exhaustive.** Every variant needs an arm, or there must be a final `_ =>`. The compiler names any missing variants.
-* **Matching on numbers or strings needs a final `_ =>` arm.**
-* **Patterns:**
-  * `_` matches anything;
-  * a lowercase name binds the value;
-  * literals (`1`, `"ada"`, `true`);
-  * variants with sub-patterns (`Rect(w, _)`).
+* **Matching on numbers or strings needs a final `_ =>` arm.** Arrays are covered when the arms handle every length, as `[]`, `[x]`, `[x, ..rest]` do.
+* **An arm with a guard covers nothing**, because the guard may be false.
+
+**Patterns:**
+
+| Pattern | Matches |
+|---|---|
+| `_` | anything |
+| `n` (lowercase name) | anything, and binds it |
+| `1`, `-2.5`, `"ada"`, `true` | that literal |
+| `0 ‥ 13` | a number with `0 ≤ x < 13`, like the `‥` primitive |
+| `Rect(w, _)` | a variant, with sub-patterns for its fields |
+| `Point { x: 0, y }`, `Point { x, .. }` | a record, by field name; `..` ignores the fields not listed |
+| `(a, 0)` | a tuple |
+| `[]`, `[a b]`, `[first, ..rest]`, `[x, ..]` | an array or string of that length; `..rest` binds the remaining elements |
+| `A \| B` | either alternative |
+| `p as name` | `p`, and also binds the whole value to `name` |
+| `"/users/{id: i64}"` | a route (see below) |
+
+```mimic
+match event {
+    Click(Point { x: 0, y: 0 })            => "origin"
+    Click(Point { x, .. } as p) if x > 2   => "right: {p}"     // guard
+    Key("q" | "Q")                         => "quit"           // alternatives
+    Scroll(n) as s if n < 0                => "{s} up"
+    Circle(r) | Square(r)                  => "r = {r}"
+    _                                      => "other"
+}
+
+if let Some(year) = get(born, "ada") { print(year) } else { print("unknown") }
+```
+
+**Rules for patterns:**
+* **Guards.** `pat if cond =>` tries the arm only when `cond` is true, and `cond` can use the pattern's variables. When the guard is false, matching continues with the next arm.
+* **Alternatives** must all bind the same names (E0505). Inside a larger pattern, alternatives cannot bind names yet.
+* **`if let pat = value { … } else { … }`** is a two-arm `match`, and `else if` / `else if let` chain as usual.
 * **Strings compare as whole values** with `==` and `!=`.
 * **Under the hood:** records and variants are immutable, reference-counted values. `with` updates in place when nothing else shares the record, and copies otherwise.
 

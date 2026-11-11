@@ -823,6 +823,9 @@ impl Walk<'_, '_> {
                 for arm in arms {
                     self.scopes.push(HashMap::new());
                     self.bind_pattern(&arm.pat, st);
+                    if let Some(g) = &arm.guard {
+                        self.expr(g);
+                    }
                     out = out.join(self.expr(&arm.body));
                     self.scopes.pop();
                 }
@@ -975,6 +978,61 @@ impl Walk<'_, '_> {
                 let fts: Vec<Ty> = td.variants()[v].fields.iter().map(|f| ann_in(p, td.module, f).unwrap_or(Ty::Dyn)).collect();
                 for (a, ft) in args.iter().zip(fts) {
                     self.bind_pattern(a, ft);
+                }
+            }
+            Pattern::Or(alts, _) => {
+                for a in alts {
+                    self.bind_pattern(a, t);
+                }
+            }
+            Pattern::Range { lo, hi, span } => {
+                let (a, b) = (self.expr(lo), self.expr(hi));
+                for x in [a, b] {
+                    if !matches!(x, Ty::I64 | Ty::F64) {
+                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("a range pattern needs numbers, found {}", show(self.inf.p, x)), *span));
+                    }
+                }
+                if !matches!(t, Ty::I64 | Ty::F64 | Ty::Dyn | Ty::Never) {
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("a range pattern matches a number, but the value is {}", show(self.inf.p, t)), *span));
+                }
+            }
+            Pattern::As(inner, n, _) => {
+                self.bind_pattern(inner, t);
+                self.out.binds.insert(id(pat), t);
+                self.scopes.last_mut().unwrap().insert(n.clone(), (id(pat), t));
+            }
+            Pattern::Record { path, fields, .. } => {
+                let p = self.inf.p;
+                let Ok(Resolved::Type(tid)) = p.resolve(self.module, path) else { return };
+                let td = &p.types[tid];
+                if let Ty::Obj(st) = t
+                    && st as usize != tid
+                {
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("this pattern is a `{}`, but the value is a `{}`", td.name, p.types[st as usize].name), pat.span()));
+                }
+                let TypeKind::Record(fs) = &td.decl.kind else { return };
+                for (f, a) in fields {
+                    let ft = fs.iter().find(|(n, _, _)| n == f).and_then(|(_, ft, _)| ann_in(p, td.module, ft)).unwrap_or(Ty::Dyn);
+                    self.bind_pattern(a, ft);
+                }
+            }
+            Pattern::Array { elems, rest, span } => {
+                let el = match t {
+                    Ty::Arr(e) => Ty::of_el(e),
+                    Ty::Dyn | Ty::Never => Ty::Dyn,
+                    other => {
+                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("an array pattern matches an array or string, but the value is {}", show(self.inf.p, other)), *span));
+                        Ty::Dyn
+                    }
+                };
+                for a in elems {
+                    self.bind_pattern(a, el);
+                }
+                if let Some(Some(n)) = rest {
+                    // the rest has the array's own type; keyed one past the pattern
+                    let rt = if matches!(t, Ty::Arr(_)) { t } else { Ty::Dyn };
+                    self.out.binds.insert(id(pat) + 1, rt);
+                    self.scopes.last_mut().unwrap().insert(n.clone(), (id(pat) + 1, rt));
                 }
             }
         }

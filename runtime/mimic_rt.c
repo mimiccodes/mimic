@@ -1606,6 +1606,23 @@ mim_val *mim_index(mim_val *xs, mim_val *i) {
     return scalar_at(xs, check_index(xs, i));
 }
 
+/* ==== pattern matching helpers ========================================== */
+
+/* Is `o` a record built from descriptor `d`? */
+int64_t mim_pat_is(mim_val *o, const mim_desc *d) { return o && o->dtype == MIM_OBJ && o->rank == 0 && o->desc == d; }
+
+/* Length of a vector (an array or string), or -1 for anything else. */
+int64_t mim_pat_len(mim_val *v) {
+    if (!v || v->rank != 1 || v->dtype == MIM_MAP) return -1;
+    return v->len;
+}
+
+/* Element `i` of a vector already known to be long enough (owned). */
+mim_val *mim_pat_at(mim_val *v, int64_t i) { return scalar_at(v, i); }
+
+/* The elements from `start` on (owned). */
+mim_val *mim_pat_rest(mim_val *v, int64_t start) { return slice(v, start, v->len - start); }
+
 /* Copy-on-write element store: mutates in place when uniquely owned. */
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     if (*slot && (*slot)->dtype == MIM_MAP) {

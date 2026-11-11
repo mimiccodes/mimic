@@ -835,6 +835,67 @@ impl Checker<'_> {
                 Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a variant", self.p.describe(r)), *span)),
                 Err(m) => self.err(m.diag(self.p, self.file, *span)),
             },
+            Pattern::Or(alts, _) => {
+                for a in alts {
+                    self.pattern(a, top, union, covered, catch_all);
+                }
+            }
+            Pattern::Range { lo, hi, .. } => {
+                self.expr(lo);
+                self.expr(hi);
+            }
+            Pattern::As(inner, n, s) => {
+                self.pattern(inner, top, union, covered, catch_all);
+                self.declare(n, false, *s);
+            }
+            Pattern::Record { path, fields, rest, span } => match self.p.resolve(self.module, path) {
+                Ok(Resolved::Type(t)) if self.p.types[t].is_record() => {
+                    let td = &self.p.types[t];
+                    let mut errs = Vec::new();
+                    for (f, _) in fields {
+                        if td.field_index(f).is_none() {
+                            errs.push(Diag::new(&C::RECORD_PATTERN, format!("`{}` has no field `{f}`", td.name), *span));
+                        }
+                    }
+                    if !rest
+                        && let TypeKind::Record(fs) = &td.decl.kind
+                    {
+                        let missing: Vec<String> =
+                            fs.iter().filter(|(n, _, _)| !fields.iter().any(|(f, _)| f == n)).map(|(n, _, _)| format!("`{n}`")).collect();
+                        if !missing.is_empty() {
+                            errs.push(
+                                Diag::new(&C::RECORD_PATTERN, format!("this pattern does not mention {}", missing.join(", ")), *span)
+                                    .help("list them, or write `..` to ignore the rest"),
+                            );
+                        }
+                    }
+                    errs.into_iter().for_each(|d| self.err(d));
+                    if top && fields.iter().all(|(_, a)| matches!(a, Pattern::Wild(_) | Pattern::Bind(..))) {
+                        *catch_all = true;
+                    }
+                    let (mut u2, mut c2, mut a2) = (None, Vec::new(), false);
+                    for (_, a) in fields {
+                        self.pattern(a, false, &mut u2, &mut c2, &mut a2);
+                    }
+                }
+                Ok(Resolved::Type(t)) => self.err(
+                    Diag::new(&C::UNION_NOT_RECORD, format!("`{}` is a union; match its variants instead", self.p.types[t].name), *span),
+                ),
+                Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a record type", self.p.describe(r)), *span)),
+                Err(m) => self.err(m.diag(self.p, self.file, *span)),
+            },
+            Pattern::Array { elems, rest, span } => {
+                if top && elems.is_empty() && rest.is_some() {
+                    *catch_all = true;
+                }
+                let (mut u2, mut c2, mut a2) = (None, Vec::new(), false);
+                for a in elems {
+                    self.pattern(a, false, &mut u2, &mut c2, &mut a2);
+                }
+                if let Some(Some(n)) = rest {
+                    self.declare(n, false, *span);
+                }
+            }
         }
     }
 
@@ -1153,9 +1214,20 @@ impl Checker<'_> {
                 let (mut union, mut covered, mut catch_all) = (None, Vec::new(), false);
                 for arm in arms {
                     self.scopes.push(HashMap::new());
-                    self.pattern(&arm.pat, true, &mut union, &mut covered, &mut catch_all);
+                    match &arm.guard {
+                        // a guarded arm may not match, so it covers nothing
+                        Some(g) => {
+                            let (mut c2, mut a2) = (Vec::new(), false);
+                            self.pattern(&arm.pat, true, &mut union, &mut c2, &mut a2);
+                            self.expr(g);
+                        }
+                        None => self.pattern(&arm.pat, true, &mut union, &mut covered, &mut catch_all),
+                    }
                     self.expr(&arm.body);
                     self.scopes.pop();
+                }
+                if !catch_all {
+                    catch_all = arrays_exhaustive(arms);
                 }
                 if !catch_all {
                     match union {
@@ -1303,6 +1375,29 @@ mod tests {
     }
 }
 
+/// Do the unguarded array patterns of these arms cover every length?
+/// (`[]`, `[x]`, `[x, ..rest]` do: lengths 0 and 1 exactly, then 1 or more.)
+fn arrays_exhaustive(arms: &[Arm]) -> bool {
+    let irrefutable = |p: &Pattern| matches!(p, Pattern::Wild(_) | Pattern::Bind(..));
+    let mut exact = Vec::new();
+    let mut from: Option<usize> = None;
+    for arm in arms.iter().filter(|a| a.guard.is_none()) {
+        let pat = match &arm.pat {
+            Pattern::As(p, _, _) => &**p,
+            p => p,
+        };
+        if let Pattern::Array { elems, rest, .. } = pat
+            && elems.iter().all(irrefutable)
+        {
+            match rest {
+                Some(_) => from = Some(from.map_or(elems.len(), |k| k.min(elems.len()))),
+                None => exact.push(elems.len()),
+            }
+        }
+    }
+    from.is_some_and(|k| (0..k).all(|n| exact.contains(&n)))
+}
+
 // ---- named and default arguments ------------------------------------------
 
 /// Is `e` a constant (usable as a parameter default)?
@@ -1416,7 +1511,12 @@ impl Norm<'_> {
             }
             ExprKind::Match { scrut, arms } => {
                 self.expr(scrut);
-                arms.iter_mut().for_each(|a| self.expr(&mut a.body));
+                for a in arms.iter_mut() {
+                    if let Some(g) = &mut a.guard {
+                        self.expr(g);
+                    }
+                    self.expr(&mut a.body);
+                }
             }
             ExprKind::Interp(parts) => parts.iter_mut().for_each(|p| {
                 if let InterpPart::Expr(x) = p {
@@ -1610,7 +1710,9 @@ impl PurityWalk<'_> {
             ExprKind::Named { value, .. } => self.expr(value),
             ExprKind::Record { fields, .. } => fields.iter().all(|(_, v, _)| self.expr(v)),
             ExprKind::With { base, fields } => self.expr(base) && fields.iter().all(|(_, v, _)| self.expr(v)),
-            ExprKind::Match { scrut, arms } => self.expr(scrut) && arms.iter().all(|a| self.expr(&a.body)),
+            ExprKind::Match { scrut, arms } => {
+                self.expr(scrut) && arms.iter().all(|a| a.guard.as_ref().is_none_or(|g| self.expr(g)) && self.expr(&a.body))
+            }
             ExprKind::Interp(parts) => parts.iter().all(|p| match p {
                 InterpPart::Expr(x) => self.expr(x),
                 InterpPart::Text(_) => true,

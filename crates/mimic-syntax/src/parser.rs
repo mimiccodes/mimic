@@ -145,14 +145,14 @@ fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
 
 pub fn parse_file(src: &str) -> Result<File, Diag> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0, nl_ignore: 0 };
+    let mut p = Parser { toks, pos: 0, nl_ignore: 0, no_lambda: false };
     p.file()
 }
 
 /// Parse a single expression (used by tests and tooling).
 pub fn parse_expr(src: &str) -> Result<Expr, Diag> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0, nl_ignore: 0 };
+    let mut p = Parser { toks, pos: 0, nl_ignore: 0, no_lambda: false };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -173,6 +173,8 @@ pub(crate) struct Parser {
     pub(crate) pos: usize,
     /// >0 inside parens/brackets: newlines are insignificant.
     pub(crate) nl_ignore: usize,
+    /// In a match guard: `x => …` ends the guard instead of starting a lambda.
+    pub(crate) no_lambda: bool,
 }
 
 type PResult<T> = Result<T, Diag>;
@@ -1054,7 +1056,7 @@ impl Parser {
             Tok::True => ExprKind::Bool(true),
             Tok::False => ExprKind::Bool(false),
             Tok::Ident(name) => {
-                if self.at(&Tok::FatArrow) {
+                if self.at(&Tok::FatArrow) && !self.no_lambda {
                     self.next();
                     let body = self.expr()?;
                     let span = span.to(body.span);
@@ -1089,7 +1091,7 @@ impl Parser {
                 let body = self.block()?;
                 return Ok(Expr { span: span.to(body.span), kind: ExprKind::Arms { params, body } });
             }
-            Tok::LParen if self.lambda_params_ahead() => {
+            Tok::LParen if !self.no_lambda && self.lambda_params_ahead() => {
                 // `(a, b) => e`, `() => e`
                 let mut params = Vec::new();
                 while !self.at(&Tok::RParen) {
@@ -1260,6 +1262,43 @@ impl Parser {
         Ok(fields)
     }
 
+    /// `Point { x, y: 0, .. }` (the path is already read)
+    fn record_pattern(&mut self, path: Vec<String>, start: Span) -> PResult<Pattern> {
+        self.expect(&Tok::LBrace)?;
+        self.nl_ignore += 1;
+        let r = (|| {
+            let mut fields: Vec<(String, Pattern)> = Vec::new();
+            let mut rest = false;
+            loop {
+                while self.eat(&Tok::Comma) {}
+                if self.at(&Tok::RBrace) {
+                    break;
+                }
+                if rest {
+                    let s = self.span();
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, "`..` must come last in a record pattern", s));
+                }
+                if self.at(&Tok::Dot) {
+                    self.next();
+                    self.expect(&Tok::Dot)?;
+                    rest = true;
+                    continue;
+                }
+                let (f, fs) = self.ident()?;
+                if fields.iter().any(|(g, _)| *g == f) {
+                    return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("field `{f}` appears twice in this pattern"), fs));
+                }
+                let p = if self.eat(&Tok::Colon) { self.pattern()? } else { Pattern::Bind(f.clone(), fs) };
+                fields.push((f, p));
+            }
+            Ok((fields, rest))
+        })();
+        self.nl_ignore -= 1;
+        let (fields, rest) = r?;
+        let end = self.expect(&Tok::RBrace)?;
+        Ok(Pattern::Record { path, fields, rest, span: start.to(end) })
+    }
+
     fn match_rest(&mut self, start: Span) -> PResult<Expr> {
         let saved = std::mem::replace(&mut self.nl_ignore, 0);
         let scrut = self.expr();
@@ -1278,10 +1317,19 @@ impl Parser {
                     break;
                 }
                 let pat = self.pattern()?;
+                // `pat if cond => …`: in the guard, `x => …` is not a lambda
+                let guard = if self.eat(&Tok::If) {
+                    let saved = std::mem::replace(&mut self.no_lambda, true);
+                    let g = self.expr();
+                    self.no_lambda = saved;
+                    Some(g?)
+                } else {
+                    None
+                };
                 self.expect(&Tok::FatArrow)?;
                 let body = self.expr()?;
                 let span = pat.span().to(body.span);
-                arms.push(Arm { pat, body, span });
+                arms.push(Arm { pat, guard, body, span });
                 if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Comma | Tok::RBrace) {
                     let s = self.span();
                     return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected a new line, `,` or `}` after a match arm", s));
@@ -1298,7 +1346,57 @@ impl Parser {
         Ok(Expr { kind: ExprKind::Match { scrut: Box::new(scrut), arms }, span: start.to(end) })
     }
 
+    /// A pattern: alternatives `A | B`, optionally `as name`.
     fn pattern(&mut self) -> PResult<Pattern> {
+        let first = self.pattern_atom()?;
+        let start = first.span();
+        let mut alts = vec![first];
+        loop {
+            // `|` may start the next line
+            let save = self.pos;
+            while self.nl_ignore > 0 && self.toks[self.pos].tok == Tok::Newline {
+                self.pos += 1;
+            }
+            if !self.eat(&Tok::Bar) {
+                self.pos = save;
+                break;
+            }
+            self.skip_newlines();
+            alts.push(self.pattern_atom()?);
+        }
+        let mut pat = if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            let span = start.to(self.prev_span());
+            Pattern::Or(alts, span)
+        };
+        if self.eat(&Tok::As) {
+            let (n, ns) = self.ident()?;
+            if is_upper(&n) {
+                return Err(Diag::new(&C::NAME_CASE, format!("`as` binds a variable, which starts with a lowercase letter: `{n}`"), ns));
+            }
+            let span = start.to(ns);
+            pat = Pattern::As(Box::new(pat), n, span);
+        }
+        Ok(pat)
+    }
+
+    /// A literal in a pattern: `3`, `-3`, `¯3`, `2.5`, `"s"`, `true`.
+    fn pattern_lit(&mut self) -> PResult<Expr> {
+        let t = self.next();
+        let (neg, t) = if t.tok == Tok::Minus { (true, self.next()) } else { (false, t) };
+        let kind = match t.tok {
+            Tok::Int(i) => ExprKind::Int(if neg { -i } else { i }),
+            Tok::Float(f) => ExprKind::Float(if neg { -f } else { f }),
+            Tok::Str(s) if !neg => ExprKind::Str(s),
+            Tok::True if !neg => ExprKind::Bool(true),
+            Tok::False if !neg => ExprKind::Bool(false),
+            other => return Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected a literal in this pattern, found {}", other.describe()), t.span)),
+        };
+        Ok(Expr { kind, span: t.span })
+    }
+
+    fn pattern_atom(&mut self) -> PResult<Pattern> {
         let t = self.peek_tok().clone();
         match t.tok {
             Tok::Ident(n) if n == "_" => {
@@ -1306,8 +1404,54 @@ impl Parser {
                 Ok(Pattern::Wild(t.span))
             }
             Tok::Int(_) | Tok::Float(_) | Tok::True | Tok::False | Tok::Str(_) | Tok::Minus => {
-                let e = self.unary()?;
-                Ok(Pattern::Lit(e))
+                let lo = self.pattern_lit()?;
+                if self.at(&Tok::Prim(Prim::Range)) {
+                    self.next();
+                    let hi = self.pattern_lit()?;
+                    let span = lo.span.to(hi.span);
+                    return Ok(Pattern::Range { lo, hi, span });
+                }
+                Ok(Pattern::Lit(lo))
+            }
+            Tok::LBracket => {
+                self.next();
+                self.nl_ignore += 1;
+                let r = (|| {
+                    let mut elems = Vec::new();
+                    let mut rest = None;
+                    loop {
+                        while self.eat(&Tok::Comma) {}
+                        if self.at(&Tok::RBracket) {
+                            break;
+                        }
+                        if rest.is_some() {
+                            let s = self.span();
+                            return Err(Diag::new(&C::UNEXPECTED_TOKEN, "`..rest` must be the last element of an array pattern", s));
+                        }
+                        if self.at(&Tok::Dot) {
+                            self.next();
+                            self.expect(&Tok::Dot)?;
+                            rest = Some(match self.peek().clone() {
+                                Tok::Ident(n) if n != "_" => {
+                                    self.next();
+                                    Some(n)
+                                }
+                                Tok::Ident(_) => {
+                                    self.next();
+                                    None
+                                }
+                                _ => None,
+                            });
+                            continue;
+                        }
+                        elems.push(self.pattern()?);
+                    }
+                    Ok((elems, rest))
+                })();
+                self.nl_ignore -= 1;
+                let (elems, rest) = r?;
+                let end = self.expect(&Tok::RBracket)?;
+                Ok(Pattern::Array { elems, rest, span: t.span.to(end) })
             }
             Tok::Interp(parts) => {
                 self.next();
@@ -1364,6 +1508,9 @@ impl Parser {
                 if path.len() == 1 && !is_upper(&path[0]) {
                     return Ok(Pattern::Bind(path.pop().unwrap(), t.span));
                 }
+                if self.at(&Tok::LBrace) {
+                    return self.record_pattern(path, t.span);
+                }
                 let mut args = Vec::new();
                 if self.at(&Tok::LParen) {
                     self.next();
@@ -1388,6 +1535,43 @@ impl Parser {
     }
 
     fn if_rest(&mut self, start: Span) -> PResult<Expr> {
+        // `if let pat = value { … } else { … }` is a two-arm `match`
+        if self.eat(&Tok::Let) {
+            let pat = self.pattern()?;
+            self.expect(&Tok::Assign)?;
+            let saved = std::mem::replace(&mut self.nl_ignore, 0);
+            let scrut = self.expr();
+            self.nl_ignore = saved;
+            let scrut = scrut?;
+            let then = self.block()?;
+            let then_span = then.span;
+            let save = self.pos;
+            while self.toks[self.pos].tok == Tok::Newline {
+                self.pos += 1;
+            }
+            let els = if self.toks[self.pos].tok == Tok::Else {
+                self.pos += 1;
+                if self.at(&Tok::If) {
+                    let s = self.next().span;
+                    self.if_rest(s)?
+                } else {
+                    let b = self.block()?;
+                    let span = b.span;
+                    Expr { kind: ExprKind::Block(b), span }
+                }
+            } else {
+                self.pos = save;
+                let span = self.prev_span();
+                Expr { kind: ExprKind::Block(Block { stmts: Vec::new(), tail: None, span }), span }
+            };
+            let span = start.to(self.prev_span());
+            let pat_span = pat.span();
+            let arms = vec![
+                Arm { pat, guard: None, body: Expr { kind: ExprKind::Block(then), span: then_span }, span: pat_span.to(then_span) },
+                Arm { pat: Pattern::Wild(els.span), guard: None, span: els.span, body: els },
+            ];
+            return Ok(Expr { kind: ExprKind::Match { scrut: Box::new(scrut), arms }, span });
+        }
         // the condition must not swallow the `{`, so parse it with newlines significant
         let saved = std::mem::replace(&mut self.nl_ignore, 0);
         let cond = self.expr();

@@ -1,0 +1,5 @@
+// expect-error: E0501 missing `On`
+module main
+type S = On | Off
+fn main() { print(f(On, 1)) }
+fn f(s: S, n: i64) -> i64 { match s { On if n > 0 => 1, Off => 0 } }

@@ -1,0 +1,5 @@
+// expect-error: E0505 every alternative of a `|` pattern must bind the same names
+module main
+type S = A(i64) | B(i64) | C
+fn main() { print(f(A(1))) }
+fn f(s: S) -> i64 { match s { A(x) | C => x, B(y) => y } }

@@ -1,0 +1,5 @@
+// expect-error: E0506 this pattern does not mention `y`
+module main
+type P = { x: i64, y: i64 }
+fn main() { print(f(P { x: 1, y: 2 })) }
+fn f(p: P) -> i64 { match p { P { x } => x } }

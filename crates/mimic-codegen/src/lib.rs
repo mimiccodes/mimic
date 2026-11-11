@@ -351,7 +351,12 @@ fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
                 ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b, true),
                 ExprKind::Match { scrut, arms } => {
                     self.none(scrut);
-                    arms.iter().for_each(|a| self.tail(&a.body));
+                    for a in arms {
+                        if let Some(g) = &a.guard {
+                            self.none(g);
+                        }
+                        self.tail(&a.body);
+                    }
                 }
                 _ => self.none(e),
             }
@@ -409,7 +414,12 @@ fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
                 }
                 ExprKind::Match { scrut, arms } => {
                     self.none(scrut);
-                    arms.iter().for_each(|a| self.none(&a.body));
+                    for a in arms {
+                        if let Some(g) = &a.guard {
+                            self.none(g);
+                        }
+                        self.none(&a.body);
+                    }
                 }
                 ExprKind::Interp(parts) => parts.iter().for_each(|p| {
                     if let InterpPart::Expr(x) = p {
@@ -624,6 +634,9 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
             "mim_unop" | "mim_prim1" => ptr.fn_type(&[i32t, p], false),
             "mim_index" => ptr.fn_type(&[p, p], false),
+            "mim_pat_is" => self.ctx.i64_type().fn_type(&[p, p], false),
+            "mim_pat_len" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_pat_at" | "mim_pat_rest" => ptr.fn_type(&[p, i64t], false),
             "mim_each" => ptr.fn_type(&[p, p, i32t], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
@@ -1808,23 +1821,84 @@ impl<'ctx> Cg<'ctx, '_> {
         match pat {
             Pattern::Wild(_) | Pattern::Bind(..) => Ok(()),
             Pattern::Lit(e) => {
-                let lv = self.expr(e)?;
                 let cond = if matches!(e.kind, ExprKind::Str(_)) {
+                    let lv = self.expr(e)?;
                     let b = self.boxed(val)?;
                     let r = self.call_rt("mim_str_eq", &[self.basic(b).into(), self.basic(lv).into()])?.unwrap().into_int_value();
                     self.b.build_int_compare(IntPredicate::NE, r, self.ctx.i64_type().const_zero(), "").s()?
-                } else if Self::is_unboxed(&val) {
-                    let V::B(c) = self.scalar_binary(BinOp::Eq, val, lv)? else { unreachable!() };
-                    c
                 } else {
-                    let lb = self.boxed(lv)?;
-                    let r = self.call_rt_ptr("mim_binop", &[self.i32c(BinOp::Eq as i32), self.basic(val).into(), self.basic(lb).into()])?;
-                    self.drop_tmp(lb)?;
-                    self.truth(r)?
+                    self.pat_compare(BinOp::Eq, val, e)?
                 };
                 let ok = self.ctx.append_basic_block(f, "pat_ok");
                 self.b.build_conditional_branch(cond, ok, fail).s()?;
                 self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::Range { lo, hi, .. } => {
+                let a = self.pat_compare(BinOp::Ge, val, lo)?;
+                let mid = self.ctx.append_basic_block(f, "range_lo_ok");
+                self.b.build_conditional_branch(a, mid, fail).s()?;
+                self.b.position_at_end(mid);
+                let b = self.pat_compare(BinOp::Lt, val, hi)?;
+                let ok = self.ctx.append_basic_block(f, "range_ok");
+                self.b.build_conditional_branch(b, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::Or(alts, _) => {
+                let ok = self.ctx.append_basic_block(f, "or_ok");
+                for (i, a) in alts.iter().enumerate() {
+                    let next = if i + 1 == alts.len() { fail } else { self.ctx.append_basic_block(f, "or_next") };
+                    self.pattern_test(a, val, next)?;
+                    self.b.build_unconditional_branch(ok).s()?;
+                    if i + 1 < alts.len() {
+                        self.b.position_at_end(next);
+                    }
+                }
+                self.b.position_at_end(ok);
+                Ok(())
+            }
+            Pattern::As(inner, _, _) => self.pattern_test(inner, val, fail),
+            Pattern::Record { path, fields, .. } => {
+                let Ok(Resolved::Type(t)) = self.p.resolve(self.cur_mod, path) else { return Err("not a record type".into()) };
+                let b = self.boxed(val)?;
+                let d = self.desc(t, None);
+                let is = self.call_rt("mim_pat_is", &[self.basic(b).into(), d.into()])?.unwrap().into_int_value();
+                let c = self.b.build_int_compare(IntPredicate::NE, is, self.ctx.i64_type().const_zero(), "").s()?;
+                let ok = self.ctx.append_basic_block(f, "record_ok");
+                self.b.build_conditional_branch(c, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                for (name, a) in fields {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
+                        continue;
+                    }
+                    let (i, ft) = self.record_field(t, name);
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.as_ty(fv, ft, "field")?;
+                    self.sub_test(a, fv, fail)?;
+                }
+                Ok(())
+            }
+            Pattern::Array { elems, rest, .. } => {
+                let i64t = self.ctx.i64_type();
+                let b = self.boxed(val)?;
+                let len = self.call_rt("mim_pat_len", &[self.basic(b).into()])?.unwrap().into_int_value();
+                let n = i64t.const_int(elems.len() as u64, false);
+                let c = if rest.is_some() {
+                    self.b.build_int_compare(IntPredicate::SGE, len, n, "").s()?
+                } else {
+                    self.b.build_int_compare(IntPredicate::EQ, len, n, "").s()?
+                };
+                let ok = self.ctx.append_basic_block(f, "array_len_ok");
+                self.b.build_conditional_branch(c, ok, fail).s()?;
+                self.b.position_at_end(ok);
+                for (i, a) in elems.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
+                        continue;
+                    }
+                    let ev = self.call_rt_ptr("mim_pat_at", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?;
+                    self.sub_test(a, ev, fail)?;
+                }
                 Ok(())
             }
             Pattern::Route(parts, _) => {
@@ -1889,24 +1963,104 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
+    /// Test a sub-value (owned temporary `v`) against `a`, releasing it on both outcomes.
+    fn sub_test(&mut self, a: &Pattern, v: V<'ctx>, fail: BasicBlock<'ctx>) -> R<()> {
+        let f = self.cur_fn.unwrap();
+        let fail_k = self.ctx.append_basic_block(f, "pat_fail");
+        self.pattern_test(a, v, fail_k)?;
+        self.drop_tmp(v)?;
+        let cont = self.b.get_insert_block().unwrap();
+        self.b.position_at_end(fail_k);
+        self.drop_tmp(v)?;
+        self.b.build_unconditional_branch(fail).s()?;
+        self.b.position_at_end(cont);
+        Ok(())
+    }
+
+    /// `val <op> e` for a literal pattern expression, as an i1.
+    fn pat_compare(&mut self, op: BinOp, val: V<'ctx>, e: &Expr) -> R<IntValue<'ctx>> {
+        let lv = self.expr(e)?;
+        if Self::is_unboxed(&val) {
+            let V::B(c) = self.scalar_binary(op, val, lv)? else { unreachable!() };
+            return Ok(c);
+        }
+        let lb = self.boxed(lv)?;
+        let r = self.call_rt_ptr("mim_binop", &[self.i32c(op as i32), self.basic(val).into(), self.basic(lb).into()])?;
+        self.drop_tmp(lb)?;
+        self.truth(r)
+    }
+
+    /// Index and static type of record field `name`.
+    fn record_field(&self, t: TypeId, name: &str) -> (usize, Ty) {
+        let td = &self.p.types[t];
+        let i = td.field_index(name).unwrap_or(0);
+        let ty = match &td.decl.kind {
+            mimic_syntax::ast::TypeKind::Record(fs) => types::ann_in(self.p, td.module, &fs[i].1).unwrap_or(Ty::Dyn),
+            _ => Ty::Dyn,
+        };
+        (i, ty)
+    }
+
+    /// A new local `n` holding (a retained copy of) `val`; its type was recorded under `key`.
+    fn bind_local(&mut self, n: &str, key: usize, val: V<'ctx>) -> R<()> {
+        let t = self.cur_spec.as_ref().and_then(|s| s.binds.get(&key).copied()).unwrap_or(Ty::Dyn);
+        let v = match val {
+            V::P(p, _) => {
+                self.call_rt("mim_retain", &[p.into()])?;
+                V::P(p, true)
+            }
+            other => other,
+        };
+        let v = self.as_ty(v, t, &format!("`{n}`"))?;
+        let slot = self.entry_alloca(t, n)?;
+        self.b.build_store(slot, self.basic(v)).s()?;
+        let owned = matches!(v, V::P(..));
+        self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false });
+        Ok(())
+    }
+
     /// Bind the variables of a pattern that matched `val`.
     fn pattern_bind(&mut self, pat: &Pattern, val: V<'ctx>) -> R<()> {
         match pat {
-            Pattern::Wild(_) | Pattern::Lit(_) => Ok(()),
-            Pattern::Bind(n, _) => {
-                let t = self.cur_spec.as_ref().and_then(|s| s.binds.get(&id(pat)).copied()).unwrap_or(Ty::Dyn);
-                let v = match val {
-                    V::P(p, _) => {
-                        self.call_rt("mim_retain", &[p.into()])?;
-                        V::P(p, true)
+            Pattern::Wild(_) | Pattern::Lit(_) | Pattern::Range { .. } => Ok(()),
+            // alternatives that bind names were split into separate arms
+            Pattern::Or(..) => Ok(()),
+            Pattern::Bind(n, _) => self.bind_local(n, id(pat), val),
+            Pattern::As(inner, n, _) => {
+                self.pattern_bind(inner, val)?;
+                self.bind_local(n, id(pat), val)
+            }
+            Pattern::Record { path, fields, .. } => {
+                let Ok(Resolved::Type(t)) = self.p.resolve(self.cur_mod, path) else { return Ok(()) };
+                let b = self.boxed(val)?;
+                for (name, a) in fields {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Lit(_) | Pattern::Range { .. }) {
+                        continue;
                     }
-                    other => other,
-                };
-                let v = self.as_ty(v, t, &format!("`{n}`"))?;
-                let slot = self.entry_alloca(t, n)?;
-                self.b.build_store(slot, self.basic(v)).s()?;
-                let owned = matches!(v, V::P(..));
-                self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false });
+                    let (i, ft) = self.record_field(t, name);
+                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.as_ty(fv, ft, "field")?;
+                    self.pattern_bind(a, fv)?;
+                    self.drop_tmp(fv)?;
+                }
+                Ok(())
+            }
+            Pattern::Array { elems, rest, .. } => {
+                let i64t = self.ctx.i64_type();
+                let b = self.boxed(val)?;
+                for (i, a) in elems.iter().enumerate() {
+                    if matches!(a, Pattern::Wild(_) | Pattern::Lit(_) | Pattern::Range { .. }) {
+                        continue;
+                    }
+                    let ev = self.call_rt_ptr("mim_pat_at", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?;
+                    self.pattern_bind(a, ev)?;
+                    self.drop_tmp(ev)?;
+                }
+                if let Some(Some(n)) = rest {
+                    let rv = self.call_rt_ptr("mim_pat_rest", &[self.basic(b).into(), i64t.const_int(elems.len() as u64, false).into()])?;
+                    self.bind_local(n, id(pat) + 1, rv)?;
+                    self.drop_tmp(rv)?;
+                }
                 Ok(())
             }
             Pattern::Tuple(ps, _) => {
@@ -2592,6 +2746,20 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.pattern_test(&arm.pat, sv, next)?;
                     self.scopes.push(Vec::new());
                     self.pattern_bind(&arm.pat, sv)?;
+                    if let Some(g) = &arm.guard {
+                        let gv = self.expr(g)?;
+                        let bit = self.truth(gv)?;
+                        let pass = self.ctx.append_basic_block(f, "guard_ok");
+                        let reject = self.ctx.append_basic_block(f, "guard_fail");
+                        self.b.build_conditional_branch(bit, pass, reject).s()?;
+                        self.b.position_at_end(reject);
+                        // the arm's bindings die before trying the next arm
+                        let scope = self.scopes.pop().unwrap();
+                        self.release_scope(&scope)?;
+                        self.scopes.push(scope);
+                        self.b.build_unconditional_branch(next).s()?;
+                        self.b.position_at_end(pass);
+                    }
                     let v = self.expr(&arm.body)?;
                     if !self.terminated() {
                         let v = self.as_ty(v, rt, "match value")?;

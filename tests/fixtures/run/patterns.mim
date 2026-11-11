@@ -1,0 +1,157 @@
+module main
+
+type Point = { x: i64, y: i64 }
+
+type Shape =
+    | Circle(f64)
+    | Square(f64)
+    | Rect(f64, f64)
+    | Dot
+
+type Event = Click(Point) | Key(str) | Scroll(i64) | Quit
+
+fn main() {
+    // guards
+    print([¯5 0 7 12 100] ¨ sign_word)
+
+    // alternatives, with and without bindings
+    print([Circle(1.0), Square(2.0), Rect(2.0, 3.0), Dot] ¨ size)
+    print([1 2 3 4 5 6 7] ¨ weekday)
+
+    // ranges: lo ‥ hi is lo ≤ x < hi, like the ‥ primitive
+    print([3 15 42 70] ¨ life_stage)
+    print(grade(91.5) + grade(78.0) + grade(12.0))
+
+    // records: by field, `..` ignores the rest
+    print(quadrant(Point { x: 3, y: ¯4 }))
+    print(quadrant(Point { x: 0, y: 9 }))
+    print((on_axis(Point { x: 0, y: 5 }), on_axis(Point { x: 2, y: 2 })))
+
+    // nested patterns, `as` binds the whole value
+    print(handle(Click(Point { x: 0, y: 0 })))
+    print(handle(Click(Point { x: 4, y: 1 })))
+    print(handle(Key("q")))
+    print(handle(Key("x")))
+    print(handle(Scroll(¯3)))
+    print(handle(Quit))
+
+    // arrays and strings: exact length, or `..rest`
+    print(describe_list([]))
+    print(describe_list([7]))
+    print(describe_list([1 2]))
+    print(describe_list([1 2 3 4]))
+    print(sum_list([1 2 3 4 5]))
+    print((command("go"), command("stop"), command("hi")))
+
+    // if let
+    print(first_even([1 3 6 8]))
+    print(first_even([1 3 5]))
+    let m = ["ada": 1815]
+    if let Some(year) = get(m, "ada") {
+        print("ada was born in {year}")
+    }
+    if let Some(year) = get(m, "alan") { print(year) } else { print("unknown") }
+    print(if let [a, b, ..] = [10 20 30] { a + b } else { 0 })
+}
+
+fn sign_word(n: i64) -> str {
+    match n {
+        0 => "zero",
+        x if x < 0 => "negative",
+        x if x > 50 => "big",
+        _ => "positive",
+    }
+}
+
+fn size(s: Shape) -> f64 {
+    match s {
+        Circle(r) | Square(r) => r,
+        Rect(w, h) => w * h,
+        Dot => 0.0,
+    }
+}
+
+fn weekday(d: i64) -> str {
+    match d {
+        6 | 7 => "weekend",
+        _ => "weekday",
+    }
+}
+
+fn life_stage(age: i64) -> str {
+    match age {
+        0 ‥ 13 => "child",
+        13 ‥ 20 => "teen",
+        20 ‥ 65 => "adult",
+        _ => "senior",
+    }
+}
+
+fn grade(score: f64) -> str {
+    match score {
+        90.0 ‥ 101.0 => "A",
+        70.0 ‥ 90.0 => "B",
+        _ => "F",
+    }
+}
+
+fn quadrant(p: Point) -> str {
+    match p {
+        Point { x: 0, .. } | Point { y: 0, .. } => "axis",
+        Point { x, y } if x > 0 and y > 0 => "I",
+        Point { x, y } if x < 0 and y > 0 => "II",
+        Point { x, y } if x < 0 and y < 0 => "III",
+        _ => "IV",
+    }
+}
+
+fn on_axis(p: Point) -> bool {
+    match p {
+        Point { x: 0, .. } | Point { y: 0, .. } => true,
+        _ => false,
+    }
+}
+
+fn handle(e: Event) -> str {
+    match e {
+        Click(Point { x: 0, y: 0 }) => "click at origin",
+        Click(Point { x, .. } as p) if x > 2 => "click right of 2 at {p}",
+        Click(_) => "click",
+        Key("q" | "Q") => "quit key",
+        Key(k) => "key {k}",
+        Scroll(n) as s if n < 0 => "{s} scrolls up",
+        Scroll(_) => "scroll down",
+        Quit => "bye",
+    }
+}
+
+fn describe_list(xs: [i64]) -> str {
+    match xs {
+        [] => "empty",
+        [x] => "one: {x}",
+        [a, b] => "two: {a + b}",
+        [first, ..rest] => "{first} then {rest}",
+    }
+}
+
+fn sum_list(xs: [i64]) -> i64 {
+    match xs {
+        [] => 0,
+        [x, ..rest] => x + sum_list(rest),
+    }
+}
+
+fn command(s: str) -> str {
+    match s {
+        "go" | "run" => "moving",
+        "stop" => "stopped",
+        _ => "?",
+    }
+}
+
+fn first_even(xs: [i64]) -> str {
+    match xs ⌿ (xs % 2 == 0) {
+        [e, ..] => "first even: {e}",
+        _ => "no even number",
+    }
+}

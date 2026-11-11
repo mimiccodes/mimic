@@ -10,9 +10,104 @@ use crate::ast::*;
 use crate::codes as C;
 use crate::{Diag, Span};
 
-/// Lift every `arms` in the file (nested modules and nested `arms` included).
+/// Lift every `arms` in the file (nested modules and nested `arms` included),
+/// and split `|` arms that bind names into one arm per alternative.
 pub fn lift_arms(file: &mut File) -> Result<(), Diag> {
-    lift_items(&mut file.module.items)
+    lift_items(&mut file.module.items)?;
+    split_or_items(&mut file.module.items)
+}
+
+fn split_or_items(items: &mut [Item]) -> Result<(), Diag> {
+    for item in items.iter_mut() {
+        match item {
+            Item::Module(m) => split_or_items(&mut m.items)?,
+            Item::Fn(f) => {
+                let mut err = None;
+                f.body.walk_mut(&mut |e| {
+                    if err.is_some() {
+                        return;
+                    }
+                    if let ExprKind::Match { arms, .. } = &mut e.kind
+                        && let Err(d) = split_or_arms(arms)
+                    {
+                        err = Some(d);
+                    }
+                });
+                if let Some(d) = err {
+                    return Err(d);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// `A(x) | B(x) => body` → `A(x) => body`, `B(x) => body`. Alternatives that
+/// bind nothing stay one arm (one test, no duplicated body).
+fn split_or_arms(arms: &mut Vec<Arm>) -> Result<(), Diag> {
+    let mut out = Vec::with_capacity(arms.len());
+    for arm in arms.drain(..) {
+        nested_or_check(&arm.pat, true)?;
+        // `(A | B) as v` keeps its `as` on each alternative
+        let (inner, as_name) = match &arm.pat {
+            Pattern::As(p, n, s) => (&**p, Some((n.clone(), *s))),
+            p => (p, None),
+        };
+        let Pattern::Or(alts, span) = inner else {
+            out.push(arm);
+            continue;
+        };
+        let names = |p: &Pattern| {
+            let mut v = Vec::new();
+            p.bound_names(&mut v);
+            v.sort();
+            v
+        };
+        let first = names(&alts[0]);
+        for a in &alts[1..] {
+            if names(a) != first {
+                return Err(Diag::new(&C::OR_BINDINGS, "every alternative of a `|` pattern must bind the same names", *span)
+                    .note(format!("the first alternative binds [{}], this one binds [{}]", first.join(", "), names(a).join(", "))));
+            }
+        }
+        if first.is_empty() {
+            out.push(arm);
+            continue;
+        }
+        for a in alts.clone() {
+            let pat = match &as_name {
+                Some((n, s)) => Pattern::As(Box::new(a), n.clone(), *s),
+                None => a,
+            };
+            out.push(Arm { pat, guard: arm.guard.clone(), body: arm.body.clone(), span: arm.span });
+        }
+    }
+    *arms = out;
+    Ok(())
+}
+
+/// Alternatives below the top of a pattern may not bind names.
+fn nested_or_check(p: &Pattern, top: bool) -> Result<(), Diag> {
+    let kids: Vec<&Pattern> = match p {
+        Pattern::Or(alts, span) => {
+            if !top {
+                let mut v = Vec::new();
+                p.bound_names(&mut v);
+                if !v.is_empty() {
+                    return Err(Diag::new(&C::OR_BINDINGS, "alternatives inside a pattern cannot bind names yet", *span)
+                        .help("split the alternatives into separate arms"));
+                }
+            }
+            return alts.iter().try_for_each(|a| nested_or_check(a, false));
+        }
+        Pattern::As(inner, _, _) => return nested_or_check(inner, top),
+        Pattern::Variant { args, .. } | Pattern::Tuple(args, _) => args.iter().collect(),
+        Pattern::Record { fields, .. } => fields.iter().map(|(_, p)| p).collect(),
+        Pattern::Array { elems, .. } => elems.iter().collect(),
+        _ => Vec::new(),
+    };
+    kids.into_iter().try_for_each(|k| nested_or_check(k, false))
 }
 
 fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {

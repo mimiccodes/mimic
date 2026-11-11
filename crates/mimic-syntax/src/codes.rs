@@ -322,6 +322,22 @@ function:
 
     let user = find(id) else { return Err(\"not found\") }";
 
+    OR_BINDINGS = "E0505" "or-bindings" "alternatives of a `|` pattern binding different names"
+"Whichever alternative matches, the arm's body sees the same variables, so
+every alternative must bind the same names:
+
+    match s { Circle(r) | Square(r) => r, _ => 0.0 }    // fine
+    match s { Circle(r) | Dot => r, _ => 0.0 }          // error: Dot binds no `r`
+
+Inside a larger pattern (`Some(A(x) | B(x))`) alternatives cannot bind names
+yet; split them into separate arms.";
+
+    RECORD_PATTERN = "E0506" "record-pattern" "a record pattern that names a missing field or omits fields without `..`"
+"A record pattern lists fields by name. Fields it does not mention must be
+waived explicitly with `..`:
+
+    match p { Point { x: 0, y } => y, Point { x, .. } => x }";
+
     // ---- E06xx bindings and closures -----------------------------------------------
     ASSIGN_IMMUTABLE = "E0601" "assign-immutable" "assigning to a variable that is not `mut`"
 "Bindings are immutable unless declared `mut`.

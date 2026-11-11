@@ -81,6 +81,8 @@ pub enum InterpPart {
 #[derive(Clone, Debug)]
 pub struct Arm {
     pub pat: Pattern,
+    /// `pat if cond => …`
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }
@@ -99,6 +101,16 @@ pub enum Pattern {
     Tuple(Vec<Pattern>, Span),
     /// `"/users/{id: i64}/posts/{slug}"`: text must match, captures bind
     Route(Vec<RoutePart>, Span),
+    /// `A | B | C`: any alternative
+    Or(Vec<Pattern>, Span),
+    /// `lo ‥ hi`: lo ≤ value < hi (like the `‥` primitive)
+    Range { lo: Expr, hi: Expr, span: Span },
+    /// `pat as name`: match `pat` and also bind the whole value
+    As(Box<Pattern>, String, Span),
+    /// `Point { x, y: 0, .. }`
+    Record { path: Vec<String>, fields: Vec<(String, Pattern)>, rest: bool, span: Span },
+    /// `[a b ..rest]`, `[x, ..]`, `[]`: `rest` is `Some(name)` for `..name`, `Some(None)` for `..`
+    Array { elems: Vec<Pattern>, rest: Option<Option<String>>, span: Span },
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +123,16 @@ pub enum RoutePart {
 impl Pattern {
     pub fn span(&self) -> Span {
         match self {
-            Pattern::Wild(s) | Pattern::Bind(_, s) | Pattern::Variant { span: s, .. } | Pattern::Tuple(_, s) | Pattern::Route(_, s) => *s,
+            Pattern::Wild(s)
+            | Pattern::Bind(_, s)
+            | Pattern::Variant { span: s, .. }
+            | Pattern::Tuple(_, s)
+            | Pattern::Route(_, s)
+            | Pattern::Or(_, s)
+            | Pattern::Range { span: s, .. }
+            | Pattern::As(_, _, s)
+            | Pattern::Record { span: s, .. }
+            | Pattern::Array { span: s, .. } => *s,
             Pattern::Lit(e) => e.span,
         }
     }
@@ -370,7 +391,12 @@ impl Expr {
             }
             ExprKind::Match { scrut, arms } => {
                 scrut.walk(f);
-                arms.iter().for_each(|a| a.body.walk(f));
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        g.walk(f);
+                    }
+                    a.body.walk(f);
+                }
             }
             ExprKind::Interp(parts) => parts.iter().for_each(|p| {
                 if let InterpPart::Expr(x) = p {
@@ -453,7 +479,12 @@ impl Expr {
             }
             ExprKind::Match { scrut, arms } => {
                 scrut.walk_mut(f);
-                arms.iter_mut().for_each(|a| a.body.walk_mut(f));
+                for a in arms {
+                    if let Some(g) = &mut a.guard {
+                        g.walk_mut(f);
+                    }
+                    a.body.walk_mut(f);
+                }
             }
             ExprKind::Interp(parts) => parts.iter_mut().for_each(|p| {
                 if let InterpPart::Expr(x) = p {
@@ -545,6 +576,19 @@ impl Pattern {
         match self {
             Pattern::Bind(n, _) => out.push(n.clone()),
             Pattern::Variant { args, .. } | Pattern::Tuple(args, _) => args.iter().for_each(|a| a.bound_names(out)),
+            // alternatives bind the same names
+            Pattern::Or(alts, _) => alts[0].bound_names(out),
+            Pattern::As(p, n, _) => {
+                p.bound_names(out);
+                out.push(n.clone());
+            }
+            Pattern::Record { fields, .. } => fields.iter().for_each(|(_, p)| p.bound_names(out)),
+            Pattern::Array { elems, rest, .. } => {
+                elems.iter().for_each(|p| p.bound_names(out));
+                if let Some(Some(n)) = rest {
+                    out.push(n.clone());
+                }
+            }
             Pattern::Route(parts, _) => {
                 for p in parts {
                     if let RoutePart::Capture { name: n, .. } = p {

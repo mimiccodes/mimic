@@ -1,0 +1,25 @@
+["negative" "zero" "positive" "positive" "big"]
+[1.0 2.0 6.0 0.0]
+["weekday" "weekday" "weekday" "weekday" "weekday" "weekend" "weekend"]
+["child" "teen" "adult" "senior"]
+ABF
+IV
+axis
+(true, false)
+click at origin
+click right of 2 at Point { x: 4, y: 1 }
+quit key
+key x
+Scroll(-3) scrolls up
+bye
+empty
+one: 7
+two: 3
+1 then [2 3 4]
+15
+("moving", "stopped", "?")
+first even: 6
+no even number
+ada was born in 1815
+unknown
+30
