@@ -64,6 +64,17 @@ For each target, Mimic code is compiled with the CPU model, features and ABI tha
 
 Native builds (no `--target`) use the host CPU with all its features.
 
+`--cpu` picks a CPU model instead, for both Mimic code and the runtime. Its features follow from the model.
+
+```sh
+mimic build --cpu apple-m3                              # Apple M3 (an alias LLVM accepts)
+mimic build --target x86_64-linux --cpu x86-64-v3       # AVX2-class x86-64
+mimic build --target riscv64-linux --cpu sifive-u74
+mimic targets --cpus aarch64                            # the models LLVM knows
+```
+
+A name LLVM does not accept is an error, with a suggestion for the closest name. `--cpu native` means "this machine" and applies only to native builds.
+
 ## What each target produces
 
 LLVM's triple parser knows 62 architectures, 49 operating systems and 53 environments. This build has code generators for 44 of those architectures.
@@ -74,7 +85,7 @@ The 5 GPU architectures (amdgpu, r600, spirv, spirv32, spirv64) take compute ker
 
 | Output | Targets |
 |---|---|
-| **Complete executable** | Every Apple platform whose SDK is installed with Xcode: macOS (arm64, x86_64), Mac Catalyst, iOS (device and simulator), tvOS, watchOS (including `arm64_32`), visionOS, each with and without the simulator. Binaries are ad-hoc signed. Checks so far: Mac Catalyst builds run here with every golden test matching, and an iOS-simulator build ran in the iPhone simulator; the other platforms are checked for the right platform tag in the binary.<br>`wasm32-wasi` (WASI preview 1): a `.wasm` command module, using wasi-libc from wasi-sdk 34 and compiler-rt. It runs in any WASI runtime (Node, wasmtime, browsers via a shim). All golden tests produce the same output as native builds. It is single-threaded for now; `wasm32-wasip1-threads` comes later.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
+| **Complete executable** | Every Apple platform whose SDK is installed with Xcode: macOS (arm64, x86_64), Mac Catalyst, iOS (device and simulator), tvOS, watchOS (including `arm64_32`), visionOS, each with and without the simulator. Binaries are ad-hoc signed. Checks so far: Mac Catalyst builds run here with every golden test matching, and an iOS-simulator build ran in the iPhone simulator; the other platforms are checked for the right platform tag in the binary.<br>`wasm32-wasi` (WASI preview 1): a `.wasm` command module, using wasi-libc from wasi-sdk 34 and compiler-rt. It runs in any WASI runtime (Node, wasmtime, browsers via a shim). All golden tests produce the same output as native builds. It is single-threaded for now; `wasm32-wasip1-threads` comes later. Deep recursion hands over to the heap-based net reducer after 256 native frames instead of 2048, because engines give WebAssembly one small stack. Known issue: Node 22 itself occasionally (about 1–3% of runs, more under load) crashes with SIGSEGV on the 100,000-deep recursion test. A WebAssembly program cannot cause that by itself; when Node does not crash, the output is always correct.<br>30 Linux musl targets, using musl 1.2.5 and compiler-rt built from the bundled sources, the first time each target is used (about 40 s), then cached in `~/.mimic/cache/libc/`. Executables are fully static. |
 | **Object file** | Any other target on a CPU architecture: Windows, glibc Linux, Android, the BSDs, UEFI, bare metal (`riscv32-unknown-elf`), AVR, MSP430, BPF, Hexagon, … |
 | **Assembly** | Backends that do not write object files: PTX for `nvptx`/`nvptx64`, `.s` for `xcore`. |
 

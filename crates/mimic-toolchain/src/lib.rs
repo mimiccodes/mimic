@@ -23,6 +23,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn mimic_llvm_names(kind: c_int, cb: extern "C" fn(*const c_char, *const c_char, *mut std::ffi::c_void), ud: *mut std::ffi::c_void);
     fn mimic_llvm_triple(input: *const c_char, out: *mut c_char, outlen: usize);
+    fn mimic_cpu_valid(triple: *const c_char, cpu: *const c_char) -> c_int;
     fn mimic_clang_main(argc: c_int, argv: *const *mut c_char, self_path: *const c_char) -> c_int;
 }
 
@@ -165,5 +166,15 @@ pub fn llvm_triple(input: &str) -> Triple {
         os: get(3),
         env: get(4),
         backend: Some(get(5)).filter(|b| !b.is_empty()),
+    }
+}
+
+/// Does LLVM accept `cpu` (a model or an alias) for `triple`?
+/// `None` when this build has no code generator for it.
+pub fn cpu_valid(triple: &str, cpu: &str) -> Option<bool> {
+    let (t, c) = (CString::new(triple).ok()?, CString::new(cpu).ok()?);
+    match unsafe { mimic_cpu_valid(t.as_ptr(), c.as_ptr()) } {
+        -1 => None,
+        v => Some(v == 1),
     }
 }

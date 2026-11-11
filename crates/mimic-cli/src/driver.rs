@@ -46,6 +46,8 @@ pub struct Profile {
     pub net: bool,
     pub opt: u8,
     pub leak_check: bool,
+    /// `--cpu`: a CPU model to generate code for (`native` = this machine).
+    pub cpu: Option<String>,
 }
 
 impl Profile {
@@ -55,7 +57,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -198,10 +200,10 @@ pub use crate::toolchain::run_tool;
 use crate::toolchain::{self, LinkJob, Toolchain};
 
 /// Compile (and cache) the C runtime for a target.
-pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<PathBuf, String> {
+pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Option<&str>) -> Result<PathBuf, String> {
     let key = mimic_syntax::fnv1a(
         format!(
-            "{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}{:?}",
+            "{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}{:?}{cpu:?}",
             target.name(),
             toolchain::describe(tc),
             target.llvm,
@@ -226,8 +228,16 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool) -> Result<
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);
     c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);
-    if release && target.name.is_none() {
-        c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
+    match cpu {
+        Some("native") | None if release && target.name.is_none() => {
+            c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
+        }
+        Some(cpu) if cpu != "native" => {
+            // x86 names a CPU with -march; every other architecture with -mcpu
+            let x86 = matches!(target.arch.as_str(), "x86_64" | "x86" | "i386" | "i686");
+            c.arg(if x86 { format!("-march={cpu}") } else { format!("-mcpu={cpu}") });
+        }
+        _ => {}
     }
     c.arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
@@ -318,13 +328,24 @@ fn codegen_and_link(
     let net = dir.join(format!("{name}.mnet"));
     let is_exe = input.is_bin();
     // cross targets: the same CPU/features/ABI as Clang uses for the C side
-    let (cpu, features, abi) = match &target.llvm {
+    let (mut cpu, mut features, abi) = match &target.llvm {
         Some(t) => match toolchain::clang_defaults(t) {
             Some((c, f, a)) => (Some(c), Some(f), a),
             None => (None, None, None),
         },
         None => (None, None, None),
     };
+    // --cpu: a named model replaces the defaults (its features follow from it)
+    match profile.cpu.as_deref() {
+        None => {}
+        Some("native") if target.name.is_none() => {}
+        Some("native") => return Err(format!("--cpu native only applies to native builds, not `{}`", target.name())),
+        Some(c) => {
+            check_cpu(target, c)?;
+            cpu = Some(c.to_string());
+            features = None;
+        }
+    }
     let obj = mimic_codegen::compile(
         program,
         &mimic_codegen::Settings {
@@ -351,7 +372,7 @@ fn codegen_and_link(
         }
         Err(why) => return Err(why),
     };
-    let rt = runtime_object(&tc, target, profile.release)?;
+    let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref())?;
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
         let objects = [obj, rt];
@@ -369,6 +390,20 @@ fn codegen_and_link(
         toolchain::archive(&tc, target, &lib, &[obj, rt])?;
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
     }
+}
+
+/// `--cpu` must name a model LLVM knows for the target.
+fn check_cpu(target: &Target, cpu: &str) -> Result<(), String> {
+    let triple = target.llvm.clone().unwrap_or_else(|| format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    let triple = mimic_toolchain::llvm_triple(&triple).triple;
+    // aliases count (apple-m3 is an alias LLVM accepts)
+    if mimic_toolchain::cpu_valid(&triple, cpu) != Some(false) {
+        return Ok(());
+    }
+    let Some(list) = mimic_toolchain::cpus(&triple, false) else { return Ok(()) };
+    let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+    let hint = mimic_syntax::closest(cpu, names.iter().copied()).map(|b| format!("; did you mean `{b}`?")).unwrap_or_default();
+    Err(format!("unknown CPU `{cpu}` for `{}`{hint} (run `mimic targets --cpus {}`)", target.name(), target.arch))
 }
 
 /// Resolve the CLI's notion of "current project" or a given file.
@@ -404,7 +439,7 @@ pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
     let c_src = dir.join("main.c");
     fs::write(&c_src, mimic_net::emit_c_main(&enc, entry, !release)).map_err(|e| e.to_string())?;
     let tc = toolchain::select(&target)?;
-    let rt = runtime_object(&tc, &target, release)?;
+    let rt = runtime_object(&tc, &target, release, None)?;
     let main_obj = dir.join("main.o");
     let mut c = toolchain::cc(&tc, &target);
     c.args(["-c", if release { "-O2" } else { "-O0" }]).arg(&c_src).arg("-o").arg(&main_obj);

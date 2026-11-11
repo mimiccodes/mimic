@@ -23,3 +23,4 @@ extern "C" void mimic_llvm_triple(const char *in, char *out, unsigned long outle
     for (; in[i] && i + 1 < outlen; i++) out[i] = in[i];
     out[i] = 0;
 }
+extern "C" int mimic_cpu_valid(const char *, const char *) { return -1; }

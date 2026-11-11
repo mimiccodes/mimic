@@ -158,3 +158,17 @@ extern "C" void mimic_llvm_triple(const char *in, char *out, size_t outlen) {
     std::strncpy(out, s.c_str(), outlen - 1);
     out[outlen - 1] = 0;
 }
+
+// Is `cpu` a CPU name (or alias) LLVM accepts for `triple`? -1 = no backend.
+extern "C" int mimic_cpu_valid(const char *triple, const char *cpu) {
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    std::string err;
+    llvm::Triple tt(triple);
+    const llvm::Target *t = llvm::TargetRegistry::lookupTarget(tt, err);
+    if (!t)
+        return -1;
+    std::unique_ptr<llvm::MCSubtargetInfo> sti(t->createMCSubtargetInfo(tt, "", ""));
+    return sti && sti->isCPUStringValid(cpu) ? 1 : 0;
+}

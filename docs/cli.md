@@ -7,7 +7,7 @@
 | `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. |
 | `mimic init [--name N] [--bin] [--lib]` | Turn the current directory into a project. |
 | `mimic run [file.mim] [--debug\|--release] [--emit-json] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. With `--emit-json`, compile errors go to stderr as JSON. |
-| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
+| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--cpu CPU] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
 | `mimic check [file.mim] [--emit-json] [--fix]` | Parse, resolve and check everything without generating code. `--emit-json` prints the result as JSON for editors and agents; `--fix` applies the machine-applicable fixes. See [diagnostics.md](diagnostics.md). |
 | `mimic explain [code] [--emit-json]` | Explain an error code (`mimic explain E0401`), or list them all. |
 | `mimic mod init` | Create `mod.mim`. |
@@ -19,7 +19,7 @@
 | `mimic update [library]` | Fast-forward every installed library, or just one. |
 | `mimic uninstall <library>` | Remove an installed library. |
 | `mimic glyphs` | Print the glyph ↔ word ↔ digraph table. |
-| `mimic targets [--cpus ARCH] [--features ARCH] [--json]` | List every target (61 architectures, 48 OSes, 30 ABIs, 108 libc targets) and whether it builds with the embedded toolchain. See [targets.md](targets.md). |
+| `mimic targets [--cpus ARCH] [--features ARCH] [--check TARGET] [--json]` | List what the linked LLVM can target (architectures, OSes, environments, code generators) and which targets build complete executables. See [targets.md](targets.md). |
 | `mimic cc …`, `mimic c++ …` | The embedded Clang C/C++ compiler. |
 | `mimic ld.lld …`, `mimic ld64.lld …`, `mimic lld-link …`, `mimic wasm-ld …` | The embedded LLD linker, in its ELF, Mach-O, COFF and WebAssembly flavours. |
 | `mimic net run <file.mnet> [--release] [--stats] [--threads N]` | Reduce a raw interaction net and print the value of `@main`. This is a runtime developer tool; see [net.md](net.md). |

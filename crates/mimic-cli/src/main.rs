@@ -31,7 +31,7 @@ struct Cli {
     cmd: Cmd,
 }
 
-#[derive(Args, Clone, Copy)]
+#[derive(Args, Clone)]
 struct ProfileArgs {
     /// Debug profile: no optimisation, debug info, leak check on exit
     /// (default for `run`)
@@ -44,6 +44,10 @@ struct ProfileArgs {
     /// Do not compile pure functions to interaction nets (everything native)
     #[arg(long)]
     no_net: bool,
+    /// Generate code for this CPU model, e.g. apple-m3, x86-64-v3, cortex-a72
+    /// (`native` = this machine; `mimic targets --cpus <arch>` lists them)
+    #[arg(long, value_name = "CPU")]
+    cpu: Option<String>,
 }
 
 /// `default_release`: `build` produces the fastest binary unless told otherwise;
@@ -52,6 +56,7 @@ fn profile_of(input: &Input, args: ProfileArgs, default_release: bool) -> Profil
     let release = args.release || (default_release && !args.debug);
     let mut p = Profile::for_input(input, release);
     p.net = !args.no_net;
+    p.cpu = args.cpu;
     p
 }
 
@@ -343,7 +348,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net, emit_json } => {
             let built = (|| -> Result<Vec<serde_json::Value>, Report> {
                 let input = driver::input_from(file.as_deref())?;
-                let prof = profile_of(&input, profile, true);
+                let prof = profile_of(&input, profile.clone(), true);
                 let mut targets = vec![match &target {
                     Some(t) => Target::parse(t)?,
                     None => Target::host(),

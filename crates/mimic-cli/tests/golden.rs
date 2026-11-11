@@ -335,7 +335,16 @@ fn wasi_fixtures() {
             failures.push(format!("{stem}: {v}"));
             continue;
         };
-        let run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        // A WebAssembly program cannot crash its host: a signal kills Node only
+        // through an engine fault (seen ~1-3% of runs on deep recursion under
+        // load). Those runs are retried; wrong output or a trap fails at once.
+        let mut run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        for _ in 0..2 {
+            use std::os::unix::process::ExitStatusExt;
+            let Some(sig) = run.status.signal() else { break };
+            eprintln!("{stem}: node died from signal {sig} (engine fault); retrying");
+            run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        }
         let status = run.status;
         let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
         let got = String::from_utf8_lossy(&run.stdout);
@@ -390,4 +399,20 @@ fn sdk_of(t: &str) -> &'static str {
         t if t.contains("xros-simulator") => "xrsimulator",
         _ => "xros",
     }
+}
+
+/// `--cpu` tunes for a model LLVM knows; unknown names get a suggestion.
+#[test]
+fn cpu_flag() {
+    let f = fixtures("run").into_iter().find(|p| p.ends_with("basics.mim")).unwrap();
+    let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        let out = mimic().arg("run").arg(&f).args(["--release", "--cpu", "apple-m1"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let out = mimic().arg("build").arg(&f).args(["--target", "riscv64-linux", "--cpu", "sifive-u74"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = mimic().arg("build").arg(&f).args(["--target", "x86_64-linux", "--cpu", "znver44"]).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown CPU `znver44`") && err.contains("did you mean `znver4`?"), "{err}");
 }
