@@ -157,6 +157,17 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     for f in &exports {
         roots.push((*f, vec![Ty::Dyn; p.fns[*f].arity()]));
     }
+    // `extern "C" fn`: exported to C in every kind of build
+    let c_exports: Vec<usize> = p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| matches!(&f.kind, FnKind::User(d) if d.export_c) && p.mods[f.module].package == p.root_package)
+        .map(|(i, _)| i)
+        .collect();
+    for f in &c_exports {
+        roots.push((*f, vec![Ty::Dyn; p.fns[*f].arity()]));
+    }
     for f in plan.def_index.keys() {
         roots.push((*f, vec![Ty::Dyn; p.fns[*f].arity()]));
     }
@@ -207,6 +218,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     };
     for f in &exports {
         cg.export(*f)?;
+    }
+    for f in &c_exports {
+        cg.export_c(*f)?;
     }
     cg.drain()?;
     cg.emit_book()?;
@@ -615,6 +629,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_check_type" => void.fn_type(&[p, i32t, p], false),
             "mim_is_type" => self.ctx.i32_type().fn_type(&[p, i32t], false),
             "mim_rt_init" => void.fn_type(&[i32t, p], false),
+            "mim_rt_ensure" => void.fn_type(&[], false),
+            "mim_cstr_dup" => ptr.fn_type(&[p], false),
             "mim_rt_shutdown" => self.ctx.i32_type().fn_type(&[i32t], false),
             "mim_net_book_once" => void.fn_type(&[p, p, i32t, p, p, p], false),
             "mim_deep_enter" | "mim_deep_leave" => void.fn_type(&[], false),
@@ -948,6 +964,59 @@ impl<'ctx> Cg<'ctx, '_> {
             Ok(())
         })?;
         Ok(f)
+    }
+
+    /// `extern "C" fn name(…)`: a C-ABI function named `name` that starts the
+    /// runtime if needed, converts its C arguments to Mimic values, runs the
+    /// Mimic function and converts the result back.
+    fn export_c(&mut self, fid: usize) -> R<()> {
+        let FnKind::User(d) = &self.p.fns[fid].kind else { return Ok(()) };
+        let d = d.clone();
+        let n = d.params.len();
+        let k: Key = (fid, vec![Ty::Dyn; n]);
+        let kind = self.kind_for(fid);
+        let inner = self.thunk(&k, kind)?;
+        let ctys: Vec<Type> = d.params.iter().map(|p| p.ty.clone().unwrap()).collect();
+        let ps: Vec<BasicMetadataTypeEnum> = ctys.iter().map(|t| self.ctype(t).into()).collect();
+        let fty = match &d.ret {
+            Some(t) => self.ctype(t).fn_type(&ps, false),
+            None => self.ctx.void_type().fn_type(&ps, false),
+        };
+        if self.module.get_function(&d.name).is_some() {
+            return Err(format!("`{}` is exported to C, but a C function of that name is also declared", d.name));
+        }
+        let f = self.module.add_function(&d.name, fty, Some(Linkage::External));
+        self.in_new_fn(f, |cg| {
+            cg.call_rt("mim_rt_ensure", &[])?;
+            let mut boxes = Vec::new();
+            for (i, t) in ctys.iter().enumerate() {
+                let v = cg.c_to_mimic(f.get_nth_param(i as u32).unwrap(), t)?;
+                boxes.push(cg.boxed(v)?);
+            }
+            let args: Vec<BasicMetadataValueEnum> = boxes.iter().map(|b| cg.basic(*b).into()).collect();
+            let r = cg.b.build_call(inner, &args, "").s()?.try_as_basic_value().basic().unwrap();
+            let rv = V::P(r.into_pointer_value(), true);
+            let out = match &d.ret {
+                // a string for C: a copy the caller frees, not memory Mimic owns
+                Some(Type::Named(n, _)) if n == "cstr" => Some(cg.call_rt("mim_cstr_dup", &[r.into()])?.unwrap()),
+                Some(t) => Some(match cg.mimic_to_c(rv, t)? {
+                    BasicMetadataValueEnum::IntValue(i) => i.into(),
+                    BasicMetadataValueEnum::FloatValue(x) => x.into(),
+                    BasicMetadataValueEnum::PointerValue(x) => x.into(),
+                    _ => return Err("unsupported C return type".into()),
+                }),
+                None => None,
+            };
+            for b in boxes {
+                cg.drop_tmp(b)?;
+            }
+            cg.drop_tmp(rv)?;
+            match out {
+                Some(v) => cg.b.build_return(Some(&v)).s()?,
+                None => cg.b.build_return(None).s()?,
+            };
+            Ok(())
+        })
     }
 
     /// A library export: the boxed ABI under the function's public symbol.

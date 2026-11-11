@@ -383,7 +383,10 @@ static mim_val *g_true, *g_false;
 static char **g_argv;
 static int32_t g_argc;
 
+static int g_rt_state = 0; /* 0 = not started, 1 = starting, 2 = ready */
+
 void mim_rt_init(int32_t argc, char **argv) {
+    __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
     g_argc = argc;
     g_argv = argv;
     for (int64_t i = SMALL_INT_MIN; i <= SMALL_INT_MAX; i++) {
@@ -419,6 +422,30 @@ void mim_rt_init(int32_t argc, char **argv) {
     (void)t;
     g_nthreads = 1;
 #endif
+}
+
+/* Functions exported to C (`extern "C" fn`) may be the first Mimic code to
+ * run, from a C program's main: start the runtime once, from any thread. */
+void mim_rt_ensure(void) {
+    if (__atomic_load_n(&g_rt_state, __ATOMIC_ACQUIRE) == 2) return;
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&g_rt_state, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        mim_rt_init(0, NULL);
+        return;
+    }
+    while (__atomic_load_n(&g_rt_state, __ATOMIC_ACQUIRE) != 2) {
+    }
+}
+
+const char *mim_cstr(mim_val *v);
+
+/* A string returned to C: a malloc'd copy the caller frees with free(). */
+char *mim_cstr_dup(mim_val *v) {
+    const char *s = mim_cstr(v);
+    size_t n = strlen(s);
+    char *d = malloc(n + 1);
+    if (d) memcpy(d, s, n + 1);
+    return d;
 }
 
 int32_t mim_rt_shutdown(int32_t leak_check) {

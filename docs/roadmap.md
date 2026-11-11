@@ -54,6 +54,7 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | B7 | C sources in a project (`ffi { sources, include, cflags }`), compiled per target by the embedded Clang, cached, linked or archived | ✅ |
 | B2 (structs) | C structs by value, both ways, nested and anonymous-typedef'd, as Mimic records, through generated C wrappers compiled by the embedded Clang (each target's struct ABI handled by Clang) | ✅ |
 | B3 | Varargs: imported variadic functions and `...` in extern declarations; arguments get C's default promotions; true variadic calls | ✅ |
+| B6 | `extern "C" fn` exports Mimic functions to C (C types, C ABI, runtime starts itself), `mimic build --emit-header` | ✅ |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |
 | E | Standard library and I/O (M3 step 6, M5, M6) | |

@@ -317,6 +317,15 @@ impl Parser {
                 if abi != "C" {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
+                // `extern "C" fn f(x: f64) -> f64 { … }`: a Mimic function exported to C
+                if self.at(&Tok::Fn) {
+                    if trusted {
+                        return Err(Diag::new(&C::UNEXPECTED_TOKEN, "`trusted` applies to imported C functions, not to exported ones", start));
+                    }
+                    let mut f = self.fn_decl(is_pub, start)?;
+                    f.export_c = true;
+                    return Ok(Item::Fn(f));
+                }
                 let mut fns = Vec::new();
                 let mut includes = Vec::new();
                 // `extern "C" include "math.h"`: a whole header, no braces
@@ -506,7 +515,7 @@ impl Parser {
         self.expect(&Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
         let body = self.block()?;
-        Ok(FnDecl { name, is_pub, params, ret, body, span: start })
+        Ok(FnDecl { name, is_pub, params, ret, body, export_c: false, span: start })
     }
 
     fn ty(&mut self) -> PResult<Type> {

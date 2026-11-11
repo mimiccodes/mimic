@@ -172,6 +172,44 @@ fn main() {
 
 Out-parameters (`T **`) use 64-bit array elements. They work on every 64-bit target, and on little-endian 32-bit targets.
 
+## Calling Mimic from C
+
+A function declared `extern "C" fn` is a normal Mimic function that is also exported to C under its plain name, with C types and the C calling convention:
+
+```mimic
+module lib
+
+pub extern "C" fn mm_hypot(a: f64, b: f64) -> f64 { sqrt(a * a + b * b) }
+pub extern "C" fn mm_sum_to(n: i64) -> i64 { ⍳ n ▷ +/ }          // parallel inside
+pub extern "C" fn mm_greet(name: cstr) -> cstr { "hello, {name}" }
+```
+
+Build it and write the header:
+
+```sh
+mimic build --emit-header        # target/release/libmm.a + target/release/mm.h
+```
+
+```c
+#include "mm.h"   // double mm_hypot(double a, double b); char * mm_greet(const char * name); …
+int main(void) {
+    printf("%.1f\n", mm_hypot(3, 4));
+    char *g = mm_greet("C"); puts(g); free(g);   // strings returned to C are malloc'd copies
+}
+```
+
+```sh
+mimic cc main.c -Itarget/release target/release/libmm.a -o main
+```
+
+**What the exported signature may use:**
+* Parameters and the result use C types: integers, `f32`/`f64`, `bool`, `c_char`, `cstr` (a string, copied in) and `cptr`.
+* Arrays cannot be received from C yet.
+
+**How C sees it:**
+* Mimic's runtime starts itself on the first call, from any thread, so the C program needs no setup. The work inside still runs on all cores.
+* The header maps the types to C: `int64_t`, `double`, `bool`, `const char *`, `char *` (returned strings, which the caller frees), and `void *` (for `cptr`).
+
 ## C sources in a project
 
 ```mimic
@@ -197,5 +235,5 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 * **B2 (rest):** unions; array fields; reading and writing structs through pointers.
 * **B4: callbacks.** A Mimic function is passed as a C function pointer through a generated trampoline, including closures with a context pointer.
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
-* **B6: exporting Mimic to C.** `pub extern fn mm_sum(xs: ptr[f64], n: usize) -> f64 { … }` plus `mimic build --emit-header`, which writes `target/<profile>/<name>.h`.
+* **B6 (rest):** receiving arrays from C (`ptr[T]` with a length), shared libraries (`.so`/`.dylib`/`.dll`).
 * **B8: ABI conformance tests** on every stable target.

@@ -614,6 +614,31 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
         let _ = fid;
         match &f.kind {
             FnKind::User(d) => {
+                // `extern "C" fn`: its signature is what C sees
+                if d.export_c {
+                    for prm in &d.params {
+                        match &prm.ty {
+                            None => diags.push(FileDiag {
+                                file: f.file,
+                                diag: Diag::new(&C::NOT_C_TYPE, format!("parameter `{}` of a function exported to C needs a C type, e.g. `{}: f64`", prm.name, prm.name), prm.span),
+                            }),
+                            Some(Type::Ptr(_, s)) => diags.push(FileDiag {
+                                file: f.file,
+                                diag: Diag::new(&C::FFI_UNSUPPORTED, "arrays from C (`ptr[T]`) cannot be received by exported functions yet; pass a cptr", *s),
+                            }),
+                            Some(t) => {
+                                if let Err(e) = check_ctype(t, false) {
+                                    diags.push(FileDiag { file: f.file, diag: e });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(t) = &d.ret
+                        && let Err(e) = check_ctype(t, true)
+                    {
+                        diags.push(FileDiag { file: f.file, diag: e });
+                    }
+                }
                 let mut c = Checker { p, module: f.module, file: f.file, scopes: Vec::new(), lambda_floor: 0, unsafe_depth: 0, diags: &mut diags };
                 c.check_fn(d);
             }
@@ -665,7 +690,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             "f32" | "f64" => 2,
             "bool" => 3,
             "c_char" | "char" => 4,
-            "str" => 5,
+            "str" | "cstr" => 5,
             other => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{other}`"), *s)),
         },
         Type::Array(inner, s) => match &**inner {

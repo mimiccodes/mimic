@@ -48,6 +48,8 @@ pub struct Profile {
     pub leak_check: bool,
     /// `--cpu`: a CPU model to generate code for (`native` = this machine).
     pub cpu: Option<String>,
+    /// `--emit-header`: write `<name>.h` declaring the `extern "C" fn`s.
+    pub emit_header: bool,
 }
 
 impl Profile {
@@ -57,7 +59,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -234,15 +236,23 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     let portable = cpu == Some("portable");
     let resolved = if portable { portable_cpu(target) } else { cpu.map(String::from) };
     let cpu = resolved.as_deref().or(if portable { Some("") } else { None });
-    let key = mimic_syntax::fnv1a(
-        format!(
-            "{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{release}{}{:?}{cpu:?}",
-            target.name(),
-            toolchain::describe(tc),
-            target.llvm,
-        )
-        .as_bytes(),
-    );
+    // the compiler flags (target, sysroot, minimum OS, CPU) are part of the key
+    let mut flags: Vec<String> = vec!["-c".into(), if release { "-O3" } else { "-O1" }.into(), "-fPIC".into()];
+    match cpu {
+        Some("native") | None if release && target.name.is_none() => {
+            flags.push("-mcpu=native".into()); /* native builds use every feature of this CPU */
+        }
+        Some("") => {} // portable without a family baseline: the target default
+        Some(cpu) if cpu != "native" => {
+            // x86 names a CPU with -march; every other architecture with -mcpu
+            let x86 = matches!(target.arch.as_str(), "x86_64" | "x86" | "i386" | "i686");
+            flags.push(if x86 { format!("-march={cpu}") } else { format!("-mcpu={cpu}") });
+        }
+        _ => {}
+    }
+    let base = toolchain::cc(tc, target);
+    let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -260,20 +270,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);
-    c.args(["-c", if release { "-O3" } else { "-O1" }, "-fPIC"]);
-    match cpu {
-        Some("native") | None if release && target.name.is_none() => {
-            c.arg("-mcpu=native"); /* native builds use every feature of this CPU */
-        }
-        Some("") => {} // portable without a family baseline: the target default
-        Some(cpu) if cpu != "native" => {
-            // x86 names a CPU with -march; every other architecture with -mcpu
-            let x86 = matches!(target.arch.as_str(), "x86_64" | "x86" | "i386" | "i686");
-            c.arg(if x86 { format!("-march={cpu}") } else { format!("-mcpu={cpu}") });
-        }
-        _ => {}
-    }
-    c.arg(&src).arg("-o").arg(&tmp);
+    c.args(&flags).arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
     fs::rename(&tmp, &obj).map_err(|e| e.to_string())?;
     Ok(obj)
@@ -503,6 +500,10 @@ fn codegen_and_link(
         emit_ir.then_some(ir.as_path()),
         emit_net.then_some(net.as_path()),
     )?;
+    if profile.emit_header {
+        let h = dir.join(format!("{name}.h"));
+        fs::write(&h, c_header(program, &name)).map_err(|e| format!("cannot write {}: {e}", h.display()))?;
+    }
     let tc = match toolchain::select(target) {
         Ok(tc) => tc,
         // every target LLVM supports gets at least its object file
@@ -534,6 +535,46 @@ fn codegen_and_link(
         toolchain::archive(&tc, target, &lib, &members)?;
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
     }
+}
+
+/// A C header declaring every `extern "C" fn` of the program.
+pub fn c_header(p: &Program, name: &str) -> String {
+    use mimic_syntax::ast::Type;
+    let cty = |t: &Type, ret: bool| -> String {
+        match t {
+            Type::Named(n, _) => match n.as_str() {
+                "i8" | "i16" | "i32" | "i64" => format!("int{}_t", &n[1..]),
+                "u8" | "u16" | "u32" | "u64" => format!("uint{}_t", &n[1..]),
+                "isize" => "intptr_t".into(),
+                "usize" => "size_t".into(),
+                "f32" => "float".into(),
+                "f64" => "double".into(),
+                "bool" => "bool".into(),
+                "c_char" => "char".into(),
+                "cstr" if ret => "char *".into(),
+                "cstr" => "const char *".into(),
+                _ => "void *".into(),
+            },
+            _ => "void *".into(),
+        }
+    };
+    let guard = format!("{}_H", name.to_uppercase().replace(|c: char| !c.is_ascii_alphanumeric(), "_"));
+    let mut out = format!(
+        "/* {name}.h: generated by mimic. Functions exported with `extern \"C\" fn`.\n * Strings returned to C are malloc'd copies: free() them. */\n\
+         #ifndef {guard}\n#define {guard}\n\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n\
+         #ifdef __cplusplus\nextern \"C\" {{\n#endif\n\n"
+    );
+    for f in &p.fns {
+        let mimic_check::FnKind::User(d) = &f.kind else { continue };
+        if !d.export_c || p.mods[f.module].package != p.root_package {
+            continue;
+        }
+        let ret = d.ret.as_ref().map(|t| cty(t, true)).unwrap_or_else(|| "void".into());
+        let params: Vec<String> = d.params.iter().map(|prm| format!("{} {}", prm.ty.as_ref().map(|t| cty(t, false)).unwrap_or_default(), prm.name)).collect();
+        out.push_str(&format!("{ret} {}({});\n", d.name, if params.is_empty() { "void".into() } else { params.join(", ") }));
+    }
+    out.push_str("\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n");
+    out
 }
 
 /// Compile the project's C sources (`ffi { sources = [...] }`) for the target,

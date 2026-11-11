@@ -125,6 +125,9 @@ enum Cmd {
         /// Write the generated interaction nets (target/<profile>/<name>.mnet)
         #[arg(long)]
         emit_net: bool,
+        /// Write a C header for the `extern "C" fn`s (target/<profile>/<name>.h)
+        #[arg(long)]
+        emit_header: bool,
         /// Print the result as JSON on stdout (see docs/diagnostics.md)
         #[arg(long)]
         emit_json: bool,
@@ -347,10 +350,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
         }
-        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net, emit_json } => {
+        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net, emit_header, emit_json } => {
             let built = (|| -> Result<Vec<serde_json::Value>, Report> {
                 let input = driver::input_from(file.as_deref())?;
-                let prof = profile_of(&input, profile.clone(), true);
+                let mut prof = profile_of(&input, profile.clone(), true);
+                prof.emit_header = emit_header;
                 let mut targets = vec![match &target {
                     Some(t) => Target::parse(t)?,
                     None => Target::host(),

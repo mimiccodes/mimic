@@ -35,6 +35,9 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub body: Block,
+    /// `extern "C" fn name(…) { … }`: also exported to C under its plain
+    /// name, with C types and the C calling convention.
+    pub export_c: bool,
     pub span: Span,
 }
 

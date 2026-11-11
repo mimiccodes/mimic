@@ -194,7 +194,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             "f32" | "f64" => Ty::F64,
             "bool" => Ty::Bool,
             "char" | "c_char" => Ty::Char,
-            "str" => Ty::Arr(El::Char),
+            "str" | "cstr" => Ty::Arr(El::Char),
             "any" => Ty::Dyn,
             _ => return None,
         },

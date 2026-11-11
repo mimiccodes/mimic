@@ -160,7 +160,8 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
                 .nth(2)
                 .map(|os| os.trim_start_matches(|c: char| c.is_ascii_alphabetic()).to_string())
                 .filter(|v| !v.is_empty()),
-            None => tool_output("sw_vers", &["-productVersion"]),
+            // this machine's OS, major version (what Clang targets natively)
+            None => tool_output("sw_vers", &["-productVersion"]).map(|v| format!("{}.0", v.split('.').next().unwrap_or("11"))),
         }
         .unwrap_or_else(|| "11.0".into());
         return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version, platform }));

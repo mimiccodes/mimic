@@ -41,6 +41,10 @@ typedef mim_val *(*mim_fn1)(mim_val *);
 
 /* lifecycle */
 void mim_rt_init(int32_t argc, char **argv);
+/* start the runtime if nothing has yet (C programs calling exported Mimic) */
+void mim_rt_ensure(void);
+/* a malloc'd copy of a Mimic string, for C callers to free() */
+char *mim_cstr_dup(mim_val *v);
 int32_t mim_rt_shutdown(int32_t leak_check);
 void mim_retain(mim_val *v);
 void mim_release(mim_val *v);

@@ -539,3 +539,37 @@ fn c_structs_by_value() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
+/// linked against the Mimic library (the runtime starts itself).
+#[test]
+fn export_to_c() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "mm", "--lib"]).status().unwrap().success());
+    let proj = dir.join("mm");
+    std::fs::write(
+        proj.join("src/lib.mim"),
+        "module lib\n\ntrusted extern \"C\" include \"math.h\"\n\n\
+         pub extern \"C\" fn mm_hypot(a: f64, b: f64) -> f64 { sqrt(a * a + b * b) }\n\
+         pub extern \"C\" fn mm_sum_to(n: i64) -> i64 { ⍳ n ▷ +/ }\n\
+         pub extern \"C\" fn mm_is_even(n: i64) -> bool { n % 2 == 0 }\n\
+         pub extern \"C\" fn mm_greet(name: cstr) -> cstr { \"hello, {name}\" }\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).args(["build", "--emit-header"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let h = std::fs::read_to_string(proj.join("target/release/mm.h")).unwrap();
+    assert!(h.contains("double mm_hypot(double a, double b);") && h.contains("char * mm_greet(const char * name);"), "{h}");
+    std::fs::write(
+        proj.join("main.c"),
+        "#include <stdio.h>\n#include <stdlib.h>\n#include \"mm.h\"\nint main(void) {\n  printf(\"%.1f %lld %d%d\\n\", mm_hypot(3, 4), (long long)mm_sum_to(1000), mm_is_even(10), mm_is_even(7));\n  char *g = mm_greet(\"C\"); printf(\"%s\\n\", g); free(g); return 0;\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).args(["cc", "main.c", "-Itarget/release", "target/release/libmm.a", "-o", "main_c"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let run = std::process::Command::new(proj.join("main_c")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "5.0 499500 10\nhello, C\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
