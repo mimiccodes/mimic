@@ -188,6 +188,9 @@ pub struct ExternFn {
     pub variadic: bool,
     /// The symbol to call, when it differs from `name` (generated C wrappers).
     pub link_name: Option<String>,
+    /// `extern "mimic"`: implemented in Mimic's runtime, taking and returning
+    /// Mimic values (memory safe: no `unsafe` needed).
+    pub intrinsic: bool,
     pub ret: Option<Type>,
     pub span: Span,
 }
@@ -263,6 +266,8 @@ pub enum ExprKind {
     Lambda { params: Vec<String>, body: Box<Expr> },
     /// `(+)`: an operator as a function value.
     OpRef(BinOp),
+    /// `["a": 1, "b": 2]`, `[:]`: a map.
+    Map(Vec<(Expr, Expr)>),
     /// `arms (lo = 0, hi = n) { … arm(a, b) … }`: divide-and-conquer
     /// recursion; lifted to a hidden function before checking.
     Arms { params: Vec<(String, Expr)>, body: Block },
@@ -334,6 +339,10 @@ impl Expr {
                 params.iter().for_each(|(_, x)| x.walk(f));
                 block(body, f);
             }
+            ExprKind::Map(kvs) => kvs.iter().for_each(|(k, v)| {
+                k.walk(f);
+                v.walk(f);
+            }),
         }
     }
 }
@@ -413,6 +422,10 @@ impl Expr {
                 params.iter_mut().for_each(|(_, x)| x.walk_mut(f));
                 body.walk_mut(f);
             }
+            ExprKind::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| {
+                k.walk_mut(f);
+                v.walk_mut(f);
+            }),
         }
         f(self);
     }

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub const RUNTIME_C: &str = include_str!("../../../runtime/mimic_rt.c");
 pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
 pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
+pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -74,6 +75,59 @@ pub type Option = Some(any) | None
 
 // Results of operations that can fail: `else` unwraps Ok.
 pub type Result = Ok(any) | Err(any)
+
+// Strings, lists and maps: implemented in Mimic's runtime (runtime/mimic_std.c).
+pub extern \"mimic\" {
+    fn split(s: str, sep: str) -> [str]
+    fn join(parts: any, sep: str) -> str
+    fn lines(s: str) -> [str]
+    fn chars(s: str) -> [str]
+    fn trim(s: str) -> str
+    fn trim_start(s: str) -> str
+    fn trim_end(s: str) -> str
+    fn contains(within: any, part: any) -> bool
+    fn starts_with(s: str, prefix: str) -> bool
+    fn ends_with(s: str, suffix: str) -> bool
+    fn find_index(s: str, part: str) -> i64
+    fn replace(s: str, from: str, to: str) -> str
+    fn upper(s: str) -> str
+    fn lower(s: str) -> str
+    fn repeat(s: str, n: i64) -> str
+    fn string(v: any) -> str
+    fn is_int(s: str) -> bool
+    fn to_int(s: str) -> i64
+    fn is_float(s: str) -> bool
+    fn to_float(s: str) -> f64
+    fn push(xs: any, x: any) -> any
+    fn concat(xs: any, ys: any) -> any
+    fn sort(xs: any) -> any
+    fn has(m: any, key: any) -> bool
+    fn put(m: any, key: any, value: any) -> any
+    fn remove(m: any, key: any) -> any
+    fn keys(m: any) -> any
+    fn values(m: any) -> any
+}
+
+// `Some(byte index)` of the first occurrence of `part`, or `None`.
+pub fn find(s: str, part: str) {
+    let i = find_index(s, part)
+    if i < 0 { None } else { Some(i) }
+}
+
+// `Some(n)` when `s` is an integer, else `None`.
+pub fn parse_int(s: str) {
+    if is_int(s) { Some(to_int(s)) } else { None }
+}
+
+// `Some(x)` when `s` is a number, else `None`.
+pub fn parse_float(s: str) {
+    if is_float(s) { Some(to_float(s)) } else { None }
+}
+
+// `Some(m[key])` when the map has the key, else `None`.
+pub fn get(m, key) {
+    if has(m, key) { Some(m[key]) } else { None }
+}
 ";
 
 fn prelude_file() -> SourceFile {
@@ -252,7 +306,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -267,6 +321,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     let src = src_dir.join("mimic_rt.c");
     mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);

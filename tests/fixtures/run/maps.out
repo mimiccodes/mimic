@@ -1,0 +1,13 @@
+["ada": 1815, "alan": 1912, "grace": 1906]
+1912
+Some(1906)
+None
+3
+["ada" "alan" "grace"]
+[1815 1912 1906]
+["ada": 1816, "alan": 1912, "grace": 1906, "linus": 1969]
+["ada": 1815, "alan": 1912, "grace": 1906]
+["ada": 1816, "grace": 1906, "linus": 1969]
+["a": 3, "b": 2, "c": 1]
+0
+two

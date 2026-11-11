@@ -59,7 +59,9 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | B4 | Callbacks: Mimic functions, lambdas and closures passed to C as function pointers through generated trampolines (synchronous; nested) | ✅ |
 | B (rest) | Callbacks C keeps for later, unions, array fields, arrays from C, shared libraries | |
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
-| D | Language completion (M3 steps 4–5, generics, lists/maps, strings, integer types, richer patterns) | |
+| D1–D3 | Closures, functions/operators as values, loop words | ✅ |
+| D5, D6 (first part) | Maps (`["a": 1]`, `m[k]`, copy-on-write `m[k] = v`, `get`/`has`/`keys`/`values`/`put`/`remove`), list functions (`push`, `concat`, `sort`), the string library (`split`, `join`, `trim`, `replace`, `find`, `parse_int`, …), `+` and `==` on strings; built on `extern "mimic"` runtime intrinsics ([std.md](std.md)) | ✅ |
+| D (rest) | Generics, bytes, bitwise operators and integer types, richer patterns, structural equality, multi-dimensional arrays | |
 | E | Standard library and I/O (M3 step 6, M5, M6) | |
 | F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |

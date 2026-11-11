@@ -562,6 +562,13 @@ impl Walk<'_, '_> {
     fn call_user(&mut self, at: usize, fid: FnId, args: Vec<Ty>) -> Ty {
         if self.inf.p.fns[fid].is_extern() {
             let FnKind::Extern { decl, .. } = &self.inf.p.fns[fid].kind else { unreachable!() };
+            if decl.intrinsic {
+                let m = self.inf.p.fns[fid].module;
+                return match &decl.ret {
+                    None => Ty::Unit,
+                    Some(t) => ann_in(self.inf.p, m, t).unwrap_or(Ty::Dyn),
+                };
+            }
             return ctype_ty(decl.ret.as_ref());
         }
         if args.contains(&Ty::Never) {
@@ -643,6 +650,13 @@ impl Walk<'_, '_> {
             },
             ExprKind::OpRef(_) => Ty::Dyn,
             ExprKind::Arms { .. } => Ty::Dyn, // lifted after parsing
+            ExprKind::Map(kvs) => {
+                for (k, v) in kvs {
+                    self.expr(k);
+                    self.expr(v);
+                }
+                Ty::Dyn
+            }
             ExprKind::Call { callee, args } => {
                 let mut argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
                 match &callee.kind {
@@ -946,6 +960,10 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
     // strings compare as whole values
     if matches!(op, Eq | Ne) && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
         return Ty::Bool;
+    }
+    // "a" + "b" joins strings
+    if op == Add && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
+        return Ty::Arr(El::Char);
     }
     let scalar = |x: Ty, y: Ty| -> Ty {
         match op {

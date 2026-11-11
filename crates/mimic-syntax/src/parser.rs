@@ -319,7 +319,8 @@ impl Parser {
                     Token { tok: Tok::Str(s), .. } => s,
                     t => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected ABI string, e.g. extern \"C\"", t.span)),
                 };
-                if abi != "C" {
+                let intrinsic = abi == "mimic";
+                if abi != "C" && !intrinsic {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
                 // `extern "C" fn f(x: f64) -> f64 { … }`: a Mimic function exported to C
@@ -378,8 +379,9 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, ret, span: fstart });
                 }
+                let trusted = trusted || intrinsic;
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
             }
             other => Err(Diag::new(&C::UNEXPECTED_TOKEN, 
@@ -1122,18 +1124,38 @@ impl Parser {
             }
             Tok::LBracket => {
                 self.nl_ignore += 1;
+                // `[:]` is the empty map; `[k: v, …]` a map; otherwise an array
                 let r = (|| {
+                    if self.at(&Tok::Colon) && matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::RBracket)) {
+                        self.next();
+                        return Ok(Err(Vec::new()));
+                    }
                     let mut elems = Vec::new();
+                    let mut pairs = Vec::new();
                     while !self.at(&Tok::RBracket) {
-                        elems.push(self.expr()?);
+                        let x = self.expr()?;
+                        if self.eat(&Tok::Colon) {
+                            if !elems.is_empty() {
+                                return Err(Diag::new(&C::UNEXPECTED_TOKEN, "a map literal has `key: value` for every entry", x.span));
+                            }
+                            pairs.push((x, self.expr()?));
+                        } else {
+                            if !pairs.is_empty() {
+                                return Err(Diag::new(&C::UNEXPECTED_TOKEN, "a map literal has `key: value` for every entry", x.span));
+                            }
+                            elems.push(x);
+                        }
                         self.eat(&Tok::Comma);
                     }
-                    Ok(elems)
+                    Ok(if pairs.is_empty() { Ok(elems) } else { Err(pairs) })
                 })();
                 self.nl_ignore -= 1;
-                let elems = r?;
+                let r = r?;
                 self.expect(&Tok::RBracket)?;
-                ExprKind::Array(elems)
+                match r {
+                    Ok(elems) => ExprKind::Array(elems),
+                    Err(pairs) => ExprKind::Map(pairs),
+                }
             }
             Tok::If => return self.if_rest(span),
             Tok::LBrace => {
@@ -1405,6 +1427,7 @@ mod tests {
             }
             ExprKind::Lambda { params, body } => format!("(λ {} {})", params.join(" "), sx(body)),
             ExprKind::OpRef(op) => format!("({op:?})"),
+            ExprKind::Map(kvs) => format!("(map {})", kvs.iter().map(|(k, v)| format!("{}:{}", sx(k), sx(v))).collect::<Vec<_>>().join(" ")),
             ExprKind::Arms { params, .. } => format!("(arms {})", params.iter().map(|(n, x)| format!("{n}={}", sx(x))).collect::<Vec<_>>().join(" ")),
             ExprKind::If { cond, .. } => format!("(if {})", sx(cond)),
             ExprKind::Block(_) => "{}".into(),

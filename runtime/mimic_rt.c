@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 
 #if defined(__wasi__) || defined(MIMIC_NO_THREADS)
@@ -29,7 +30,7 @@
 
 /* BOXED: a vector of handles (nested arrays, lists of strings/records).
  * OBJ: a record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7 } mim_dtype;
 
 /* Emitted by the compiler, one per record type / union variant. */
 typedef struct {
@@ -61,7 +62,7 @@ typedef struct mim_val {
     int64_t inl[];
 } mim_val;
 
-#define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ || (v)->dtype == MIM_FN)
+#define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ || (v)->dtype == MIM_FN || (v)->dtype == MIM_MAP)
 #define FN_DESC(v) ((const mim_fn_desc *)(const void *)(v)->desc)
 
 #define MIM_IMMORTAL ((int64_t)1 << 62)
@@ -304,7 +305,8 @@ static size_t elsize(int dt) {
     case MIM_F64: return 8;
     case MIM_BOXED:
     case MIM_OBJ:
-    case MIM_FN: return sizeof(void *);
+    case MIM_FN:
+    case MIM_MAP: return sizeof(void *);
     default: return 1;
     }
 }
@@ -353,11 +355,14 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
 
 void mim_release(mim_val *v);
 
+static void map_dealloc_meta(mim_val *m);
+
 static void dealloc(mim_val *v) {
     if (IS_HANDLES(v)) { /* release children */
         mim_val **h = (mim_val **)v->data;
         for (int64_t i = 0; i < v->len; i++) mim_release(h[i]);
     }
+    if (v->dtype == MIM_MAP) map_dealloc_meta(v);
     size_t bytes = (size_t)v->len * elsize(v->dtype) + 1;
     __atomic_store_n(&live_slot()->n, live_slot()->n - 1, __ATOMIC_RELAXED);
     if (bytes <= SMALL_BYTES && t_free_len < FREE_LIST_CAP) {
@@ -520,6 +525,7 @@ static const char *dtname(const mim_val *v) {
     if (v->dtype == MIM_OBJ) return v->desc && v->desc->type_name ? v->desc->type_name : "record";
     if (v->dtype == MIM_BOXED) return "list";
     if (v->dtype == MIM_FN) return "function";
+    if (v->dtype == MIM_MAP) return "map";
     return v->rank == 0 ? s[v->dtype] : vs[v->dtype];
 }
 
@@ -735,9 +741,17 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
     }
 }
 
+mim_val *mim_std_concat(mim_val *xs, mim_val *ys);
+
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     need(a, "operator");
     need(b, "operator");
+    /* "a" + "b" joins strings (adding character codes is never meant) */
+    if (op == OP_ADD && a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->rank == 1 && b->rank == 1) return mim_std_concat(a, b);
+    if ((op == OP_EQ || op == OP_NE) && a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->rank == 1 && b->rank == 1) {
+        int eq = a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+        return mim_bool(op == OP_EQ ? eq : !eq);
+    }
     if (IS_HANDLES(a) || IS_HANDLES(b)) mim_panic("arithmetic is not defined on records or lists of values");
     int64_t n;
     int rank;
@@ -821,6 +835,20 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
 /* `quoted`: strings nested inside lists/records print with quotes */
 static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
     if (!v) { sb_str(b, "()"); return; }
+    if (v->dtype == MIM_MAP) {
+        int64_t n = ((const int64_t *)(const void *)v->desc)[0]; /* map_meta.count */
+        mim_val **h = (mim_val **)v->data;
+        if (n == 0) { sb_str(b, "[:]"); return; }
+        sb_str(b, "[");
+        for (int64_t e = 0; e < n; e++) {
+            if (e) sb_str(b, ", ");
+            fmt_val(b, h[2 * e], 1);
+            sb_str(b, ": ");
+            fmt_val(b, h[2 * e + 1], 1);
+        }
+        sb_str(b, "]");
+        return;
+    }
     if (v->dtype == MIM_FN) {
         sb_str(b, "<fn ");
         sb_str(b, FN_DESC(v)->name ? FN_DESC(v)->name : "lambda");
@@ -1215,7 +1243,9 @@ mim_val *mim_prim1(int32_t prim, mim_val *a) {
     case P_PRODUCT:
     case P_MAX:
     case P_MIN: return reduce(prim, a);
-    case P_LEN: return mim_int(a->rank == 0 ? 1 : a->len);
+    case P_LEN:
+        if (a->dtype == MIM_MAP) return mim_int(((const int64_t *)(const void *)a->desc)[0]);
+        return mim_int(a->rank == 0 ? 1 : a->len);
     }
     mim_panic("unknown monadic primitive");
     return NULL;
@@ -1542,12 +1572,20 @@ static int64_t check_index(mim_val *xs, mim_val *i) {
     return k;
 }
 
+static mim_val *map_get(mim_val *m, mim_val *k);
+static void map_set(mim_val **slot, mim_val *k, mim_val *v);
+
 mim_val *mim_index(mim_val *xs, mim_val *i) {
+    if (xs && xs->dtype == MIM_MAP) return map_get(xs, i);
     return scalar_at(xs, check_index(xs, i));
 }
 
 /* Copy-on-write element store: mutates in place when uniquely owned. */
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
+    if (*slot && (*slot)->dtype == MIM_MAP) {
+        map_set(slot, i, v);
+        return;
+    }
     mim_val *xs = *slot;
     int64_t k = check_index(xs, i);
     need(v, "indexed assignment");
@@ -1662,3 +1700,5 @@ void *mim_dataptr(mim_val *v) {
 #ifndef MIMIC_NO_NET
 #include "mimic_net.c"
 #endif
+/* standard-library intrinsics (strings, lists, maps) */
+#include "mimic_std.c"

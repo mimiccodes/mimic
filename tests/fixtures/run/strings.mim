@@ -1,0 +1,25 @@
+module main
+
+fn main() {
+    let csv = "  ada,lovelace,1815  "
+    let parts = csv ▷ trim ▷ split(",")
+    print(parts)
+    print(join(parts, " | "))
+    print(upper("mimic") + "!" == "MIMIC!")
+    print(contains("parallel", "all"))
+    print(contains([1 2 3], 2))
+    print(replace("a-b-c", "-", "+"))
+    print(find("hello", "ll"))
+    print(find("hello", "z"))
+    print(parse_int("42"))
+    print(parse_int("4x2"))
+    print(parse_float("2.5"))
+    print(chars("héllo"))
+    print(repeat("ab", 3))
+    print(string([1 2 3]) + " and " + string(4.5))
+    print(sort([3 1 2]))
+    print(sort(["pear" "apple" "fig"]))
+    print(push([1 2], 3))
+    print(concat(["a"], ["b" "c"]))
+    print(lines("one\ntwo"))
+}

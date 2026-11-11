@@ -537,6 +537,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // a lambda capturing `name` needs it as a real variable (unless a
             // parameter of the same name hides it)
             ExprKind::Lambda { params, body } => params.iter().any(|p| p == name) || self.uses_ok(name, body, false),
+            ExprKind::Map(kvs) => kvs.iter().all(|(k, v)| self.uses_ok(name, k, false) && self.uses_ok(name, v, false)),
             _ => true,
         }
     }

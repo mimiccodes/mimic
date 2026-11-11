@@ -636,6 +636,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_each_fn" => ptr.fn_type(&[p, p], false),
+            "mim_map_lit" => ptr.fn_type(&[i64t, p, p], false),
             "mim_gather" | "mim_trail" => ptr.fn_type(&[p, p], false),
             "mim_evolve" => ptr.fn_type(&[p, i64t, p], false),
             "mim_settle" => ptr.fn_type(&[p, p, p], false),
@@ -2208,6 +2209,29 @@ impl<'ctx> Cg<'ctx, '_> {
                 for a in args {
                     vals.push(self.expr(a)?);
                 }
+                // a runtime intrinsic: Mimic values in, a Mimic value out
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                {
+                    let name = format!("mim_std_{}", decl.name);
+                    let f = match self.module.get_function(&name) {
+                        Some(f) => f,
+                        None => {
+                            let ps: Vec<BasicMetadataTypeEnum> = vals.iter().map(|_| self.ptr.into()).collect();
+                            self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
+                        }
+                    };
+                    let mut boxed = Vec::new();
+                    for v in &vals {
+                        boxed.push(self.boxed(*v)?);
+                    }
+                    let argv: Vec<BasicMetadataValueEnum> = boxed.iter().map(|b| self.basic(*b).into()).collect();
+                    let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+                    for b in boxed {
+                        self.drop_tmp(b)?;
+                    }
+                    return self.as_ty(V::P(r.into_pointer_value(), true), ty, &format!("result of `{}`", decl.name));
+                }
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind {
                     let decl = decl.clone();
                     let f = self.extern_fn(&decl);
@@ -2338,6 +2362,32 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.as_ty(r, ty, "loop result")
             }
             ExprKind::Arms { .. } => Err("internal error: `arms` reached codegen".into()),
+            ExprKind::Map(kvs) => {
+                let i64t = self.ctx.i64_type();
+                let n = kvs.len();
+                let (karr, varr) = if n == 0 {
+                    (self.ptr.const_null(), self.ptr.const_null())
+                } else {
+                    let arr_ty = self.ptr.array_type(n as u32);
+                    (self.entry_alloca_ty(arr_ty.into(), "keys")?, self.entry_alloca_ty(arr_ty.into(), "vals")?)
+                };
+                let mut held = Vec::new();
+                for (i, (k, v)) in kvs.iter().enumerate() {
+                    let arr_ty = self.ptr.array_type(n as u32);
+                    for (x, arr) in [(k, karr), (v, varr)] {
+                        let xv = self.expr(x)?;
+                        let xv = self.boxed(xv)?;
+                        let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+                        self.b.build_store(slot, self.basic(xv)).s()?;
+                        held.push(xv);
+                    }
+                }
+                let r = self.call_rt_ptr("mim_map_lit", &[i64t.const_int(n as u64, false).into(), karr.into(), varr.into()])?;
+                for x in held {
+                    self.drop_tmp(x)?;
+                }
+                self.as_ty(r, ty, "map")
+            }
             ExprKind::Prim { prim, args } => {
                 let a = self.expr(&args[0])?;
                 let a = self.boxed(a)?;

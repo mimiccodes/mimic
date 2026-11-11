@@ -73,6 +73,7 @@ impl Imported {
                 params: f.params.iter().enumerate().map(|(i, p)| (format!("a{i}"), ty(p))).collect(),
                 variadic: f.variadic,
                 link_name: f.link_name.clone(),
+                intrinsic: false,
                 ret: f.ret.as_deref().map(ty),
                 span,
             })

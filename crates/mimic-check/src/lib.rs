@@ -642,6 +642,8 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                 let mut c = Checker { p, module: f.module, file: f.file, scopes: Vec::new(), lambda_floor: 0, unsafe_depth: 0, diags: &mut diags };
                 c.check_fn(d);
             }
+            // runtime intrinsics take Mimic types, checked like annotations
+            FnKind::Extern { decl, .. } if decl.intrinsic => {}
             FnKind::Extern { decl, .. } => {
                 for (_, t) in &decl.params {
                     if let Err(e) = check_ctype(t, false) {
@@ -1188,6 +1190,12 @@ impl Checker<'_> {
             ExprKind::Lambda { params, body } => self.lambda(params, body),
             ExprKind::OpRef(_) => {}
             ExprKind::Arms { .. } => {} // lifted to a function after parsing
+            ExprKind::Map(kvs) => {
+                for (k, v) in kvs {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
             ExprKind::If { cond, then, els } => {
                 self.expr(cond);
                 self.block(then, true);
@@ -1486,7 +1494,9 @@ pub struct Purity {
 impl Purity {
     pub fn analyze(p: &Program) -> Purity {
         // Optimistic fixpoint: assume pure, then knock out until stable.
-        let mut pure: Vec<bool> = p.fns.iter().map(|f| !f.is_extern()).collect();
+        // runtime intrinsics (strings, lists, maps) have no side effects
+        let mut pure: Vec<bool> =
+            p.fns.iter().map(|f| matches!(&f.kind, FnKind::User(_)) || matches!(&f.kind, FnKind::Extern { decl, .. } if decl.intrinsic)).collect();
         loop {
             let mut changed = false;
             for (fid, f) in p.fns.iter().enumerate() {
@@ -1541,6 +1551,7 @@ impl PurityWalk<'_> {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
             ExprKind::OpRef(_) => true,
             ExprKind::Arms { .. } => false, // lifted after parsing
+            ExprKind::Map(kvs) => kvs.iter().all(|(k, v)| self.expr(k) && self.expr(v)),
             ExprKind::Array(xs) => xs.iter().all(|x| self.expr(x)),
             ExprKind::Call { callee, args } => {
                 args.iter().all(|a| self.expr(a))

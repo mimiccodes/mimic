@@ -1,0 +1,37 @@
+module main
+
+fn count_words(text: str) {
+    let mut counts = [:]
+    let words = split(text, " ")
+    let n = ≢ words
+    fill(counts, words, 0, n)
+}
+
+fn fill(counts, words, i: i64, n: i64) {
+    if i == n { counts } else {
+        let w = words[i]
+        let c = if has(counts, w) { counts[w] + 1 } else { 1 }
+        fill(put(counts, w, c), words, i + 1, n)
+    }
+}
+
+fn main() {
+    let born = ["ada": 1815, "alan": 1912, "grace": 1906]
+    print(born)
+    print(born["alan"])
+    print(get(born, "grace"))
+    print(get(born, "linus"))
+    print(≢ born)
+    print(keys(born))
+    print(values(born))
+    let mut m = born
+    m["linus"] = 1969                 // copy-on-write: born is unchanged
+    m["ada"] = 1816
+    print(m)
+    print(born)
+    print(remove(m, "alan"))
+    print(count_words("a b a c b a"))
+    let empty = [:]
+    print(≢ empty)
+    print([1: "one", 2: "two"][2])
+}
