@@ -42,6 +42,10 @@ pub(crate) enum Node {
     Leaf(usize, El),
     /// a scalar computed once before the loop (slot holds its value)
     Scalar(usize, Ty),
+    /// a number written in the program: a constant inside the kernel, so
+    /// LLVM can fold it (`i % 1000` becomes a multiply and a shift)
+    ConstI(i64),
+    ConstF(f64),
     Bin(BinOp, Box<Node>, Box<Node>),
     Un(UnOp, Box<Node>),
     /// `xs ¨ f` with a pure `f` on unboxed numbers: call the native `f` (by
@@ -201,6 +205,11 @@ impl<'ctx> Cg<'ctx, '_> {
         if self.is_fae(x) {
             return self.build(x, plan);
         }
+        match &x.kind {
+            ExprKind::Int(v) if self.ty_of(x) == Ty::I64 => return Ok(Node::ConstI(*v)),
+            ExprKind::Float(v) if self.ty_of(x) == Ty::F64 => return Ok(Node::ConstF(*v)),
+            _ => {}
+        }
         let t = self.ty_of(x);
         if let Some(el) = num_el(t) {
             let v = self.expr(x)?;
@@ -282,6 +291,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
             }
             Node::Scalar(s, t) => self.val_of(slots[*s], *t, false),
+            Node::ConstI(v) => V::I(self.ctx.i64_type().const_int(*v as u64, true)),
+            Node::ConstF(v) => V::F(self.ctx.f64_type().const_float(*v)),
             Node::Bin(op, a, b) => {
                 let x = self.eval_node(a, i, slots)?;
                 let y = self.eval_node(b, i, slots)?;
@@ -340,6 +351,13 @@ impl<'ctx> Cg<'ctx, '_> {
                 slots.push(load(cg, k, *t)?);
             }
             let out = load(cg, nslots, cg.ptr.into())?.into_pointer_value();
+            // chunks start at 0 or later: indices are never negative, which
+            // lets LLVM drop the sign fix-ups of floored `%` and `div`
+            let nonneg = cg.b.build_int_compare(IntPredicate::SGE, lo, i64t.const_zero(), "").s()?;
+            let assume = Intrinsic::find("llvm.assume")
+                .and_then(|i| i.get_declaration(&cg.module, &[]))
+                .ok_or("internal compiler error: llvm.assume")?;
+            cg.b.build_call(assume, &[nonneg.into()], "").s()?;
             let entry = cg.b.get_insert_block().unwrap();
             let body = cg.ctx.append_basic_block(f, "body");
             let done = cg.ctx.append_basic_block(f, "done");

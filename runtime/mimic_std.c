@@ -347,6 +347,108 @@ static int cmp_vals(const mim_val *a, const mim_val *b) {
 
 static int cmp_handles(const void *x, const void *y) { return cmp_vals(*(mim_val *const *)x, *(mim_val *const *)y); }
 
+/* ---- sorting numbers: a parallel LSD radix sort ----------------------------
+ * Keys are unsigned 64-bit images of the values that sort in the same order
+ * (signed integers: flip the sign bit; floats: flip every bit of negatives,
+ * the sign bit of the rest). One pass per byte that differs between keys:
+ * each chunk counts its bytes, the counts become each chunk's write offsets,
+ * and each chunk scatters its keys there — stable, and the same for any
+ * number of threads. */
+
+typedef struct {
+    uint64_t *src, *dst;
+    int64_t grain;
+    int shift;
+    int64_t *hist; /* 256 per chunk */
+} radix_job;
+
+static void radix_count(void *c, int64_t lo, int64_t hi) {
+    radix_job *r = (radix_job *)c;
+    for (int64_t start = lo; start < hi; start += r->grain) { /* whole chunks, even when run in one call */
+        int64_t end = start + r->grain < hi ? start + r->grain : hi;
+        int64_t *h = r->hist + (start / r->grain) * 256;
+        memset(h, 0, 256 * sizeof(int64_t));
+        for (int64_t i = start; i < end; i++) h[(r->src[i] >> r->shift) & 255]++;
+    }
+}
+
+static void radix_scatter(void *c, int64_t lo, int64_t hi) {
+    radix_job *r = (radix_job *)c;
+    for (int64_t start = lo; start < hi; start += r->grain) {
+        int64_t end = start + r->grain < hi ? start + r->grain : hi;
+        int64_t *h = r->hist + (start / r->grain) * 256;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t v = r->src[i];
+            r->dst[h[(v >> r->shift) & 255]++] = v;
+        }
+    }
+}
+
+static void radix_sort_keys(uint64_t *a, int64_t n) {
+    if (n < 2) return;
+    uint64_t diff = 0;
+    for (int64_t i = 1; i < n; i++) diff |= a[i] ^ a[0];
+    if (!diff) return;
+    int64_t grain = n / ((int64_t)g_nthreads * 4);
+    if (grain < 65536) grain = 65536;
+    int64_t chunks = (n + grain - 1) / grain;
+    uint64_t *tmp = (uint64_t *)malloc(sizeof(uint64_t) * (size_t)n);
+    int64_t *hist = (int64_t *)malloc(sizeof(int64_t) * 256 * (size_t)chunks);
+    if (!tmp || !hist) mim_panic("out of memory");
+    radix_job r = {a, tmp, grain, 0, hist};
+    for (int shift = 0; shift < 64; shift += 8) {
+        if (((diff >> shift) & 255) == 0) continue; /* every key has the same byte here */
+        r.shift = shift;
+        parallel_for_grain(n, grain, radix_count, &r);
+        int64_t at = 0;
+        for (int d = 0; d < 256; d++)
+            for (int64_t ch = 0; ch < chunks; ch++) {
+                int64_t k = hist[ch * 256 + d];
+                hist[ch * 256 + d] = at;
+                at += k;
+            }
+        parallel_for_grain(n, grain, radix_scatter, &r);
+        uint64_t *t = r.src;
+        r.src = r.dst;
+        r.dst = t;
+    }
+    if (r.src != a) memcpy(a, r.src, sizeof(uint64_t) * (size_t)n);
+    free(tmp);
+    free(hist);
+}
+
+/* a sorted copy of a vector of numbers, bytes or bools; NULL for others */
+static mim_val *sort_numbers(mim_val *xs) {
+    int64_t n = xs->len;
+    if (xs->dtype == MIM_I64 || xs->dtype == MIM_F64) {
+        mim_val *r = alloc(xs->dtype, 1, n);
+        uint64_t *k = (uint64_t *)r->data;
+        memcpy(k, xs->data, sizeof(uint64_t) * (size_t)n);
+        const uint64_t top = (uint64_t)1 << 63;
+        if (xs->dtype == MIM_I64) {
+            for (int64_t i = 0; i < n; i++) k[i] ^= top;
+            radix_sort_keys(k, n);
+            for (int64_t i = 0; i < n; i++) k[i] ^= top;
+        } else {
+            for (int64_t i = 0; i < n; i++) k[i] = (k[i] & top) ? ~k[i] : k[i] | top;
+            radix_sort_keys(k, n);
+            for (int64_t i = 0; i < n; i++) k[i] = (k[i] & top) ? k[i] & ~top : ~k[i];
+        }
+        return r;
+    }
+    if (xs->dtype == MIM_U8 || xs->dtype == MIM_BOOL) { /* counting */
+        int64_t count[256] = {0};
+        const uint8_t *s = (const uint8_t *)xs->data;
+        for (int64_t i = 0; i < n; i++) count[s[i]]++;
+        mim_val *r = alloc(xs->dtype, 1, n);
+        uint8_t *d = (uint8_t *)r->data;
+        for (int v = 0; v < 256; v++)
+            for (int64_t c = 0; c < count[v]; c++) *d++ = (uint8_t)v;
+        return r;
+    }
+    return NULL;
+}
+
 /* sort(xs): ascending; numbers or strings (stable for equal elements) */
 mim_val *mim_std_sort(mim_val *xs) {
     need(xs, "sort");
@@ -355,6 +457,8 @@ mim_val *mim_std_sort(mim_val *xs) {
         mim_retain(xs);
         return xs;
     }
+    mim_val *fast = sort_numbers(xs);
+    if (fast) return fast;
     int64_t n = xs->len;
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = scalar_at(xs, i);

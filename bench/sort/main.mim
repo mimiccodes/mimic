@@ -1,0 +1,8 @@
+module main
+
+fn main() {
+    let n = 10000000
+    let xs = ⍳ n ¨ (i => (i * 1103515245 + 12345) % 2147483648)
+    let s = sort(xs)
+    print("{s[0]} {s[n div 2]} {s[n - 1]}")
+}

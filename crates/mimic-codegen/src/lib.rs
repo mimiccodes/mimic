@@ -1604,6 +1604,10 @@ impl<'ctx> Cg<'ctx, '_> {
         self.in_new_fn(f, |cg| {
             cg.cur_ret = rt;
             cg.ret_what = "lambda result".into();
+            // the kernel already runs in parallel: calls stay native (not the
+            // net), each element starting on a fresh native stack
+            cg.native_frame = true;
+            cg.cur_depth = Some(cg.ctx.i32_type().const_zero());
             let mut locals = Vec::new();
             for (i, (name, pt)) in names.iter().zip(&all).enumerate() {
                 let slot = cg.entry_alloca(*pt, name)?;

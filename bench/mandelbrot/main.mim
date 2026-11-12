@@ -1,0 +1,18 @@
+module main
+
+// does c = (cr, ci) stay bounded for `limit` steps? 1 if so
+fn bounded(cr: f64, ci: f64, zr: f64, zi: f64, k: i64, limit: i64) -> i64 {
+    if k == limit {
+        1
+    } else if zr * zr + zi * zi > 4.0 {
+        0
+    } else {
+        bounded(cr, ci, zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, k + 1, limit)
+    }
+}
+
+fn main() {
+    let n = 2000
+    let count = ⍳ (n * n) ¨ (p => bounded(-2.0 + 2.5 * (p % n) / n, -1.25 + 2.5 * (p div n) / n, 0.0, 0.0, 0, 200)) ▷ +/
+    print(count)
+}

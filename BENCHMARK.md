@@ -38,7 +38,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Building the suite, step by step
 
-### Step 1: Harness (now)
+### Step 1: Harness ✅
 * Create a `bench/` directory with one folder per benchmark, each holding `main.mim`, `main.c`, `main.rs`, `main.go` and an `expected.txt`.
 * `bench/run.sh`:
   * builds every version;
@@ -47,7 +47,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
   * writes `bench/results.md`.
 * Start with benchmarks 1, 3, 5 and 7, which need no language features beyond today's.
 
-**Done when:** `bench/run.sh` prints a table with C ratios on this machine.
+**Done when:** `bench/run.sh` prints a table with C ratios on this machine. Done: the runner is `bench/run.py` (`python3 bench/run.py [names…] [--runs N]`), and it writes `bench/results.md`.
 
 ### Step 2: CI
 * Run the suite on every merge to `main`, on fixed hardware: Linux x86-64 and macOS arm64.
@@ -92,6 +92,26 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### The suite, first run (`bench/run.py`)
+
+Apple M3 Pro (12 cores), macOS 26.6, load average 6–10 (other work running), best of 5 after a warm-up. The ratio is to C. C, Rust and Go run their straightforward sequential versions.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib(38) | 0.556 s | 1.11× | 1.15× | 1.85× | **0.23×** |
+| mandelbrot 2000², 200 steps | 2.607 s | 1.14× | 1.21× | 1.16× | **0.12×** |
+| sort 10M integers | 4.726 s | 0.15× | 0.74× | **0.07×** | **0.04×** |
+| sum of squares, 100M | 0.126 s | 1.64× | 2.52× | 2.47× | **0.37×** |
+
+On all cores Mimic beats C on every benchmark. On one core it beats C at sorting and is close on mandelbrot. Where it is still behind:
+* **fib on one core (1.85×)** runs through the interaction nets that make it parallel. Plain native code was 1.42× earlier (`--no-net`).
+* **sum of squares on one core (2.47×)**: Clang knows this loop runs fewer than 2³² times, so it narrows the counter to 32 bits and computes `% 1000` in NEON vector registers. A Mimic kernel only learns its bounds when it runs. A 32-bit copy of each kernel loop would close this gap.
+
+Fixes made while building the suite:
+* **Sorting numbers** used a merge sort over boxed values: 24.4 s. It is now a parallel radix sort: 0.33 s on one core, 0.17 s on all cores.
+* **Functions called from a fused `¨` kernel** went through the interaction nets once per element: mandelbrot took minutes. They now stay native.
+* **Numbers written in the program** are constants inside kernels, so `x % 1000` is a multiply and a shift instead of a division. Kernels also tell LLVM that their indices are never negative, which drops the sign fix-ups of floored `%`.
 
 ### Phase F step 1: typed `¨` kernels and direct indexing
 
