@@ -116,6 +116,56 @@ fn show(r: Result[http::Response, str]) -> str {
 Ok(3)
 ```
 
+## WebSockets
+
+A WebSocket stays open, and both sides can send messages at any time. A WebSocket server is a function called once per connection. When it returns, the connection closes:
+
+```mimic run
+module main
+
+// answer every message upper-cased, until the client goes away
+fn shout(sock: ws::Socket) {
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => {
+            ws::send(sock, upper(t))
+            shout(sock)
+        }
+        _ => {}
+    }
+}
+
+fn server(port: i64) -> Result[i64, str] { ws::serve_connections(port, shout, 1) }
+
+fn connect_when_up(url: str, tries: i64) -> Result[ws::Socket, str] {
+    match ws::connect(url) {
+        Ok(s) => Ok(s),
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); connect_when_up(url, tries - 1) },
+    }
+}
+
+fn main() {
+    let port = 30000 + os::pid() % 20000
+    let s = server(port)
+    let sock = connect_when_up("ws://127.0.0.1:{port}/", 100) else { return }
+    print(ws::send(sock, "hello"))
+    print(ws::receive(sock))
+    print(ws::send(sock, "still here?"))
+    print(ws::receive(sock))
+    ws::close(sock)
+    print(s)
+}
+```
+
+```output
+Ok(5)
+Ok(Text("HELLO"))
+Ok(11)
+Ok(Text("STILL HERE?"))
+Ok(1)
+```
+
+`wss://` addresses use TLS, just like `https://`. `ws::receive` returns `ws::Text(…)`, `ws::Binary(bytes)` or, once the other side has closed, `ws::Closed`.
+
 ## TCP
 
 For other protocols, use TCP sockets directly:

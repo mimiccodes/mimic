@@ -240,6 +240,38 @@ How the client and server behave:
 * **Redirects are followed** (301, 302, 303, 307, 308), up to 10. A 303, or a 301/302 after a non-GET, continues as a GET; 307 and 308 keep the method and body.
 * **WebAssembly has no sockets**, so there every network function returns `Err`.
 
+### `ws`: WebSockets
+
+```mimic
+fn echo(sock: ws::Socket) {                       // one call per connection
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => { ws::send(sock, upper(t)); echo(sock) }
+        _ => {}
+    }
+}
+ws::serve(8080, echo)
+
+let sock = ws::connect("wss://example.com/live") else { return }
+ws::send(sock, "hello")
+let reply = ws::receive(sock)                     // Ok(ws::Text("…")) / Ok(ws::Binary(bytes)) / Ok(ws::Closed)
+ws::close(sock)
+```
+
+| Function / type | Meaning |
+|---|---|
+| `ws::connect(url)` | `Result[ws::Socket, str]` for `ws://` and `wss://` (TLS as for `https://`) |
+| `ws::send(socket, text)`, `ws::send_bytes(socket, data)` | `Result[i64, str]` |
+| `ws::receive(socket)` | `Result[ws::Message, str]`: `Text(str)`, `Binary([u8])` or `Closed` |
+| `ws::close(socket)` | Close (with the closing handshake) |
+| `ws::serve(port, handler)` | Call `handler(socket)` for each connection; the socket closes when it returns |
+| `ws::serve_connections(port, handler, n)` | The same, stopping after `n` connections |
+
+How WebSockets behave:
+* **Protocol.** RFC 6455: fragmented messages are joined, pings are answered automatically, and messages may be up to 64 MB.
+* **Sending.** Sends on one socket from different threads never interleave.
+* **Connections run in parallel** when the handler's effects may overlap, the same rule as `http::serve`.
+* **No shared state yet.** Connections cannot share state with each other, so a chat room that broadcasts to every connection is not possible until channels arrive.
+
 ### `tcp`
 
 | Function | Result |

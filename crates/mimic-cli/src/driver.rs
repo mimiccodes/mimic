@@ -279,6 +279,27 @@ pub module json {
     }
 }
 
+// WebSockets: `ws::connect(url)` (ws:// and wss://), `ws::serve(port, handler)`.
+// Sends on one socket are never interleaved; pings are answered for you.
+pub module ws {
+    pub type Socket = { id: i64 }
+
+    // A received message. `Closed` when the other side has closed.
+    pub type Message = Text(str) | Binary([u8]) | Closed
+
+    pub extern \"mimic\" concurrent {
+        fn connect(url: str) -> Result[Socket, str]
+        fn send(socket: Socket, text: str) -> Result[i64, str]
+        fn send_bytes(socket: Socket, data: [u8]) -> Result[i64, str]
+        fn receive(socket: Socket) -> Result[Message, str]
+        fn close(socket: Socket)
+        // one call of `handler` per connection (in parallel when the
+        // handler's effects may overlap); the socket closes when it returns
+        fn serve(port: i64, handler: fn(Socket)) -> Result[i64, str]
+        fn serve_connections(port: i64, handler: fn(Socket), count: i64) -> Result[i64, str]
+    }
+}
+
 // ---- networking: the `tcp` and `http` modules ------------------------------
 
 // TCP sockets: `tcp::connect(host, port)`, … (in program order).

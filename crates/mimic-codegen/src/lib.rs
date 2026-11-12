@@ -1907,9 +1907,14 @@ impl<'ctx> Cg<'ctx, '_> {
         let val = st.const_named_struct(&[tname.into(), vname.into(), i32t.const_int(tag, false).into(), i32t.const_int(n, false).into(), fields.into()]);
         // the standard library's types are known to the runtime by name
         // (`mim_desc_Ok`, `mim_desc_Response`), so intrinsics can build them
-        let std_name = (self.p.mods[td.module].package == "std").then(|| match variant {
-            Some(v) => format!("mim_desc_{}", td.variants()[v].name),
-            None => format!("mim_desc_{}", td.name),
+        // (`mim_desc_Ok` in the prelude, `mim_desc_json_Text` in a std module)
+        let std_name = (self.p.mods[td.module].package == "std").then(|| {
+            let m = &self.p.mods[td.module].name;
+            let prefix = if m == "prelude" { String::new() } else { format!("{m}_") };
+            match variant {
+                Some(v) => format!("mim_desc_{prefix}{}", td.variants()[v].name),
+                None => format!("mim_desc_{prefix}{}", td.name),
+            }
         });
         let g = self.module.add_global(st, None, std_name.as_deref().unwrap_or("desc"));
         g.set_initializer(&val);

@@ -1,0 +1,57 @@
+module main
+
+// WebSockets: a server (one handler call per connection) and its client in
+// one program; text, a 70 kB message, binary, two connections, closing.
+// (WASI has no sockets: websocket_echo.wasi.out has its output.)
+
+// echo every message back, upper-cased, until the client closes
+fn echo(sock: ws::Socket) {
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => {
+            ws::send(sock, upper(t))
+            echo(sock)
+        }
+        Ok(ws::Binary(b)) => {
+            ws::send_bytes(sock, ⌽ b)
+            echo(sock)
+        }
+        _ => {}
+    }
+}
+
+fn server(port: i64) -> Result[i64, str] { ws::serve_connections(port, echo, 2) }
+
+fn connect_when_up(url: str, tries: i64) -> Result[ws::Socket, str] {
+    match ws::connect(url) {
+        Ok(s) => Ok(s),
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); connect_when_up(url, tries - 1) },
+    }
+}
+
+fn main() {
+    let port = 30000 + os::pid() % 20000
+    let s = server(port)
+    let sock = match connect_when_up("ws://127.0.0.1:{port}/chat", 100) {
+        Ok(x) => x,
+        Err(e) => {
+            print("no WebSocket: {e}")
+            return
+        }
+    }
+    print(ws::send(sock, "hello"))
+    print(ws::receive(sock))
+    print(ws::send(sock, repeat("x", 70000)) )
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => print(≢ t),
+        other => print(other),
+    }
+    print(ws::send_bytes(sock, bytes::from([1 2 3])))
+    print(ws::receive(sock))
+    ws::close(sock)
+    let sock2 = ws::connect("ws://127.0.0.1:{port}/") else { return }
+    print(ws::send(sock2, "second"))
+    print(ws::receive(sock2))
+    ws::close(sock2)
+    print(s)
+    print(ws::connect("ws://127.0.0.1:1/"))
+}

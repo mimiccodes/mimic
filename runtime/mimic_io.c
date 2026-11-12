@@ -18,7 +18,7 @@
 /* ---- standard-library values -------------------------------------------- */
 
 extern const mim_desc mim_desc_Ok, mim_desc_Err, mim_desc_Some, mim_desc_None;
-extern const mim_desc mim_desc_Output, mim_desc_DateTime;
+extern const mim_desc mim_desc_os_Output, mim_desc_time_DateTime;
 
 static mim_val *obj_owned(const mim_desc *d, int64_t n, mim_val **fields) {
     mim_val *r = mim_obj(d, n, fields); /* retains the fields */
@@ -855,7 +855,7 @@ mim_val *mim_std_os_run(mim_val *program, mim_val *args) {
     mim_val *f[3];
     for (int i = 0; i < 3; i++) f[i] = scalar_at(parts, i);
     mim_release(parts);
-    return ok_of(obj_owned(&mim_desc_Output, 3, f));
+    return ok_of(obj_owned(&mim_desc_os_Output, 3, f));
 }
 
 /* ---- time --------------------------------------------------------------- */
@@ -874,7 +874,7 @@ static mim_val *date_time_of(mim_val *parts) {
     mim_val *f[9];
     for (int i = 0; i < 9; i++) f[i] = mim_int(((int64_t *)parts->data)[i]);
     mim_release(parts);
-    return obj_owned(&mim_desc_DateTime, 9, f);
+    return obj_owned(&mim_desc_time_DateTime, 9, f);
 }
 
 mim_val *mim_std_time_utc(mim_val *t) { return date_time_of(impl_time_utc_parts(t)); }

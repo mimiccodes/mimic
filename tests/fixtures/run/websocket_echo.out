@@ -1,0 +1,10 @@
+Ok(5)
+Ok(Text("HELLO"))
+Ok(70000)
+70000
+Ok(3)
+Ok(Binary([3 2 1]))
+Ok(6)
+Ok(Text("SECOND"))
+Ok(2)
+Err("cannot connect to 127.0.0.1:1: Connection refused")

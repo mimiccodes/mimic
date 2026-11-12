@@ -15,7 +15,7 @@ typedef struct mim_schema {
     const struct mim_schema *const *items;
 } mim_schema;
 
-extern const mim_desc mim_desc_Null, mim_desc_Bool, mim_desc_Number, mim_desc_Text, mim_desc_List, mim_desc_Object;
+extern const mim_desc mim_desc_json_Null, mim_desc_json_Bool, mim_desc_json_Number, mim_desc_json_Text, mim_desc_json_List, mim_desc_json_Object;
 
 /* ---- parsing into a C tree ------------------------------------------------ */
 
@@ -326,18 +326,18 @@ static mim_val *list_owned(int64_t n, mim_val **xs) {
 
 static mim_val *to_value(const jnode *j) {
     switch (j->type) {
-    case J_NULL: return obj_owned(&mim_desc_Null, 0, NULL);
-    case J_TRUE: return variant1(&mim_desc_Bool, mim_bool(1));
-    case J_FALSE: return variant1(&mim_desc_Bool, mim_bool(0));
-    case J_NUM: return variant1(&mim_desc_Number, mim_float(j->num));
-    case J_STR: return variant1(&mim_desc_Text, mim_str(j->str, (int64_t)j->len));
+    case J_NULL: return obj_owned(&mim_desc_json_Null, 0, NULL);
+    case J_TRUE: return variant1(&mim_desc_json_Bool, mim_bool(1));
+    case J_FALSE: return variant1(&mim_desc_json_Bool, mim_bool(0));
+    case J_NUM: return variant1(&mim_desc_json_Number, mim_float(j->num));
+    case J_STR: return variant1(&mim_desc_json_Text, mim_str(j->str, (int64_t)j->len));
     case J_ARR: {
         mim_val **xs = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(j->n ? j->n : 1));
         for (int64_t k = 0; k < j->n; k++) xs[k] = to_value(j->kids[k]);
         /* a list of values stays a list of handles even when empty */
         mim_val *l = j->n ? list_owned(j->n, xs) : alloc(MIM_BOXED, 1, 0);
         free(xs);
-        return variant1(&mim_desc_List, l);
+        return variant1(&mim_desc_json_List, l);
     }
     default: {
         mim_val **ks = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(j->n ? j->n : 1));
@@ -349,7 +349,7 @@ static mim_val *to_value(const jnode *j) {
         mim_val *m = map_from_pairs(j->n, ks, vs);
         free(ks);
         free(vs);
-        return variant1(&mim_desc_Object, m);
+        return variant1(&mim_desc_json_Object, m);
     }
     }
 }
@@ -639,8 +639,8 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
             const mim_desc *d = v->desc;
             mim_val **f = (mim_val **)v->data;
             if (d == &mim_desc_Some) { jenc(b, f[0], indent, depth); return; }
-            if (d == &mim_desc_None || d == &mim_desc_Null) { sb_str(b, "null"); return; }
-            if (d == &mim_desc_Bool || d == &mim_desc_Number || d == &mim_desc_Text || d == &mim_desc_List || d == &mim_desc_Object) {
+            if (d == &mim_desc_None || d == &mim_desc_json_Null) { sb_str(b, "null"); return; }
+            if (d == &mim_desc_json_Bool || d == &mim_desc_json_Number || d == &mim_desc_json_Text || d == &mim_desc_json_List || d == &mim_desc_json_Object) {
                 jenc(b, f[0], indent, depth);
                 return;
             }

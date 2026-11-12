@@ -8,7 +8,7 @@
 
 /* ok_of, err_of, obj_owned: see mimic_io.c */
 
-extern const mim_desc mim_desc_Socket, mim_desc_Listener, mim_desc_Request, mim_desc_Response;
+extern const mim_desc mim_desc_tcp_Socket, mim_desc_tcp_Listener, mim_desc_http_Request, mim_desc_http_Response;
 
 static mim_val *err_errno(const char *what, const char *detail) {
     char buf[512];
@@ -41,6 +41,13 @@ mim_val *mim_std_tcp_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_
 mim_val *mim_std_tcp_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
 mim_val *mim_std_tcp_close(mim_val *s) { (void)s; return NULL; }
 mim_val *mim_std_tcp_send_bytes(mim_val *s, mim_val *b) { (void)s; (void)b; return no_net(); }
+mim_val *mim_std_ws_connect(mim_val *u) { (void)u; return no_net(); }
+mim_val *mim_std_ws_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_net(); }
+mim_val *mim_std_ws_send_bytes(mim_val *s, mim_val *b) { (void)s; (void)b; return no_net(); }
+mim_val *mim_std_ws_receive(mim_val *s) { (void)s; return no_net(); }
+mim_val *mim_std_ws_close(mim_val *s) { (void)s; return NULL; }
+mim_val *mim_std_ws_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
+mim_val *mim_std_ws_serve_connections(mim_val *p, mim_val *h, mim_val *n) { (void)p; (void)h; (void)n; return no_net(); }
 mim_val *mim_std_tcp_receive_bytes(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
 mim_val *mim_std_http_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
 mim_val *mim_std_http_fetch(mim_val *u) { (void)u; return no_net(); }
@@ -124,11 +131,11 @@ static int send_all(int fd, const char *p, size_t n) {
 
 static mim_val *socket_of(int64_t fd) {
     mim_val *f = mim_int(fd);
-    return obj_owned(&mim_desc_Socket, 1, &f);
+    return obj_owned(&mim_desc_tcp_Socket, 1, &f);
 }
 
 static int fd_of(mim_val *s, const char *what) {
-    if (s && s->dtype == MIM_OBJ && (s->desc == &mim_desc_Socket || s->desc == &mim_desc_Listener))
+    if (s && s->dtype == MIM_OBJ && (s->desc == &mim_desc_tcp_Socket || s->desc == &mim_desc_tcp_Listener))
         return (int)geti(((mim_val **)s->data)[0], 0);
     char buf[96];
     snprintf(buf, sizeof buf, "%s: expected a Socket", what);
@@ -165,7 +172,7 @@ mim_val *mim_std_tcp_listen(mim_val *port) {
     socklen_t len = sizeof a;
     getsockname(fd, (struct sockaddr *)&a, &len);
     mim_val *fields[2] = {mim_int(fd), mim_int(ntohs(a.sin_port))};
-    return ok_of(obj_owned(&mim_desc_Listener, 2, fields));
+    return ok_of(obj_owned(&mim_desc_tcp_Listener, 2, fields));
 }
 
 mim_val *mim_std_tcp_accept(mim_val *l) {
@@ -746,7 +753,7 @@ static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val 
         }
     }
     mim_val *fields[3] = {mim_int(status), hm, bodyv};
-    return ok_of(obj_owned(&mim_desc_Response, 3, fields));
+    return ok_of(obj_owned(&mim_desc_http_Response, 3, fields));
 }
 
 mim_val *mim_std_http_fetch(mim_val *url) {
@@ -812,13 +819,13 @@ static void serve_one(int fd, mim_val *handler) {
         hm,
         bodyv,
     };
-    mim_val *req = obj_owned(&mim_desc_Request, 5, fields);
+    mim_val *req = obj_owned(&mim_desc_http_Request, 5, fields);
     free(b.p);
     mim_val *resp = mim_call(handler, 1, &req);
     mim_release(req);
-    int64_t status = geti(field_of(resp, &mim_desc_Response, 0, "an HTTP handler's result"), 0);
-    mim_val *rh = field_of(resp, &mim_desc_Response, 1, "an HTTP handler's result");
-    mim_val *rb = field_of(resp, &mim_desc_Response, 2, "an HTTP handler's result");
+    int64_t status = geti(field_of(resp, &mim_desc_http_Response, 0, "an HTTP handler's result"), 0);
+    mim_val *rh = field_of(resp, &mim_desc_http_Response, 1, "an HTTP handler's result");
+    mim_val *rb = field_of(resp, &mim_desc_http_Response, 2, "an HTTP handler's result");
     sbuf out = {0};
     char line[256];
     snprintf(line, sizeof line, "HTTP/1.1 %lld %s\r\n", (long long)status, reason(status));
@@ -850,14 +857,17 @@ static void serve_one(int fd, mim_val *handler) {
     close(fd);
 }
 
+typedef void (*conn_fn)(int fd, mim_val *handler);
+
 typedef struct {
     int fd;
     mim_val *handler;
+    conn_fn one;
 } conn_job;
 
 static void *conn_main(void *p) {
     conn_job *j = (conn_job *)p;
-    serve_one(j->fd, j->handler);
+    j->one(j->fd, j->handler);
     mim_release(j->handler);
     free(j);
     free_list_drain(); /* this thread ends now */
@@ -866,7 +876,12 @@ static void *conn_main(void *p) {
 
 /* accept `limit` connections (0 = forever); handlers whose effects may
  * overlap get a thread each, others run one at a time in order */
-static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) {
+static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one);
+
+static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) { return serve_loop_with(port, handler, limit, serve_one); }
+
+/* accept `limit` connections (0 = forever) and run `one` on each */
+static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("serve: the handler must be a function");
     mim_val *lr = mim_std_tcp_listen(port);
     if (lr->desc != &mim_desc_Ok) return lr;
@@ -887,6 +902,7 @@ static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) {
             conn_job *j = (conn_job *)malloc(sizeof(conn_job));
             j->fd = fd;
             j->handler = handler;
+            j->one = one;
             mim_retain(handler);
             pthread_t t;
             pthread_attr_t a;
@@ -901,7 +917,7 @@ static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) {
             }
             pthread_attr_destroy(&a);
         } else {
-            serve_one(fd, handler);
+            one(fd, handler);
         }
         served++;
     }
@@ -918,6 +934,409 @@ mim_val *mim_std_http_serve(mim_val *port, mim_val *handler) { return serve_loop
 
 mim_val *mim_std_http_serve_requests(mim_val *port, mim_val *handler, mim_val *count) {
     return serve_loop(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1);
+}
+
+/* ==== WebSockets (RFC 6455) ================================================ */
+
+extern const mim_desc mim_desc_ws_Socket, mim_desc_ws_Text, mim_desc_ws_Binary, mim_desc_ws_Closed;
+
+/* SHA-1, for the handshake's Sec-WebSocket-Accept only */
+static void sha1(const uint8_t *msg, size_t len, uint8_t out[20]) {
+    uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    size_t total = ((len + 8) / 64 + 1) * 64;
+    uint8_t *m = (uint8_t *)calloc(total, 1);
+    memcpy(m, msg, len);
+    m[len] = 0x80;
+    uint64_t bits = (uint64_t)len * 8;
+    for (int k = 0; k < 8; k++) m[total - 1 - k] = (uint8_t)(bits >> (8 * k));
+    for (size_t off = 0; off < total; off += 64) {
+        uint32_t w[80];
+        for (int t = 0; t < 16; t++)
+            w[t] = (uint32_t)m[off + 4 * t] << 24 | (uint32_t)m[off + 4 * t + 1] << 16 | (uint32_t)m[off + 4 * t + 2] << 8 | m[off + 4 * t + 3];
+        for (int t = 16; t < 80; t++) {
+            uint32_t x = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16];
+            w[t] = x << 1 | x >> 31;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int t = 0; t < 80; t++) {
+            uint32_t f, k;
+            if (t < 20) { f = (b & c) | (~b & d); k = 0x5A827999; }
+            else if (t < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1; }
+            else if (t < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+            else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+            uint32_t tmp = (a << 5 | a >> 27) + f + e + k + w[t];
+            e = d; d = c; c = b << 30 | b >> 2; b = a; a = tmp;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    free(m);
+    for (int k = 0; k < 5; k++)
+        for (int q = 0; q < 4; q++) out[4 * k + q] = (uint8_t)(h[k] >> (24 - 8 * q));
+}
+
+static void b64_encode(const uint8_t *p, size_t n, char *o) {
+    size_t k = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        o[k++] = B64[v >> 18 & 63];
+        o[k++] = B64[v >> 12 & 63];
+        o[k++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        o[k++] = i + 2 < n ? B64[v & 63] : '=';
+    }
+    o[k] = 0;
+}
+
+/* the Sec-WebSocket-Accept value for a key */
+static void ws_accept_of(const char *key, size_t klen, char out[32]) {
+    static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    char buf[128];
+    if (klen > 60) klen = 60;
+    memcpy(buf, key, klen);
+    memcpy(buf + klen, guid, sizeof guid - 1);
+    uint8_t d[20];
+    sha1((const uint8_t *)buf, klen + sizeof guid - 1, d);
+    b64_encode(d, 20, out);
+}
+
+typedef struct {
+    mconn c;
+    int client; /* clients mask what they send */
+    int closed;
+    pthread_mutex_t send_lock;
+    char *pending; /* bytes read past the handshake */
+    size_t pend_n, pend_off;
+} ws_conn;
+
+static ws_conn **ws_tab;
+static int64_t ws_n, ws_cap;
+static pthread_mutex_t ws_tab_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static mim_val *ws_socket_of(ws_conn *w) {
+    pthread_mutex_lock(&ws_tab_lock);
+    if (ws_n == ws_cap) {
+        ws_cap = ws_cap ? ws_cap * 2 : 16;
+        ws_tab = (ws_conn **)realloc(ws_tab, sizeof(ws_conn *) * (size_t)ws_cap);
+    }
+    int64_t id = ws_n++;
+    ws_tab[id] = w;
+    pthread_mutex_unlock(&ws_tab_lock);
+    mim_val *f = mim_int(id);
+    return obj_owned(&mim_desc_ws_Socket, 1, &f);
+}
+
+static ws_conn *ws_get(mim_val *sock, const char *what) {
+    if (!sock || sock->dtype != MIM_OBJ || sock->desc != &mim_desc_ws_Socket) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s: expected a ws::Socket", what);
+        mim_panic(buf);
+    }
+    int64_t id = geti(((mim_val **)sock->data)[0], 0);
+    pthread_mutex_lock(&ws_tab_lock);
+    ws_conn *w = id >= 0 && id < ws_n ? ws_tab[id] : NULL;
+    pthread_mutex_unlock(&ws_tab_lock);
+    return w;
+}
+
+static ws_conn *ws_new(int fd, void *tls, int client, const char *rest, size_t rest_n) {
+    ws_conn *w = (ws_conn *)calloc(1, sizeof(ws_conn));
+    w->c.fd = fd;
+    w->c.tls = tls;
+    w->client = client;
+    pthread_mutex_init(&w->send_lock, NULL);
+    if (rest_n) {
+        w->pending = (char *)malloc(rest_n);
+        memcpy(w->pending, rest, rest_n);
+        w->pend_n = rest_n;
+    }
+    return w;
+}
+
+static int ws_read_exact(ws_conn *w, void *buf, size_t n) {
+    size_t got = 0;
+    if (w->pend_off < w->pend_n) {
+        size_t k = w->pend_n - w->pend_off < n ? w->pend_n - w->pend_off : n;
+        memcpy(buf, w->pending + w->pend_off, k);
+        w->pend_off += k;
+        got = k;
+    }
+    while (got < n) {
+        ssize_t r = conn_recv(&w->c, (char *)buf + got, n - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+static int ws_write_frame(ws_conn *w, int op, const void *data, size_t n) {
+    uint8_t hdr[14];
+    size_t h = 0;
+    hdr[h++] = (uint8_t)(0x80 | op);
+    uint8_t maskbit = w->client ? 0x80 : 0;
+    if (n < 126) {
+        hdr[h++] = (uint8_t)(maskbit | n);
+    } else if (n < 65536) {
+        hdr[h++] = maskbit | 126;
+        hdr[h++] = (uint8_t)(n >> 8);
+        hdr[h++] = (uint8_t)n;
+    } else {
+        hdr[h++] = maskbit | 127;
+        for (int k = 7; k >= 0; k--) hdr[h++] = (uint8_t)((uint64_t)n >> (8 * k));
+    }
+    char *frame = (char *)malloc(h + 4 + n + 1);
+    uint8_t mask[4] = {0};
+    if (w->client) {
+        uint64_t r = rng_next();
+        memcpy(mask, &r, 4);
+        memcpy(hdr + h, mask, 4);
+        h += 4;
+    }
+    memcpy(frame, hdr, h);
+    for (size_t k = 0; k < n; k++) frame[h + k] = (char)(((const uint8_t *)data)[k] ^ (w->client ? mask[k & 3] : 0));
+    pthread_mutex_lock(&w->send_lock); /* frames from different threads never interleave */
+    int rc = conn_send_all(&w->c, frame, h + n);
+    pthread_mutex_unlock(&w->send_lock);
+    free(frame);
+    return rc;
+}
+
+static void ws_free(ws_conn *w) {
+    if (w->c.tls) tls_close(w->c.tls);
+    close(w->c.fd);
+    pthread_mutex_destroy(&w->send_lock);
+    free(w->pending);
+    free(w);
+}
+
+/* forget a connection's table slot (ids are never reused) and free it */
+static void ws_drop(mim_val *sock) {
+    int64_t id = geti(((mim_val **)sock->data)[0], 0);
+    pthread_mutex_lock(&ws_tab_lock);
+    ws_conn *w = id >= 0 && id < ws_n ? ws_tab[id] : NULL;
+    if (w) ws_tab[id] = NULL;
+    pthread_mutex_unlock(&ws_tab_lock);
+    if (w) {
+        if (!w->closed) {
+            uint8_t code[2] = {0x03, 0xE8}; /* 1000: normal closure */
+            ws_write_frame(w, 8, code, 2);
+        }
+        ws_free(w);
+    }
+}
+
+/* ws://host[:port]/path or wss://… */
+mim_val *mim_std_ws_connect(mim_val *url) {
+    const char *u = io_path(url, "ws::connect");
+    int secure = strncmp(u, "wss://", 6) == 0;
+    if (!secure && strncmp(u, "ws://", 5) != 0) return err_of("ws::connect: the URL must start with ws:// or wss://");
+    const char *hp = u + (secure ? 6 : 5), *slash = strchr(hp, '/');
+    size_t hl = slash ? (size_t)(slash - hp) : strlen(hp);
+    char host[256];
+    if (hl == 0 || hl >= sizeof host) return err_of("ws::connect: bad host in URL");
+    memcpy(host, hp, hl);
+    host[hl] = 0;
+    int64_t port = secure ? 443 : 80;
+    char *colon = strrchr(host, ':');
+    if (colon) {
+        port = atoll(colon + 1);
+        *colon = 0;
+    }
+    char err[512];
+    int fd = dial(host, port, err, sizeof err);
+    if (fd < 0) return err_of(err);
+    sock_timeout(fd, 30);
+    mconn c = {fd, NULL};
+    if (secure && !(c.tls = tls_open(fd, host, err, sizeof err))) {
+        close(fd);
+        return err_of(err);
+    }
+    uint8_t raw[16];
+    for (int k = 0; k < 16; k += 8) {
+        uint64_t r = rng_next();
+        memcpy(raw + k, &r, 8);
+    }
+    char key[32], want[32], req[1024];
+    b64_encode(raw, 16, key);
+    ws_accept_of(key, strlen(key), want);
+    snprintf(req, sizeof req,
+             "GET %s HTTP/1.1\r\nHost: %.*s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
+             slash ? slash : "/", (int)hl, hp, key);
+    sbuf b = {0};
+    int64_t off = conn_send_all(&c, req, strlen(req)) == 0 ? read_head(&c, &b) : -1;
+    int ok = 0;
+    if (off > 0) {
+        const char *sp = memchr(b.p, ' ', (size_t)off);
+        int64_t clen;
+        int chunked;
+        const char *first_end = strstr(b.p, "\r\n");
+        mim_val *hm = parse_headers(first_end + 2, b.p + off - 2, &clen, &chunked);
+        mim_val *k = mim_str("sec-websocket-accept", 20);
+        int64_t at = map_find(hm, k, NULL);
+        mim_release(k);
+        ok = sp && atoll(sp + 1) == 101 && at >= 0 && strcmp((const char *)((mim_val **)hm->data)[2 * at + 1]->data, want) == 0;
+        mim_release(hm);
+    }
+    if (!ok) {
+        free(b.p);
+        if (c.tls) tls_close(c.tls);
+        close(fd);
+        return err_of(off < 0 ? "ws::connect: no answer to the WebSocket handshake" : "ws::connect: the server refused the WebSocket handshake");
+    }
+    sock_timeout(fd, 0); /* a WebSocket may stay quiet for a long time */
+    ws_conn *w = ws_new(fd, c.tls, 1, b.p + off, b.n - (size_t)off);
+    free(b.p);
+    return ok_of(ws_socket_of(w));
+}
+
+static mim_val *ws_send_op(mim_val *sock, int op, const void *p, size_t n, const char *what) {
+    ws_conn *w = ws_get(sock, what);
+    if (!w || w->closed) return err_of("the WebSocket is closed");
+    if (ws_write_frame(w, op, p, n) != 0) return err_errno("cannot send", NULL);
+    return ok_of(mim_int((int64_t)n));
+}
+
+mim_val *mim_std_ws_send(mim_val *sock, mim_val *text) {
+    if (!text || text->dtype != MIM_CHAR || text->rank != 1) mim_panic("ws::send: expected text (str)");
+    return ws_send_op(sock, 1, text->data, (size_t)text->len, "ws::send");
+}
+
+mim_val *mim_std_ws_send_bytes(mim_val *sock, mim_val *b) {
+    if (!b || b->rank != 1 || (b->dtype != MIM_U8 && b->len != 0)) mim_panic("ws::send_bytes: expected bytes ([u8])");
+    return ws_send_op(sock, 2, b->data, (size_t)b->len, "ws::send_bytes");
+}
+
+/* the next message: Text, Binary or Closed (pings are answered here) */
+mim_val *mim_std_ws_receive(mim_val *sock) {
+    ws_conn *w = ws_get(sock, "ws::receive");
+    if (!w || w->closed) return ok_of(obj_owned(&mim_desc_ws_Closed, 0, NULL));
+    sbuf msg = {0};
+    int msg_op = -1;
+    for (;;) {
+        uint8_t h[2];
+        if (ws_read_exact(w, h, 2) != 0) break;
+        int fin = h[0] & 0x80, op = h[0] & 0x0F, masked = h[1] & 0x80;
+        uint64_t n = h[1] & 0x7F;
+        if (n == 126) {
+            uint8_t e[2];
+            if (ws_read_exact(w, e, 2) != 0) break;
+            n = (uint64_t)e[0] << 8 | e[1];
+        } else if (n == 127) {
+            uint8_t e[8];
+            if (ws_read_exact(w, e, 8) != 0) break;
+            n = 0;
+            for (int k = 0; k < 8; k++) n = n << 8 | e[k];
+        }
+        if (n > (64u << 20)) {
+            free(msg.p);
+            return err_of("WebSocket message over 64 MB");
+        }
+        uint8_t mask[4] = {0};
+        if (masked && ws_read_exact(w, mask, 4) != 0) break;
+        char *data = (char *)malloc(n ? n : 1);
+        if (n && ws_read_exact(w, data, n) != 0) {
+            free(data);
+            break;
+        }
+        if (masked)
+            for (uint64_t k = 0; k < n; k++) data[k] ^= (char)mask[k & 3];
+        if (op == 9) { /* ping → pong */
+            ws_write_frame(w, 10, data, n);
+            free(data);
+            continue;
+        }
+        if (op == 10) {
+            free(data);
+            continue;
+        }
+        if (op == 8) { /* close: answer it */
+            if (!w->closed) ws_write_frame(w, 8, data, n >= 2 ? 2 : 0);
+            w->closed = 1;
+            free(data);
+            free(msg.p);
+            return ok_of(obj_owned(&mim_desc_ws_Closed, 0, NULL));
+        }
+        if (op == 1 || op == 2) msg_op = op;
+        sb_put(&msg, data, n);
+        free(data);
+        if (fin && msg_op >= 0) {
+            mim_val *v;
+            if (msg_op == 1) {
+                v = mim_str(msg.p ? msg.p : "", (int64_t)msg.n);
+                v = obj_owned(&mim_desc_ws_Text, 1, &v);
+            } else {
+                mim_val *b = alloc(MIM_U8, 1, (int64_t)msg.n);
+                if (msg.n) memcpy(b->data, msg.p, msg.n);
+                v = obj_owned(&mim_desc_ws_Binary, 1, &b);
+            }
+            free(msg.p);
+            return ok_of(v);
+        }
+    }
+    free(msg.p);
+    w->closed = 1;
+    return err_of("the WebSocket connection was lost");
+}
+
+mim_val *mim_std_ws_close(mim_val *sock) {
+    ws_get(sock, "ws::close");
+    ws_drop(sock);
+    return NULL;
+}
+
+/* one WebSocket connection on a server: handshake, the handler, closing */
+static void ws_serve_one(int fd, mim_val *handler) {
+    sock_timeout(fd, 30);
+    mconn c = {fd, NULL};
+    sbuf b = {0};
+    int64_t off = read_head(&c, &b);
+    if (off < 0) {
+        free(b.p);
+        close(fd);
+        return;
+    }
+    const char *first_end = strstr(b.p, "\r\n");
+    int64_t clen;
+    int chunked;
+    mim_val *hm = parse_headers(first_end + 2, b.p + off - 2, &clen, &chunked);
+    mim_val *k = mim_str("sec-websocket-key", 17);
+    int64_t at = map_find(hm, k, NULL);
+    mim_release(k);
+    if (at < 0) {
+        const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 27\r\nConnection: close\r\n\r\nexpected a WebSocket client";
+        send_all(fd, bad, strlen(bad));
+        mim_release(hm);
+        free(b.p);
+        close(fd);
+        return;
+    }
+    mim_val *key = ((mim_val **)hm->data)[2 * at + 1];
+    char acc[32], resp[256];
+    ws_accept_of((const char *)key->data, (size_t)key->len, acc);
+    mim_release(hm);
+    snprintf(resp, sizeof resp, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
+    if (send_all(fd, resp, strlen(resp)) != 0) {
+        free(b.p);
+        close(fd);
+        return;
+    }
+    sock_timeout(fd, 0);
+    ws_conn *w = ws_new(fd, NULL, 0, b.p + off, b.n - (size_t)off);
+    free(b.p);
+    mim_val *sock = ws_socket_of(w);
+    mim_val *r = mim_call(handler, 1, &sock);
+    if (r) mim_release(r);
+    ws_drop(sock); /* closes it, if the handler did not */
+    mim_release(sock);
+}
+
+mim_val *mim_std_ws_serve(mim_val *port, mim_val *handler) {
+    if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve: the handler must be a function");
+    return serve_loop_with(port, handler, 0, ws_serve_one);
+}
+
+mim_val *mim_std_ws_serve_connections(mim_val *port, mim_val *handler, mim_val *count) {
+    if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_connections: the handler must be a function");
+    return serve_loop_with(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1, ws_serve_one);
 }
 
 #endif
