@@ -526,6 +526,8 @@ fn ty_suffix(tys: &[Ty]) -> String {
             Ty::F64 => "f".to_string(),
             Ty::Bool => "b".to_string(),
             Ty::Dyn => "d".to_string(),
+            // a list of known length: its own specialisation
+            Ty::Arr(e, n) if *n > 0 => format!("{}x{n}", Ty::Arr(*e, 0)).replace(['[', ']'], "_"),
             other => format!("{other}").replace(['[', ']', '(', ')', '?'], "_"),
         })
         .collect::<Vec<_>>()
@@ -1046,7 +1048,7 @@ impl<'ctx> Cg<'ctx, '_> {
         // a vector parameter always points at a live header (rc, dtype, rank,
         // len, data): LLVM may read it early, so header checks leave loops
         for (i, t) in s.params.iter().enumerate() {
-            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool) | Ty::Obj(_)) {
+            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, _) | Ty::Obj(_)) {
                 let attr = |name: &str, v: u64| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), v);
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("nonnull", 0));
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", self.live_bytes(*t)));
@@ -2260,8 +2262,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Ty::I64 => (1, self.ptr.const_null(), vec![]),
             Ty::F64 => (2, self.ptr.const_null(), vec![]),
             Ty::Bool => (3, self.ptr.const_null(), vec![]),
-            Ty::Char | Ty::Arr(El::Char) => (4, self.ptr.const_null(), vec![]),
-            Ty::Arr(el) => (5, self.ptr.const_null(), vec![Ty::of_el(el)]),
+            Ty::Char | Ty::Arr(El::Char, _) => (4, self.ptr.const_null(), vec![]),
+            Ty::Arr(el, _) => (5, self.ptr.const_null(), vec![Ty::of_el(el)]),
             Ty::Tup(id) => (9, self.desc(usize::MAX, None), types::tuple_elems(id)),
             Ty::Obj(id) => {
                 let tid = types::obj_tid(id);
@@ -2845,13 +2847,13 @@ impl<'ctx> Cg<'ctx, '_> {
     /// a list whose type is not known statically is checked.
     fn into_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
         let want = match to {
-            Ty::Arr(El::F64) => Some(1),
-            Ty::Arr(El::I64) => Some(0),
+            Ty::Arr(El::F64, _) => Some(1),
+            Ty::Arr(El::I64, _) => Some(0),
             _ => None,
         };
         let differs = match (from, to) {
-            (Ty::Arr(El::I64 | El::Bool), Ty::Arr(El::F64)) | (Ty::Arr(El::Bool), Ty::Arr(El::I64)) => true,
-            (Ty::Dyn | Ty::Arr(El::Dyn), Ty::Arr(El::F64 | El::I64)) => true,
+            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) => true,
+            (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64, _)) => true,
             _ => false,
         };
         let v = match (want, differs, v) {
@@ -2884,7 +2886,7 @@ impl<'ctx> Cg<'ctx, '_> {
             Ok(())
         };
         match t {
-            Ty::Arr(El::F64 | El::I64 | El::Bool) => assume(p, self.live_bytes(t))?,
+            Ty::Arr(El::F64 | El::I64 | El::Bool, _) => assume(p, self.live_bytes(t))?,
             Ty::Obj(id) => {
                 assume(p, self.live_bytes(t))?;
                 let td = &self.p.types[types::obj_tid(id)];
@@ -2894,7 +2896,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
                 for (i, (_, ft, _)) in fs.iter().enumerate() {
                     let fty = types::ann_in(self.p, td.module, ft).unwrap_or(Ty::Dyn);
-                    if !matches!(fty, Ty::Arr(El::F64 | El::I64 | El::Bool)) {
+                    if !matches!(fty, Ty::Arr(El::F64 | El::I64 | El::Bool, _)) {
                         continue;
                     }
                     let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
@@ -2927,7 +2929,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// tell LLVM its header can be read anywhere, so checks on it may leave
     /// loops.
     fn assume_live(&self, load: BasicValueEnum<'ctx>, t: Ty) -> R<()> {
-        if !matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool) | Ty::Obj(_)) {
+        if !matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, _) | Ty::Obj(_)) {
             return Ok(());
         }
         let i = inkwell::values::BasicValue::as_instruction_value(&load).ok_or("not an instruction")?;
@@ -3241,8 +3243,8 @@ impl<'ctx> Cg<'ctx, '_> {
                                 let b = self.truth(*v)?;
                                 self.b.build_int_z_extend(b, self.ctx.i32_type(), "").s()?.into()
                             }
-                            (Ty::Arr(mimic_check::types::El::Char), V::P(p, _)) => self.call_rt("mim_cstr", &[(*p).into()])?.unwrap().into(),
-                            (Ty::Arr(_), V::P(p, _)) => self.call_rt("mim_dataptr", &[(*p).into()])?.unwrap().into(),
+                            (Ty::Arr(mimic_check::types::El::Char, _), V::P(p, _)) => self.call_rt("mim_cstr", &[(*p).into()])?.unwrap().into(),
+                            (Ty::Arr(_, _), V::P(p, _)) => self.call_rt("mim_dataptr", &[(*p).into()])?.unwrap().into(),
                             _ => self.to_i64(*v)?.into(),
                         });
                     }
@@ -3321,8 +3323,8 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Binary { op, lhs, rhs }
                 if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                    && self.ty_of(lhs) == Ty::Arr(El::Char)
-                    && self.ty_of(rhs) == Ty::Arr(El::Char) =>
+                    && self.ty_of(lhs) == Ty::Arr(El::Char, 0)
+                    && self.ty_of(rhs) == Ty::Arr(El::Char, 0) =>
             {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
@@ -3546,7 +3548,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         _ => Ty::Dyn,
                     };
                     let v = self.expr(x)?;
-                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
+                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
                     let v = self.boxed(v)?;
                     cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(i as u64, false).into(), self.basic(v).into()])?;
                     self.drop_tmp(v)?;
@@ -3701,6 +3703,6 @@ mod tests {
     fn suffixes_are_distinct() {
         use mimic_check::types::{El, Ty};
         assert_ne!(super::ty_suffix(&[Ty::I64]), super::ty_suffix(&[Ty::F64]));
-        assert_ne!(super::ty_suffix(&[Ty::Arr(El::I64)]), super::ty_suffix(&[Ty::Arr(El::F64)]));
+        assert_ne!(super::ty_suffix(&[Ty::Arr(El::I64, 0)]), super::ty_suffix(&[Ty::Arr(El::F64, 0)]));
     }
 }

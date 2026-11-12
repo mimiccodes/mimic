@@ -101,7 +101,7 @@ pub fn compatible(a: Ty, b: Ty) -> bool {
                 p.is_empty() || q.is_empty() || p.iter().zip(&q).all(|(s, t)| compatible(*s, *t))
             }
         }
-        (Ty::Arr(x), Ty::Arr(y)) => x == El::Dyn || y == El::Dyn || compatible(Ty::of_el(x), Ty::of_el(y)),
+        (Ty::Arr(x, _), Ty::Arr(y, _)) => x == El::Dyn || y == El::Dyn || compatible(Ty::of_el(x), Ty::of_el(y)),
         (Ty::Tup(x), Ty::Tup(y)) => {
             let (p, q) = (tuple_elems(x), tuple_elems(y));
             p.len() == q.len() && p.iter().zip(&q).all(|(s, t)| compatible(*s, *t))
@@ -122,7 +122,7 @@ pub fn refine(a: Ty, got: Ty) -> Ty {
             let r: Vec<Ty> = p.iter().zip(&q).map(|(s, t)| refine(*s, *t)).collect();
             obj(obj_tid(x), &r)
         }
-        (Ty::Arr(El::Dyn), g @ Ty::Arr(_)) => g,
+        (Ty::Arr(El::Dyn, _), g @ Ty::Arr(_, _)) => g,
         _ => a,
     }
 }
@@ -152,7 +152,7 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
             }
         }
         Type::Array(inner, _) => {
-            if let Ty::Arr(el) = got
+            if let Ty::Arr(el, _) = got
                 && el != El::Dyn
             {
                 unify(p, module, inner, Ty::of_el(el), params, env, conflict);
@@ -189,6 +189,24 @@ pub enum El {
     Dyn,
 }
 
+/// The longest list whose length types carry (see [`Ty::Arr`]).
+pub const MAX_FIXED: usize = 32;
+
+/// The known length of a list of `el` with `n` elements: lists of numbers
+/// and truth values of 1..=MAX_FIXED elements; else 0 (not known).
+pub fn fixed_len(el: El, n: usize) -> u8 {
+    if matches!(el, El::I64 | El::F64 | El::Bool) && (1..=MAX_FIXED).contains(&n) { n as u8 } else { 0 }
+}
+
+/// The length an elementwise operation on `a` and `b` gives, when known.
+fn same_len(a: Ty, b: Ty) -> u8 {
+    match (a, b) {
+        (Ty::Arr(_, n), Ty::Arr(_, m)) => if n == m { n } else { 0 },
+        (Ty::Arr(_, n), _) | (_, Ty::Arr(_, n)) => n,
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Ty {
     /// No information yet (fixpoint bottom) / does not return.
@@ -199,8 +217,13 @@ pub enum Ty {
     F64,
     Bool,
     Char,
-    /// Array (vectors); `Arr(El::Char)` is a string.
-    Arr(El),
+    /// Array (vectors); `Arr(El::Char, 0)` is a string. The second field is
+    /// the length when it is known and small (1..=MAX_FIXED): a list of
+    /// numbers whose length the compiler knows (a literal, `⍳ 5`, and what
+    /// elementwise operations and `¨` make of them); 0 when it is not known.
+    /// Functions are specialised on it like on any other type, so code for a
+    /// list of 5 numbers can keep them in registers.
+    Arr(El, u8),
     /// A record or union value of a user-declared type.
     Obj(u32),
     /// A tuple (interned element types, see [`tuple_elems`]).
@@ -223,7 +246,7 @@ impl Ty {
             Ty::F64 => El::F64,
             Ty::Bool => El::Bool,
             Ty::Char => El::Char,
-            Ty::Arr(El::Char) => El::Str,
+            Ty::Arr(El::Char, _) => El::Str,
             Ty::Obj(t) => El::Obj(t),
             Ty::Tup(t) => El::Tup(t),
             _ => El::Dyn,
@@ -235,7 +258,7 @@ impl Ty {
             El::F64 => Ty::F64,
             El::Bool => Ty::Bool,
             El::Char => Ty::Char,
-            El::Str => Ty::Arr(El::Char),
+            El::Str => Ty::Arr(El::Char, 0),
             El::Obj(t) => Ty::Obj(t),
             El::U8 => Ty::I64,
             El::Tup(t) => Ty::Tup(t),
@@ -246,7 +269,8 @@ impl Ty {
         match (self, o) {
             (Ty::Never, x) | (x, Ty::Never) => x,
             (a, b) if a == b => a,
-            (Ty::Arr(_), Ty::Arr(_)) => Ty::Arr(El::Dyn),
+            (Ty::Arr(x, _), Ty::Arr(y, _)) if x == y => Ty::Arr(x, 0), // lengths differ
+            (Ty::Arr(_, _), Ty::Arr(_, _)) => Ty::Arr(El::Dyn, 0),
             (Ty::Obj(a), Ty::Obj(b)) if obj_tid(a) == obj_tid(b) => {
                 let (x, y) = (obj_args(a), obj_args(b));
                 if x.len() != y.len() {
@@ -288,8 +312,8 @@ impl std::fmt::Display for Ty {
             Ty::F64 => write!(f, "f64"),
             Ty::Bool => write!(f, "bool"),
             Ty::Char => write!(f, "char"),
-            Ty::Arr(El::Char) => write!(f, "str"),
-            Ty::Arr(e) => write!(f, "[{}]", el(e)),
+            Ty::Arr(El::Char, _) => write!(f, "str"),
+            Ty::Arr(e, _) => write!(f, "[{}]", el(e)),
             Ty::Obj(_) => write!(f, "record"),
             Ty::Tup(id) => {
                 let e: Vec<String> = tuple_elems(*id).iter().map(|t| t.to_string()).collect();
@@ -348,15 +372,15 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             "f32" | "f64" => Ty::F64,
             "bool" => Ty::Bool,
             "char" | "c_char" => Ty::Char,
-            "str" | "cstr" => Ty::Arr(El::Char),
+            "str" | "cstr" => Ty::Arr(El::Char, 0),
             "any" => Ty::Dyn,
             _ => return None,
         },
-        Type::Array(inner, _) if matches!(&**inner, Type::Named(n, _) if n == "u8") => Ty::Arr(El::U8),
+        Type::Array(inner, _) if matches!(&**inner, Type::Named(n, _) if n == "u8") => Ty::Arr(El::U8, 0),
         Type::Array(inner, _) => match ann_ty(inner)? {
-            Ty::I64 => Ty::Arr(El::I64),
-            Ty::F64 => Ty::Arr(El::F64),
-            Ty::Bool => Ty::Arr(El::Bool),
+            Ty::I64 => Ty::Arr(El::I64, 0),
+            Ty::F64 => Ty::Arr(El::F64, 0),
+            Ty::Bool => Ty::Arr(El::Bool, 0),
             _ => return None,
         },
         Type::Ptr(..) | Type::App(..) | Type::Tuple(..) => return None,
@@ -394,7 +418,7 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
             }
             _ => None,
         },
-        Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el())),
+        Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el(), 0)),
         Type::Map(..) => Some(Ty::Dyn),
         Type::Tuple(ts, _) => {
             let elems: Vec<Ty> = ts.iter().map(|t| ann_env(p, module, t, env).unwrap_or(Ty::Dyn)).collect();
@@ -423,9 +447,9 @@ pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: 
 pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
     match a {
         Ty::Dyn => Ok(Ty::Dyn),
-        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_)) => match got {
+        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
-            Ty::Arr(El::Dyn) if matches!(a, Ty::Arr(_)) => Ok(a),
+            Ty::Arr(El::Dyn, _) if matches!(a, Ty::Arr(_, _)) => Ok(a),
             g if compatible(a, g) => Ok(refine(a, g)),
             g => Err(format!("expected {}, found {}", show(p, a), show(p, g))),
         },
@@ -445,9 +469,9 @@ pub fn show(p: &Program, t: Ty) -> String {
             let a: Vec<String> = args.iter().map(|t| if matches!(t, Ty::Never | Ty::Dyn) { "_".into() } else { show(p, *t) }).collect();
             format!("{name}[{}]", a.join(", "))
         }
-        Ty::Arr(El::Obj(id)) => format!("[{}]", show(p, Ty::Obj(id))),
-        Ty::Arr(El::Tup(id)) => format!("[{}]", show(p, Ty::Tup(id))),
-        Ty::Arr(El::Str) => "[str]".into(),
+        Ty::Arr(El::Obj(id), _) => format!("[{}]", show(p, Ty::Obj(id))),
+        Ty::Arr(El::Tup(id), _) => format!("[{}]", show(p, Ty::Tup(id))),
+        Ty::Arr(El::Str, _) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),
     }
@@ -464,7 +488,7 @@ pub fn coerce(ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
 /// [`coerce`] for an already-resolved scalar or array type.
 fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
     // a list of anything (e.g. an unbound `[T]`) takes any list
-    if a == Ty::Arr(El::Dyn) && matches!(got, Ty::Arr(_) | Ty::Never | Ty::Dyn) {
+    if a == Ty::Arr(El::Dyn, 0) && matches!(got, Ty::Arr(_, _) | Ty::Never | Ty::Dyn) {
         return Ok(got);
     }
     if a == Ty::Dyn {
@@ -477,18 +501,18 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
             | (Ty::F64, Ty::I64 | Ty::F64 | Ty::Bool)
             | (Ty::Bool, Ty::Bool)
             | (Ty::Char, Ty::Char)
-            | (Ty::Arr(El::Char), Ty::Arr(El::Char | El::Dyn))
-            | (Ty::Arr(El::I64), Ty::Arr(El::I64 | El::Bool | El::Dyn))
-            | (Ty::Arr(El::F64), Ty::Arr(El::I64 | El::F64 | El::Bool | El::Dyn))
-            | (Ty::Arr(El::Bool), Ty::Arr(El::Bool | El::Dyn))
-            | (Ty::Arr(El::U8), Ty::Arr(El::U8 | El::Dyn))
+            | (Ty::Arr(El::Char, _), Ty::Arr(El::Char | El::Dyn, _))
+            | (Ty::Arr(El::I64, _), Ty::Arr(El::I64 | El::Bool | El::Dyn, _))
+            | (Ty::Arr(El::F64, _), Ty::Arr(El::I64 | El::F64 | El::Bool | El::Dyn, _))
+            | (Ty::Arr(El::Bool, _), Ty::Arr(El::Bool | El::Dyn, _))
+            | (Ty::Arr(El::U8, _), Ty::Arr(El::U8 | El::Dyn, _))
     );
     if !ok {
         return Err(format!("expected {a}, found {got}"));
     }
     Ok(match (a, got) {
-        (Ty::Arr(_), g) if g != Ty::Dyn && g != Ty::Never => g, // arrays: a check, not a conversion
-        (Ty::Arr(_), _) => got,
+        (Ty::Arr(_, _), g) if g != Ty::Dyn && g != Ty::Never => g, // arrays: a check, not a conversion
+        (Ty::Arr(_, _), _) => got,
         (scalar, _) => scalar,
     })
 }
@@ -500,7 +524,7 @@ fn ctype_ty(t: Option<&Type>) -> Ty {
         Some(Type::Named(n, _)) => match n.as_str() {
             "f32" | "f64" => Ty::F64,
             "bool" => Ty::Bool,
-            "cstr" => Ty::Arr(El::Char),
+            "cstr" => Ty::Arr(El::Char, 0),
             _ => Ty::I64,
         },
         Some(_) => Ty::Dyn,
@@ -692,9 +716,9 @@ impl Walk<'_, '_> {
                             None => cur.join(v),
                             // element store: an f64 into an int array promotes it
                             Some(_) => match (cur, v) {
-                                (Ty::Arr(e), s) if Ty::of_el(e) == s || s == Ty::Never => cur,
-                                (Ty::Arr(El::I64 | El::Bool), Ty::F64) => Ty::Arr(El::Dyn),
-                                (Ty::Arr(_), _) => Ty::Arr(El::Dyn),
+                                (Ty::Arr(e, _), s) if Ty::of_el(e) == s || s == Ty::Never => cur,
+                                (Ty::Arr(El::I64 | El::Bool, _), Ty::F64) => Ty::Arr(El::Dyn, 0),
+                                (Ty::Arr(_, _), _) => Ty::Arr(El::Dyn, 0),
                                 _ => Ty::Dyn,
                             },
                         };
@@ -898,7 +922,7 @@ impl Walk<'_, '_> {
             ExprKind::Int(_) => Ty::I64,
             ExprKind::Float(_) => Ty::F64,
             ExprKind::Bool(_) => Ty::Bool,
-            ExprKind::Str(_) => Ty::Arr(El::Char),
+            ExprKind::Str(_) => Ty::Arr(El::Char, 0),
             ExprKind::Array(xs) => {
                 let mut el = Ty::Never;
                 for x in xs {
@@ -914,9 +938,9 @@ impl Walk<'_, '_> {
                 }
                 match el {
                     // `[]` has no element type of its own: it fits any list
-                    Ty::Never if xs.is_empty() => Ty::Arr(El::Dyn),
+                    Ty::Never if xs.is_empty() => Ty::Arr(El::Dyn, 0),
                     Ty::Never => Ty::Never,
-                    t => Ty::Arr(t.el()), // numbers, strings and records; anything else is dynamic
+                    t => Ty::Arr(t.el(), fixed_len(t.el(), xs.len())), // numbers, strings and records; anything else is dynamic
                 }
             }
             ExprKind::Path(path) => match self.lookup(&path[0]) {
@@ -1029,7 +1053,7 @@ impl Walk<'_, '_> {
                     return if b == Ty::Never { Ty::Never } else { Ty::Dyn }; // m[i, j]
                 }
                 match b {
-                    Ty::Arr(el) => Ty::of_el(el),
+                    Ty::Arr(el, _) => Ty::of_el(el),
                     Ty::Never => Ty::Never,
                     _ => Ty::Dyn,
                 }
@@ -1037,7 +1061,7 @@ impl Walk<'_, '_> {
             ExprKind::Unary { op, expr } => {
                 let t = self.expr(expr);
                 if *op == UnOp::BitNot
-                    && matches!(t, Ty::F64 | Ty::Char | Ty::Arr(El::F64 | El::Char | El::Str))
+                    && matches!(t, Ty::F64 | Ty::Char | Ty::Arr(El::F64 | El::Char | El::Str, _))
                 {
                     self.err(Diag::new(&C::NO_OPERATOR, "`~` needs an integer (or a bool)", expr.span));
                     return Ty::Dyn;
@@ -1053,7 +1077,7 @@ impl Walk<'_, '_> {
                 };
                 match t {
                     Ty::Never => Ty::Never,
-                    Ty::Arr(el) => Ty::Arr(scalar(Ty::of_el(el)).el()),
+                    Ty::Arr(el, n) => Ty::Arr(scalar(Ty::of_el(el)).el(), n),
                     s if s.is_scalar() => scalar(s),
                     _ => Ty::Dyn,
                 }
@@ -1062,7 +1086,7 @@ impl Walk<'_, '_> {
                 let a = self.expr(lhs);
                 let b = self.expr(rhs);
                 let elem = |t: Ty| match t {
-                    Ty::Arr(x) => Ty::of_el(x),
+                    Ty::Arr(x, _) => Ty::of_el(x),
                     t => t,
                 };
                 let whole = |t: Ty| matches!(elem(t), Ty::Obj(_) | Ty::Tup(_));
@@ -1080,8 +1104,8 @@ impl Walk<'_, '_> {
                     }
                     return if a == Ty::Never || b == Ty::Never {
                         Ty::Never
-                    } else if matches!(a, Ty::Arr(_)) || matches!(b, Ty::Arr(_)) {
-                        Ty::Arr(El::Bool)
+                    } else if matches!(a, Ty::Arr(_, _)) || matches!(b, Ty::Arr(_, _)) {
+                        Ty::Arr(El::Bool, same_len(a, b))
                     } else {
                         Ty::Bool
                     };
@@ -1092,12 +1116,12 @@ impl Walk<'_, '_> {
                 }
                 if op.is_bitwise() {
                     let el = |t: Ty| match t {
-                        Ty::Arr(x) => Ty::of_el(x),
+                        Ty::Arr(x, _) => Ty::of_el(x),
                         t => t,
                     };
                     for (t, side) in [(a, lhs), (b, rhs)] {
                         let t = el(t);
-                        if matches!(t, Ty::F64 | Ty::Char | Ty::Arr(_)) || (t == Ty::Bool && op.is_shift()) {
+                        if matches!(t, Ty::F64 | Ty::Char | Ty::Arr(_, _)) || (t == Ty::Bool && op.is_shift()) {
                             let what = match t {
                                 Ty::F64 => "a float",
                                 Ty::Bool => "a bool",
@@ -1126,7 +1150,7 @@ impl Walk<'_, '_> {
                         self.expr(x);
                     }
                 }
-                Ty::Arr(El::Char)
+                Ty::Arr(El::Char, 0)
             }
             ExprKind::Named { value, .. } => {
                 self.expr(value);
@@ -1211,7 +1235,7 @@ impl Walk<'_, '_> {
                 let a = self.expr(&args[0]);
                 if *prim == Prim::Each {
                     let el = match a {
-                        Ty::Arr(el) => Ty::of_el(el),
+                        Ty::Arr(el, _) => Ty::of_el(el),
                         Ty::Never => return Ty::Never,
                         s => s,
                     };
@@ -1229,7 +1253,7 @@ impl Walk<'_, '_> {
                     };
                     return match (a, r) {
                         (_, Ty::Never) => Ty::Never,
-                        (Ty::Arr(_), r) => Ty::Arr(r.el()),
+                        (Ty::Arr(_, n), r) => Ty::Arr(r.el(), fixed_len(r.el(), n as usize)),
                         (Ty::Dyn, _) => Ty::Dyn, // a list or a scalar: not known here
                         (_, r) => r,             // `¨` on a scalar applies f once
                     };
@@ -1286,6 +1310,12 @@ impl Walk<'_, '_> {
                 }
                 if a == Ty::Never || b == Ty::Never {
                     return Ty::Never;
+                }
+                // ⍳ 5: five numbers, a length the compiler knows
+                if *prim == Prim::Iota && args.len() == 1 {
+                    if let ExprKind::Int(k) = args[0].kind {
+                        return Ty::Arr(El::I64, fixed_len(El::I64, k.max(0) as usize));
+                    }
                 }
                 prim_ty(*prim, a, b)
             }
@@ -1373,7 +1403,7 @@ impl Walk<'_, '_> {
                 }
             }
             Pattern::Route(parts, span) => {
-                if !matches!(t, Ty::Arr(El::Char) | Ty::Dyn | Ty::Never) {
+                if !matches!(t, Ty::Arr(El::Char, _) | Ty::Dyn | Ty::Never) {
                     self.err(Diag::new(&C::TYPE_MISMATCH, format!("a route pattern matches a str, but the value is {}", show(self.inf.p, t)), *span));
                 }
                 let mut k = 0;
@@ -1382,7 +1412,7 @@ impl Walk<'_, '_> {
                         let ct = match ty.as_deref() {
                             Some("i64") => Ty::I64,
                             Some("f64") => Ty::F64,
-                            _ => Ty::Arr(El::Char),
+                            _ => Ty::Arr(El::Char, 0),
                         };
                         self.out.route_binds.insert((id(pat), k), ct);
                         self.scopes.last_mut().unwrap().insert(name.clone(), (id(pat) + 1 + k, ct));
@@ -1442,7 +1472,7 @@ impl Walk<'_, '_> {
             }
             Pattern::Array { elems, rest, span } => {
                 let el = match t {
-                    Ty::Arr(e) => Ty::of_el(e),
+                    Ty::Arr(e, _) => Ty::of_el(e),
                     Ty::Dyn | Ty::Never => Ty::Dyn,
                     other => {
                         self.err(Diag::new(&C::TYPE_MISMATCH, format!("an array pattern matches an array or string, but the value is {}", show(self.inf.p, other)), *span));
@@ -1454,7 +1484,7 @@ impl Walk<'_, '_> {
                 }
                 if let Some(Some(n)) = rest {
                     // the rest has the array's own type; keyed one past the pattern
-                    let rt = if matches!(t, Ty::Arr(_)) { t } else { Ty::Dyn };
+                    let rt = if matches!(t, Ty::Arr(_, _)) { t } else { Ty::Dyn };
                     self.out.binds.insert(id(pat) + 1, rt);
                     self.scopes.last_mut().unwrap().insert(n.clone(), (id(pat) + 1, rt));
                 }
@@ -1470,12 +1500,12 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
         return Ty::Never;
     }
     // strings compare as whole values
-    if matches!(op, Eq | Ne | Lt | Le | Gt | Ge) && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
+    if matches!(op, Eq | Ne | Lt | Le | Gt | Ge) && a == Ty::Arr(El::Char, 0) && b == Ty::Arr(El::Char, 0) {
         return Ty::Bool;
     }
     // "a" + "b" joins strings
-    if op == Add && a == Ty::Arr(El::Char) && b == Ty::Arr(El::Char) {
-        return Ty::Arr(El::Char);
+    if op == Add && a == Ty::Arr(El::Char, 0) && b == Ty::Arr(El::Char, 0) {
+        return Ty::Arr(El::Char, 0);
     }
     let scalar = |x: Ty, y: Ty| -> Ty {
         match op {
@@ -1491,10 +1521,10 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
     };
     match (a, b) {
         (x, y) if x.is_scalar() && y.is_scalar() => scalar(x, y),
-        (Ty::Arr(x), y) if y.is_scalar() => Ty::Arr(scalar(Ty::of_el(x), y).el()),
-        (x, Ty::Arr(y)) if x.is_scalar() => Ty::Arr(scalar(x, Ty::of_el(y)).el()),
-        (Ty::Arr(x), Ty::Arr(y)) => Ty::Arr(scalar(Ty::of_el(x), Ty::of_el(y)).el()),
-        (Ty::Arr(_), _) | (_, Ty::Arr(_)) => Ty::Dyn,
+        (Ty::Arr(x, n), y) if y.is_scalar() => Ty::Arr(scalar(Ty::of_el(x), y).el(), n),
+        (x, Ty::Arr(y, n)) if x.is_scalar() => Ty::Arr(scalar(x, Ty::of_el(y)).el(), n),
+        (Ty::Arr(x, n), Ty::Arr(y, m)) => Ty::Arr(scalar(Ty::of_el(x), Ty::of_el(y)).el(), if n == m { n } else { 0 }),
+        (Ty::Arr(_, _), _) | (_, Ty::Arr(_, _)) => Ty::Dyn,
         _ => Ty::Dyn,
     }
 }
@@ -1502,19 +1532,19 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
 /// Result type of a primitive (other than `¨`).
 pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
     let reduce = |a: Ty| match a {
-        Ty::Arr(El::F64) => Ty::F64,
-        Ty::Arr(El::I64 | El::Bool | El::Char) => Ty::I64,
-        Ty::Arr(El::Dyn) | Ty::Dyn => Ty::Dyn,
+        Ty::Arr(El::F64, _) => Ty::F64,
+        Ty::Arr(El::I64 | El::Bool | El::Char, _) => Ty::I64,
+        Ty::Arr(El::Dyn, _) | Ty::Dyn => Ty::Dyn,
         s => s, // reducing a scalar returns it
     };
     match p {
-        Prim::Iota | Prim::Shape | Prim::Range => Ty::Arr(El::I64),
+        Prim::Iota | Prim::Shape | Prim::Range => Ty::Arr(El::I64, 0),
         Prim::Reverse => a,
         Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum => reduce(a),
         Prim::Len => Ty::I64,
         Prim::Print => Ty::Unit,
         Prim::Take | Prim::Drop | Prim::Keep => match a {
-            Ty::Arr(_) => a,
+            Ty::Arr(_, _) => a,
             _ => Ty::Dyn,
         },
         Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle => Ty::Dyn,
@@ -1561,7 +1591,8 @@ mod tests {
     fn arrays_and_reductions() {
         let p = prog("module main\nfn main() { print(f(⍳ 10)) }\nfn f(xs) { (xs × 2.0 ▷ +/) + (xs ▷ ≢) }\n");
         let t = infer(&p, &default_roots(&p, false));
-        assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64)])).ret, Ty::F64);
+        // ⍳ 10: ten numbers, a length the compiler knows
+        assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64, 10)])).ret, Ty::F64);
     }
 
     #[test]

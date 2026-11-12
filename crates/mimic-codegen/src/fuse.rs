@@ -17,7 +17,7 @@ use super::*;
 /// Element type of a numeric vector the kernels can read and write directly.
 pub(crate) fn num_el(t: Ty) -> Option<El> {
     match t {
-        Ty::Arr(e @ (El::I64 | El::F64 | El::Bool)) => Some(e),
+        Ty::Arr(e @ (El::I64 | El::F64 | El::Bool), _) => Some(e),
         _ => None,
     }
 }
