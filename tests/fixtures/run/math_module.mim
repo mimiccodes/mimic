@@ -12,7 +12,7 @@ fn main() {
     print(math::ln(math::e()))
     print(math::sin(math::pi() / 2.0))
     print([1.0 4.0 9.0] ¨ math::sqrt)
-    print(⍳ 1000000 ¨ (x => math::sqrt(x)) ▷ +/)
+    print(⍳ 1000000 ¨ (x => math::floor(math::sqrt(x))) ▷ +/)   // whole numbers: exact in any order
     let xs: [f64] = [0.0 1.0]
     print(xs ¨ (x => math::cos(x)))
 }

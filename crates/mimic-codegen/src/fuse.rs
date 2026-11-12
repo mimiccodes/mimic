@@ -218,8 +218,7 @@ impl<'ctx> Cg<'ctx, '_> {
         if let Some(el) = num_el(t) {
             let v = self.expr(x)?;
             let v = self.boxed(v)?;
-            let len = self.call_rt("mim_vec_len", &[self.basic(v).into(), self.i32c(dtype_of(el))])?.unwrap().into_int_value();
-            let data = self.call_rt("mim_dataptr", &[self.basic(v).into()])?.unwrap();
+            let (len, data) = self.vec_header(v, el)?;
             plan.lens.push(len);
             plan.slots.push(data);
             plan.temps.push(v);
@@ -512,10 +511,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let root = self.build(e, &mut plan)?;
         let n = self.plan_len(&plan)?;
         let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
-        let data = self.call_rt("mim_dataptr", &[self.basic(out).into()])?.unwrap();
+        let data = self.data_of(out)?;
         let k = self.emit_kernel(&root, &plan, Mode::Map(el))?;
         let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
-        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        self.par_for(n, k, ctx)?;
         self.release_plan(&plan)?;
         Ok(out)
     }
@@ -537,16 +536,16 @@ impl<'ctx> Cg<'ctx, '_> {
             self.panic_if(z, "maximum/minimum of an empty array")?;
         }
         // one partial result per fixed-size chunk, combined in chunk order
-        let grain = self.call_rt("mim_par_grain", &[])?.unwrap().into_int_value();
+        let grain = self.grain()?;
         let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
         let nc = self.b.build_int_add(n, g1, "").s()?;
         let nc = self.b.build_int_signed_div(nc, grain, "").s()?;
         let bytes = self.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
         let bytes = self.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
-        let partials = self.call_malloc(bytes)?;
+        let (partials, heap) = self.partials_buf(nc, bytes)?;
         let k = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
         let ctx = self.pack_ctx(&plan, &[partials.into(), grain.into()])?;
-        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        self.par_for(n, k, ctx)?;
         self.release_plan(&plan)?;
         // combine the partials in order
         let f = self.cur_fn.unwrap();
@@ -573,7 +572,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(done);
         let res = self.b.build_phi(acc_ty, "red").s()?;
         res.add_incoming(&[(&ident, pre), (&next, latch)]);
-        self.call_free(partials)?;
+        self.free_partials(partials, heap)?;
         let r = res.as_basic_value();
         Ok(if float { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) })
     }
@@ -590,18 +589,18 @@ impl<'ctx> Cg<'ctx, '_> {
         let root = self.build(arg, &mut plan)?;
         let n = self.plan_len(&plan)?;
         let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
-        let data = self.call_rt("mim_dataptr", &[self.basic(out).into()])?.unwrap();
-        let grain = self.call_rt("mim_par_grain", &[])?.unwrap().into_int_value();
+        let data = self.data_of(out)?;
+        let grain = self.grain()?;
         let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
         let nc = self.b.build_int_add(n, g1, "").s()?;
         let nc = self.b.build_int_signed_div(nc, grain, "").s()?;
         let bytes = self.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
         let bytes = self.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
-        let parts = self.call_malloc(bytes)?;
+        let (parts, heap) = self.partials_buf(nc, bytes)?;
         // 1: each chunk's own total
         let k1 = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
         let ctx1 = self.pack_ctx(&plan, &[parts.into(), grain.into()])?;
-        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k1).into(), ctx1.into()])?;
+        self.par_for(n, k1, ctx1)?;
         // 2: totals → starting offsets (in place, in chunk order)
         let f = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
@@ -629,10 +628,113 @@ impl<'ctx> Cg<'ctx, '_> {
         // 3: the running results
         let k2 = self.emit_kernel(&root, &plan, Mode::Scan(prim, el))?;
         let ctx2 = self.pack_ctx(&plan, &[data, grain.into(), parts.into()])?;
-        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k2).into(), ctx2.into()])?;
+        self.par_for(n, k2, ctx2)?;
         self.release_plan(&plan)?;
-        self.call_free(parts)?;
+        self.free_partials(parts, heap)?;
         Ok(out)
+    }
+
+    /// The elements of a vector just allocated (its header's data pointer).
+    fn data_of(&mut self, v: V<'ctx>) -> R<BasicValueEnum<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let fp = self.b.build_struct_gep(hdr, self.basic(v).into_pointer_value(), 4, "").s()?;
+        self.b.build_load(self.ptr, fp, "data").s()
+    }
+
+    /// The runtime's chunk size (a global it sets once).
+    fn grain(&mut self) -> R<IntValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let g = self.module.get_global("mim_grain").unwrap_or_else(|| {
+            let g = self.module.add_global(i64t, None, "mim_grain");
+            g.set_linkage(Linkage::External);
+            g
+        });
+        let p = self.gaddr(g);
+        Ok(self.b.build_load(i64t, p, "grain").s()?.into_int_value())
+    }
+
+    /// Length and data of a vector a kernel reads: straight from its header
+    /// when it is a vector of `el`; anything else is reported by the runtime.
+    fn vec_header(&mut self, v: V<'ctx>, el: El) -> R<(IntValue<'ctx>, BasicValueEnum<'ctx>)> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let p = self.basic(v).into_pointer_value();
+        let load = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
+            let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
+            cg.b.build_load(t, fp, "").s()
+        };
+        let dtype = load(self, 1, i32t.into())?.into_int_value();
+        let rank = load(self, 2, i32t.into())?.into_int_value();
+        let ok_t = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(dtype_of(el) as u64, false), "").s()?;
+        let ok_r = self.b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        let ok = self.b.build_and(ok_t, ok_r, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let bad = self.ctx.append_basic_block(f, "vec_bad");
+        let good = self.ctx.append_basic_block(f, "vec_ok");
+        self.b.build_conditional_branch(ok, good, bad).s()?;
+        self.b.position_at_end(bad);
+        self.call_rt("mim_vec_len", &[p.into(), self.i32c(dtype_of(el))])?; // reports it
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(good);
+        let len = load(self, 3, i64t.into())?.into_int_value();
+        let data = load(self, 4, self.ptr.into())?;
+        Ok((len, data))
+    }
+
+    /// Run kernel `k` over `0..n`: directly when it is one chunk (no thread
+    /// pool, no locks), else through the runtime's parallel loop.
+    fn par_for(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>) -> R<()> {
+        let grain = self.grain()?;
+        let one = self.b.build_int_compare(IntPredicate::SLE, n, grain, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let direct = self.ctx.append_basic_block(f, "k_direct");
+        let pooled = self.ctx.append_basic_block(f, "k_pool");
+        let done = self.ctx.append_basic_block(f, "k_done");
+        self.b.build_conditional_branch(one, direct, pooled).s()?;
+        self.b.position_at_end(direct);
+        self.b.build_call(k, &[ctx.into(), self.ctx.i64_type().const_zero().into(), n.into()], "").s()?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(pooled);
+        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        Ok(())
+    }
+
+    /// A buffer for one partial result per chunk: on the stack for up to 64
+    /// chunks, else on the heap. Returns it and whether it came from the heap.
+    fn partials_buf(&mut self, nc: IntValue<'ctx>, bytes: IntValue<'ctx>) -> R<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        let i64t = self.ctx.i64_type();
+        let stack = self.entry_array_of(i64t.array_type(65))?;
+        let heap = self.b.build_int_compare(IntPredicate::SGT, nc, i64t.const_int(64, false), "").s()?;
+        let f = self.cur_fn.unwrap();
+        let pre = self.b.get_insert_block().unwrap();
+        let big = self.ctx.append_basic_block(f, "parts_heap");
+        let done = self.ctx.append_basic_block(f, "parts_done");
+        self.b.build_conditional_branch(heap, big, done).s()?;
+        self.b.position_at_end(big);
+        let m = self.call_malloc(bytes)?;
+        let big_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "parts").s()?;
+        phi.add_incoming(&[(&stack, pre), (&m, big_end)]);
+        Ok((phi.as_basic_value().into_pointer_value(), heap))
+    }
+
+    fn free_partials(&mut self, p: PointerValue<'ctx>, heap: IntValue<'ctx>) -> R<()> {
+        let f = self.cur_fn.unwrap();
+        let yes = self.ctx.append_basic_block(f, "parts_free");
+        let done = self.ctx.append_basic_block(f, "parts_freed");
+        self.b.build_conditional_branch(heap, yes, done).s()?;
+        self.b.position_at_end(yes);
+        self.call_free(p)?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        Ok(())
     }
 
     fn call_malloc(&self, bytes: IntValue<'ctx>) -> R<PointerValue<'ctx>> {

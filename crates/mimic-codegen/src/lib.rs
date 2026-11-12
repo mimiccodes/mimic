@@ -712,6 +712,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_rt_ensure" => void.fn_type(&[], false),
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
+            "mim_index_fail" => void.fn_type(&[p, i64t], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
             "mim_await" => ptr.fn_type(&[p], false),
@@ -2597,32 +2598,41 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(arr).into_pointer_value();
+        // an array's header never changes while it is alive (a changed array
+        // is a new one): its loads may be hoisted and shared
+        let invariant = self.ctx.get_kind_id("invariant.load");
+        let empty = self.ctx.metadata_node(&[]);
         let field = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
-            cg.b.build_load(t, fp, "").s()
+            let v = cg.b.build_load(t, fp, "").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+            Ok(v)
         };
         let dtype = field(self, 1, i32t.into())?.into_int_value();
         let rank = field(self, 2, i32t.into())?.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
+        let data = field(self, 4, self.ptr.into())?.into_pointer_value();
         let want = match el {
             El::F64 => 1,
             El::Bool => 2,
             _ => 0,
         };
         let b = &self.b;
-        let ok_t = b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want, false), "").s()?;
         let ok_r = b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
         // one unsigned compare checks 0 <= i < len
         let ok_i = b.build_int_compare(IntPredicate::ULT, i, len, "").s()?;
-        let ok = b.build_and(b.build_and(ok_t, ok_r, "").s()?, ok_i, "").s()?;
+        let ok = b.build_and(ok_r, ok_i, "").s()?;
+        let is_t = b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want, false), "").s()?;
         let f = self.cur_fn.unwrap();
         let fast = self.ctx.append_basic_block(f, "idx_fast");
-        let slow = self.ctx.append_basic_block(f, "idx_slow");
+        let other = self.ctx.append_basic_block(f, "idx_other");
+        let ints = self.ctx.append_basic_block(f, "idx_ints");
+        let bad = self.ctx.append_basic_block(f, "idx_bad");
         let join = self.ctx.append_basic_block(f, "idx_done");
-        self.b.build_conditional_branch(ok, fast, slow).s()?;
-        // fast: load the element
+        let go = self.b.build_and(ok, is_t, "").s()?;
+        self.b.build_conditional_branch(go, fast, other).s()?;
+        // fast: the element itself
         self.b.position_at_end(fast);
-        let data = field(self, 4, self.ptr.into())?.into_pointer_value();
         let fv: V<'ctx> = match el {
             El::F64 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), data, &[i], "").s()? };
@@ -2641,17 +2651,27 @@ impl<'ctx> Cg<'ctx, '_> {
         let fv = self.as_ty(fv, ty, "element")?;
         let fast_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(join).s()?;
-        // slow: the general path (errors, matrices)
-        self.b.position_at_end(slow);
-        let iv = self.boxed(V::I(i))?;
-        let r = self.call_rt_ptr("mim_index", &[self.basic(arr).into(), self.basic(iv).into()])?;
-        self.drop_tmp(iv)?;
-        let sv = self.as_ty(r, ty, "element")?;
-        let slow_end = self.b.get_insert_block().unwrap();
+        // integers where floats are expected: convert (a list written as [1 2 3])
+        self.b.position_at_end(other);
+        let is_int = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
+        let conv = self.b.build_and(ok, is_int, "").s()?;
+        let conv = if el == El::F64 { conv } else { self.ctx.bool_type().const_zero() };
+        self.b.build_conditional_branch(conv, ints, bad).s()?;
+        self.b.position_at_end(ints);
+        let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
+        let iv = self.b.build_load(i64t, ep, "").s()?.into_int_value();
+        let cv = self.as_ty(V::I(iv), ty, "element")?;
+        let cv = if el == El::F64 { V::F(self.to_f64(cv)?) } else { cv };
+        let cv = self.as_ty(cv, ty, "element")?;
+        let ints_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(join).s()?;
+        // anything else is an error: out of bounds, or not such a vector
+        self.b.position_at_end(bad);
+        self.call_rt("mim_index_fail", &[p.into(), i.into()])?;
+        self.b.build_unreachable().s()?;
         self.b.position_at_end(join);
         let phi = self.b.build_phi(self.basic(fv).get_type(), "elem").s()?;
-        phi.add_incoming(&[(&self.basic(fv), fast_end), (&self.basic(sv), slow_end)]);
+        phi.add_incoming(&[(&self.basic(fv), fast_end), (&self.basic(cv), ints_end)]);
         Ok(self.val_of(phi.as_basic_value(), ty, false))
     }
 

@@ -122,6 +122,8 @@ void mim_panic(const char *msg) {
 typedef void (*mim_task)(void *ctx, int64_t lo, int64_t hi);
 
 static int64_t g_grain = 16384;
+/* the same, for compiled kernels to read without a call */
+int64_t mim_grain = 16384;
 static int g_nthreads = 1;
 static _Thread_local int t_in_parallel = 0;
 
@@ -327,6 +329,7 @@ static size_t elsize(int dt) {
 }
 
 #define SMALL_BYTES 16 /* payload bytes (incl. NUL) served by the free list */
+#define MID_BYTES 64   /* a second free list: short vectors, small records, short strings */
 #define FREE_LIST_CAP 4096
 #define MAX_SLOTS 257
 
@@ -337,6 +340,8 @@ static int g_next_slot = 0;
 static _Thread_local int t_slot = -1;
 static _Thread_local mim_val *t_free = NULL;
 static _Thread_local int t_free_len = 0;
+static _Thread_local mim_val *t_free_mid = NULL;
+static _Thread_local int t_free_mid_len = 0;
 
 static padded_count *live_slot(void) {
     if (t_slot < 0) {
@@ -353,8 +358,12 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
         v = t_free;
         t_free = *(mim_val **)v;
         t_free_len--;
+    } else if (bytes > SMALL_BYTES && bytes <= MID_BYTES && t_free_mid) {
+        v = t_free_mid;
+        t_free_mid = *(mim_val **)v;
+        t_free_mid_len--;
     } else {
-        v = (mim_val *)malloc(sizeof(mim_val) + (bytes <= SMALL_BYTES ? SMALL_BYTES : bytes));
+        v = (mim_val *)malloc(sizeof(mim_val) + (bytes <= SMALL_BYTES ? SMALL_BYTES : bytes <= MID_BYTES ? MID_BYTES : bytes));
         if (!v) mim_panic("out of memory");
     }
     v->rc = 1;
@@ -385,6 +394,10 @@ static void dealloc(mim_val *v) {
         *(mim_val **)v = t_free;
         t_free = v;
         t_free_len++;
+    } else if (bytes > SMALL_BYTES && bytes <= MID_BYTES && t_free_mid_len < FREE_LIST_CAP) {
+        *(mim_val **)v = t_free_mid;
+        t_free_mid = v;
+        t_free_mid_len++;
     } else {
         free(v);
     }
@@ -398,6 +411,12 @@ static void free_list_drain(void) {
         free(v);
     }
     t_free_len = 0;
+    while (t_free_mid) {
+        mim_val *v = t_free_mid;
+        t_free_mid = *(mim_val **)v;
+        free(v);
+    }
+    t_free_mid_len = 0;
 }
 
 /* A fresh vector for a fused kernel's output. */
@@ -446,6 +465,7 @@ void mim_rt_init(int32_t argc, char **argv) {
     const char *g = getenv("MIMIC_PAR_GRAIN");
     if (g && atoll(g) > 0) {
         g_grain = atoll(g);
+        mim_grain = g_grain;
         g_grain_forced = 1;
     }
 #if MIM_THREADS
@@ -2276,6 +2296,20 @@ static int64_t multi_offset(mim_val *xs, mim_val *t, int *nidx, int64_t *cell) {
     *nidx = n;
     *cell = stride;
     return off;
+}
+
+/* compiled `xs[i]` on a vector of numbers that is not in bounds (or not
+ * such a vector): the error, as mim_index would give it; never returns */
+void mim_index_fail(mim_val *xs, int64_t i) {
+    need(xs, "index");
+    if (xs->rank == 1 && (i < 0 || i >= xs->len)) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "index %lld out of bounds for length %lld", (long long)i, (long long)xs->len);
+        mim_panic(buf);
+    }
+    char buf[160];
+    snprintf(buf, sizeof buf, "index: expected a list of numbers, found %s", dtname(xs));
+    mim_panic(buf);
 }
 
 mim_val *mim_index(mim_val *xs, mim_val *i) {

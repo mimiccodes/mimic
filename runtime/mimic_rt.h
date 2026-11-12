@@ -81,6 +81,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b);
 /* pure != 0: f has no side effects, so elements may be processed in parallel */
 mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure);
 mim_val *mim_index(mim_val *xs, mim_val *i);
+void mim_index_fail(mim_val *xs, int64_t i) __attribute__((noreturn));
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v);
 int64_t mim_truthy(mim_val *v);
 void mim_check_type(mim_val *v, int32_t ty, const char *what);

@@ -5,9 +5,14 @@ module main
 
 type Sys = { x: [f64], y: [f64], z: [f64], vx: [f64], vy: [f64], vz: [f64] }
 
+// m[j] / d³ for every pair (i, j) of different bodies: entry i × 5 + j
+fn pulls(s: Sys, m: [f64]) -> [f64] {
+    ⍳ 25 ¨ (k => if k div 5 == k % 5 { 0.0 } else { m[k % 5] / cube(s, k div 5, k % 5) })
+}
+
 // one coordinate of body i's acceleration (a: that coordinate of every body)
-fn pull(a: [f64], s: Sys, m: [f64], i: i64) -> f64 {
-    ⍳ 5 ¨ (j => if j == i { 0.0 } else { (a[j] - a[i]) * (m[j] / cube(s, i, j)) }) ▷ +/
+fn pull(a: [f64], p: [f64], i: i64) -> f64 {
+    ⍳ 5 ¨ (j => (a[j] - a[i]) * p[i * 5 + j]) ▷ +/
 }
 
 fn cube(s: Sys, i: i64, j: i64) -> f64 {
@@ -19,9 +24,10 @@ fn cube(s: Sys, i: i64, j: i64) -> f64 {
 }
 
 fn step(s: Sys, m: [f64]) -> Sys {
-    let vx = s.vx + 0.01 * (⍳ 5 ¨ (i => pull(s.x, s, m, i)))
-    let vy = s.vy + 0.01 * (⍳ 5 ¨ (i => pull(s.y, s, m, i)))
-    let vz = s.vz + 0.01 * (⍳ 5 ¨ (i => pull(s.z, s, m, i)))
+    let p = pulls(s, m)
+    let vx = s.vx + 0.01 * (⍳ 5 ¨ (i => pull(s.x, p, i)))
+    let vy = s.vy + 0.01 * (⍳ 5 ¨ (i => pull(s.y, p, i)))
+    let vz = s.vz + 0.01 * (⍳ 5 ¨ (i => pull(s.z, p, i)))
     Sys { x: s.x + 0.01 * vx, y: s.y + 0.01 * vy, z: s.z + 0.01 * vz, vx: vx, vy: vy, vz: vz }
 }
 

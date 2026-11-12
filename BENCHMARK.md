@@ -93,6 +93,28 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Smaller overheads (nbody 16.6× → 8.6× C)
+
+Same machine, load average about 7:
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib(38) | 0.509 s | 1.08× | 1.18× | 1.90× | **0.35×** |
+| mandelbrot | 2.475 s | 1.14× | 1.21× | 1.16× | **0.13×** |
+| matmul 1024² | 0.794 s | 1.01× | 2.40× | **0.09×** | **0.08×** |
+| nbody, 1M steps | 0.178 s | 1.23× | 1.45× | 8.98× | 8.56× |
+| prefix sum, 100M | 0.425 s | 2.46× | 1.05× | 1.43× | **0.64×** |
+| sort 10M integers | 4.485 s | 0.15× | 0.74× | **0.06×** | **0.03×** |
+| sum of squares, 100M | 0.122 s | 1.63× | 2.47× | 2.48× | **0.38×** |
+
+What changed:
+* **Small loops run directly.** A fused loop that fits in one chunk calls its kernel directly, with its partial results on the stack. Larger ones still go to the thread pool.
+* **A second free list** (blocks up to 64 bytes) recycles short vectors, small records and short strings per thread instead of calling `malloc` and `free`.
+* **Fewer runtime calls.** Kernels read vector lengths, data pointers and the chunk size inline. Array reads in compiled code have a never-returning error path, so LLVM keeps array headers in registers.
+* **nbody in Mimic** now computes each pair's `m / d³` once per step and uses it for x, y and z, as the C version does.
+
+The rest of nbody's gap is the boxed small arrays and records that every step allocates.
+
 ### The suite with seven benchmarks
 
 Same machine (Apple M3 Pro, 12 cores), load average 6–10, best of 5 after a warm-up. The ratio is to C:
