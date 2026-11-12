@@ -437,8 +437,11 @@ void mim_retain(mim_val *v) {
 }
 
 void mim_release(mim_val *v) {
-    if (v && __atomic_load_n(&v->rc, __ATOMIC_RELAXED) < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0)
-        dealloc(v);
+    if (!v) return;
+    int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
+    /* the only reference: no other thread can see it, so no atomic update */
+    if (rc == 1) dealloc(v);
+    else if (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0) dealloc(v);
 }
 
 /* Immortal values are never counted, refcounted or freed. */
@@ -2320,6 +2323,31 @@ void mim_index_fail(mim_val *xs, int64_t i) {
     char buf[160];
     snprintf(buf, sizeof buf, "index: expected a list of numbers, found %s", dtname(xs));
     mim_panic(buf);
+}
+
+/* A list stored with element type `dtype` (I64, F64 or BOOL): a value's
+ * type says how it is stored, so a list of integers written where floats
+ * are expected becomes floats here, once, not at every read. Returns a new
+ * reference; `v` stays the caller's. Anything that cannot be converted is
+ * returned as it is, for the usual error at its use. */
+mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
+    if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL)) {
+        mim_retain(v);
+        return v;
+    }
+    if (dtype != MIM_F64 && !(dtype == MIM_I64 && v->dtype == MIM_BOOL)) {
+        mim_retain(v);
+        return v;
+    }
+    int64_t n = v->len;
+    mim_val *r = alloc(dtype, v->rank, n);
+    if (v->rank >= 2) set_shape(r, v->rank, SHAPE(v));
+    for (int64_t k = 0; k < n; k++) {
+        double x = v->dtype == MIM_I64 ? (double)((int64_t *)v->data)[k] : (double)((uint8_t *)v->data)[k];
+        if (dtype == MIM_F64) ((double *)r->data)[k] = x;
+        else ((int64_t *)r->data)[k] = (int64_t)x;
+    }
+    return r;
 }
 
 mim_val *mim_index(mim_val *xs, mim_val *i) {

@@ -713,6 +713,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_index_fail" => void.fn_type(&[p, i64t], false),
+            "mim_vec_as" => ptr.fn_type(&[p, i32t], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
             "mim_await" => ptr.fn_type(&[p], false),
@@ -742,7 +743,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_route" => self.ctx.i64_type().fn_type(&[p, i64t, p, p, p], false),
             other => panic!("unknown runtime function {other}"),
         };
-        self.module.add_function(name, ty, Some(Linkage::External))
+        let f = self.module.add_function(name, ty, Some(Linkage::External));
+        f
     }
 
     fn call_rt(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> R<Option<BasicValueEnum<'ctx>>> {
@@ -1754,8 +1756,9 @@ impl<'ctx> Cg<'ctx, '_> {
             let mut locals = Vec::new();
             let mut bind = |cg: &mut Self, base: PointerValue<'ctx>, i: usize, name: &str, t: Ty| -> R<()> {
                 let at = unsafe { cg.b.build_in_bounds_gep(cg.ptr, base, &[cg.ctx.i64_type().const_int(i as u64, false)], "").s()? };
-                let p = cg.b.build_load(cg.ptr, at, name).s()?.into_pointer_value();
-                let v = cg.as_ty(V::P(p, false), t, "lambda argument")?;
+                let p = cg.b.build_load(cg.ptr, at, name).s()?;
+                cg.assume_live(p, t)?;
+                let v = cg.as_ty(V::P(p.into_pointer_value(), false), t, "lambda argument")?;
                 let owned = matches!(v, V::P(_, true));
                 let slot = cg.entry_alloca(t, name)?;
                 cg.b.build_store(slot, cg.basic(v)).s()?;
@@ -2598,10 +2601,54 @@ impl<'ctx> Cg<'ctx, '_> {
         !matches!(v, V::P(..))
     }
 
+    /// `v` (of type `from`) moving into a slot of type `to`. A value's type
+    /// says how it is stored, so a list of integers (or booleans) going where
+    /// a list of floats (or integers) is declared is converted here, once;
+    /// a list whose type is not known statically is checked.
+    fn into_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
+        let want = match to {
+            Ty::Arr(El::F64) => Some(1),
+            Ty::Arr(El::I64) => Some(0),
+            _ => None,
+        };
+        let differs = match (from, to) {
+            (Ty::Arr(El::I64 | El::Bool), Ty::Arr(El::F64)) | (Ty::Arr(El::Bool), Ty::Arr(El::I64)) => true,
+            (Ty::Dyn | Ty::Arr(El::Dyn), Ty::Arr(El::F64 | El::I64)) => true,
+            _ => false,
+        };
+        let v = match (want, differs, v) {
+            (Some(w), true, V::P(..)) => {
+                let b = self.boxed(v)?;
+                let r = self.call_rt_ptr("mim_vec_as", &[self.basic(b).into(), self.i32c(w)])?;
+                self.drop_tmp(b)?;
+                r
+            }
+            (_, _, v) => v,
+        };
+        self.as_ty(v, to, what)
+    }
+
+    /// A loaded value of type `t` that is always a live vector or record:
+    /// tell LLVM its header can be read anywhere, so checks on it may leave
+    /// loops.
+    fn assume_live(&self, load: BasicValueEnum<'ctx>, t: Ty) -> R<()> {
+        if !matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool) | Ty::Obj(_)) {
+            return Ok(());
+        }
+        let i = inkwell::values::BasicValue::as_instruction_value(&load).ok_or("not an instruction")?;
+        let empty = self.ctx.metadata_node(&[]);
+        i.set_metadata(empty, self.ctx.get_kind_id("nonnull")).map_err(|e| e.to_string())?;
+        let n = self.ctx.metadata_node(&[self.ctx.i64_type().const_int(32, false).into()]);
+        i.set_metadata(n, self.ctx.get_kind_id("dereferenceable")).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// `xs[i]` on a numeric vector known by type: read the element straight
-    /// from the array when it is a vector of that element type and `i` is in
-    /// bounds; anything else (a matrix, an index out of bounds) goes through
-    /// `mim_index`, which gives the usual result or error.
+    /// from the array. A value's type says how it is stored (see
+    /// `into_slot`), so one check covers it all: a vector (not a matrix) of
+    /// that element type, with `i` in bounds. Anything else stops the
+    /// program with `mim_index_fail`, which never returns, so code after the
+    /// check may assume it held.
     fn index_fast(&mut self, arr: V<'ctx>, i: IntValue<'ctx>, el: El, ty: Ty) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
@@ -2617,29 +2664,41 @@ impl<'ctx> Cg<'ctx, '_> {
             inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
             Ok(v)
         };
-        let dtype = field(self, 1, i32t.into())?.into_int_value();
-        let rank = field(self, 2, i32t.into())?.into_int_value();
+        // dtype and rank sit side by side: one 64-bit load and compare checks
+        // both (little-endian: dtype in the low half)
+        let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
+        let kind = self.b.build_load(i64t, kind_p, "").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&kind).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+        let kind = kind.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
         let data = field(self, 4, self.ptr.into())?.into_pointer_value();
-        let want = match el {
+        let want: u64 = match el {
             El::F64 => 1,
             El::Bool => 2,
             _ => 0,
         };
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want = if little { (1u64 << 32) | want } else { (want << 32) | 1 };
         let b = &self.b;
-        let ok_r = b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        let ok_k = b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
         // one unsigned compare checks 0 <= i < len
         let ok_i = b.build_int_compare(IntPredicate::ULT, i, len, "").s()?;
-        let ok = b.build_and(ok_r, ok_i, "").s()?;
-        let is_t = b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want, false), "").s()?;
+        let go = b.build_and(ok_k, ok_i, "").s()?;
         let f = self.cur_fn.unwrap();
         let fast = self.ctx.append_basic_block(f, "idx_fast");
-        let other = self.ctx.append_basic_block(f, "idx_other");
-        let ints = self.ctx.append_basic_block(f, "idx_ints");
         let bad = self.ctx.append_basic_block(f, "idx_bad");
-        let join = self.ctx.append_basic_block(f, "idx_done");
-        let go = self.b.build_and(ok, is_t, "").s()?;
-        self.b.build_conditional_branch(go, fast, other).s()?;
+        // the fast path is almost always taken
+        let expect = self.module.get_function("llvm.expect.i1").unwrap_or_else(|| {
+            let bt = self.ctx.bool_type();
+            self.module.add_function("llvm.expect.i1", bt.fn_type(&[bt.into(), bt.into()], false), None)
+        });
+        let go = self.b.build_call(expect, &[go.into(), self.ctx.bool_type().const_int(1, false).into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
+        self.b.build_conditional_branch(go, fast, bad).s()?;
+        // anything else stops the program (out of bounds, or a matrix): a
+        // value's type says how it is stored, so a [f64] always holds f64s
+        self.b.position_at_end(bad);
+        self.call_rt("mim_index_fail", &[p.into(), i.into()])?;
+        self.b.build_unreachable().s()?;
         // fast: the element itself
         self.b.position_at_end(fast);
         let fv: V<'ctx> = match el {
@@ -2657,31 +2716,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 V::I(self.b.build_load(i64t, ep, "").s()?.into_int_value())
             }
         };
-        let fv = self.as_ty(fv, ty, "element")?;
-        let fast_end = self.b.get_insert_block().unwrap();
-        self.b.build_unconditional_branch(join).s()?;
-        // integers where floats are expected: convert (a list written as [1 2 3])
-        self.b.position_at_end(other);
-        let is_int = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
-        let conv = self.b.build_and(ok, is_int, "").s()?;
-        let conv = if el == El::F64 { conv } else { self.ctx.bool_type().const_zero() };
-        self.b.build_conditional_branch(conv, ints, bad).s()?;
-        self.b.position_at_end(ints);
-        let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-        let iv = self.b.build_load(i64t, ep, "").s()?.into_int_value();
-        let cv = self.as_ty(V::I(iv), ty, "element")?;
-        let cv = if el == El::F64 { V::F(self.to_f64(cv)?) } else { cv };
-        let cv = self.as_ty(cv, ty, "element")?;
-        let ints_end = self.b.get_insert_block().unwrap();
-        self.b.build_unconditional_branch(join).s()?;
-        // anything else is an error: out of bounds, or not such a vector
-        self.b.position_at_end(bad);
-        self.call_rt("mim_index_fail", &[p.into(), i.into()])?;
-        self.b.build_unreachable().s()?;
-        self.b.position_at_end(join);
-        let phi = self.b.build_phi(self.basic(fv).get_type(), "elem").s()?;
-        phi.add_incoming(&[(&self.basic(fv), fast_end), (&self.basic(cv), ints_end)]);
-        Ok(self.val_of(phi.as_basic_value(), ty, false))
+        self.as_ty(fv, ty, "element")
     }
 
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
@@ -2820,7 +2855,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     let mut vals = Vec::new();
                     for (i, a) in args.iter().enumerate() {
                         let x = self.expr(a)?;
-                        vals.push(self.as_ty(x, ftys[i], "field")?);
+                        vals.push(self.into_slot(x, self.ty_of(a), ftys[i], "field")?);
                     }
                     return self.construct(t, Some(v), vals);
                 }
@@ -3156,7 +3191,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 for (n, x, _) in fields {
                     let i = order.iter().position(|o| o == n).ok_or("unknown field")?;
                     let v = self.expr(x)?;
-                    slots[i] = Some(self.as_ty(v, ftys[i], &format!("field `{n}`"))?);
+                    slots[i] = Some(self.into_slot(v, self.ty_of(x), ftys[i], &format!("field `{n}`"))?);
                 }
                 let vals: Vec<V> = slots.into_iter().map(|s| s.ok_or("missing field")).collect::<Result<_, _>>()?;
                 self.construct(t, None, vals)
@@ -3188,6 +3223,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
                         let fv = self.b.build_load(self.ptr, fp, "").s()?;
                         inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                        self.assume_live(fv, ty)?;
                         let fv = fv.into_pointer_value();
                         if let V::P(_, true) = b {
                             self.call_rt("mim_retain", &[fv.into()])?;
@@ -3210,8 +3246,14 @@ impl<'ctx> Cg<'ctx, '_> {
                 // mim_obj_with consumes its record: hand it an owned reference
                 let mut cur = self.own(self.boxed(b)?)?;
                 for (n, x, _) in fields {
-                    let i = self.p.types[types::obj_tid(t)].field_index(n).ok_or("unknown field")?;
+                    let tid = types::obj_tid(t);
+                    let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
+                    let ft = match &self.p.types[tid].decl.kind {
+                        mimic_syntax::ast::TypeKind::Record(fs) => fs.get(i).and_then(|(_, ft, _)| types::ann_in(self.p, self.p.types[tid].module, ft)).unwrap_or(Ty::Dyn),
+                        _ => Ty::Dyn,
+                    };
                     let v = self.expr(x)?;
+                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
                     let v = self.boxed(v)?;
                     cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(i as u64, false).into(), self.basic(v).into()])?;
                     self.drop_tmp(v)?;

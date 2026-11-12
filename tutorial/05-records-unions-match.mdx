@@ -61,6 +61,23 @@ Home
 [false false]
 ```
 
+A field always holds what its type says. A field declared `[f64]` stores floats even when you write a list of integers, so reading it is fast and never needs a check. The same goes for a variant's payload (see below):
+
+```mimic run
+module main
+
+type Body = { mass: f64, pos: [f64] }
+
+fn main() {
+    let b = Body { mass: 1.0, pos: [0 2 5] }
+    print(b.pos)
+}
+```
+
+```output
+[0.0 2.0 5.0]
+```
+
 ## Unions
 
 A union is a value that is exactly one of several *variants*, and each variant can carry data:

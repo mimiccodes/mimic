@@ -1,0 +1,30 @@
+module main
+
+// a record field or variant payload declared [f64] stores floats, even when
+// written as a list of integers (or booleans)
+
+type P = { xs: [f64], n: i64 }
+type Shape = Poly([f64]) | Dot
+
+fn first(a: [f64]) -> f64 { a[0] + a[1] }
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Poly(pts) => pts[0] + pts[1],
+        Dot => 0.0,
+    }
+}
+
+fn main() {
+    let p = P { xs: [1 2 3], n: 1 }
+    print(p.xs)
+    print(p.xs[0] + p.xs[1])
+    print(first(p.xs))
+    let p2 = { p with xs: [4 5] }
+    print(p2.xs[0] + p2.xs[1])
+    print(P { xs: [true false], n: 0 }.xs)
+    print(area(Poly([1 2])))
+    print([[3 4], [5 6]] ¨ Poly ¨ area)
+    print([1 2 3] ¨ (i => p.xs[i - 1] * 2.0))
+    print(json::encode(p))
+}
