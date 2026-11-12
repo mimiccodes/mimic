@@ -21,7 +21,7 @@ They live in a few standard **modules**, used by path from any file, with no imp
 | `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
 | `time` | clocks and dates | `time::now`, `time::clock`, `time::sleep`, `time::utc` |
 | `random` | random numbers | `random::int`, `random::float`, `random::seed` |
-| `http`, `tcp` | the network | [chapter 17](17-networking.mdx) |
+| `http`, `ws`, `tcp`, `udp` | the network | [chapter 17](17-networking.mdx) |
 
 The module name says where a function comes from, and short names like `read` or `int` can't collide with yours. If you use one often, `use fs::read` brings in the short name. `print` and the string, list and map functions stay global, because almost every program uses them.
 

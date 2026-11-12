@@ -49,6 +49,12 @@ mim_val *mim_std_ws_close(mim_val *s) { (void)s; return NULL; }
 mim_val *mim_std_ws_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
 mim_val *mim_std_ws_serve_connections(mim_val *p, mim_val *h, mim_val *n) { (void)p; (void)h; (void)n; return no_net(); }
 mim_val *mim_std_tcp_receive_bytes(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
+mim_val *mim_std_udp_bind(mim_val *p) { (void)p; return no_net(); }
+mim_val *mim_std_udp_send(mim_val *s, mim_val *h, mim_val *p, mim_val *t) { (void)s; (void)h; (void)p; (void)t; return no_net(); }
+mim_val *mim_std_udp_send_bytes(mim_val *s, mim_val *h, mim_val *p, mim_val *b) { (void)s; (void)h; (void)p; (void)b; return no_net(); }
+mim_val *mim_std_udp_receive(mim_val *s) { (void)s; return no_net(); }
+mim_val *mim_std_udp_receive_within(mim_val *s, mim_val *d) { (void)s; (void)d; return no_net(); }
+mim_val *mim_std_udp_close(mim_val *s) { (void)s; return NULL; }
 mim_val *mim_std_http_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
 mim_val *mim_std_http_fetch(mim_val *u) { (void)u; return no_net(); }
 mim_val *mim_std_http_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
@@ -1409,6 +1415,112 @@ mim_val *mim_std_ws_serve(mim_val *port, mim_val *handler) {
 mim_val *mim_std_ws_serve_connections(mim_val *port, mim_val *handler, mim_val *count) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_connections: the handler must be a function");
     return serve_loop_with(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1, ws_serve_one);
+}
+
+/* ==== UDP ================================================================
+ * Datagrams over IPv4: each send is one packet, each receive returns one
+ * packet with the sender's address. Packets may be lost or reordered. */
+
+extern const mim_desc mim_desc_udp_Socket, mim_desc_udp_Packet;
+
+static int udp_fd(mim_val *s, const char *what) {
+    return (int)geti(field_of(s, &mim_desc_udp_Socket, 0, what), 0);
+}
+
+/* bind a UDP socket on every interface; port 0 picks a free port (`.port`) */
+mim_val *mim_std_udp_bind(mim_val *port) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return err_errno("cannot open a UDP socket", NULL);
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port = htons((uint16_t)geti(port, 0));
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        char what[64];
+        snprintf(what, sizeof what, "port %lld", (long long)geti(port, 0));
+        mim_val *e = err_errno("cannot bind UDP", what);
+        close(fd);
+        return e;
+    }
+    socklen_t len = sizeof a;
+    getsockname(fd, (struct sockaddr *)&a, &len);
+    mim_val *f[2] = {mim_int(fd), mim_int(ntohs(a.sin_port))};
+    return ok_of(obj_owned(&mim_desc_udp_Socket, 2, f));
+}
+
+static mim_val *udp_send_raw(mim_val *s, mim_val *host, mim_val *port, const char *p, size_t n, const char *what) {
+    int fd = udp_fd(s, what);
+    const char *h = io_path(host, what);
+    char ps[16];
+    snprintf(ps, sizeof ps, "%lld", (long long)geti(port, 0));
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    int rc = getaddrinfo(h, ps, &hints, &res);
+    if (rc != 0) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "cannot resolve %s: %s", h, gai_strerror(rc));
+        return err_of(buf);
+    }
+    ssize_t w = msendto(fd, p, n, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (w < 0) return err_errno("cannot send", NULL);
+    return ok_of(mim_int((int64_t)w));
+}
+
+mim_val *mim_std_udp_send(mim_val *s, mim_val *host, mim_val *port, mim_val *text) {
+    if (!text || text->dtype != MIM_CHAR || text->rank != 1) mim_panic("udp::send: expected text (str)");
+    return udp_send_raw(s, host, port, (const char *)text->data, (size_t)text->len, "udp::send");
+}
+
+mim_val *mim_std_udp_send_bytes(mim_val *s, mim_val *host, mim_val *port, mim_val *b) {
+    if (!b || b->rank != 1 || (b->dtype != MIM_U8 && b->len != 0)) mim_panic("udp::send_bytes: expected bytes ([u8])");
+    return udp_send_raw(s, host, port, (const char *)b->data, (size_t)b->len, "udp::send_bytes");
+}
+
+/* one packet: Ok(Packet { data, text, host, port }) */
+mim_val *mim_std_udp_receive(mim_val *s) {
+    int fd = udp_fd(s, "udp::receive");
+    char *buf = (char *)malloc(65536);
+    struct sockaddr_in from;
+    socklen_t fl = sizeof from;
+    ssize_t r;
+    while ((r = mrecvfrom(fd, buf, 65536, (struct sockaddr *)&from, &fl)) < 0 && errno == EINTR) {
+    }
+    if (r < 0) {
+        free(buf);
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return err_of("timed out");
+        return err_errno("cannot receive", NULL);
+    }
+    mim_val *data = alloc(MIM_U8, 1, (int64_t)r);
+    if (r) memcpy(data->data, buf, (size_t)r);
+    mim_val *text = mim_str(buf, (int64_t)r);
+    free(buf);
+    char host[INET_ADDRSTRLEN] = "";
+    inet_ntop(AF_INET, &from.sin_addr, host, sizeof host);
+    mim_val *f[4] = {data, text, mim_str(host, (int64_t)strlen(host)), mim_int(ntohs(from.sin_port))};
+    return ok_of(obj_owned(&mim_desc_udp_Packet, 4, f));
+}
+
+/* like receive, but Err("timed out") after `timeout` (a duration) */
+mim_val *mim_std_udp_receive_within(mim_val *s, mim_val *timeout) {
+    int fd = udp_fd(s, "udp::receive_within");
+    int64_t ns = timeout && timeout->rank == 0 ? (timeout->dtype == MIM_F64 ? (int64_t)getf(timeout, 0) : geti(timeout, 0)) : 0;
+    if (ns < 1000) ns = 1000; /* 0 would mean "wait forever" to the socket */
+    struct timeval tv = {(time_t)(ns / 1000000000), (int)(ns % 1000000000 / 1000)};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    mim_val *r = mim_std_udp_receive(s);
+    struct timeval none = {0, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
+    return r;
+}
+
+mim_val *mim_std_udp_close(mim_val *s) {
+    close(udp_fd(s, "udp::close"));
+    return NULL;
 }
 
 #endif

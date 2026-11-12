@@ -338,6 +338,23 @@ pub module tcp {
     }
 }
 
+// UDP: `udp::bind(port)`, `udp::send(socket, host, port, text)`, `udp::receive(socket)`.
+// Datagrams over IPv4; packets may be lost or arrive out of order.
+pub module udp {
+    pub type Socket = { fd: i64, port: i64 }
+    // One received packet: its bytes (also as text) and who sent it.
+    pub type Packet = { data: [u8], text: str, host: str, port: i64 }
+
+    pub extern \"mimic\" concurrent {
+        fn bind(port: i64) -> Result[Socket, str]
+        fn send(socket: Socket, host: str, port: i64, text: str) -> Result[i64, str]
+        fn send_bytes(socket: Socket, host: str, port: i64, data: [u8]) -> Result[i64, str]
+        fn receive(socket: Socket) -> Result[Packet, str]
+        fn receive_within(socket: Socket, timeout: i64) -> Result[Packet, str]
+        fn close(socket: Socket)
+    }
+}
+
 // HTTP: `http::fetch(url)`, `http::serve(port, handler)`, …
 pub module http {
     // A request as a server receives it. Header names are lower case.

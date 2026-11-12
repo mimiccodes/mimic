@@ -1,0 +1,46 @@
+module main
+
+// UDP: an echo server task and a client in one program.
+// (WASI has no sockets: datagrams.wasi.out has its output.)
+
+fn echo(sock: udp::Socket, n: i64) -> i64 {
+    if n == 0 { 0 } else {
+        match udp::receive(sock) {
+            Ok(p) => {
+                udp::send(sock, p.host, p.port, upper(p.text))
+                1 + echo(sock, n - 1)
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
+fn text_of(r: Result[udp::Packet, str]) -> str {
+    match r {
+        Ok(p) => "{p.text} from {p.host}",
+        Err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    let server = match udp::bind(0) {
+        Ok(s) => s,
+        Err(e) => {
+            print("no UDP: {e}")
+            return
+        }
+    }
+    let answered = echo(server, 2)              // a task of its own
+    let client = udp::bind(0) else { return }
+    print(server.port > 0)
+    print(udp::send(client, "127.0.0.1", server.port, "ping"))
+    print(text_of(udp::receive_within(client, 2s)))
+    udp::send_bytes(client, "localhost", server.port, bytes::from([104 105]))
+    let r = udp::receive_within(client, 2s) else { return }
+    print(bytes::hex(r.data))
+    print(r.port == server.port)
+    print(answered)
+    print(text_of(udp::receive_within(client, 50ms)))   // nobody answers now
+    udp::close(client)
+    udp::close(server)
+}

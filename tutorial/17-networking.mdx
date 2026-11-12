@@ -1,12 +1,12 @@
 ---
 title: Networking
-description: The http and tcp modules — fetch from the web, write an HTTP server with route patterns, and talk TCP, with requests that overlap by themselves.
+description: The http, ws, tcp and udp modules — fetch from the web, write an HTTP server with route patterns, WebSockets, TCP and UDP, with requests that overlap by themselves.
 order: 17
 ---
 
 # Networking
 
-Networking lives in two standard modules, `http` and `tcp`. Like all standard modules they need no import: write `http::fetch(…)` or `tcp::connect(…)` from any file. If you prefer short names, `use http::fetch` brings one in. A module of your own with the same name, for example a project called `http`, takes precedence.
+Networking lives in four standard modules: `http`, `ws`, `tcp` and `udp`. Like all standard modules they need no import: write `http::fetch(…)` or `tcp::connect(…)` from any file. If you prefer short names, `use http::fetch` brings one in. A module of your own with the same name, for example a project called `http`, takes precedence.
 
 ## Fetching
 
@@ -179,5 +179,71 @@ tcp::close(sock)
 ```
 
 A server side uses `tcp::listen(port)` and `tcp::accept(listener)`. All TCP calls happen in program order.
+
+## UDP
+
+UDP sends single packets instead of a stream. There is no connection, and a packet can get lost on the way. In return it is quick and simple, and it is what games, DNS and many local-network protocols use.
+
+`udp::bind(port)` opens a socket. Port `0` picks any free port. `udp::send(socket, host, port, text)` sends one packet. `udp::receive(socket)` waits for one and returns a `udp::Packet` with its text, its bytes and who sent it. Because packets can get lost, `udp::receive_within(socket, timeout)` gives up after a while:
+
+```mimic run
+module main
+
+// UDP: an echo server task and a client in one program.
+
+fn echo(sock: udp::Socket, n: i64) -> i64 {
+    if n == 0 { 0 } else {
+        match udp::receive(sock) {
+            Ok(p) => {
+                udp::send(sock, p.host, p.port, upper(p.text))
+                1 + echo(sock, n - 1)
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
+fn text_of(r: Result[udp::Packet, str]) -> str {
+    match r {
+        Ok(p) => "{p.text} from {p.host}",
+        Err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    let server = match udp::bind(0) {
+        Ok(s) => s,
+        Err(e) => {
+            print("no UDP: {e}")
+            return
+        }
+    }
+    let answered = echo(server, 2)              // a task of its own
+    let client = udp::bind(0) else { return }
+    print(server.port > 0)
+    print(udp::send(client, "127.0.0.1", server.port, "ping"))
+    print(text_of(udp::receive_within(client, 2s)))
+    udp::send_bytes(client, "localhost", server.port, bytes::from([104 105]))
+    let r = udp::receive_within(client, 2s) else { return }
+    print(bytes::hex(r.data))
+    print(r.port == server.port)
+    print(answered)
+    print(text_of(udp::receive_within(client, 50ms)))   // nobody answers now
+    udp::close(client)
+    udp::close(server)
+}
+```
+
+```output
+true
+Ok(4)
+PING from 127.0.0.1
+4849
+true
+2
+error: timed out
+```
+
+`echo` runs as a task of its own while `main` talks to it. It answers to whatever address each packet came from.
 
 Next: the full list of networking functions is in the [standard library reference](../docs/std.md#networking). Back to the [index](index.mdx).

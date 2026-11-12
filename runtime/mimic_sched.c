@@ -656,6 +656,34 @@ static ssize_t msend(int fd, const void *buf, size_t n, int flags) {
     }
 }
 
+static ssize_t mrecvfrom(int fd, void *buf, size_t n, struct sockaddr *from, socklen_t *fl) {
+    if (!t_co) return recvfrom(fd, buf, n, 0, from, fl);
+    for (;;) {
+        ssize_t r = recvfrom(fd, buf, n, MSG_DONTWAIT, from, fl);
+        if (r >= 0) return r;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return r;
+        if (!co_wait_fd(fd, 0, sock_timeo(fd, SO_RCVTIMEO))) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+}
+
+static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr *to, socklen_t tl) {
+    if (!t_co) return sendto(fd, buf, n, 0, to, tl);
+    for (;;) {
+        ssize_t r = sendto(fd, buf, n, MSG_DONTWAIT, to, tl);
+        if (r >= 0) return r;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return r;
+        if (!co_wait_fd(fd, 1, sock_timeo(fd, SO_SNDTIMEO))) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+}
+
 /* before a call that would block until fd is ready (accept) */
 static void mim_wait_readable(int fd) {
     if (t_co) co_wait_fd(fd, 0, 0);
@@ -671,6 +699,8 @@ static void co_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 #include <sys/socket.h>
 static ssize_t mrecv(int fd, void *buf, size_t n) { return recv(fd, buf, n, 0); }
 static ssize_t msend(int fd, const void *buf, size_t n, int flags) { return send(fd, buf, n, flags); }
+static ssize_t mrecvfrom(int fd, void *buf, size_t n, struct sockaddr *from, socklen_t *fl) { return recvfrom(fd, buf, n, 0, from, fl); }
+static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr *to, socklen_t tl) { return sendto(fd, buf, n, 0, to, tl); }
 #endif
 static void mim_wait_readable(int fd) { (void)fd; }
 

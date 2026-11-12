@@ -232,9 +232,9 @@ match v { json::Object(m) => …, json::List(xs) => …, _ => … }
 
 **Raw strings** make JSON literals easy: `'{"name": "Ada"}'` uses single quotes, has no interpolation and no escapes.
 
-## Networking: the `http` and `tcp` modules
+## Networking: the `http`, `ws`, `tcp` and `udp` modules
 
-Networking lives in two standard modules, used by path from any file with no import: `http::fetch`, `tcp::connect`. (`use http::fetch` works too.) Your own modules come first: a project or module called `http` hides the standard one.
+Networking lives in standard modules, used by path from any file with no import: `http::fetch`, `ws::connect`, `tcp::connect`, `udp::bind`. (`use http::fetch` works too.) Your own modules come first: a project or module called `http` hides the standard one.
 
 ### `http`
 
@@ -330,3 +330,29 @@ How WebSockets behave:
 | `tcp::close(socket)` | Close a socket or listener |
 
 TCP calls happen in program order.
+
+### `udp`
+
+```mimic
+let sock = udp::bind(0) else { return }                 // port 0: any free port, see sock.port
+udp::send(sock, "127.0.0.1", 9999, "ping")
+match udp::receive_within(sock, 2s) {
+    Ok(p) => print("{p.text} from {p.host}:{p.port}"),
+    Err(e) => print(e),                                  // "timed out"
+}
+```
+
+| Function / type | Result |
+|---|---|
+| `udp::bind(port)` | `Result[udp::Socket, str]`: a socket on every interface; `.port` is the port it got |
+| `udp::send(socket, host, port, text)` | `Result[i64, str]`: one packet |
+| `udp::send_bytes(socket, host, port, data)` | The same with `[u8]` |
+| `udp::receive(socket)` | `Result[udp::Packet, str]`: waits for one packet |
+| `udp::receive_within(socket, timeout)` | The same, or `Err("timed out")` after `timeout` (a duration such as `500ms`) |
+| `udp::close(socket)` | Close it |
+| `udp::Packet` | `{ data: [u8], text: str, host: str, port: i64 }`: the bytes, the same bytes as text, and the sender |
+
+How UDP behaves:
+* **Packets, not streams.** Each send is one packet, at most about 64 KB. Packets can be lost, duplicated or arrive out of order. UDP never tells you, so use `receive_within` and retry when an answer matters.
+* **IPv4 only, for now.** Broadcast addresses are allowed.
+* **Tasks.** UDP calls may overlap, like WebSockets. A function that only uses UDP can run as a task (`let s = serve_udp(sock)`), and on the event loop a waiting `receive` parks only its task.
