@@ -1,0 +1,32 @@
+module main
+
+// `¨` with pure functions on numbers compiles into fused kernels: check the
+// shapes it takes (results must equal the plain evaluation).
+
+fn sq(x: i64) -> i64 { x * x }
+
+fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+
+fn half(x: f64) -> f64 { x / 2.0 }
+
+fn main() {
+    let n = 100000
+    print(⍳ n ¨ (x => x % 7) ▷ +/)                       // lambda, reduced
+    print(⍳ n ¨ sq ▷ +/)                                 // named function
+    print(⍳ 10 ¨ sq)                                     // materialised
+    print(⍳ 10 ¨ (x => x * 3) × 2 + 1)                    // inside a longer chain
+    print((⍳ 10 ¨ (x => x * 3)) ¨ (y => y - 1))          // ¨ of ¨
+    let k = 5
+    let xs = ⍳ 10 × 10
+    print(⍳ 10 ¨ (i => xs[i] + k))                       // capturing an array and a number
+    print(⍳ 10 ¨ (i => xs[9 - i]))                       // indexing in any order
+    print([1.5 2.5 4.0] ¨ half)                           // floats
+    print([1.5 2.5 4.0] ¨ (x => x * x) ▷ +/)
+    print(⍳ 12 ¨ fib)                                    // recursion inside
+    let evens = ⍳ 10 ¨ (x => x % 2 == 0)                 // booleans
+    print(evens)
+    print(⍳ 10 ⌿ evens)
+    print(⍳ 0 ¨ sq)                                       // empty
+    print(⍳ 1000000 ¨ (x => x % 1000) ▷ ⌈/)               // max
+    print(⍳ 20 ¨ (x => if x % 3 == 0 { x } else { 0 - x }) ▷ +/)
+}

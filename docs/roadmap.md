@@ -76,7 +76,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | E4 (TLS servers) | `tls` module: identities from PEM (PKCS#8/EC/RSA keys), `tls::self_signed` (P-256 certificates built in the runtime), `http::serve_tls`, `ws::serve_tls`, `tls::accept`, encrypted TCP streams with `tls::connect` / `connect_trusting` | ✅ |
 | E5 (first part) | `ui` module: `view(state)` / `update(state, message)`, elements as functions with named arguments, `ui::run` serving the browser (one task per tab, minimal patches over a WebSocket), constructors as functions, nested `with`, purity polymorphic in function parameters, E0605 ([ui.md](ui.md)) | ✅ |
 | E3 (rest), E4 (rest), E5 | Event loop on Windows (IOCP), io_uring, decoding unions, interfaces (`view(state)`, design in [ui.md](ui.md)) | |
-| F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
+| F (first part) | Typed `¨` kernels: `¨` with pure numeric functions fused into the parallel loops (lambdas may capture numbers and numeric arrays); direct indexing of numeric vectors ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (fusion through `↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 

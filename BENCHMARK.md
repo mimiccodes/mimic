@@ -93,6 +93,20 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Phase F step 1: typed `¨` kernels and direct indexing
+
+`xs ¨ f` with a pure `f` on numbers now compiles into the fused kernels: `f` becomes a native function on unboxed numbers, called (and usually inlined) inside one parallel loop, with no boxing and no temporary arrays. Lambdas may capture numbers and numeric arrays. `xs[i]` on a numeric vector reads the element directly after a bounds check, and falls back to the general path for errors and matrices.
+
+20 million elements on the M3 Pro, best of 3. The C version is a plain `-O3 -mcpu=native` loop:
+
+| Expression | Before | Now, all cores | Now, 1 thread | C, 1 thread |
+|---|---|---|---|---|
+| `⍳ n ¨ (x => (x × x + 7) % 1000) ▷ +/` | 1437 ms | **9 ms** | 63 ms | 59 ms |
+| `⍳ n ¨ step ▷ +/` (a named function) | 1412 ms | **10 ms** | 61 ms | 59 ms |
+| `⍳ n ¨ (i => xs[i] × 2) ▷ +/` | 7129 ms | **58 ms** | 131 ms | — |
+
+So `¨` went from 24× slower than C to C's speed on one core, and about 6× faster on all cores. `¨` over records, strings or other boxed values still takes the general path.
+
 ### After M3 performance step 1: fusion, cheaper division, real loops
 
 These are the showcase's compute benchmarks (`examples/showcase`, run with `make compare` and `make parallel`). Measured on the same M3 Pro under load average 9. Times are best of 3:

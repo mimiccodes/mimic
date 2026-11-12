@@ -44,6 +44,10 @@ pub(crate) enum Node {
     Scalar(usize, Ty),
     Bin(BinOp, Box<Node>, Box<Node>),
     Un(UnOp, Box<Node>),
+    /// `xs ¨ f` with a pure `f` on unboxed numbers: call the native `f` (by
+    /// name) on the element, with captured values from slots; `depth`: `f`
+    /// takes the native recursion depth too
+    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool },
 }
 
 /// Values computed before the loop and handed to the kernel.
@@ -77,6 +81,40 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Binary { lhs, rhs, .. } => self.is_operand(lhs) && self.is_operand(rhs),
             ExprKind::Unary { expr, .. } => self.is_operand(expr),
             ExprKind::Path(p) => p.len() == 1 && self.lazy_expr(&p[0]).is_some(),
+            ExprKind::Prim { prim: Prim::Each, args } => self.each_fusible(e, args),
+            _ => false,
+        }
+    }
+
+    /// `xs ¨ f` computed element by element: `xs` a numeric array, `f` a pure
+    /// lambda of one parameter (capturing only numbers and numeric arrays) or
+    /// a pure named function, both on unboxed numbers.
+    fn each_fusible(&self, e: &Expr, args: &[Expr]) -> bool {
+        if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some()) {
+            return false;
+        }
+        if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
+            return false;
+        }
+        let simple = |t: Ty| t.is_unboxed() && t != Ty::Unit;
+        match &args[1].kind {
+            ExprKind::Lambda { params, body } => {
+                let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
+                params.len() == 1
+                    && pts.len() == 1
+                    && simple(pts[0])
+                    && simple(rt)
+                    && self.captures(params, body).iter().all(|(_, t)| simple(*t) || num_el(*t).is_some())
+            }
+            ExprKind::Path(path) => {
+                let Ok(fid) = self.resolve_fn(path) else { return false };
+                if !matches!(self.p.fns[fid].kind, FnKind::User(_)) {
+                    return false;
+                }
+                let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) else { return false };
+                let Ok(spec) = self.spec(&k) else { return false };
+                spec.params.len() == 1 && simple(spec.params[0]) && simple(spec.ret)
+            }
             _ => false,
         }
     }
@@ -89,7 +127,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Worth fusing: an operation over arrays (a lone `⍳ n` or variable is not).
     pub(crate) fn fusible_root(&self, e: &Expr) -> bool {
-        matches!(e.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. }) && self.is_fae(e)
+        matches!(e.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Prim { prim: Prim::Each, .. }) && self.is_fae(e)
     }
 
     /// Evaluate the parts of a fusible expression that are computed once
@@ -127,6 +165,34 @@ impl<'ctx> Cg<'ctx, '_> {
                 Ok(Node::Bin(*op, Box::new(a), Box::new(b)))
             }
             ExprKind::Unary { op, expr } => Ok(Node::Un(*op, Box::new(self.operand(expr, plan)?))),
+            ExprKind::Prim { prim: Prim::Each, args } => {
+                let arg = Box::new(self.operand(&args[0], plan)?);
+                match &args[1].kind {
+                    ExprKind::Lambda { params, body } => {
+                        let caps = self.captures(params, body);
+                        let mut slots = Vec::new();
+                        for (name, t) in &caps {
+                            let l = self.lookup(name).ok_or("internal compiler error: captured variable")?;
+                            let (slot, lt) = (l.slot, l.ty);
+                            let v = self.b.build_load(self.repr(lt), slot, name).s()?;
+                            plan.slots.push(v);
+                            slots.push(plan.slots.len() - 1);
+                            let _ = t;
+                        }
+                        let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false })
+                    }
+                    ExprKind::Path(path) => {
+                        let fid = self.resolve_fn(path)?;
+                        let k = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()).ok_or("internal compiler error: untyped ¨ callback")?;
+                        let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                        let f = self.request(&k, kind)?;
+                        let spec = self.spec(&k)?;
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native })
+                    }
+                    _ => Err("internal compiler error: not a fusible ¨".into()),
+                }
+            }
             _ => Err("internal compiler error: not a fusible expression".into()),
         }
     }
@@ -224,6 +290,24 @@ impl<'ctx> Cg<'ctx, '_> {
             Node::Un(op, a) => {
                 let x = self.eval_node(a, i, slots)?;
                 self.scalar_unary(*op, x)?
+            }
+            Node::Apply { f, arg, caps, pt, rt, depth } => {
+                let x = self.eval_node(arg, i, slots)?;
+                let x: BasicMetadataValueEnum = match pt {
+                    Ty::F64 => self.to_f64(x)?.into(),
+                    Ty::Bool => self.truth(x)?.into(),
+                    _ => self.to_i64(x)?.into(),
+                };
+                let mut args = vec![x];
+                for c in caps {
+                    args.push(slots[*c].into());
+                }
+                if *depth {
+                    args.push(self.ctx.i32_type().const_zero().into()); // a fresh native stack
+                }
+                let fv = self.module.get_function(f).ok_or("internal compiler error: missing ¨ function")?;
+                let r = self.b.build_call(fv, &args, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: ¨ function returns nothing")?;
+                self.val_of(r, *rt, false)
             }
         })
     }

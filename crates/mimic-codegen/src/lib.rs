@@ -1586,6 +1586,40 @@ impl<'ctx> Cg<'ctx, '_> {
     // ---- expressions ----------------------------------------------------
 
     /// Compile a lambda without captures as a typed function `(params…) -> ret`.
+    /// A lambda as a native function whose captured variables are extra
+    /// parameters after its own (used by fused `¨` kernels).
+    fn lambda_fn_with(&mut self, e: &Expr, caps: &[(String, Ty)]) -> R<(FunctionValue<'ctx>, Vec<Ty>, Ty)> {
+        let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
+        let (pts, rt) = self
+            .cur_spec
+            .as_ref()
+            .and_then(|s| s.lambdas.get(&id(e)).cloned())
+            .unwrap_or_else(|| (vec![Ty::Dyn; params.len()], Ty::Dyn));
+        let rt = if rt == Ty::Never { Ty::Dyn } else { rt };
+        let mut all: Vec<Ty> = pts.clone();
+        all.extend(caps.iter().map(|(_, t)| *t));
+        self.lambdas += 1;
+        let f = self.module.add_function(&format!("_mimic_each_{}", self.lambdas), self.fn_type(&all, rt), Some(Linkage::Internal));
+        let names: Vec<String> = params.iter().cloned().chain(caps.iter().map(|(n, _)| n.clone())).collect();
+        self.in_new_fn(f, |cg| {
+            cg.cur_ret = rt;
+            cg.ret_what = "lambda result".into();
+            let mut locals = Vec::new();
+            for (i, (name, pt)) in names.iter().zip(&all).enumerate() {
+                let slot = cg.entry_alloca(*pt, name)?;
+                cg.b.build_store(slot, f.get_nth_param(i as u32).unwrap()).s()?;
+                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false });
+            }
+            cg.scopes = vec![locals];
+            let v = cg.expr(body)?;
+            if !cg.terminated() {
+                cg.ret(v)?;
+            }
+            Ok(())
+        })?;
+        Ok((f, pts, rt))
+    }
+
     fn lambda_fn(&mut self, e: &Expr) -> R<(FunctionValue<'ctx>, Vec<Ty>, Ty)> {
         let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
         let (pts, rt) = self
@@ -2550,6 +2584,73 @@ impl<'ctx> Cg<'ctx, '_> {
         !matches!(v, V::P(..))
     }
 
+    /// `xs[i]` on a numeric vector known by type: read the element straight
+    /// from the array when it is a vector of that element type and `i` is in
+    /// bounds; anything else (a matrix, an index out of bounds) goes through
+    /// `mim_index`, which gives the usual result or error.
+    fn index_fast(&mut self, arr: V<'ctx>, i: IntValue<'ctx>, el: El, ty: Ty) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let p = self.basic(arr).into_pointer_value();
+        let field = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
+            let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
+            cg.b.build_load(t, fp, "").s()
+        };
+        let dtype = field(self, 1, i32t.into())?.into_int_value();
+        let rank = field(self, 2, i32t.into())?.into_int_value();
+        let len = field(self, 3, i64t.into())?.into_int_value();
+        let want = match el {
+            El::F64 => 1,
+            El::Bool => 2,
+            _ => 0,
+        };
+        let b = &self.b;
+        let ok_t = b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want, false), "").s()?;
+        let ok_r = b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        // one unsigned compare checks 0 <= i < len
+        let ok_i = b.build_int_compare(IntPredicate::ULT, i, len, "").s()?;
+        let ok = b.build_and(b.build_and(ok_t, ok_r, "").s()?, ok_i, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let fast = self.ctx.append_basic_block(f, "idx_fast");
+        let slow = self.ctx.append_basic_block(f, "idx_slow");
+        let join = self.ctx.append_basic_block(f, "idx_done");
+        self.b.build_conditional_branch(ok, fast, slow).s()?;
+        // fast: load the element
+        self.b.position_at_end(fast);
+        let data = field(self, 4, self.ptr.into())?.into_pointer_value();
+        let fv: V<'ctx> = match el {
+            El::F64 => {
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), data, &[i], "").s()? };
+                V::F(self.b.build_load(self.ctx.f64_type(), ep, "").s()?.into_float_value())
+            }
+            El::Bool => {
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                V::B(self.b.build_int_compare(IntPredicate::NE, x, self.ctx.i8_type().const_zero(), "").s()?)
+            }
+            _ => {
+                let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
+                V::I(self.b.build_load(i64t, ep, "").s()?.into_int_value())
+            }
+        };
+        let fv = self.as_ty(fv, ty, "element")?;
+        let fast_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).s()?;
+        // slow: the general path (errors, matrices)
+        self.b.position_at_end(slow);
+        let iv = self.boxed(V::I(i))?;
+        let r = self.call_rt_ptr("mim_index", &[self.basic(arr).into(), self.basic(iv).into()])?;
+        self.drop_tmp(iv)?;
+        let sv = self.as_ty(r, ty, "element")?;
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).s()?;
+        self.b.position_at_end(join);
+        let phi = self.b.build_phi(self.basic(fv).get_type(), "elem").s()?;
+        phi.add_incoming(&[(&self.basic(fv), fast_end), (&self.basic(sv), slow_end)]);
+        Ok(self.val_of(phi.as_basic_value(), ty, false))
+    }
+
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let ty = self.ty_of(e);
@@ -2766,6 +2867,17 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.drop_tmp(c)?;
                 }
                 Ok(self.val_of(r, spec.ret, true))
+            }
+            ExprKind::Index { base, index }
+                if fuse::num_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
+            {
+                let b = self.expr(base)?;
+                let b = self.boxed(b)?;
+                let i = self.expr(index)?;
+                let i = self.to_i64(i)?;
+                let r = self.index_fast(b, i, fuse::num_el(self.ty_of(base)).unwrap(), ty)?;
+                self.drop_tmp(b)?;
+                Ok(r)
             }
             ExprKind::Index { base, index } => {
                 let b = self.expr(base)?;
