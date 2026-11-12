@@ -210,6 +210,8 @@ type Shape =
 
 let u = User { name: "ada", age: 36 }      // every field, in any order
 let older = { u with age: u.age + 1 }      // a new record; `u` is unchanged
+let moved = { u with home.city: "Paris" }  // reaches into nested records…
+let done = { s with todos[i].done: true }  // …and into list elements
 print(u.name)
 
 fn area(s: Shape) -> f64 {

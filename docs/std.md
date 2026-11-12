@@ -27,6 +27,7 @@ These are visible in every file without an import. The string, list and map func
 | Function | Result |
 |---|---|
 | `push(xs, x)` | A new list with `x` appended |
+| `put(xs, i, x)` | A new list with element `i` replaced by `x` (for maps: a new map with key `i` set) |
 | `concat(xs, ys)` | `xs` followed by `ys` |
 | `sort(xs)` | Ascending, stable; numbers or strings |
 | `contains(xs, x)` | `bool` |

@@ -38,6 +38,29 @@ Ada
 false
 ```
 
+`with` can reach inside nested records and lists. Only the path you name changes, and everything else is shared with the original:
+
+```mimic run
+module main
+
+type Todo = { text: str, done: bool }
+type List = { title: str, todos: [Todo] }
+
+fn main() {
+    let l = List { title: "home", todos: [Todo { text: "milk", done: false }, Todo { text: "bike", done: false }] }
+    let l2 = { l with todos[1].done: true, title: "Home" }
+    print(l2.todos ¨ (t => t.done))
+    print(l2.title)
+    print(l.todos ¨ (t => t.done))         // the original is unchanged
+}
+```
+
+```output
+[false true]
+Home
+[false false]
+```
+
 ## Unions
 
 A union is a value that is exactly one of several *variants*, and each variant can carry data:

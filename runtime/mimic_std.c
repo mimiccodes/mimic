@@ -612,8 +612,15 @@ static void map_set(mim_val **slot, mim_val *k, mim_val *v) {
 
 mim_val *mim_std_has(mim_val *m, mim_val *k) { return mim_bool(map_find(map_check(m, "has"), k, NULL) >= 0); }
 
-/* put(m, k, v): a new map with k set (the original is unchanged) */
+/* put(m, k, v): a new map with k set; put(xs, i, v): a new list with
+ * element i replaced (the original is unchanged either way) */
 mim_val *mim_std_put(mim_val *m, mim_val *k, mim_val *v) {
+    if (m && m->dtype != MIM_MAP && m->rank == 1) {
+        mim_val *slot = m;
+        mim_retain(m); /* shared now, so the store copies */
+        mim_set_index(&slot, k, v);
+        return slot;
+    }
     map_check(m, "put");
     mim_val *r = map_copy(m, MAP_META(m)->count + 1);
     mim_retain(k);

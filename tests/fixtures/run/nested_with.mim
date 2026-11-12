@@ -1,0 +1,27 @@
+module main
+
+// `with` reaches inside records and lists: `{ s with todos[i].done: true }`.
+
+type Todo = { text: str, done: bool }
+type Place = { city: str, zip: str }
+type Owner = { name: str, home: Place }
+type State = { todos: [Todo], owner: Owner, scores: [i64] }
+
+fn main() {
+    let s = State {
+        todos: [Todo { text: "milk", done: false }, Todo { text: "bike", done: false }],
+        owner: Owner { name: "Ada", home: Place { city: "London", zip: "N1" } },
+        scores: [1 2 3],
+    }
+    let t = { s with todos[1].done: not s.todos[1].done }
+    print(t.todos ¨ (x => x.done))
+    print(s.todos ¨ (x => x.done))                       // the original is unchanged
+    let u = { s with owner.home.city: "Paris", scores[0]: 10, scores[2]: s.scores[2] * 100 }
+    print(u.owner.home)
+    print(u.scores)
+    print(s.owner.home.city)
+    let i = 0
+    print({ s with todos[i].text: upper(s.todos[i].text) }.todos ¨ (x => x.text))
+    print(put([1 2 3], 1, 20))
+    print(put(["a" "b"], 0, "z"))
+}

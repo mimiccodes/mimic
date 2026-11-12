@@ -21,7 +21,7 @@ fn update(s: State, m: Msg) -> State {
         Add if trim(s.draft) == "" => s,
         Add => { s with todos: push(s.todos, Todo { text: s.draft, done: false }), draft: "" },
         Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
-        Toggle(i) => { s with todos[i].done: !s.todos[i].done },   // new syntax, see below
+        Toggle(i) => { s with todos[i].done: not s.todos[i].done },   // new syntax, see below
     }
 }
 
@@ -114,7 +114,7 @@ Colours are `"#3366ff"` or names. Sizes are numbers (logical pixels). There is a
 ## Language additions it needs
 
 * **Variant constructors as functions:** `on_input: Typed` instead of `on_input: t => Typed(t)`. This is useful everywhere, not just for interfaces.
-* **Updating one element of a list in a record:** `{ s with todos[i].done: !s.todos[i].done }`. Today this needs a whole `¨`.
+* **Updating one element of a list in a record:** `{ s with todos[i].done: not s.todos[i].done }`. Today this needs a whole `¨`.
 * **`ui::Node[Msg]` as a generic std type** whose event handlers carry `Msg` values. Generics already exist; the runtime stores handlers as closures.
 
 ## Build order

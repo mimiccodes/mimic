@@ -1319,8 +1319,9 @@ impl Parser {
                 self.nl_ignore = save.1;
                 if is_with {
                     self.next();
-                    let fields = self.field_list()?;
-                    return Ok(Expr { kind: ExprKind::With { base: Box::new(base?), fields }, span: span.to(self.prev_span()) });
+                    let entries = self.with_entries()?;
+                    let all = span.to(self.prev_span());
+                    return Ok(with_desugar(base?, entries, all));
                 }
                 self.pos = save.0 - 1;
                 let b = self.block()?;
@@ -1395,6 +1396,43 @@ impl Parser {
         let fields = r?;
         self.expect(&Tok::RBrace)?;
         Ok(fields)
+    }
+
+    /// The entries of `{ base with … }`: `field: value`, or a nested target
+    /// such as `todos[i].done: value`.
+    fn with_entries(&mut self) -> PResult<Vec<WithEntry>> {
+        self.nl_ignore += 1;
+        let r = (|| {
+            let mut out: Vec<WithEntry> = Vec::new();
+            while !self.at(&Tok::RBrace) {
+                let (f, fs) = self.name_or_word()?;
+                let mut segs = Vec::new();
+                loop {
+                    if self.eat(&Tok::Dot) {
+                        segs.push(WithSeg::Field(self.name_or_word()?.0));
+                    } else if self.at(&Tok::LBracket) {
+                        self.next();
+                        let i = self.expr()?;
+                        self.expect(&Tok::RBracket)?;
+                        segs.push(WithSeg::Index(i));
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&Tok::Colon)?;
+                let v = self.expr()?;
+                if segs.is_empty() && out.iter().any(|e| e.segs.is_empty() && e.field == f) {
+                    return Err(Diag::new(&C::DUPLICATE_ENTRY, format!("field `{f}` is given twice"), fs));
+                }
+                out.push(WithEntry { field: f, segs, value: v, span: fs });
+                self.eat(&Tok::Comma);
+            }
+            Ok(out)
+        })();
+        self.nl_ignore -= 1;
+        let out = r?;
+        self.expect(&Tok::RBrace)?;
+        Ok(out)
     }
 
     /// `Point { x, y: 0, .. }` (the path is already read)
@@ -1734,6 +1772,84 @@ impl Parser {
         };
         let span = start.to(self.prev_span());
         Ok(Expr { kind: ExprKind::If { cond: Box::new(cond), then, els }, span })
+    }
+}
+
+
+/// One entry of `{ base with … }`.
+pub(crate) struct WithEntry {
+    field: String,
+    segs: Vec<WithSeg>,
+    value: Expr,
+    span: Span,
+}
+
+pub(crate) enum WithSeg {
+    Field(String),
+    Index(Expr),
+}
+
+fn ex(kind: ExprKind, span: Span) -> Expr {
+    Expr { kind, span }
+}
+
+/// `{ base with a: 1, b.c: 2, d[i].e: 3 }` in plain terms: the plain fields
+/// form one `with`; each nested entry is applied on top, in order, through a
+/// temporary, so nothing is evaluated twice:
+/// `{ let t = …; { t with d: put(t.d, i, { t.d[i] with e: 3 }) } }`.
+fn with_desugar(base: Expr, entries: Vec<WithEntry>, span: Span) -> Expr {
+    let (plain, nested): (Vec<WithEntry>, Vec<WithEntry>) = entries.into_iter().partition(|e| e.segs.is_empty());
+    let mut cur = if !plain.is_empty() || nested.is_empty() {
+        let fields = plain.into_iter().map(|e| (e.field, e.value, e.span)).collect();
+        ex(ExprKind::With { base: Box::new(base), fields }, span)
+    } else {
+        base
+    };
+    for (k, e) in nested.into_iter().enumerate() {
+        let t = format!("with·{}·{k}", span.start);
+        let tv = ex(ExprKind::Path(vec![t.clone()]), e.span);
+        let target = ex(ExprKind::Field { base: Box::new(tv.clone()), name: e.field.clone() }, e.span);
+        let inner = with_path(target, e.segs, e.value, &t, 0);
+        let upd = ex(ExprKind::With { base: Box::new(tv), fields: vec![(e.field, inner, e.span)] }, span);
+        cur = ex(
+            ExprKind::Block(Block {
+                stmts: vec![Stmt::Let { name: t, mutable: false, ty: None, value: cur, span }],
+                tail: Some(Box::new(upd)),
+                span,
+            }),
+            span,
+        );
+    }
+    cur
+}
+
+/// The new value of `target` (the current value there) after setting
+/// `target` + `segs` to `value`.
+fn with_path(target: Expr, mut segs: Vec<WithSeg>, value: Expr, tmp: &str, depth: usize) -> Expr {
+    if segs.is_empty() {
+        return value;
+    }
+    let span = target.span;
+    match segs.remove(0) {
+        WithSeg::Field(f) => {
+            let next = ex(ExprKind::Field { base: Box::new(target.clone()), name: f.clone() }, span);
+            let v = with_path(next, segs, value, tmp, depth + 1);
+            ex(ExprKind::With { base: Box::new(target), fields: vec![(f, v, span)] }, span)
+        }
+        WithSeg::Index(i) => {
+            let iname = format!("{tmp}·at{depth}");
+            let iv = ex(ExprKind::Path(vec![iname.clone()]), i.span);
+            let next = ex(ExprKind::Index { base: Box::new(target.clone()), index: Box::new(iv.clone()) }, span);
+            let v = with_path(next, segs, value, tmp, depth + 1);
+            let put = ex(
+                ExprKind::Call { callee: Box::new(ex(ExprKind::Path(vec!["std".into(), "put".into()]), span)), args: vec![target, iv, v] },
+                span,
+            );
+            ex(
+                ExprKind::Block(Block { stmts: vec![Stmt::Let { name: iname, mutable: false, ty: None, value: i, span }], tail: Some(Box::new(put)), span }),
+                span,
+            )
+        }
     }
 }
 
