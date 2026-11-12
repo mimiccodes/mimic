@@ -1,0 +1,38 @@
+module main
+
+// A bounded channel holds at most `capacity` values: a sender waits while it
+// is full, so a fast producer cannot run far ahead of a slow consumer.
+// (WASI has no threads: tasks are deferred, so backpressure.wasi.out differs.)
+
+fn produce(tx: chan::Sender[i64], log: chan::Sender[i64], i: i64, n: i64) -> i64 {
+    if i > n {
+        chan::close(tx)
+        chan::close(log)
+        n
+    } else {
+        chan::send(tx, i)
+        chan::send(log, i)                 // after the send went through
+        produce(tx, log, i + 1, n)
+    }
+}
+
+fn drain(rx: chan::Receiver[i64], acc: [i64]) -> [i64] {
+    match chan::receive(rx) {
+        Some(x) => drain(rx, push(acc, x)),
+        None => acc,
+    }
+}
+
+fn main() {
+    let (tx, rx) = chan::bounded[i64](2)
+    let (log_tx, log_rx) = chan::new[i64]()
+    let p = produce(tx, log_tx, 1, 6)
+    time::sleep(50ms)
+    // the producer is waiting to send 3: only 1 and 2 got in
+    print(chan::try_receive(log_rx))
+    print(chan::try_receive(log_rx))
+    print(chan::try_receive(log_rx))
+    print(drain(rx, []))
+    print(drain(log_rx, []))
+    print(p)
+}

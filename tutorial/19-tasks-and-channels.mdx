@@ -16,7 +16,7 @@ A task is something you already know: a `let` whose function only has overlappin
 
 `chan::new[T]()` makes a channel for values of type `T`. It returns a sender and a receiver:
 
-* **`chan::send(tx, value)`** never waits.
+* **`chan::send(tx, value)`** never waits (but see [bounded channels](#bounded-channels)).
 * **`chan::receive(rx)`** waits for the next value, and returns `None` once the channel is closed and empty.
 * **`chan::close(tx)`** says no more values will come.
 
@@ -76,6 +76,61 @@ Some("hi")
 The worker runs at the same time as `main`. `collect` gathers results until the worker closes its output channel, and `done` (the worker's count) is awaited where it is printed.
 
 The ends of a channel are ordinary values, so they can be put in lists, captured by closures, or even sent through other channels. A sender sent through a channel is how a server hands each new connection a way to be reached, as the chat room below shows.
+
+## Bounded channels
+
+A channel from `chan::new` has no limit. If a producer is faster than its consumer, values pile up in memory. `chan::bounded[T](capacity)` makes a channel that holds at most `capacity` values. A `send` to a full channel waits until the receiver has taken one. This is called **backpressure**:
+
+```mimic run
+module main
+
+// A bounded channel holds at most `capacity` values: a sender waits while it
+// is full, so a fast producer cannot run far ahead of a slow consumer.
+
+fn produce(tx: chan::Sender[i64], log: chan::Sender[i64], i: i64, n: i64) -> i64 {
+    if i > n {
+        chan::close(tx)
+        chan::close(log)
+        n
+    } else {
+        chan::send(tx, i)
+        chan::send(log, i)                 // after the send went through
+        produce(tx, log, i + 1, n)
+    }
+}
+
+fn drain(rx: chan::Receiver[i64], acc: [i64]) -> [i64] {
+    match chan::receive(rx) {
+        Some(x) => drain(rx, push(acc, x)),
+        None => acc,
+    }
+}
+
+fn main() {
+    let (tx, rx) = chan::bounded[i64](2)
+    let (log_tx, log_rx) = chan::new[i64]()
+    let p = produce(tx, log_tx, 1, 6)
+    time::sleep(50ms)
+    // the producer is waiting to send 3: only 1 and 2 got in
+    print(chan::try_receive(log_rx))
+    print(chan::try_receive(log_rx))
+    print(chan::try_receive(log_rx))
+    print(drain(rx, []))
+    print(drain(log_rx, []))
+    print(p)
+}
+```
+
+```output
+Some(1)
+Some(2)
+None
+[1 2 3 4 5 6]
+[3 4 5 6]
+6
+```
+
+The producer starts at once, sends `1` and `2`, and then waits: the channel is full. It goes on only when `drain` takes values out. It never gets more than two values ahead.
 
 ## A chat room
 

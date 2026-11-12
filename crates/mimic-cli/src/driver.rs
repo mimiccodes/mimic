@@ -290,6 +290,7 @@ pub module chan {
 
     pub extern \"mimic\" concurrent {
         fn new[T]() -> (Sender[T], Receiver[T])
+        fn bounded[T](capacity: i64) -> (Sender[T], Receiver[T])
         fn send[T](tx: Sender[T], value: T) -> bool
         fn receive[T](rx: Receiver[T]) -> Option[T]
         fn try_receive[T](rx: Receiver[T]) -> Option[T]

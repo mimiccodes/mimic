@@ -1142,13 +1142,16 @@ extern const mim_desc mim_desc_tuple, mim_desc_chan_Sender, mim_desc_chan_Receiv
 typedef struct {
 #if MIM_THREADS && !defined(_WIN32)
     pthread_mutex_t m;
-    pthread_cond_t c;
+    pthread_cond_t c;     /* a value arrived (or closed) */
+    pthread_cond_t space; /* a bounded channel has room again (or closed) */
 #endif
     mim_val **q;
     int64_t head, n, cap;
+    int64_t limit; /* the most values it holds; 0: unbounded */
     int closed;
 #if MIM_GREEN
-    mim_co *waiters, *waiters_tail; /* coroutines waiting in receive */
+    mim_co *waiters, *waiters_tail;   /* coroutines waiting in receive */
+    mim_co *senders, *senders_tail;   /* coroutines waiting in send */
 #endif
 } chan_t;
 
@@ -1177,13 +1180,13 @@ static chan_t *chan_of(mim_val *end, const char *what) {
     return c;
 }
 
-/* (Sender, Receiver) of a new channel; the schema argument (T) is unused */
-mim_val *mim_std_chan_new(mim_val *schema) {
-    (void)schema;
+static mim_val *chan_make(int64_t limit) {
     chan_t *c = (chan_t *)calloc(1, sizeof(chan_t));
+    c->limit = limit;
 #if MIM_THREADS && !defined(_WIN32)
     pthread_mutex_init(&c->m, NULL);
     pthread_cond_init(&c->c, NULL);
+    pthread_cond_init(&c->space, NULL);
 #endif
     CH_LOCK(&ch_tab_lock);
     if (ch_n == ch_cap) {
@@ -1198,11 +1201,96 @@ mim_val *mim_std_chan_new(mim_val *schema) {
     return obj_owned(&mim_desc_tuple, 2, ends);
 }
 
+/* (Sender, Receiver) of a new channel; the schema argument (T) is unused */
+mim_val *mim_std_chan_new(mim_val *schema) {
+    (void)schema;
+    return chan_make(0);
+}
+
+/* a channel that holds at most `capacity` values: send waits while it is full */
+mim_val *mim_std_chan_bounded(mim_val *schema, mim_val *capacity) {
+    (void)schema;
+    int64_t n = geti(capacity, 0);
+    if (n < 1) mim_panic("chan::bounded: the capacity must be at least 1");
+    return chan_make(n);
+}
+
+#if MIM_GREEN
+/* put co at the end of a waiter list */
+static void co_list_add(mim_co **head, mim_co **tail, mim_co *co) {
+    co->next = NULL;
+    if (*tail) (*tail)->next = co;
+    else *head = co;
+    *tail = co;
+}
+
+static mim_co *co_list_take(mim_co **head, mim_co **tail) {
+    mim_co *co = *head;
+    if (co) {
+        *head = co->next;
+        if (!*head) *tail = NULL;
+    }
+    return co;
+}
+
+/* wake every coroutine of a list (after the lock is released) */
+static void co_list_wake(mim_co *co) {
+    while (co) {
+        mim_co *n = co->next;
+        co_ready(co);
+        co = n;
+    }
+}
+#endif
+
+/* after a value left the channel (lock held): one waiting sender may go on.
+ * Returns a coroutine to wake once the lock is released. */
+static void *chan_room(chan_t *c) {
+    if (!c->limit) return NULL;
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_cond_signal(&c->space);
+#endif
+#if MIM_GREEN
+    return co_list_take(&c->senders, &c->senders_tail);
+#else
+    return NULL;
+#endif
+}
+
+static void chan_room_wake(void *co) {
+#if MIM_GREEN
+    if (co) co_ready((mim_co *)co);
+#else
+    (void)co;
+#endif
+}
+
+#if MIM_GREEN
+static void chan_send_park(mim_co *co, void *arg);
+#endif
+
 /* true when sent; false when the channel is closed */
 mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
     chan_t *c = chan_of(tx, "chan::send");
     need(v, "chan::send");
     CH_LOCK(&c->m);
+    while (c->limit && c->n >= c->limit && !c->closed) {
+#if MIM_GREEN
+        if (t_co) {
+            CH_UNLOCK(&c->m);
+            co_park(chan_send_park, c);
+            CH_LOCK(&c->m);
+            continue;
+        }
+#endif
+#if MIM_THREADS && !defined(_WIN32)
+        pthread_cond_wait(&c->space, &c->m);
+#else
+        /* without threads: deferred tasks may make room; a task cannot
+         * wait mid-way there, so when none is left the channel grows */
+        if (!lazy_run_one()) break;
+#endif
+    }
     if (c->closed) {
         CH_UNLOCK(&c->m);
         return mim_bool(0);
@@ -1223,11 +1311,7 @@ mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
     pthread_cond_signal(&c->c);
 #endif
 #if MIM_GREEN
-    mim_co *w = c->waiters;
-    if (w) {
-        c->waiters = w->next;
-        if (!c->waiters) c->waiters_tail = NULL;
-    }
+    mim_co *w = co_list_take(&c->waiters, &c->waiters_tail);
     CH_UNLOCK(&c->m);
     if (w) co_ready(w);
 #else
@@ -1242,12 +1326,17 @@ static void chan_park(mim_co *co, void *arg) {
     chan_t *c = (chan_t *)arg;
     CH_LOCK(&c->m);
     int now = c->n > 0 || c->closed;
-    if (!now) {
-        co->next = NULL;
-        if (c->waiters_tail) c->waiters_tail->next = co;
-        else c->waiters = co;
-        c->waiters_tail = co;
-    }
+    if (!now) co_list_add(&c->waiters, &c->waiters_tail, co);
+    CH_UNLOCK(&c->m);
+    if (now) co_ready(co);
+}
+
+/* runs once the sending coroutine is off its stack */
+static void chan_send_park(mim_co *co, void *arg) {
+    chan_t *c = (chan_t *)arg;
+    CH_LOCK(&c->m);
+    int now = c->n < c->limit || c->closed;
+    if (!now) co_list_add(&c->senders, &c->senders_tail, co);
     CH_UNLOCK(&c->m);
     if (now) co_ready(co);
 }
@@ -1280,7 +1369,9 @@ mim_val *mim_std_chan_receive(mim_val *rx) {
     if (c->n == 0 && !c->closed) mim_panic("chan::receive: the channel is empty and no task is left that could send to it");
 #endif
     mim_val *v = c->n ? chan_take(c) : NULL;
+    void *room = v ? chan_room(c) : NULL;
     CH_UNLOCK(&c->m);
+    chan_room_wake(room);
     return v ? some_of(v) : none_val();
 }
 
@@ -1289,7 +1380,9 @@ mim_val *mim_std_chan_try_receive(mim_val *rx) {
     chan_t *c = chan_of(rx, "chan::try_receive");
     CH_LOCK(&c->m);
     mim_val *v = c->n ? chan_take(c) : NULL;
+    void *room = v ? chan_room(c) : NULL;
     CH_UNLOCK(&c->m);
+    chan_room_wake(room);
     return v ? some_of(v) : none_val();
 }
 
@@ -1300,16 +1393,15 @@ mim_val *mim_std_chan_close(mim_val *tx) {
     c->closed = 1;
 #if MIM_THREADS && !defined(_WIN32)
     pthread_cond_broadcast(&c->c);
+    pthread_cond_broadcast(&c->space);
 #endif
 #if MIM_GREEN
-    mim_co *w = c->waiters;
+    mim_co *w = c->waiters, *snd = c->senders;
     c->waiters = c->waiters_tail = NULL;
+    c->senders = c->senders_tail = NULL;
     CH_UNLOCK(&c->m);
-    while (w) {
-        mim_co *n = w->next;
-        co_ready(w);
-        w = n;
-    }
+    co_list_wake(w);
+    co_list_wake(snd);
 #else
     CH_UNLOCK(&c->m);
 #endif

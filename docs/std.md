@@ -101,18 +101,20 @@ fn consume(rx: chan::Receiver[str]) -> i64 {
 
 | Function | Result |
 |---|---|
-| `chan::new[T]()` | `(chan::Sender[T], chan::Receiver[T])` |
-| `chan::send(tx, value)` | `bool`: `false` when the channel is closed |
+| `chan::new[T]()` | `(chan::Sender[T], chan::Receiver[T])`: an unbounded channel |
+| `chan::bounded[T](capacity)` | The same, holding at most `capacity` values |
+| `chan::send(tx, value)` | `bool`: `false` when the channel is closed. On a full bounded channel it waits for room |
 | `chan::receive(rx)` | `Option[T]`: waits for a value; `None` once closed and empty |
 | `chan::try_receive(rx)` | `Option[T]` without waiting |
 | `chan::close(tx)` | No more values; receivers get what is left, then `None` |
 
 How channels behave:
-* **Unbounded and safe to share.** Channels are unbounded queues, and values can be handed between threads safely because they are immutable.
+* **Unbounded or bounded.** `chan::new` makes an unbounded queue, so `send` never waits. `chan::bounded` holds a fixed number of values, and `send` waits while it is full. That is backpressure: a fast producer cannot run ahead of a slow consumer and fill memory.
+* **Safe to share.** Values can be handed between tasks safely because they are immutable.
 * **Ends are ordinary values.** A `Sender` or `Receiver` can be stored in a list, sent through another channel or captured by a closure.
 * **Tasks.** A task is any `let` of a function whose effects may overlap, which channel operations are, and `ws::serve`/`http::serve` handlers run as tasks too.
 * **Waiting is cheap.** On the event loop a `receive` that waits parks only its own task, not a thread.
-* **Without threads (WebAssembly),** tasks are deferred. A `receive` that would wait first runs deferred tasks, so producer/consumer code still works.
+* **Without threads (WebAssembly),** tasks are deferred. A `receive` that would wait first runs deferred tasks, so producer/consumer code still works. A deferred task cannot stop half-way, so a full bounded channel grows there instead of waiting.
 
 ### `bytes`: binary data (pure)
 
