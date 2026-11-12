@@ -70,7 +70,7 @@ fn main() {
 ```output
 <div data-p="0" style="display:flex;flex-direction:row;gap:8px;align-items:center"><span data-p="0.0">1</span><button data-p="0.1" type="button" data-e="click">+</button></div>
 Some(Inc)
-[{"op":"children","p":"0.0","html":"2","attrs":[]}]
+[{"op":"children","p":"0.0","html":"2","attrs":[],"at":0}]
 ```
 
 Going from 1 to 2 changes only the text of one `span`, and that is all the browser receives.
@@ -85,14 +85,14 @@ module main
 // A to-do list in the browser: `mimic run examples/todo/todo.mim`, then open
 // http://localhost:8080/. Every tab has its own list.
 
-type Todo = { text: str, done: bool }
-type State = { todos: [Todo], draft: str }
+type Todo = { id: i64, text: str, done: bool }
+type State = { todos: [Todo], draft: str, next: i64 }
 type Msg = Typed(str) | Add | Toggle(i64, bool) | Remove(i64) | ClearDone
 
 fn update(s: State, m: Msg) -> State {
     match m {
         Typed(t) => { s with draft: t },
-        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { text: trim(s.draft), done: false }), draft: "" } },
+        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { id: s.next, text: trim(s.draft), done: false }), draft: "", next: s.next + 1 } },
         Toggle(i, on) => { s with todos[i].done: on },
         Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
         ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
@@ -116,23 +116,25 @@ fn view(s: State) -> ui::Node[Msg] {
     ])
 }
 
+// keyed by id: removing a row touches only that row
 fn item(i: i64, t: Todo) -> ui::Node[Msg] {
-    ui::row([
+    ui::keyed("{t.id}", ui::row([
         ui::checkbox(t.done, on_change: on => Toggle(i, on)),
         ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
         ui::spacer(),
         ui::button("×", on_click: Remove(i)),
-    ])
+    ]))
 }
 
 fn main() {
-    print(ui::run(State { todos: [Todo { text: "Try Mimic", done: true }], draft: "" }, view, update, title: "To do"))
+    print(ui::run(State { todos: [Todo { id: 0, text: "Try Mimic", done: true }], draft: "", next: 1 }, view, update, title: "To do"))
 }
 ```
 
 Things to notice:
 * **No loops.** The list of rows is `⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))`, built in parallel like any other `¨`.
 * **Nested updates.** `{ s with todos[i].done: on }` changes one field of one element ([chapter 5](05-records-unions-match.mdx)).
+* **Keyed rows.** `ui::keyed("{t.id}", …)` gives each row an identity, so removing one row from a long list sends just that change.
 * **One state per tab.** Open the page in two tabs and each has its own list. Each tab is a task on the event loop, so thousands of tabs are cheap.
 * **Functions inside a screen must be pure.** `on_input: t => { print(t); Typed(t) }` is error E0605, because the screen may be rendered at any time and in parallel.
 

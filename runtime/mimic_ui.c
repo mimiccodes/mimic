@@ -8,6 +8,10 @@
  *   {op: 'children', p, html}  the element's contents become html
  *   {op: 'attrs', p, attrs}    the element's attributes become attrs, a
  *                              flat list [name, value, name, value, …]
+ *   {op: 'append', p, html}    new children at the end
+ *   {op: 'trim', p, at}        only the first `at` children stay
+ *   {op: 'insert', p, at, html} / {op: 'remove', p, at}: one child; the
+ *                              later siblings' paths are renumbered
  * Elements are addressed by data-p paths ('0', '0.1', '0.1.2', …) and say
  * which events they want in data-e. Focus and the caret survive patches. */
 
@@ -35,8 +39,16 @@ static const char MIM_UI_JS[] =
     "for(const k in a){if(k==='value'){if(el.value!==a[k])el.value=a[k]}el.setAttribute(k,a[k])}"
     "if(el.type==='checkbox')el.checked='checked' in a;"
     "else if('value' in el&&!('value' in a)&&el.tagName!=='BUTTON')el.value=''}"
+    "function renumber(par,from){const base=par.dataset.p;const cs=par.children;"
+    "for(let j=from;j<cs.length;j++){const c=cs[j];const old=c.dataset.p;const nw=base+'.'+j;if(old===nw)continue;"
+    "c.dataset.p=nw;for(const d of c.querySelectorAll('[data-p]'))d.dataset.p=nw+d.dataset.p.slice(old.length)}}"
+    "function frag(h){const t=document.createElement('template');t.innerHTML=h;return t.content}"
     "ws.onmessage=m=>{keep(()=>{for(const p of JSON.parse(m.data)){const el=find(p.p);if(!el)continue;"
     "if(p.op==='replace')el.outerHTML=p.html;else if(p.op==='children')el.innerHTML=p.html;"
-    "else if(p.op==='attrs')attrs(el,p.attrs)}})};"
+    "else if(p.op==='attrs')attrs(el,p.attrs);"
+    "else if(p.op==='append')el.append(frag(p.html));"
+    "else if(p.op==='trim'){while(el.children.length>p.at)el.lastElementChild.remove()}"
+    "else if(p.op==='remove'){const c=el.children[p.at];if(c){c.remove();renumber(el,p.at)}}"
+    "else if(p.op==='insert'){el.insertBefore(frag(p.html),el.children[p.at]||null);renumber(el,p.at+1)}}})};"
     "ws.onclose=()=>{document.body.style.opacity='0.5';document.title='(disconnected) '+document.title};"
     "})();";

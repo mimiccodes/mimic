@@ -1230,7 +1230,8 @@ impl Walk<'_, '_> {
                     return match (a, r) {
                         (_, Ty::Never) => Ty::Never,
                         (Ty::Arr(_), r) => Ty::Arr(r.el()),
-                        (_, r) => r, // `¨` on a scalar applies f once
+                        (Ty::Dyn, _) => Ty::Dyn, // a list or a scalar: not known here
+                        (_, r) => r,             // `¨` on a scalar applies f once
                     };
                 }
                 let b = if args.len() > 1 { self.expr(&args[1]) } else { Ty::Unit };

@@ -629,6 +629,20 @@ mim_val *mim_std_put(mim_val *m, mim_val *k, mim_val *v) {
     return r;
 }
 
+/* map_of(keys, values): a map from two lists of the same length (a later
+ * duplicate key wins); one pass, no copies */
+mim_val *mim_std_map_of(mim_val *ks, mim_val *vs) {
+    if (!ks || !vs || ks->rank != 1 || vs->rank != 1) mim_panic("map_of: expected two lists");
+    if (ks->len != vs->len) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "map_of: %lld keys but %lld values", (long long)ks->len, (long long)vs->len);
+        mim_panic(buf);
+    }
+    mim_val *m = map_alloc(ks->len);
+    for (int64_t i = 0; i < ks->len; i++) map_put_raw(m, scalar_at(ks, i), scalar_at(vs, i));
+    return m;
+}
+
 /* remove(m, k): a new map without k */
 mim_val *mim_std_remove(mim_val *m, mim_val *k) {
     map_check(m, "remove");

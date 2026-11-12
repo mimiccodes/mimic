@@ -14,7 +14,7 @@ pub module ui {
     pub type Event = { p: str, e: str, v: str }
 
     // A change for the browser to make (runtime/mimic_ui.c applies it).
-    pub type Patch = { op: str, p: str, html: str, attrs: [str] }
+    pub type Patch = { op: str, p: str, html: str, attrs: [str], at: i64 }
 
     // What `update` returns in `ui::run_live`: the next state, and jobs to run
     // on their own (fetching, saving, …); each job's result comes back as a
@@ -75,6 +75,15 @@ pub module ui {
 
     // Empty space that pushes its neighbours apart.
     pub fn spacer[M]() -> Node[M] { Elem("div", [Prop("style", "flex:1")], []) }
+
+    // `node`, known by `key` among its siblings: when a list changes, rows are
+    // matched by key, so inserting or removing one row touches only that row.
+    pub fn keyed[M](key: str, node: Node[M]) -> Node[M] {
+        match node {
+            Elem(tag, attrs, kids) => Elem(tag, push(attrs, Prop("data-key", key)), kids),
+            Txt(t) => Elem("span", [Prop("data-key", key)], [Txt(t)]),
+        }
+    }
 
     // A thin line.
     pub fn divider[M]() -> Node[M] { Elem("hr", [], []) }
@@ -292,22 +301,89 @@ pub module ui {
     pub fn diff[M](a: Node[M], b: Node[M], path: str) -> [Patch] {
         match (a, b) {
             (Elem(t1, a1, k1), Elem(t2, a2, k2)) if t1 == t2 => {
-                let f2 = flat_attrs(a2)
-                let mine = if same(flat_attrs(a1), f2) { [] } else { [Patch { op: "attrs", p: path, html: "", attrs: f2 }] }
+                let mine = if same_attrs(a1, a2) { [] } else { [Patch { op: "attrs", p: path, html: "", attrs: flat_attrs(a2), at: 0 }] }
                 concat(mine, kids_diff(k1, k2, path))
             }
             (Txt(x), Txt(y)) if x == y => [],
-            _ => [Patch { op: "replace", p: path, html: render(b, path), attrs: [] }],
+            _ => [Patch { op: "replace", p: path, html: render(b, path), attrs: [], at: 0 }],
         }
     }
 
     fn kids_diff[M](k1: [Node[M]], k2: [Node[M]], path: str) -> [Patch] {
-        // (`and` evaluates both sides: compare the texts only when the lengths match)
-        let same_shape = if ≢ k1 != ≢ k2 { false } else { ((⍳ ≢ k1 ¨ (i => if text_differs(k1[i], k2[i]) { 1 } else { 0 })) ▷ +/) == 0 }
-        if same_shape {
-            flatten(⍳ ≢ k1 ¨ (i => diff(k1[i], k2[i], "{path}.{i}")))
+        // a list is keyed when its rows are (its first row tells)
+        let keyed = if ≢ k1 == 0 or ≢ k2 == 0 { false } else { key_of(k1[0]) != "" and key_of(k2[0]) != "" }
+        if keyed {
+            let keys1 = k1 ¨ key_of
+            let keys2 = k2 ¨ key_of
+            if same(keys1, keys2) { pairwise(k1, k2, path, ≢ k1) } else { keyed_diff(k1, k2, keys1, keys2, path) }
+        } else if ≢ k1 == ≢ k2 {
+            if any_text_differs(k1, k2) { whole_list(k2, path) } else { pairwise(k1, k2, path, ≢ k1) }
+        } else if all_elems(k1) and all_elems(k2) {
+            if ≢ k2 > ≢ k1 {
+                // grown at the end: the old rows, then the new ones appended
+                let more = ⍳ (≢ k2 - ≢ k1) ¨ (i => render(k2[≢ k1 + i], "{path}.{≢ k1 + i}"))
+                concat(pairwise(k1, k2, path, ≢ k1), [Patch { op: "append", p: path, html: join(more, ""), attrs: [], at: 0 }])
+            } else {
+                // shrunk at the end
+                concat([Patch { op: "trim", p: path, html: "", attrs: [], at: ≢ k2 }], pairwise(k1, k2, path, ≢ k2))
+            }
         } else {
-            [Patch { op: "children", p: path, html: kids_html(k2, path), attrs: [] }]
+            whole_list(k2, path)
+        }
+    }
+
+    fn whole_list[M](k2: [Node[M]], path: str) -> [Patch] { [Patch { op: "children", p: path, html: kids_html(k2, path), attrs: [], at: 0 }] }
+
+    fn pairwise[M](k1: [Node[M]], k2: [Node[M]], path: str, n: i64) -> [Patch] {
+        flatten(⍳ n ¨ (i => diff(k1[i], k2[i], "{path}.{i}")))
+    }
+
+    // (`and` evaluates both sides: compare texts only when the lengths match)
+    fn any_text_differs[M](k1: [Node[M]], k2: [Node[M]]) -> bool {
+        if ≢ k1 != ≢ k2 { true } else { ((⍳ ≢ k1 ¨ (i => if text_differs(k1[i], k2[i]) { 1 } else { 0 })) ▷ +/) > 0 }
+    }
+
+    fn all_elems[M](ks: [Node[M]]) -> bool { ((ks ¨ (k => match k { Txt(_) => 1, _ => 0 })) ▷ +/) == 0 }
+
+    fn key_of[M](n: Node[M]) -> str {
+        match n {
+            Elem(_, attrs, _) => key_in(attrs),
+            Txt(_) => "",
+        }
+    }
+
+    fn key_in[M](attrs: [Attr[M]]) -> str {
+        if ≢ attrs == 0 {
+            ""
+        } else {
+            match attrs[0] {
+                Prop(k, v) if k == "data-key" => v,
+                _ => key_in(attrs ↓ 1),
+            }
+        }
+    }
+
+    // Rows matched by key: removals (last first), then insertions (first
+    // first), then changes inside the rows that stayed. Reordered rows (or
+    // repeated keys) re-render the list.
+    fn keyed_diff[M](k1: [Node[M]], k2: [Node[M]], keys1: [str], keys2: [str], path: str) -> [Patch] {
+        let pos1 = map_of(keys1, ⍳ ≢ keys1)
+        let pos2 = map_of(keys2, ⍳ ≢ keys2)
+        let kept = keys1 ¨ (k => has(pos2, k))
+        let order = (keys1 ⌿ kept) ¨ (k => pos2[k])
+        let in_order = if ≢ order < 2 { true } else { ((⍳ (≢ order - 1) ¨ (i => if order[i] < order[i + 1] { 0 } else { 1 })) ▷ +/) == 0 }
+        // every row keyed, each key once, nothing moved: else re-render
+        let unkeyed = has(pos1, "") or has(pos2, "")
+        if unkeyed or ≢ pos1 != ≢ keys1 or ≢ pos2 != ≢ keys2 or not in_order {
+            whole_list(k2, path)
+        } else {
+            let gone = ⌽ ((⍳ ≢ k1) ⌿ (kept ¨ (b => not b)))
+            let removes = gone ¨ (i => Patch { op: "remove", p: path, html: "", attrs: [], at: i })
+            let fresh = (⍳ ≢ k2) ⌿ (keys2 ¨ (k => not has(pos1, k)))
+            let inserts = fresh ¨ (j => Patch { op: "insert", p: path, html: render(k2[j], "{path}.{j}"), attrs: [], at: j })
+            let stayed = (⍳ ≢ k2) ⌿ (keys2 ¨ (k => has(pos1, k)))
+            let changes = flatten(stayed ¨ (j => diff(k1[pos1[keys2[j]]], k2[j], "{path}.{j}")))
+            concat(concat(removes, inserts), changes)
         }
     }
 
@@ -323,6 +399,22 @@ pub module ui {
             _ => true,
         }
     }
+
+    // the same attributes and events (handlers are looked up when an event
+    // comes, so only their names matter here)
+    fn same_attrs[M](a: [Attr[M]], b: [Attr[M]]) -> bool {
+        if ≢ a != ≢ b { false } else { ((⍳ ≢ a ¨ (i => if same_attr(a[i], b[i]) { 0 } else { 1 })) ▷ +/) == 0 }
+    }
+
+    fn same_attr[M](a: Attr[M], b: Attr[M]) -> bool {
+        match (a, b) {
+            (Prop(k1, v1), Prop(k2, v2)) => k1 == k2 and v1 == v2,
+            (On(e1, _), On(e2, _)) => e1 == e2,
+            (OnText(e1, _), OnText(e2, _)) => e1 == e2,
+            _ => false,
+        }
+    }
+
 
     // ---- events -------------------------------------------------------------------
 

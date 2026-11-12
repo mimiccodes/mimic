@@ -1,0 +1,4 @@
+["remove 0 1 ","insert 0 2 <button data-p=\"0.2\" type=\"button\" data-key=\"x\" data-e=\"click\">x</button>"]
+["append 0 0 <button data-p=\"0.2\" type=\"button\" data-e=\"click\">c</button>"]
+["trim 0 2 ","children 0.1 0 z"]
+["children 0 0 <button data-p=\"0.0\" type=\"button\" data-key=\"c\" data-e=\"click\">c</button><button data-p=\"0.1\" type=\"button\" data-key=\"a\" data-e=\"click\">a</button><button data-p=\"0.2\" type=\"button\" data-key=\"b\" data-e=\"click\">b</button>"]

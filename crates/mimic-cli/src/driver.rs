@@ -108,6 +108,7 @@ pub extern \"mimic\" {
     fn sort(xs: any) -> any
     fn has(m: any, key: any) -> bool
     fn put(m: any, key: any, value: any) -> any
+    fn map_of(keys: any, values: any) -> any
     fn remove(m: any, key: any) -> any
     fn keys(m: any) -> any
     fn values(m: any) -> any

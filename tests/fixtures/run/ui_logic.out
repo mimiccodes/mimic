@@ -6,7 +6,7 @@ Some(Checked(true))
 None
 None
 None
-[{"op":"children","p":"0.0","html":"Count: 1","attrs":[]}]
-[{"op":"attrs","p":"0.2","html":"","attrs":["type","text","value","Ada <3","placeholder","name","data-e","input"]}]
-[{"op":"attrs","p":"0.3","html":"","attrs":["type","checkbox","checked","","data-e","change"]}]
+[{"op":"children","p":"0.0","html":"Count: 1","attrs":[],"at":0}]
+[{"op":"attrs","p":"0.2","html":"","attrs":["type","text","value","Ada <3","placeholder","name","data-e","input"],"at":0}]
+[{"op":"attrs","p":"0.3","html":"","attrs":["type","checkbox","checked","","data-e","change"],"at":0}]
 []

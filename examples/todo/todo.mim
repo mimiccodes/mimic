@@ -3,14 +3,14 @@ module main
 // A to-do list in the browser: `mimic run examples/todo/todo.mim`, then open
 // http://localhost:8080/. Every tab has its own list.
 
-type Todo = { text: str, done: bool }
-type State = { todos: [Todo], draft: str }
+type Todo = { id: i64, text: str, done: bool }
+type State = { todos: [Todo], draft: str, next: i64 }
 type Msg = Typed(str) | Add | Toggle(i64, bool) | Remove(i64) | ClearDone
 
 fn update(s: State, m: Msg) -> State {
     match m {
         Typed(t) => { s with draft: t },
-        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { text: trim(s.draft), done: false }), draft: "" } },
+        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { id: s.next, text: trim(s.draft), done: false }), draft: "", next: s.next + 1 } },
         Toggle(i, on) => { s with todos[i].done: on },
         Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
         ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
@@ -34,15 +34,16 @@ fn view(s: State) -> ui::Node[Msg] {
     ])
 }
 
+// keyed by id: removing a row touches only that row
 fn item(i: i64, t: Todo) -> ui::Node[Msg] {
-    ui::row([
+    ui::keyed("{t.id}", ui::row([
         ui::checkbox(t.done, on_change: on => Toggle(i, on)),
         ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
         ui::spacer(),
         ui::button("×", on_click: Remove(i)),
-    ])
+    ]))
 }
 
 fn main() {
-    print(ui::run(State { todos: [Todo { text: "Try Mimic", done: true }], draft: "" }, view, update, title: "To do"))
+    print(ui::run(State { todos: [Todo { id: 0, text: "Try Mimic", done: true }], draft: "", next: 1 }, view, update, title: "To do"))
 }

@@ -1,0 +1,17 @@
+module main
+
+// How lists change: keyed rows are matched by key; plain lists that grow or
+// shrink at the end touch only the end; anything else re-renders the list.
+type Msg = Pick(str)
+fn rows(names: [str], keyed: bool) -> ui::Node[Msg] {
+    ui::column(names ¨ (n => if keyed { ui::keyed(n, ui::button(n, on_click: Pick(n))) } else { ui::button(n, on_click: Pick(n)) }))
+}
+fn show(a: [str], b: [str], keyed: bool) {
+    print(json::encode(ui::diff(rows(a, keyed), rows(b, keyed), "0") ¨ (p => "{p.op} {p.p} {p.at} {p.html}")))
+}
+fn main() {
+    show(["a" "b" "c" "d"], ["a" "c" "x" "d"], true)        // b removed, x inserted
+    show(["a" "b"], ["a" "b" "c"], false)                    // appended
+    show(["a" "b" "c"], ["a" "z"], false)                    // shrunk (and one changed)
+    show(["a" "b" "c"], ["c" "a" "b"], true)                 // reordered: whole list
+}
