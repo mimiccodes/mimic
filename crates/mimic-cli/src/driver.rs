@@ -235,6 +235,65 @@ pub fn make_dir(path: str) -> Result[bool, str] {
     let done = io_make_dir(path)
     if done { Ok(true) } else { Err(io_error()) }
 }
+
+// ---- time, random numbers, processes -------------------------------------
+
+// A calendar date and time. weekday: 1 = Monday … 7 = Sunday; utc_offset in seconds.
+pub type DateTime = {
+    year: i64, month: i64, day: i64,
+    hour: i64, minute: i64, second: i64, nanosecond: i64,
+    weekday: i64, utc_offset: i64,
+}
+
+// What a finished program left behind.
+pub type Output = { status: i64, stdout: str, stderr: str }
+
+pub extern \"mimic-io\" {
+    fn now() -> i64
+    fn clock() -> i64
+    fn sleep(duration: i64)
+    fn random() -> f64
+    fn random_int(lo: i64, hi: i64) -> i64
+    fn seed_random(seed: i64)
+    fn pid() -> i64
+}
+
+pub extern \"mimic\" {
+    fn format_time(t: i64) -> str
+    fn timestamp(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64
+}
+
+extern \"mimic\" {
+    fn time_utc_parts(t: i64) -> [i64]
+}
+
+extern \"mimic-io\" {
+    fn time_local_parts(t: i64) -> [i64]
+    fn io_run(program: str, arguments: [str]) -> any
+}
+
+fn date_of(p: [i64]) -> DateTime {
+    DateTime {
+        year: p[0], month: p[1], day: p[2],
+        hour: p[3], minute: p[4], second: p[5], nanosecond: p[6],
+        weekday: p[7], utc_offset: p[8],
+    }
+}
+
+// The calendar date and time of instant `t` (from now(), timestamp(…)) in UTC.
+pub fn utc(t: i64) -> DateTime { date_of(time_utc_parts(t)) }
+
+// … and in this machine's time zone.
+pub fn local(t: i64) -> DateTime { date_of(time_local_parts(t)) }
+
+// Run a program (found through PATH) and wait for it; its output is captured.
+pub fn run(program: str, arguments: [str]) -> Result[Output, str] {
+    let r = io_run(program, arguments)
+    if io_ok() { Ok(Output { status: r[0], stdout: r[1], stderr: r[2] }) } else { Err(io_error()) }
+}
+
+// Run a command line through the system shell (/bin/sh -c).
+pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
 ";
 
 fn prelude_file() -> SourceFile {

@@ -440,6 +440,10 @@ pub fn coerce(ann: Option<&Type>, got: Ty) -> Result<Ty, String> {
 
 /// [`coerce`] for an already-resolved scalar or array type.
 fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
+    // a list of anything (e.g. an unbound `[T]`) takes any list
+    if a == Ty::Arr(El::Dyn) && matches!(got, Ty::Arr(_) | Ty::Never | Ty::Dyn) {
+        return Ok(got);
+    }
     if a == Ty::Dyn {
         return Ok(Ty::Dyn); // `any` accepts every value (boxed)
     }
@@ -842,7 +846,8 @@ impl Walk<'_, '_> {
                     };
                 }
                 match el {
-                    Ty::Never if xs.is_empty() => Ty::Arr(El::I64),
+                    // `[]` has no element type of its own: it fits any list
+                    Ty::Never if xs.is_empty() => Ty::Arr(El::Dyn),
                     Ty::Never => Ty::Never,
                     t => Ty::Arr(t.el()), // numbers, strings and records; anything else is dynamic
                 }

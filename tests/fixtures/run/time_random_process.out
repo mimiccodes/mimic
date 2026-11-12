@@ -1,0 +1,17 @@
+1794493805000000000
+2026-11-12T14:30:05Z
+2026-11-12T14:30:05.250Z
+DateTime { year: 2026, month: 11, day: 12, hour: 14, minute: 30, second: 5, nanosecond: 0, weekday: 4, utc_offset: 0 }
+4
+1969-12-31T23:59:59Z
+315
+true
+true
+[true true true true true]
+true
+true
+true
+Output { status: 0, stdout: "hello world
+", stderr: "" }
+(3, "out", "err")
+true

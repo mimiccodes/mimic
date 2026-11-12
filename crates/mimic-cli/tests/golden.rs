@@ -359,7 +359,9 @@ fn wasi_fixtures() {
             run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         }
         let status = run.status;
-        let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
+        // a fixture may expect different output under WASI (no processes, …)
+        let wasi_out = f.with_extension("wasi.out");
+        let want = std::fs::read_to_string(if wasi_out.is_file() { wasi_out } else { f.with_extension("out") }).unwrap();
         let got = String::from_utf8_lossy(&run.stdout);
         if got != want {
             failures.push(format!(

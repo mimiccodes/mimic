@@ -1,0 +1,51 @@
+module main
+
+// Clocks and dates, random numbers, running other programs.
+// (WASI has no processes: time_random_process.wasi.out has its output.)
+fn main() {
+    let t = timestamp(2026, 11, 12, 14, 30, 5)
+    print(t)
+    print(format_time(t))
+    print(format_time(t + 250ms))
+    print(utc(t))
+    print(utc(timestamp(2024, 2, 29, 23, 59, 59)).weekday)  // a leap day, a Thursday
+    print(format_time(timestamp(1969, 12, 31, 23, 59, 59)))  // before the epoch
+    print(days_between(timestamp(2026, 1, 1, 0, 0, 0), t))
+    print(utc(now()).year >= 2026)
+
+    let start = clock()
+    sleep(15ms)
+    let took = clock() - start
+    print(took >= 15ms and took < 5s)
+
+    seed_random(7)
+    let a = dice(5)
+    seed_random(7)
+    print(a == dice(5))                                     // a seed makes it repeatable
+    print(dice(1000) ▷ ⌊/ >= 1)
+    print(dice(1000) ▷ ⌈/ <= 6)
+    let r = random()
+    print(r >= 0.0 and r < 1.0)
+
+    match run("echo", ["hello" "world"]) {
+        Ok(o) => print(o),
+        Err(e) => print("cannot run programs: {e}"),
+    }
+    match shell("echo out; echo err 1>&2; exit 3") {
+        Ok(o) => print((o.status, trim(o.stdout), trim(o.stderr))),
+        Err(e) => print("no shell: {e}"),
+    }
+    print(is_err(run("no-such-program-xyz", [])))
+}
+
+fn days_between(a: i64, b: i64) -> i64 { (b - a) div (24 * 3600 * 1s) }
+
+// random numbers are an effect: these run in order, even inside a list
+fn dice(n: i64) -> [i64] { ⍳ n ¨ (i => random_int(1, 7)) }
+
+fn is_err(r: Result[Output, str]) -> bool {
+    match r {
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}

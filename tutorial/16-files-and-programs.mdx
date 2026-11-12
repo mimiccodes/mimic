@@ -1,6 +1,6 @@
 ---
 title: Files and the outside world
-description: Command-line arguments, environment variables, standard input and output, files, directories and paths.
+description: Command-line arguments, environment variables, standard input and output, files, directories, paths, time, random numbers and other programs.
 order: 16
 ---
 
@@ -183,6 +183,81 @@ let config = read_file("app.conf") else {
     exit(1)
     return
 }
+```
+
+## Time
+
+`now()` is the current time and `clock()` is a stopwatch. Both count nanoseconds, so they mix with duration literals like `250ms` and `2s`:
+
+```mimic run
+module main
+
+fn main() {
+    let t = timestamp(2026, 11, 12, 14, 30, 5)      // a UTC date and time
+    print(format_time(t))
+    print(format_time(t + 90min))
+    let d = utc(t)
+    print("{d.day}/{d.month}/{d.year}, weekday {d.weekday}")
+
+    let start = clock()
+    sleep(20ms)
+    print(clock() - start >= 20ms)
+}
+```
+
+```output
+2026-11-12T14:30:05Z
+2026-11-12T16:00:05Z
+12/11/2026, weekday 4
+true
+```
+
+## Random numbers
+
+```mimic run
+module main
+
+fn main() {
+    seed_random(2026)                     // repeatable; leave out for a fresh sequence
+    let rolls = ⍳ 10 ¨ (i => random_int(1, 7))
+    print(rolls)
+    print(rolls ▷ +/)
+    let coin = if random() < 0.5 { "heads" } else { "tails" }
+    print(coin)
+}
+```
+
+```output
+[6 5 1 1 1 5 3 6 4 4]
+36
+tails
+```
+
+Drawing a random number changes hidden state, so it counts as an effect: the `¨` above runs in order, which is what makes the sequence repeatable.
+
+## Running other programs
+
+`run` starts a program and waits for it to finish. `shell` runs a whole command line:
+
+```mimic run
+module main
+
+fn main() {
+    let r = run("echo", ["hello" "from echo"]) else { return }
+    print(r.status)
+    print(trim(r.stdout))
+
+    match shell("ls /no/such/place") {
+        Ok(o) => print("failed: {o.status != 0}, said something: {≢ o.stderr > 0}"),
+        Err(e) => print(e),
+    }
+}
+```
+
+```output
+0
+hello from echo
+failed: true, said something: true
 ```
 
 ## Names are never taken from you

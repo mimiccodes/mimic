@@ -80,6 +80,41 @@ These functions have side effects. The compiler knows this: a function that call
 
 Error messages name the operation, the path and the system's reason: `cannot read data.csv: No such file or directory`.
 
+## Time
+
+Instants and durations are both `i64` nanoseconds, so duration literals mix freely: `now() + 90min`, `took < 2s`.
+
+| Function | Result |
+|---|---|
+| `now()` | Wall-clock time: nanoseconds since 1970-01-01 00:00 UTC |
+| `clock()` | A monotonic clock in nanoseconds, for measuring how long something takes (never jumps) |
+| `sleep(d)` | Pause this thread, e.g. `sleep(250ms)` |
+| `timestamp(y, mo, d, h, mi, s)` | The instant of a UTC date and time |
+| `utc(t)`, `local(t)` | A `DateTime { year, month, day, hour, minute, second, nanosecond, weekday, utc_offset }`; weekday 1 = Monday … 7 = Sunday; `utc_offset` in seconds |
+| `format_time(t)` | ISO 8601 / RFC 3339 in UTC: `2026-11-12T14:30:05Z`, with `.250` milliseconds when present |
+
+The calendar is the proleptic Gregorian one, correct for any year, before 1970 included.
+
+## Random numbers
+
+| Function | Result |
+|---|---|
+| `random()` | A float in `[0, 1)` |
+| `random_int(lo, hi)` | An integer in `[lo, hi)`, without bias |
+| `seed_random(n)` | Make the sequence repeatable (per thread) |
+
+The generator is xoshiro256**, seeded from the operating system's entropy. Each thread has its own. Drawing a number changes the generator's state, so code that uses random numbers runs in order and never in parallel. It is not for cryptography.
+
+## Running programs
+
+| Function | Result |
+|---|---|
+| `run(program, arguments)` | `Result[Output, str]`. `program` is looked up through `PATH`. `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely. |
+| `shell(command)` | `run("/bin/sh", ["-c" command])` |
+| `pid()` | This process's id |
+
+The child's standard input is empty. WebAssembly (WASI), tvOS and watchOS have no child processes, so there `run` returns `Err`.
+
 ## Paths
 
 Pure text operations, so they stay parallel:
