@@ -18,6 +18,7 @@ pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
 pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/mimic_io.c");
 pub const RUNTIME_SOCKET_C: &str = include_str!("../../../runtime/mimic_socket.c");
+pub const RUNTIME_JSON_C: &str = include_str!("../../../runtime/mimic_json.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -240,6 +241,26 @@ pub module random {
     }
 }
 
+// JSON text ↔ values: `json::encode(user)`, `json::decode[User](text)`,
+// `json::parse(text)` for an untyped tree to match on.
+pub module json {
+    // An untyped JSON value.
+    pub type Value =
+        | Null
+        | Bool(bool)
+        | Number(f64)
+        | Text(str)
+        | List([Value])
+        | Object([str: Value])
+
+    pub extern \"mimic\" pure {
+        fn encode(value: any) -> str
+        fn encode_pretty(value: any) -> str
+        fn parse(text: str) -> Result[Value, str]
+        fn decode[T](text: str) -> Result[T, str]
+    }
+}
+
 // ---- networking: the `tcp` and `http` modules ------------------------------
 
 // TCP sockets: `tcp::connect(host, port)`, … (in program order).
@@ -282,6 +303,11 @@ pub module http {
     pub fn ok(body: str) -> Response { respond(200, body) }
 
     pub fn not_found() -> Response { respond(404, \"not found\") }
+
+    // A 200 response with `value` as JSON.
+    pub fn json(value: any) -> Response {
+        Response { status: 200, headers: [\"content-type\": \"application/json\"], body: super::json::encode(value) }
+    }
 }
 
 ";
@@ -462,7 +488,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -480,6 +506,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_json.c"), RUNTIME_JSON_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);

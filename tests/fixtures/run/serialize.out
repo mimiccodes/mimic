@@ -1,0 +1,19 @@
+{"name":"Ada","age":36,"score":9.5,"admin":true,"tags":["math","code"],"home":{"city":"London","zip":null}}
+{
+  "city": "Paris",
+  "zip": "75001"
+}
+true
+Err("json: expected an integer at age, found a string")
+Err("json: missing field `age`")
+Ok([1 2 3])
+Ok(Page { items: [], total: 0 })
+Ok(["a": 1, "b": 2])
+Ok(None)
+Err("invalid JSON at line 1, column 7: expected a value")
+List([Number(1.0) Bool(true) Null Text("sé")])
+[1.5,2.0,1e+300]
+{"a":[1,2],"b":[3]}
+[1,"two",null,3,{"ok":1},{"error":"bad"}]
+"quote \" and \n newline"
+[[0,1,2],[3,4,5]]

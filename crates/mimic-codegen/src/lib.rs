@@ -209,6 +209,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         descs: HashMap::new(),
         lazies: Vec::new(),
         futures: Vec::new(),
+        schemas: HashMap::new(),
         opt_level: settings.opt_level,
     };
     // every standard-library type descriptor, for the runtime (see desc())
@@ -329,6 +330,8 @@ fn stmt_names(s: &Stmt) -> Vec<String> {
 }
 
 struct Cg<'ctx, 'p> {
+    /// runtime type schemas (`json::decode[User]`), by static type
+    schemas: HashMap<Ty, PointerValue<'ctx>>,
     /// implicit futures still pending, per enclosing block (awaited at `return`)
     futures: Vec<Vec<Pending<'ctx>>>,
     ctx: &'ctx Context,
@@ -1917,6 +1920,63 @@ impl<'ctx> Cg<'ctx, '_> {
         p
     }
 
+    /// A static description of a type for the runtime (`mim_schema` in
+    /// runtime/mimic_json.c): kind, item count, record descriptor, items.
+    /// Kinds: 0 any, 1 int, 2 float, 3 bool, 4 str, 5 list, 7 record,
+    /// 8 Option, 9 tuple, 10 other union. Memoised first, so recursive
+    /// records refer to themselves.
+    fn schema(&mut self, t: Ty) -> PointerValue<'ctx> {
+        if let Some(p) = self.schemas.get(&t) {
+            return *p;
+        }
+        let i32t = self.ctx.i32_type();
+        let st = self.ctx.struct_type(&[i32t.into(), i32t.into(), self.ptr.into(), self.ptr.into()], false);
+        let g = self.module.add_global(st, None, "schema");
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        let gp = self.gaddr(g);
+        self.schemas.insert(t, gp);
+        let (kind, desc, items): (u64, PointerValue<'ctx>, Vec<Ty>) = match t {
+            Ty::I64 => (1, self.ptr.const_null(), vec![]),
+            Ty::F64 => (2, self.ptr.const_null(), vec![]),
+            Ty::Bool => (3, self.ptr.const_null(), vec![]),
+            Ty::Char | Ty::Arr(El::Char) => (4, self.ptr.const_null(), vec![]),
+            Ty::Arr(el) => (5, self.ptr.const_null(), vec![Ty::of_el(el)]),
+            Ty::Tup(id) => (9, self.desc(usize::MAX, None), types::tuple_elems(id)),
+            Ty::Obj(id) => {
+                let tid = types::obj_tid(id);
+                let td = &self.p.types[tid];
+                if td.is_record() {
+                    let fts: Vec<Ty> = match &td.decl.kind {
+                        mimic_syntax::ast::TypeKind::Record(fs) => fs.iter().map(|(_, ft, _)| types::field_type(self.p, tid, t, ft)).collect(),
+                        _ => vec![],
+                    };
+                    (7, self.desc(tid, None), fts)
+                } else if td.name == "Option" && self.p.mods[td.module].package == "std" {
+                    let arg = types::obj_args(id).first().copied().filter(|a| *a != Ty::Never).unwrap_or(Ty::Dyn);
+                    (8, self.ptr.const_null(), vec![arg])
+                } else {
+                    (10, self.ptr.const_null(), vec![])
+                }
+            }
+            _ => (0, self.ptr.const_null(), vec![]),
+        };
+        let ptrs: Vec<PointerValue<'ctx>> = items.iter().map(|it| self.schema(*it)).collect();
+        let arr = self.ptr.const_array(&ptrs);
+        let ag = self.module.add_global(arr.get_type(), None, "schema_items");
+        ag.set_initializer(&arr);
+        ag.set_constant(true);
+        ag.set_linkage(Linkage::Private);
+        let val = st.const_named_struct(&[
+            i32t.const_int(kind, false).into(),
+            i32t.const_int(items.len() as u64, false).into(),
+            desc.into(),
+            self.gaddr(ag).into(),
+        ]);
+        g.set_initializer(&val);
+        gp
+    }
+
     /// Build a record or variant from field values (in field order).
     fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
         // (tuples use t = usize::MAX)
@@ -2475,6 +2535,11 @@ impl<'ctx> Cg<'ctx, '_> {
             _ => {}
         }
         match &e.kind {
+            // `User` in `json::decode[User](…)`: the type's schema (not a value to release)
+            ExprKind::TypeArg(t) => {
+                let ty = types::ann_in(self.p, self.cur_mod, t).unwrap_or(Ty::Dyn);
+                Ok(V::P(self.schema(ty), false))
+            }
             ExprKind::Int(i) => Ok(V::I(i64t.const_int(*i as u64, true))),
             ExprKind::Float(f) => Ok(V::F(self.ctx.f64_type().const_float(*f))),
             ExprKind::Bool(b) => Ok(V::B(self.ctx.bool_type().const_int(*b as u64, false))),

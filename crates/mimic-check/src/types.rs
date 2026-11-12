@@ -829,6 +829,7 @@ impl Walk<'_, '_> {
 
     fn expr_inner(&mut self, e: &Expr) -> Ty {
         match &e.kind {
+            ExprKind::TypeArg(_) => Ty::Dyn, // a schema handle
             ExprKind::Int(_) => Ty::I64,
             ExprKind::Float(_) => Ty::F64,
             ExprKind::Bool(_) => Ty::Bool,
@@ -882,6 +883,26 @@ impl Walk<'_, '_> {
                     ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some() => Ty::Dyn,
                     ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
                         Ok(Resolved::Fn(f)) => {
+                            // an intrinsic with type parameters: `json::decode[User](…)`
+                            if let FnKind::Extern { decl, .. } = &self.inf.p.fns[f].kind
+                                && !decl.type_params.is_empty()
+                            {
+                                let p = self.inf.p;
+                                let m = p.fns[f].module;
+                                let env: Vec<(String, Ty)> = decl
+                                    .type_params
+                                    .iter()
+                                    .zip(args.iter().filter_map(|a| match &a.kind {
+                                        ExprKind::TypeArg(t) => Some(ann_in(p, self.module, t).unwrap_or(Ty::Dyn)),
+                                        _ => None,
+                                    }))
+                                    .map(|(n, t)| (n.clone(), t))
+                                    .collect();
+                                return match &decl.ret {
+                                    Some(rt) => ann_env(p, m, rt, &env).unwrap_or(Ty::Dyn),
+                                    None => Ty::Unit,
+                                };
+                            }
                             self.check_args_at_call(e, path, f, args, &mut argt);
                             self.call_user(id(e), f, argt)
                         }

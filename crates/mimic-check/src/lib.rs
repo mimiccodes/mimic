@@ -1089,6 +1089,7 @@ impl Checker<'_> {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+            ExprKind::TypeArg(t) => self.check_ann(t),
             ExprKind::Array(xs) => xs.iter().for_each(|x| self.expr(x)),
             ExprKind::Path(path) => {
                 // a local variable (captured by value when used inside a lambda)
@@ -1148,9 +1149,27 @@ impl Checker<'_> {
                             Ok(Resolved::Fn(f)) => {
                                 let func = &self.p.fns[f];
                                 let variadic = matches!(&func.kind, FnKind::Extern { decl, .. } if decl.variadic);
-                                if func.arity() != args.len() && !(variadic && args.len() >= func.arity()) {
+                                // `json::decode[User](text)`: type arguments come first
+                                let targs = args.iter().filter(|a| matches!(a.kind, ExprKind::TypeArg(_))).count();
+                                let want_t = match &func.kind {
+                                    FnKind::Extern { decl, .. } => decl.type_params.len(),
+                                    _ => 0,
+                                };
+                                if targs != want_t {
+                                    self.err(Diag::new(
+                                        &C::TYPE_ARGS,
+                                        if want_t == 0 {
+                                            format!("`{}` takes no type arguments: its types are inferred", path.join("::"))
+                                        } else {
+                                            format!("`{}` takes {want_t} type argument(s) in `[…]`, got {targs}", path.join("::"))
+                                        },
+                                        e.span,
+                                    ));
+                                }
+                                let n = args.len() - targs;
+                                if func.arity() != n && !(variadic && n >= func.arity()) {
                                     self.err(Diag::new(&C::ARG_COUNT, 
-                                        format!("`{}` takes {} argument(s) but {} were supplied", path.join("::"), func.arity(), args.len()),
+                                        format!("`{}` takes {} argument(s) but {} were supplied", path.join("::"), func.arity(), n),
                                         e.span,
                                     ));
                                 }
@@ -1781,7 +1800,7 @@ impl PurityWalk<'_> {
     fn expr(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
-            ExprKind::OpRef(_) => true,
+            ExprKind::OpRef(_) | ExprKind::TypeArg(_) => true,
             ExprKind::Arms { .. } => false, // lifted after parsing
             ExprKind::Map(kvs) => kvs.iter().all(|(k, v)| self.expr(k) && self.expr(v)),
             ExprKind::Array(xs) => xs.iter().all(|x| self.expr(x)),

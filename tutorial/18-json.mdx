@@ -1,0 +1,158 @@
+---
+title: JSON
+description: The json module — encode any value, decode JSON straight into your own records with json::decode[T], and build a small JSON API.
+order: 18
+---
+
+# JSON
+
+The `json` module turns Mimic values into JSON text and back. Its functions are pure, so they run in parallel like any other computation.
+
+## Encoding
+
+`json::encode` works on any value. Records become objects with their field names, lists become arrays, `None` becomes `null`:
+
+```mimic run
+module main
+
+type Address = { city: str, zip: Option[str] }
+type User = { name: str, age: i64, tags: [str], home: Address }
+
+fn main() {
+    let u = User { name: "Ada", age: 36, tags: ["math" "code"], home: Address { city: "London", zip: None } }
+    print(json::encode(u))
+    print(json::encode_pretty(u.home))
+    print(json::encode(["apples": 3, "pears": 5]))
+}
+```
+
+```output
+{"name":"Ada","age":36,"tags":["math","code"],"home":{"city":"London","zip":null}}
+{
+  "city": "London",
+  "zip": null
+}
+{"apples":3,"pears":5}
+```
+
+## Decoding into your own types
+
+Give the type you want in square brackets: `json::decode[User](text)`. The result is a `Result`: either your value, fully typed, or a message that says exactly what was wrong and where.
+
+JSON is full of quotes and braces, so write it in a **raw string**. Raw strings use single quotes, and inside them nothing is special:
+
+```mimic run
+module main
+
+type User = { name: str, age: i64, email: Option[str] }
+
+fn main() {
+    let text = '{"name": "Grace", "age": 85, "extra": "ignored"}'
+    let u = json::decode[User](text) else { return }
+    print(u.name)
+    print(u.age + 1)                         // a real i64
+    print(u.email)                           // missing optional field: None
+
+    print(json::decode[User]('{"name": "Linus", "age": "old"}'))
+    print(json::decode[User]('{"name": "Linus"}'))
+    print(json::decode[[i64]]('[1, 2, oops]'))
+}
+```
+
+```output
+Grace
+86
+None
+Err("json: expected an integer at age, found a string")
+Err("json: missing field `age`")
+Err("invalid JSON at line 1, column 8: expected a value")
+```
+
+The decoding rules:
+* **Extra fields** are ignored.
+* **Missing fields** are `None` if their type is an `Option`, and an error otherwise.
+* **Generic records** work too: `json::decode[Page[User]](text)`.
+
+## Untyped JSON
+
+When you don't know the shape in advance, `json::parse` gives a `json::Value` that you can take apart with `match`:
+
+```mimic run
+module main
+
+fn main() {
+    let v = json::parse('{"ok": true, "items": [1, 2.5, "three", null]}') else { return }
+    match v {
+        json::Object(fields) => {
+            print(keys(fields))
+            match fields["items"] {
+                json::List(xs) => print(xs ¨ (x => describe(x))),
+                _ => print("no list"),
+            }
+        }
+        _ => print("not an object"),
+    }
+}
+
+fn describe(x: json::Value) -> str {
+    match x {
+        json::Number(n) => "number {n}",
+        json::Text(s) => "text {s}",
+        json::Null => "nothing",
+        _ => "something else",
+    }
+}
+```
+
+```output
+["ok" "items"]
+["number 1.0" "number 2.5" "text three" "nothing"]
+```
+
+## A small JSON API
+
+`http::json(value)` answers a request with JSON, and `json::decode` reads it back on the client side:
+
+```mimic run
+module main
+
+type Book = { title: str, year: i64 }
+
+fn handle(req: http::Request) -> http::Response {
+    match req.path {
+        "/books" => http::json([Book { title: "SICP", year: 1985 }, Book { title: "TAOCP", year: 1968 }]),
+        _ => http::not_found(),
+    }
+}
+
+fn server(port: i64) -> Result[i64, str] { http::serve_requests(port, handle, 1) }
+
+fn when_up(url: str, tries: i64) -> Result[http::Response, str] {
+    match http::fetch(url) {
+        Ok(r) => Ok(r),
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); when_up(url, tries - 1) },
+    }
+}
+
+fn main() {
+    let port = 30000 + os::pid() % 20000
+    let s = server(port)
+    let r = when_up("http://127.0.0.1:{port}/books", 100) else { return }
+    print(get(r.headers, "content-type"))
+    let books = json::decode[[Book]](r.body) else { return }
+    print(books ¨ (b => b.title))
+    print(books ¨ (b => b.year) ▷ ⌊/)
+    print(s)
+}
+```
+
+```output
+Some("application/json")
+["SICP" "TAOCP"]
+1968
+Ok(1)
+```
+
+The full mapping between Mimic values and JSON is in the [standard library reference](../docs/std.md#json-json-text--values-pure).
+
+Back to the [index](index.mdx).

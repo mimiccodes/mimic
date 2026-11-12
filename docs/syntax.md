@@ -266,6 +266,8 @@ if let Some(year) = get(born, "ada") { print(year) } else { print("unknown") }
 
 **Interpolation:** `"hi {u.name}, next year {u.age + 1}"`. Any expression can go inside `{ }`, and it is formatted the way `print` shows it. Write `\{` for a literal brace.
 
+**Raw strings** use single quotes: `'{"name": "Ada", "path": "C:\\dir"}'`. They have no interpolation and no escapes, which suits JSON, regular expressions and Windows paths. They end at the next `'` and cannot span lines.
+
 ## Tuples
 
 ```mimic
@@ -388,6 +390,7 @@ first([3 1 2])            // Some(3): an Option[i64]
 first(["x" "y"])          // Some("x"): an Option[str]
 ```
 
+* **Explicit type arguments.** A function whose result type cannot be inferred from its arguments takes its type arguments in `[…]` right after its name: `json::decode[User](text)`. Only the standard library declares such functions so far.
 * **Type arguments are inferred.** You never write `first[i64](…)`. `Some(42)` is an `Option[i64]`, and `Pair { first: 1, second: "one" }` is a `Pair[i64, str]`. `None` and `Leaf` take their type arguments from where they are used.
 * **Mismatches are compile errors.** For example, `let o: Option[str] = Some(3)` is an error (E0401). So is calling `or_else(Some(1), "s")` against `fn or_else[T](o: Option[T], d: T)`, because `T` would have to be both `i64` and `str`. The wrong number of type arguments is E0411.
 * **Generic code runs as fast as hand-written code.** Every function is compiled once per combination of argument types it is called with, so `first` on `[i64]` and `first` on `[str]` are separate, fully typed functions. A value taken out of an `Option[i64]`, by `match`, `let … else` or `or_else`, is a plain machine integer.

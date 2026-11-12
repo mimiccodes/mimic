@@ -374,6 +374,7 @@ impl Parser {
                     let fpub = self.eat(&Tok::Pub) || is_pub;
                     self.expect(&Tok::Fn)?;
                     let (name, _) = self.name_or_word()?;
+                    let type_params = self.type_params()?;
                     self.expect(&Tok::LParen)?;
                     self.nl_ignore += 1;
                     let mut params = Vec::new();
@@ -400,7 +401,7 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, effects, overlap, sync, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, type_params, effects, overlap, sync, ret, span: fstart });
                 }
                 let trusted = trusted || intrinsic;
                 Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, span: start }))
@@ -1045,10 +1046,52 @@ impl Parser {
         self.postfix()
     }
 
+    /// `f[User, i64](…)`: explicit type arguments. Only types that read as
+    /// types (uppercase names, built-in type names, `[…]`) followed directly by
+    /// `(` count, so `xs[i]` and `handlers[k](x)` stay indexing.
+    fn type_args_ahead(&mut self) -> Option<Vec<Type>> {
+        const BUILTIN: &[&str] = &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "bool", "char", "str", "any"];
+        let save = (self.pos, self.nl_ignore);
+        let typey = |t: &Type| match t {
+            Type::Named(n, _) | Type::App(n, _, _) => {
+                n.split("::").last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase())) || BUILTIN.contains(&n.as_str())
+            }
+            Type::Array(..) | Type::Map(..) => true,
+            _ => false,
+        };
+        let attempt = (|| {
+            self.next(); // [
+            let mut ts = vec![self.ty().ok()?];
+            while self.eat(&Tok::Comma) {
+                ts.push(self.ty().ok()?);
+            }
+            if !self.eat(&Tok::RBracket) || !self.at(&Tok::LParen) || !self.adjacent() {
+                return None;
+            }
+            ts.iter().all(typey).then_some(ts)
+        })();
+        if attempt.is_none() {
+            (self.pos, self.nl_ignore) = save;
+        }
+        attempt
+    }
+
     fn postfix(&mut self) -> PResult<Expr> {
         let mut e = self.primary()?;
         loop {
-            if self.at(&Tok::LParen) && self.adjacent() {
+            if self.at(&Tok::LBracket)
+                && self.adjacent()
+                && matches!(e.kind, ExprKind::Path(_))
+                && let Some(ts) = self.type_args_ahead()
+            {
+                let mut args: Vec<Expr> = ts.into_iter().map(|t| {
+                    let span = t.span();
+                    Expr { kind: ExprKind::TypeArg(t), span }
+                }).collect();
+                args.extend(self.call_args()?);
+                let span = e.span.to(self.prev_span());
+                e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
+            } else if self.at(&Tok::LParen) && self.adjacent() {
                 let args = self.call_args()?;
                 let span = e.span.to(self.prev_span());
                 e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
@@ -1695,6 +1738,7 @@ mod tests {
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Array(xs) => format!("[{}]", xs.iter().map(sx).collect::<Vec<_>>().join(" ")),
             ExprKind::Path(p) => p.join("::"),
+            ExprKind::TypeArg(t) => format!("(type {t})"),
             ExprKind::Call { callee, args } => {
                 format!("({} {})", sx(callee), args.iter().map(sx).collect::<Vec<_>>().join(" "))
             }
@@ -1822,5 +1866,19 @@ fn main() {
     fn naming_rules() {
         assert!(parse_file("module main\ntype user = { a: i64 }\n").unwrap_err().msg.contains("`User`"));
         assert!(parse_file("module main\ntype T = a | B\n").unwrap_err().msg.contains("uppercase"));
+    }
+
+    #[test]
+    fn type_arguments_versus_indexing() {
+        // how many explicit type arguments the outermost call has (None: not a call)
+        let targs = |src: &str| match parse_expr(src).unwrap().kind {
+            ExprKind::Call { args, .. } => Some(args.iter().filter(|a| matches!(a.kind, ExprKind::TypeArg(_))).count()),
+            _ => None,
+        };
+        assert_eq!(targs("json::decode[User](t)"), Some(1));
+        assert_eq!(targs("json::decode[[i64]](t)"), Some(1));
+        assert_eq!(targs("f[Page[User], str](t)"), Some(2));
+        assert_eq!(targs("handlers[k](x)"), Some(0)); // indexing, then a call
+        assert_eq!(targs("xs[i]"), None);
     }
 }

@@ -75,6 +75,7 @@ impl Imported {
                 variadic: f.variadic,
                 link_name: f.link_name.clone(),
                 intrinsic: false,
+                type_params: Vec::new(),
                 effects,
                 overlap,
                 sync,

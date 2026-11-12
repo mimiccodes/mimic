@@ -140,6 +140,48 @@ The generator is xoshiro256**, seeded from the operating system's entropy. Each 
 
 `lines(s)` (global) splits at newlines and drops a `\r` before each one. A final newline ends the last line instead of starting an empty one, so `lines(fs::read(…))` gives exactly the file's lines.
 
+### `json`: JSON text ↔ values (pure)
+
+```mimic
+type User = { name: str, age: i64, tags: [str], email: Option[str] }
+
+json::encode(user)                       // {"name":"Ada","age":36,"tags":["math"],"email":null}
+json::encode_pretty(user)                // the same, indented
+let u = json::decode[User](text) else { return }      // Result[User, str]
+let v = json::parse(text) else { return }             // Result[json::Value, str]
+match v { json::Object(m) => …, json::List(xs) => …, _ => … }
+```
+
+| Function | Result |
+|---|---|
+| `json::encode(x)`, `json::encode_pretty(x)` | `str` |
+| `json::decode[T](text)` | `Result[T, str]`: `T` given explicitly in `[…]` |
+| `json::parse(text)` | `Result[json::Value, str]` |
+| `json::Value` | `Null \| Bool(bool) \| Number(f64) \| Text(str) \| List([Value]) \| Object([str: Value])` |
+
+**How values map to JSON:**
+
+| Mimic | JSON |
+|---|---|
+| `i64`, `f64` | numbers (floats keep a `.0`; NaN and infinity become `null`) |
+| `bool`, `str` | `true`/`false`, strings |
+| lists, matrices | arrays (nested, row by row, for matrices) |
+| maps | objects (non-string keys are written as text) |
+| records | objects with the field names |
+| tuples | arrays |
+| `Some(x)` / `None` | `x` / `null` |
+| `Ok(x)` / `Err(e)` | `{"ok": x}` / `{"error": e}` |
+| other variants | `"Name"`, `{"Name": x}`, `{"Name": [x, y]}` |
+
+**Decoding into `T`** follows `T`'s fields and types:
+* **Extra fields** in the JSON are ignored.
+* **Missing fields** are `None` when their type is an `Option`, and an error otherwise.
+* **Integers** must be whole numbers.
+* **Errors name where the problem is:** `json: expected an integer at users[2].age, found a string` or `invalid JSON at line 3, column 7: expected ','`.
+* **What can be decoded:** records (generic ones too, like `Page[User]`), lists, maps (`[str: i64]`), `Option`, numbers, bools and strings. Unions other than `Option` cannot be decoded yet.
+
+**Raw strings** make JSON literals easy: `'{"name": "Ada"}'` uses single quotes, has no interpolation and no escapes.
+
 ## Networking: the `http` and `tcp` modules
 
 Networking lives in two standard modules, used by path from any file with no import: `http::fetch`, `tcp::connect`. (`use http::fetch` works too.) Your own modules come first: a project or module called `http` hides the standard one.
@@ -170,6 +212,7 @@ http::serve(8080, handle)                                     // runs until the 
 | `http::Request` | `{ method, path, query, headers, body }`: header names are lower case, `query` is the part after `?` |
 | `http::Response` | `{ status, headers, body }` |
 | `http::ok(body)`, `http::respond(status, body)`, `http::not_found()` | Responses (text/plain unless the headers say otherwise) |
+| `http::json(value)` | A 200 response with `value` encoded as JSON (`application/json`) |
 
 How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).

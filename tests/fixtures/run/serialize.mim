@@ -1,0 +1,34 @@
+module main
+
+// The json module: encode any value, decode into typed records with
+// json::decode[T], parse into an untyped json::Value. Raw strings '…' hold JSON.
+
+type Address = { city: str, zip: Option[str] }
+type User = { name: str, age: i64, score: f64, admin: bool, tags: [str], home: Address }
+type Page[T] = { items: [T], total: i64 }
+
+fn main() {
+    let u = User { name: "Ada", age: 36, score: 9.5, admin: true, tags: ["math" "code"], home: Address { city: "London", zip: None } }
+    let text = json::encode(u)
+    print(text)
+    print(json::encode_pretty(Address { city: "Paris", zip: Some("75001") }))
+    let back = json::decode[User](text) else { return }
+    print(back == u)
+    print(json::decode[User]('{"name": "Bo", "age": "x"}'))
+    print(json::decode[User]('{"name": "Bo"}'))
+    print(json::decode[[i64]]("[1, 2, 3]"))
+    print(json::decode[Page[User]]('{"items": [], "total": 0}'))
+    print(json::decode[[str: i64]]('{"a": 1, "b": 2}'))
+    print(json::decode[Option[f64]]("null"))
+    print(json::decode[i64]("[1, 2,]"))
+    match json::parse('{"x": [1, true, null, "s\u00e9"]}') {
+        Ok(json::Object(m)) => print(m["x"]),
+        Ok(v) => print(v),
+        Err(e) => print(e),
+    }
+    print(json::encode([1.5 2.0 1e300]))
+    print(json::encode(["a": [1 2], "b": [3]]))
+    print(json::encode((1, "two", None, Some(3), Ok(1), Err("bad"))))
+    print(json::encode("quote \" and \n newline"))
+    print(json::encode(⍳ 6 ⥊ [2 3]))
+}

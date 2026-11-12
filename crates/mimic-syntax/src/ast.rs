@@ -266,6 +266,8 @@ pub struct ExternFn {
     /// `extern "mimic"`: implemented in Mimic's runtime, taking and returning
     /// Mimic values (memory safe: no `unsafe` needed).
     pub intrinsic: bool,
+    /// `fn decode[T](text: str) -> Result[T, str]`: given explicitly at the call
+    pub type_params: Vec<String>,
     /// `extern "mimic-io"`: an intrinsic with side effects (files, environment,
     /// stdin…): never run in parallel or out of order.
     pub effects: bool,
@@ -391,6 +393,9 @@ pub enum ExprKind {
     /// A name or `a::b::c` path.
     Path(Vec<String>),
     Call { callee: Box<Expr>, args: Vec<Expr> },
+    /// An explicit type argument, `User` in `json::decode[User](text)`: it
+    /// becomes a leading argument of the call (a schema the runtime follows).
+    TypeArg(Type),
     Index { base: Box<Expr>, index: Box<Expr> },
     Unary { op: UnOp, expr: Box<Expr> },
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
@@ -431,7 +436,7 @@ impl Expr {
         f(self);
         let block = |b: &Block, f: &mut dyn FnMut(&Expr)| b.walk(f);
         match &self.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) | ExprKind::TypeArg(_) => {}
             ExprKind::Array(xs) | ExprKind::Tuple(xs) | ExprKind::Prim { args: xs, .. } => xs.iter().for_each(|x| x.walk(f)),
             ExprKind::Call { callee, args } => {
                 callee.walk(f);
@@ -519,7 +524,7 @@ impl Expr {
     /// Visit every expression bottom-up (children before parents), mutably.
     pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
         match &mut self.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) | ExprKind::OpRef(_) | ExprKind::TypeArg(_) => {}
             ExprKind::Array(xs) | ExprKind::Tuple(xs) | ExprKind::Prim { args: xs, .. } => xs.iter_mut().for_each(|x| x.walk_mut(f)),
             ExprKind::Call { callee, args } => {
                 callee.walk_mut(f);

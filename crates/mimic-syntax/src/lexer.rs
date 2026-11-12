@@ -393,6 +393,18 @@ impl<'a> Lexer<'a> {
                 }
             }
             '"' => self.string(start)?,
+            // 'raw text': no interpolation, no escapes (JSON, regexes, Windows paths)
+            '\'' => {
+                let mut s = String::new();
+                loop {
+                    match self.bump() {
+                        None | Some('\n') => return Err(Diag::new(&C::UNTERMINATED_STRING, "unterminated raw string ('…')", start)),
+                        Some('\'') => break,
+                        Some(c) => s.push(c),
+                    }
+                }
+                Tok::Str(s)
+            }
             '\\' => {
                 let d = self.bump().ok_or_else(|| Diag::new(&C::UNKNOWN_DIGRAPH, "dangling `\\`", start))?;
                 let key = format!("\\{d}");
@@ -620,6 +632,12 @@ mod tests {
         assert_eq!(toks("0xFF 0b1010 0o17 0xFFFF_FFFF_FFFF_FFFF ¯0x10"), vec![Tok::Int(255), Tok::Int(10), Tok::Int(15), Tok::Int(-1), Tok::Int(-16), Tok::Eof]);
         assert!(lex("0x1_0000_0000_0000_0000").is_err());
         assert!(lex("0b102").is_err());
+    }
+
+    #[test]
+    fn raw_strings() {
+        assert_eq!(toks(r#"'{"a": "\n"}'"#), vec![Tok::Str(r#"{"a": "\n"}"#.into()), Tok::Eof]);
+        assert!(lex("'open").is_err());
     }
 
     #[test]
