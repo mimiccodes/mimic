@@ -10,6 +10,20 @@ Real programs read their arguments, open files and talk to the terminal. In Mimi
 
 None of these operations crash on failure. They return `Option` or `Result` ([chapter 7](07-errors.mdx)).
 
+They live in a few standard **modules**, used by path from any file, with no import:
+
+| Module | For | Examples |
+|---|---|---|
+| `fs` | files and directories | `fs::read`, `fs::write`, `fs::list_dir`, `fs::remove` |
+| `path` | paths as text | `path::join`, `path::file_name`, `path::extension` |
+| `io` | standard input and error | `io::read_line`, `io::read_input`, `io::eprint` |
+| `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
+| `time` | clocks and dates | `time::now`, `time::clock`, `time::sleep`, `time::utc` |
+| `random` | random numbers | `random::int`, `random::float`, `random::seed` |
+| `http`, `tcp` | the network | [chapter 17](17-networking.mdx) |
+
+The module name says where a function comes from, and short names like `read` or `int` can't collide with yours. If you use one often, `use fs::read` brings in the short name. `print` and the string, list and map functions stay global, because almost every program uses them.
+
 ## Arguments and environment
 
 ```sh
@@ -22,13 +36,13 @@ Everything after `--` goes to your program:
 module main
 
 fn main() {
-    let names = args()                         // ["Ada" "--loud"]
+    let names = os::args()                         // ["Ada" "--loud"]
     let who = if ≢ names > 0 { names[0] } else { "world" }
     let shout = contains(names, "--loud")
     let greeting = "hello, {who}!"
     print(if shout { upper(greeting) } else { greeting })
 
-    match env("HOME") {
+    match os::env("HOME") {
         Some(home) => print("home is {home}"),
         None => print("no HOME set"),
     }
@@ -41,23 +55,23 @@ fn main() {
 module main
 
 fn main() {
-    let dir = path_join(temp_dir(), "mimic-tutorial")
-    let path = path_join(dir, "todo.txt")
-    print(make_dir(dir))
-    print(write_file(path, "buy milk\nfix bike\n"))
-    print(append_file(path, "call mum\n"))
+    let dir = path::join(fs::temp_dir(), "mimic-tutorial")
+    let todo = path::join(dir, "todo.txt")
+    print(fs::make_dir(dir))
+    print(fs::write(todo, "buy milk\nfix bike\n"))
+    print(fs::append(todo, "call mum\n"))
 
-    let text = read_file(path) else { return }
+    let text = fs::read(todo) else { return }
     let items = lines(text)
     print(items)
     print("{≢ items} things to do")
 
-    match read_file(path_join(dir, "missing.txt")) {
+    match fs::read(path::join(dir, "missing.txt")) {
         Ok(_) => print("found it?"),
         Err(why) => print(starts_with(why, "cannot read")),    // the reason names the file
     }
-    print(remove_file(path))
-    print(remove_file(dir))
+    print(fs::remove(todo))
+    print(fs::remove(dir))
 }
 ```
 
@@ -73,7 +87,7 @@ Ok(true)
 ```
 
 How it works:
-* **Writing** returns `Ok(bytes written)`. `write_file` replaces the file's contents and `append_file` adds to the end.
+* **Writing** returns `Ok(bytes written)`. `fs::write` replaces the file's contents and `fs::append` adds to the end.
 * **Reading** returns the text as `Ok(…)`. On failure you get `Err` with a reason like `cannot read todo.txt: No such file or directory`.
 * **`lines`** splits text into lines. A final newline doesn't produce an empty extra line, and Windows `\r\n` line endings are handled.
 
@@ -83,22 +97,22 @@ How it works:
 module main
 
 fn main() {
-    let root = path_join(temp_dir(), "mimic-tour")
-    print(make_dir(path_join(root, "src/parts")))     // parents are created too
-    print(write_file(path_join(root, "src/main.mim"), "module main"))
-    print(write_file(path_join(root, "README.md"), "# tour"))
-    print(list_dir(root))                             // sorted
-    print(is_dir(path_join(root, "src")))
-    print(is_file(path_join(root, "README.md")))
-    print(file_size(path_join(root, "README.md")))
+    let root = path::join(fs::temp_dir(), "mimic-tour")
+    print(fs::make_dir(path::join(root, "src/parts")))     // parents are created too
+    print(fs::write(path::join(root, "src/main.mim"), "module main"))
+    print(fs::write(path::join(root, "README.md"), "# tour"))
+    print(fs::list_dir(root))                             // sorted
+    print(fs::is_dir(path::join(root, "src")))
+    print(fs::is_file(path::join(root, "README.md")))
+    print(fs::size(path::join(root, "README.md")))
 
-    // clean up: remove_file removes files and empty directories
-    print(remove_file(path_join(root, "src/main.mim")))
-    print(remove_file(path_join(root, "src/parts")))
-    print(remove_file(path_join(root, "src")))
-    print(remove_file(path_join(root, "README.md")))
-    print(remove_file(root))
-    print(exists(root))
+    // clean up: fs::remove removes files and empty directories
+    print(fs::remove(path::join(root, "src/main.mim")))
+    print(fs::remove(path::join(root, "src/parts")))
+    print(fs::remove(path::join(root, "src")))
+    print(fs::remove(path::join(root, "README.md")))
+    print(fs::remove(root))
+    print(fs::exists(root))
 }
 ```
 
@@ -127,11 +141,11 @@ module main
 
 fn main() {
     let p = "photos/2026/beach.jpeg"
-    print(file_name(p))
-    print(stem(p))
-    print(extension(p))
-    print(parent(p))
-    print(path_join(parent(p), stem(p) + ".png"))
+    print(path::file_name(p))
+    print(path::stem(p))
+    print(path::extension(p))
+    print(path::parent(p))
+    print(path::join(path::parent(p), path::stem(p) + ".png"))
 }
 ```
 
@@ -150,10 +164,10 @@ module main
 
 // count the words of everything typed (or piped) in
 fn main() {
-    let text = read_input()
+    let text = io::read_input()
     let words = split(text, " ") ▷ ≢
     print("{words} words")
-    eprint("done")            // to standard error, not mixed into the output
+    io::eprint("done")            // to standard error, not mixed into the output
 }
 ```
 
@@ -161,11 +175,11 @@ fn main() {
 echo "the quick brown fox" | mimic run count.mim
 ```
 
-To read one line at a time, use `read_line()`, which returns `None` at the end of the input:
+To read one line at a time, use `io::read_line()`, which returns `None` at the end of the input:
 
 ```mimic
 fn total(acc: i64) -> i64 {
-    match read_line() {
+    match io::read_line() {
         None => acc,
         Some(line) => match parse_int(trim(line)) {
             Some(n) => total(acc + n),
@@ -175,33 +189,33 @@ fn total(acc: i64) -> i64 {
 }
 ```
 
-`exit(code)` ends the program at once with an exit status. A non-zero status tells the shell that something went wrong:
+`os::exit(code)` ends the program at once with an exit status. A non-zero status tells the shell that something went wrong:
 
 ```mimic
-let config = read_file("app.conf") else {
-    eprint("cannot start: app.conf is missing")
-    exit(1)
+let config = fs::read("app.conf") else {
+    io::eprint("cannot start: app.conf is missing")
+    os::exit(1)
     return
 }
 ```
 
 ## Time
 
-`now()` is the current time and `clock()` is a stopwatch. Both count nanoseconds, so they mix with duration literals like `250ms` and `2s`:
+`time::now()` is the current time and `time::clock()` is a stopwatch. Both count nanoseconds, so they mix with duration literals like `250ms` and `2s`:
 
 ```mimic run
 module main
 
 fn main() {
-    let t = timestamp(2026, 11, 12, 14, 30, 5)      // a UTC date and time
-    print(format_time(t))
-    print(format_time(t + 90min))
-    let d = utc(t)
+    let t = time::timestamp(2026, 11, 12, 14, 30, 5)      // a UTC date and time
+    print(time::format(t))
+    print(time::format(t + 90min))
+    let d = time::utc(t)
     print("{d.day}/{d.month}/{d.year}, weekday {d.weekday}")
 
-    let start = clock()
-    sleep(20ms)
-    print(clock() - start >= 20ms)
+    let start = time::clock()
+    time::sleep(20ms)
+    print(time::clock() - start >= 20ms)
 }
 ```
 
@@ -218,11 +232,11 @@ true
 module main
 
 fn main() {
-    seed_random(2026)                     // repeatable; leave out for a fresh sequence
-    let rolls = ⍳ 10 ¨ (i => random_int(1, 7))
+    random::seed(2026)                     // repeatable; leave out for a fresh sequence
+    let rolls = ⍳ 10 ¨ (i => random::int(1, 7))
     print(rolls)
     print(rolls ▷ +/)
-    let coin = if random() < 0.5 { "heads" } else { "tails" }
+    let coin = if random::float() < 0.5 { "heads" } else { "tails" }
     print(coin)
 }
 ```
@@ -237,17 +251,17 @@ Drawing a random number changes hidden state, so it counts as an effect: the `¨
 
 ## Running other programs
 
-`run` starts a program and waits for it to finish. `shell` runs a whole command line:
+`os::run` starts a program and waits for it to finish. `os::shell` runs a whole command line:
 
 ```mimic run
 module main
 
 fn main() {
-    let r = run("echo", ["hello" "from echo"]) else { return }
+    let r = os::run("echo", ["hello" "from echo"]) else { return }
     print(r.status)
     print(trim(r.stdout))
 
-    match shell("ls /no/such/place") {
+    match os::shell("ls /no/such/place") {
         Ok(o) => print("failed: {o.status != 0}, said something: {≢ o.stderr > 0}"),
         Err(e) => print(e),
     }
@@ -262,7 +276,7 @@ failed: true, said something: true
 
 ## Names are never taken from you
 
-The standard library has functions called `args`, `env`, `parent` and `stem`, and you can still use those names for your own variables and functions. Your own definitions always win in your code.
+Because the standard modules are used by path, names like `args`, `env`, `read` or `parent` stay free for your own variables and functions. Even if you name a module of your own `fs` or `time`, your module wins inside your program.
 
 The full list of functions is in the [standard library reference](../docs/std.md).
 

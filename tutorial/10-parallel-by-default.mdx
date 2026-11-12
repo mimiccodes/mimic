@@ -56,24 +56,24 @@ Reading files, sleeping and, soon, network requests spend most of their time wai
 module main
 
 fn main() {
-    let dir = temp_dir()
-    print(write_file(path_join(dir, "a.txt"), "alpha"))
-    print(write_file(path_join(dir, "b.txt"), "beta"))
+    let dir = fs::temp_dir()
+    print(fs::write(path::join(dir, "a.txt"), "alpha"))
+    print(fs::write(path::join(dir, "b.txt"), "beta"))
 
-    let start = clock()
-    let a = slow_read(path_join(dir, "a.txt"))   // starts now
-    let b = slow_read(path_join(dir, "b.txt"))   // starts now too
+    let start = time::clock()
+    let a = slow_read(path::join(dir, "a.txt"))   // starts now
+    let b = slow_read(path::join(dir, "b.txt"))   // starts now too
     print(a)                                     // waits here for a
     print(b)
-    print(clock() - start < 190ms)               // both sleeps overlapped (100ms, not 200ms)
+    print(time::clock() - start < 190ms)               // both sleeps overlapped (100ms, not 200ms)
 
     // ¨ runs them in parallel as well
-    print(["a.txt" "b.txt"] ¨ (f => slow_read(path_join(dir, f))))
+    print(["a.txt" "b.txt"] ¨ (f => slow_read(path::join(dir, f))))
 }
 
 fn slow_read(path: str) -> Result[str, str] {
-    sleep(100ms)
-    read_file(path)
+    time::sleep(100ms)
+    fs::read(path)
 }
 ```
 

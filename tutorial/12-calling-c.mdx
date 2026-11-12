@@ -115,11 +115,11 @@ fn nap(ms: i64) -> i64 {
 
 fn main() {
     print([1.0 4.0 9.0] ¨ (x => sqrt(x)))   // pure: in parallel
-    let start = clock()
+    let start = time::clock()
     let a = nap(100)                         // concurrent: both naps overlap
     let b = nap(100)
     print(a + b)
-    print(clock() - start < 190ms)           // about 100ms, not 200ms
+    print(time::clock() - start < 190ms)           // about 100ms, not 200ms
 }
 ```
 

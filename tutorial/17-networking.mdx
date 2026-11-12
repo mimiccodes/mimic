@@ -80,12 +80,12 @@ fn server(port: i64) -> Result[i64, str] { http::serve_requests(port, handle, 3)
 fn when_up(url: str, tries: i64) -> Result[http::Response, str] {
     match http::fetch(url) {
         Ok(r) => Ok(r),
-        Err(e) => if tries <= 1 { Err(e) } else { sleep(20ms); when_up(url, tries - 1) },
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); when_up(url, tries - 1) },
     }
 }
 
 fn main() {
-    let port = 30000 + pid() % 20000
+    let port = 30000 + os::pid() % 20000
     let base = "http://127.0.0.1:{port}"
     let s = server(port)                         // starts serving in the background
     print(show(when_up(base + "/hello/ada", 100)))

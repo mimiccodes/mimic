@@ -55,81 +55,90 @@ remove(born, "ada")                        // a new map without it
 * **Speed.** Lookups go through a hash index.
 * **Updates.** `m[k] = v` on a `let mut` map changes it in place when nothing else shares it, and copies it first otherwise.
 
-## Program, files and directories
+## Standard modules
 
-These functions have side effects. The compiler knows this: a function that calls one of them, even indirectly, never runs in parallel and never moves past other effects, the same as `print`. Failures come back as values, never as crashes.
+Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name. A module of your program with the same name comes first. The global names are only `print`, `Option`/`Result` and the string, list and map functions above.
 
-| Function | Result |
-|---|---|
-| `args()` | `[str]`: the command-line arguments, without the program name (`mimic run file.mim -- a b`) |
-| `env(name)` | `Option[str]` |
-| `set_env(name, value)` | `Result[bool, str]` |
-| `read_line()` | `Option[str]`: the next line of standard input without its newline; `None` at the end |
-| `read_input()` | `str`: everything left on standard input |
-| `eprint(x)` | Print to standard error |
-| `exit(code)` | Leave the program now with that exit status |
-| `read_file(path)` | `Result[str, str]` |
-| `write_file(path, text)`, `append_file(path, text)` | `Result[i64, str]`: bytes written |
-| `file_size(path)` | `Result[i64, str]` |
-| `copy_file(from, to)` | `Result[i64, str]` |
-| `rename(from, to)`, `remove_file(path)` | `Result[bool, str]`; `remove_file` also removes empty directories |
-| `exists(path)`, `is_file(path)`, `is_dir(path)` | `bool` |
-| `list_dir(path)` | `Result[[str], str]`: sorted names, without `.` and `..` |
-| `make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists |
-| `current_dir()`, `temp_dir()` | `str` |
+Functions with effects are known to the compiler for what they are (see [ffi.md](ffi.md#what-c-functions-do-effects)):
+* **concurrent:** may overlap; `let x = …` starts an implicit future, and `¨` runs them in parallel.
+* **ordered:** in program order.
+* **sync:** pending futures finish first.
 
-Error messages name the operation, the path and the system's reason: `cannot read data.csv: No such file or directory`.
+Failures come back as values, never as crashes. Error messages name the operation, the path and the system's reason: `cannot read data.csv: No such file or directory`.
 
-## Time
+### `fs`: files and directories
 
-Instants and durations are both `i64` nanoseconds, so duration literals mix freely: `now() + 90min`, `took < 2s`.
+| Function | Result | Effect |
+|---|---|---|
+| `fs::read(path)` | `Result[str, str]` | concurrent |
+| `fs::size(path)` | `Result[i64, str]` | concurrent |
+| `fs::list_dir(path)` | `Result[[str], str]`: sorted names, without `.` and `..` | concurrent |
+| `fs::exists(path)`, `fs::is_file(path)`, `fs::is_dir(path)` | `bool` | concurrent |
+| `fs::current_dir()`, `fs::temp_dir()` | `str` | concurrent |
+| `fs::write(path, text)`, `fs::append(path, text)` | `Result[i64, str]`: bytes written | sync |
+| `fs::copy(from, to)` | `Result[i64, str]` | sync |
+| `fs::rename(from, to)`, `fs::remove(path)` | `Result[bool, str]`; `remove` also removes empty directories | sync |
+| `fs::make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists | sync |
 
-| Function | Result |
-|---|---|
-| `now()` | Wall-clock time: nanoseconds since 1970-01-01 00:00 UTC |
-| `clock()` | A monotonic clock in nanoseconds, for measuring how long something takes (never jumps) |
-| `sleep(d)` | Pause this thread, e.g. `sleep(250ms)` |
-| `timestamp(y, mo, d, h, mi, s)` | The instant of a UTC date and time |
-| `utc(t)`, `local(t)` | A `DateTime { year, month, day, hour, minute, second, nanosecond, weekday, utc_offset }`; weekday 1 = Monday … 7 = Sunday; `utc_offset` in seconds |
-| `format_time(t)` | ISO 8601 / RFC 3339 in UTC: `2026-11-12T14:30:05Z`, with `.250` milliseconds when present |
-
-The calendar is the proleptic Gregorian one, correct for any year, before 1970 included.
-
-## Random numbers
-
-| Function | Result |
-|---|---|
-| `random()` | A float in `[0, 1)` |
-| `random_int(lo, hi)` | An integer in `[lo, hi)`, without bias |
-| `seed_random(n)` | Make the sequence repeatable (per thread) |
-
-The generator is xoshiro256**, seeded from the operating system's entropy. Each thread has its own. Drawing a number changes the generator's state, so code that uses random numbers runs in order and never in parallel. It is not for cryptography.
-
-## Running programs
-
-| Function | Result |
-|---|---|
-| `run(program, arguments)` | `Result[Output, str]`. `program` is looked up through `PATH`. `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely. |
-| `shell(command)` | `run("/bin/sh", ["-c" command])` |
-| `pid()` | This process's id |
-
-The child's standard input is empty. WebAssembly (WASI), tvOS and watchOS have no child processes, so there `run` returns `Err`.
-
-## Paths
-
-Pure text operations, so they stay parallel:
+### `path`: paths as text (pure)
 
 | Function | Example |
 |---|---|
-| `path_join(a, b)` | `path_join("logs", "today.txt")` → `"logs/today.txt"`; an absolute `b` replaces `a` |
-| `file_name(p)` | `"a/b/c.tar.gz"` → `"c.tar.gz"` |
-| `extension(p)` | `"a/b/c.tar.gz"` → `"gz"` |
-| `stem(p)` | `"a/report.pdf"` → `"report"` |
-| `parent(p)` | `"a/b/c.txt"` → `"a/b"`; `"c.txt"` → `""` |
+| `path::join(a, b)` | `path::join("logs", "today.txt")` → `"logs/today.txt"`; an absolute `b` replaces `a` |
+| `path::file_name(p)` | `"a/b/c.tar.gz"` → `"c.tar.gz"` |
+| `path::extension(p)` | `"a/b/c.tar.gz"` → `"gz"` |
+| `path::stem(p)` | `"a/report.pdf"` → `"report"` |
+| `path::parent(p)` | `"a/b/c.txt"` → `"a/b"`; `"c.txt"` → `""` |
 
-`lines(s)` splits at newlines and drops a `\r` before each one. A final newline ends the last line instead of starting an empty one, so `lines(read_file(…))` gives exactly the file's lines.
+### `io`: standard input and error (ordered)
 
-The names in the standard library never block your own: a variable or function of yours may be called `args`, `parent` or `remove_file`, and your definition wins in your code.
+| Function | Result |
+|---|---|
+| `io::read_line()` | `Option[str]`: the next line without its newline; `None` at the end |
+| `io::read_input()` | `str`: everything left on standard input |
+| `io::eprint(x)` | Print to standard error |
+
+### `os`: the program and other programs
+
+| Function | Result | Effect |
+|---|---|---|
+| `os::args()` | `[str]`: the command-line arguments, without the program name (`mimic run file.mim -- a b`) | concurrent |
+| `os::env(name)` | `Option[str]` | concurrent |
+| `os::pid()` | This process's id | concurrent |
+| `os::set_env(name, value)` | `Result[bool, str]` | sync |
+| `os::run(program, arguments)` | `Result[os::Output, str]`: `program` is looked up through `PATH`; `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely | sync |
+| `os::shell(command)` | `os::run("/bin/sh", ["-c" command])` | sync |
+| `os::exit(code)` | Leave the program now with that exit status | ordered |
+
+The child's standard input is empty. WebAssembly (WASI), tvOS and watchOS have no child processes, so there `os::run` returns `Err`.
+
+### `time`: clocks and dates
+
+Instants and durations are both `i64` nanoseconds, so duration literals mix freely: `time::now() + 90min`, `took < 2s`.
+
+| Function | Result | Effect |
+|---|---|---|
+| `time::now()` | Wall-clock time: nanoseconds since 1970-01-01 00:00 UTC | concurrent |
+| `time::clock()` | A monotonic clock in nanoseconds, for measuring how long something takes (never jumps) | concurrent |
+| `time::sleep(d)` | Pause, e.g. `time::sleep(250ms)` | concurrent |
+| `time::local(t)` | `time::DateTime` in this machine's time zone | concurrent |
+| `time::utc(t)` | `time::DateTime { year, month, day, hour, minute, second, nanosecond, weekday, utc_offset }`; weekday 1 = Monday … 7 = Sunday | pure |
+| `time::timestamp(y, mo, d, h, mi, s)` | The instant of a UTC date and time | pure |
+| `time::format(t)` | ISO 8601 / RFC 3339 in UTC: `2026-11-12T14:30:05Z`, with `.250` milliseconds when present | pure |
+
+The calendar is the proleptic Gregorian one, correct for any year, before 1970 included.
+
+### `random`: random numbers (ordered)
+
+| Function | Result |
+|---|---|
+| `random::float()` | A float in `[0, 1)` |
+| `random::int(lo, hi)` | An integer in `[lo, hi)`, without bias |
+| `random::seed(n)` | Make the sequence repeatable (per thread) |
+
+The generator is xoshiro256**, seeded from the operating system's entropy. Each thread has its own. Drawing a number changes the generator's state, so random draws run in order and never in parallel. It is not for cryptography.
+
+`lines(s)` (global) splits at newlines and drops a `\r` before each one. A final newline ends the last line instead of starting an empty one, so `lines(fs::read(…))` gives exactly the file's lines.
 
 ## Networking: the `http` and `tcp` modules
 

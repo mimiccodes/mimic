@@ -6,22 +6,9 @@
  * exports by name (`mim_desc_Ok`, …), so no wrapper code is needed and a
  * handler passed to `serve` is visible to the compiler's effect analysis. */
 
-/* ---- standard-library values -------------------------------------------- */
+/* ok_of, err_of, obj_owned: see mimic_io.c */
 
-extern const mim_desc mim_desc_Ok, mim_desc_Err, mim_desc_Socket, mim_desc_Listener, mim_desc_Request, mim_desc_Response;
-
-static mim_val *obj_owned(const mim_desc *d, int64_t n, mim_val **fields) {
-    mim_val *r = mim_obj(d, n, fields); /* retains the fields */
-    for (int64_t i = 0; i < n; i++) mim_release(fields[i]);
-    return r;
-}
-
-static mim_val *ok_of(mim_val *v) { return obj_owned(&mim_desc_Ok, 1, &v); }
-
-static mim_val *err_of(const char *msg) {
-    mim_val *m = mim_from_cstr(msg);
-    return obj_owned(&mim_desc_Err, 1, &m);
-}
+extern const mim_desc mim_desc_Socket, mim_desc_Listener, mim_desc_Request, mim_desc_Response;
 
 static mim_val *err_errno(const char *what, const char *detail) {
     char buf[512];

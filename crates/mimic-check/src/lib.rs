@@ -352,8 +352,9 @@ impl Program {
             diags.push(FileDiag { file, diag: Diag::new(&C::DUPLICATE_DEFINITION, format!("function `{name}` collides with a type or variant of the same name"), span) });
             return;
         }
-        // strict: no shadowing of functions from enclosing modules
-        let mut cur = self.mods[m].parent;
+        // strict: no shadowing of functions from enclosing modules (the
+        // standard library's modules are always used by path: `fs::remove`)
+        let mut cur = if self.mods[m].package == "std" { None } else { self.mods[m].parent };
         while let Some(a) = cur {
             if self.mods[a].fns.contains_key(name) {
                 diags.push(FileDiag {

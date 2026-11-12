@@ -131,189 +131,113 @@ pub fn get(m, key) {
     if has(m, key) { Some(m[key]) } else { None }
 }
 
-// Paths: pure text operations (runtime/mimic_io.c).
-pub extern \"mimic\" {
-    fn path_join(a: str, b: str) -> str
-    fn file_name(path: str) -> str
-    fn parent(path: str) -> str
-    fn extension(path: str) -> str
-    fn stem(path: str) -> str
-}
+// ---- standard modules ------------------------------------------------------
+// Used by path from any file, no import needed (`fs::read(p)`); `use fs::read`
+// gives a short name. A module of the program with the same name comes first.
+// Each extern block says what its functions do (docs/ffi.md):
+//   pure        no effects
+//   concurrent  may overlap (reads, waiting): implicit futures, parallel ¨
+//   ordered     in program order, changes nothing others read (printing)
+//   sync        changes shared state: pending futures finish first
+// (runtime/mimic_io.c, runtime/mimic_socket.c)
 
-// The program and its surroundings. These have side effects, so they never
-// run in parallel or out of order (runtime/mimic_io.c).
-// `ordered`: effects that happen in program order (they change nothing
-// that overlapping reads see, so pending implicit futures keep running).
-pub extern \"mimic\" ordered {
-    fn eprint(value: any)
-    fn exit(code: i64)
-    fn read_input() -> str
-}
+// Files and directories.
+pub module fs {
+    pub extern \"mimic\" concurrent {
+        fn read(path: str) -> Result[str, str]
+        fn size(path: str) -> Result[i64, str]
+        fn list_dir(path: str) -> Result[[str], str]
+        fn exists(path: str) -> bool
+        fn is_file(path: str) -> bool
+        fn is_dir(path: str) -> bool
+        fn current_dir() -> str
+        fn temp_dir() -> str
+    }
 
-// `concurrent`: effects that may overlap each other (reads). A
-// `let` of a function that only has these starts at once and is awaited at
-// its first use (an implicit future); `¨` runs such functions in parallel.
-pub extern \"mimic\" concurrent {
-    fn args() -> [str]
-    fn exists(path: str) -> bool
-    fn is_dir(path: str) -> bool
-    fn is_file(path: str) -> bool
-    fn current_dir() -> str
-    fn temp_dir() -> str
-}
-
-// Low-level forms: on failure they set an error (per thread) that the
-// wrappers below read on the same thread.
-extern \"mimic\" concurrent {
-    fn io_ok() -> bool
-    fn io_error() -> str
-    fn io_env(name: str) -> str
-    fn io_read_file(path: str) -> str
-    fn io_file_size(path: str) -> i64
-    fn io_list_dir(path: str) -> [str]
-}
-
-extern \"mimic\" ordered {
-    fn io_read_line() -> str
-}
-
-// `sync`: changes what overlapping reads would see, so pending
-// implicit futures finish first.
-extern \"mimic\" sync {
-    fn io_set_env(name: str, value: str) -> bool
-    fn io_write_file(path: str, text: str, append: bool) -> i64
-    fn io_remove_file(path: str) -> bool
-    fn io_rename(from: str, to: str) -> bool
-    fn io_copy_file(from: str, to: str) -> i64
-    fn io_make_dir(path: str) -> bool
-}
-
-// `Some(value)` of an environment variable, or `None` when it is not set.
-pub fn env(name: str) -> Option[str] {
-    let v = io_env(name)
-    if io_ok() { Some(v) } else { None }
-}
-
-pub fn set_env(name: str, value: str) -> Result[bool, str] {
-    let done = io_set_env(name, value)
-    if done { Ok(true) } else { Err(io_error()) }
-}
-
-// The next line of standard input (without its newline); `None` at the end.
-pub fn read_line() -> Option[str] {
-    let line = io_read_line()
-    if io_ok() { Some(line) } else { None }
-}
-
-pub fn read_file(path: str) -> Result[str, str] {
-    let text = io_read_file(path)
-    if io_ok() { Ok(text) } else { Err(io_error()) }
-}
-
-// Replace the file's contents; `Ok(bytes written)`.
-pub fn write_file(path: str, text: str) -> Result[i64, str] {
-    let n = io_write_file(path, text, false)
-    if io_ok() { Ok(n) } else { Err(io_error()) }
-}
-
-pub fn append_file(path: str, text: str) -> Result[i64, str] {
-    let n = io_write_file(path, text, true)
-    if io_ok() { Ok(n) } else { Err(io_error()) }
-}
-
-pub fn file_size(path: str) -> Result[i64, str] {
-    let n = io_file_size(path)
-    if io_ok() { Ok(n) } else { Err(io_error()) }
-}
-
-// Remove a file, or an empty directory.
-pub fn remove_file(path: str) -> Result[bool, str] {
-    let done = io_remove_file(path)
-    if done { Ok(true) } else { Err(io_error()) }
-}
-
-pub fn rename(from: str, to: str) -> Result[bool, str] {
-    let done = io_rename(from, to)
-    if done { Ok(true) } else { Err(io_error()) }
-}
-
-pub fn copy_file(from: str, to: str) -> Result[i64, str] {
-    let n = io_copy_file(from, to)
-    if io_ok() { Ok(n) } else { Err(io_error()) }
-}
-
-// The names in a directory, sorted (without `.` and `..`).
-pub fn list_dir(path: str) -> Result[[str], str] {
-    let names = io_list_dir(path)
-    if io_ok() { Ok(names) } else { Err(io_error()) }
-}
-
-// Create a directory and any missing parents (fine if it exists).
-pub fn make_dir(path: str) -> Result[bool, str] {
-    let done = io_make_dir(path)
-    if done { Ok(true) } else { Err(io_error()) }
-}
-
-// ---- time, random numbers, processes -------------------------------------
-
-// A calendar date and time. weekday: 1 = Monday … 7 = Sunday; utc_offset in seconds.
-pub type DateTime = {
-    year: i64, month: i64, day: i64,
-    hour: i64, minute: i64, second: i64, nanosecond: i64,
-    weekday: i64, utc_offset: i64,
-}
-
-// What a finished program left behind.
-pub type Output = { status: i64, stdout: str, stderr: str }
-
-pub extern \"mimic\" concurrent {
-    fn now() -> i64
-    fn clock() -> i64
-    fn sleep(duration: i64)
-    fn pid() -> i64
-}
-
-pub extern \"mimic\" ordered {
-    fn random() -> f64
-    fn random_int(lo: i64, hi: i64) -> i64
-    fn seed_random(seed: i64)
-}
-
-pub extern \"mimic\" {
-    fn format_time(t: i64) -> str
-    fn timestamp(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64
-}
-
-extern \"mimic\" {
-    fn time_utc_parts(t: i64) -> [i64]
-}
-
-extern \"mimic\" concurrent {
-    fn time_local_parts(t: i64) -> [i64]
-}
-
-extern \"mimic\" sync {
-    fn io_run(program: str, arguments: [str]) -> any
-}
-
-fn date_of(p: [i64]) -> DateTime {
-    DateTime {
-        year: p[0], month: p[1], day: p[2],
-        hour: p[3], minute: p[4], second: p[5], nanosecond: p[6],
-        weekday: p[7], utc_offset: p[8],
+    pub extern \"mimic\" sync {
+        fn write(path: str, text: str) -> Result[i64, str]
+        fn append(path: str, text: str) -> Result[i64, str]
+        fn copy(from: str, to: str) -> Result[i64, str]
+        fn rename(from: str, to: str) -> Result[bool, str]
+        fn remove(path: str) -> Result[bool, str]
+        fn make_dir(path: str) -> Result[bool, str]
     }
 }
 
-// The calendar date and time of instant `t` (from now(), timestamp(…)) in UTC.
-pub fn utc(t: i64) -> DateTime { date_of(time_utc_parts(t)) }
+// Paths as text: pure.
+pub module path {
+    pub extern \"mimic\" pure {
+        fn join(a: str, b: str) -> str
+        fn file_name(path: str) -> str
+        fn parent(path: str) -> str
+        fn extension(path: str) -> str
+        fn stem(path: str) -> str
+    }
+}
 
-// … and in this machine's time zone.
-pub fn local(t: i64) -> DateTime { date_of(time_local_parts(t)) }
+// Standard input and standard error (`print` writes standard output).
+pub module io {
+    pub extern \"mimic\" ordered {
+        fn read_line() -> Option[str]
+        fn read_input() -> str
+        fn eprint(value: any)
+    }
+}
 
-// Run a program (found through PATH) and wait for it; its output is captured.
-pub fn run(program: str, arguments: [str]) -> Result[Output, str] {
-    let r = io_run(program, arguments)
-    if io_ok() { Ok(Output { status: r[0], stdout: r[1], stderr: r[2] }) } else { Err(io_error()) }
+// The program and its process: arguments, environment, other programs.
+pub module os {
+    // What a finished program left behind.
+    pub type Output = { status: i64, stdout: str, stderr: str }
+
+    pub extern \"mimic\" concurrent {
+        fn args() -> [str]
+        fn env(name: str) -> Option[str]
+        fn pid() -> i64
+    }
+
+    pub extern \"mimic\" ordered {
+        fn exit(code: i64)
+    }
+
+    pub extern \"mimic\" sync {
+        fn set_env(name: str, value: str) -> Result[bool, str]
+        fn run(program: str, arguments: [str]) -> Result[Output, str]
+    }
+
+    // Run a command line through the system shell (/bin/sh -c).
+    pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
+}
+
+// Clocks and dates. Instants and durations are i64 nanoseconds.
+pub module time {
+    // weekday: 1 = Monday … 7 = Sunday; utc_offset in seconds
+    pub type DateTime = {
+        year: i64, month: i64, day: i64,
+        hour: i64, minute: i64, second: i64, nanosecond: i64,
+        weekday: i64, utc_offset: i64,
+    }
+
+    pub extern \"mimic\" concurrent {
+        fn now() -> i64
+        fn clock() -> i64
+        fn sleep(duration: i64)
+        fn local(t: i64) -> DateTime
+    }
+
+    pub extern \"mimic\" pure {
+        fn utc(t: i64) -> DateTime
+        fn format(t: i64) -> str
+        fn timestamp(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64
+    }
+}
+
+// Random numbers (xoshiro256**, seeded from the system, one per thread).
+pub module random {
+    pub extern \"mimic\" ordered {
+        fn float() -> f64
+        fn int(lo: i64, hi: i64) -> i64
+        fn seed(n: i64)
+    }
 }
 
 // ---- networking: the `tcp` and `http` modules ------------------------------
@@ -360,8 +284,6 @@ pub module http {
     pub fn not_found() -> Response { respond(404, \"not found\") }
 }
 
-// Run a command line through the system shell (/bin/sh -c).
-pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
 ";
 
 fn prelude_file() -> SourceFile {

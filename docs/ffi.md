@@ -66,7 +66,7 @@ extern "C" { fn remove(path: cstr) -> i32 }                // sync: the default
 How the declaration is used:
 * **It is a promise the compiler trusts**, like `trusted` is for memory safety. A function declared `pure` or `concurrent` that secretly writes shared state can produce races. When unsure, leave it out: `sync` is always correct, only slower.
 * **It covers headers too.** It applies to every function of the block, including those imported with `include`.
-* **The runtime uses the same words.** Mimic's own runtime functions, declared with `extern "mimic"`, carry the same annotations. That's how `http::fetch` (concurrent) and `write_file` (sync) get their behavior. Library authors use the same mechanism for their C bindings.
+* **The runtime uses the same words.** Mimic's own runtime functions, declared with `extern "mimic"`, carry the same annotations. That's how `http::fetch` (concurrent) and `fs::write` (sync) get their behavior. Library authors use the same mechanism for their C bindings.
 
 ## Importing C headers directly
 

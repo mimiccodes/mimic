@@ -1,17 +1,11 @@
-/* Program basics: arguments, environment, files, directories, paths, stdin.
- * Included at the end of mimic_rt.c (same translation unit).
+/* The standard modules with effects: fs, path, io, os, time, random, plus
+ * implicit futures. Included at the end of mimic_rt.c (same translation unit).
  *
- * Functions declared `extern "mimic-io"` in the prelude have side effects:
- * the compiler never runs them in parallel or out of order. They report
- * failure through a per-thread "last error" that the prelude's Mimic
- * wrappers turn into `Result` / `Option` values:
- *
- *     pub fn read_file(path: str) -> Result[str, str] {
- *         let s = io_read_file(path)
- *         if io_ok() { Ok(s) } else { Err(io_error()) }
- *     }
- *
- * Path helpers (`path_join`, `file_name`, …) are pure `extern "mimic"`. */
+ * Each module function is exported as mim_std_<module>_<name> (see the end of
+ * this file) and returns the standard library's own values (`Ok(…)`,
+ * `Err("…")`, `Some(…)`, records), built from the type descriptors the
+ * compiler exports by name (mim_desc_Ok, …). Their effects are declared in
+ * the prelude (`extern "mimic" concurrent { … }`, see docs/ffi.md). */
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -19,6 +13,27 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+
+
+/* ---- standard-library values -------------------------------------------- */
+
+extern const mim_desc mim_desc_Ok, mim_desc_Err, mim_desc_Some, mim_desc_None;
+extern const mim_desc mim_desc_Output, mim_desc_DateTime;
+
+static mim_val *obj_owned(const mim_desc *d, int64_t n, mim_val **fields) {
+    mim_val *r = mim_obj(d, n, fields); /* retains the fields */
+    for (int64_t i = 0; i < n; i++) mim_release(fields[i]);
+    return r;
+}
+
+static mim_val *ok_of(mim_val *v) { return obj_owned(&mim_desc_Ok, 1, &v); }
+static mim_val *some_of(mim_val *v) { return obj_owned(&mim_desc_Some, 1, &v); }
+static mim_val *none_val(void) { return obj_owned(&mim_desc_None, 0, NULL); }
+
+static mim_val *err_of(const char *msg) {
+    mim_val *m = mim_from_cstr(msg);
+    return obj_owned(&mim_desc_Err, 1, &m);
+}
 
 static _Thread_local char io_err[512];
 static _Thread_local int io_failed;
@@ -49,13 +64,11 @@ static const char *io_path(mim_val *v, const char *fn) {
     return (const char *)v->data; /* strings are NUL-terminated */
 }
 
-mim_val *mim_std_io_ok(void) { return mim_bool(!io_failed); }
-mim_val *mim_std_io_error(void) { return mim_from_cstr(io_err); }
 
 /* ---- program ------------------------------------------------------------ */
 
 /* the command-line arguments, without the program's own name */
-mim_val *mim_std_args(void) {
+static mim_val *impl_args(void) {
     int64_t n = g_argc > 1 ? g_argc - 1 : 0;
     if (n == 0) return alloc(MIM_BOXED, 1, 0);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
@@ -66,7 +79,7 @@ mim_val *mim_std_args(void) {
     return r;
 }
 
-mim_val *mim_std_io_env(mim_val *name) {
+static mim_val *impl_io_env(mim_val *name) {
     io_clear();
     const char *v = getenv(io_path(name, "env"));
     if (!v) {
@@ -76,7 +89,7 @@ mim_val *mim_std_io_env(mim_val *name) {
     return mim_from_cstr(v);
 }
 
-mim_val *mim_std_io_set_env(mim_val *name, mim_val *value) {
+static mim_val *impl_io_set_env(mim_val *name, mim_val *value) {
     io_clear();
 #ifdef _WIN32
     if (_putenv_s(io_path(name, "set_env"), io_path(value, "set_env")) != 0) io_fail("set_env", io_path(name, "set_env"));
@@ -87,7 +100,7 @@ mim_val *mim_std_io_set_env(mim_val *name, mim_val *value) {
 }
 
 /* print to standard error (a newline follows) */
-mim_val *mim_std_eprint(mim_val *v) {
+static mim_val *impl_eprint(mim_val *v) {
     fflush(stdout);
     sbuf b = {0};
     fmt_val(&b, v, 0);
@@ -98,7 +111,7 @@ mim_val *mim_std_eprint(mim_val *v) {
 }
 
 /* leave the program now with an exit status */
-mim_val *mim_std_exit(mim_val *code) {
+static mim_val *impl_exit(mim_val *code) {
     fflush(stdout);
     fflush(stderr);
     exit((int)(code && code->rank == 0 && code->dtype != MIM_F64 ? geti(code, 0) : 1));
@@ -108,7 +121,7 @@ mim_val *mim_std_exit(mim_val *code) {
 /* ---- standard input ----------------------------------------------------- */
 
 /* one line without its newline; at end of input: error "end of input" */
-mim_val *mim_std_io_read_line(void) {
+static mim_val *impl_io_read_line(void) {
     io_clear();
     fflush(stdout);
     sbuf b = {0};
@@ -131,7 +144,7 @@ mim_val *mim_std_io_read_line(void) {
 }
 
 /* everything left on standard input */
-mim_val *mim_std_read_input(void) {
+static mim_val *impl_read_input(void) {
     sbuf b = {0};
     char buf[65536];
     size_t n;
@@ -143,7 +156,7 @@ mim_val *mim_std_read_input(void) {
 
 /* ---- files -------------------------------------------------------------- */
 
-mim_val *mim_std_io_read_file(mim_val *path) {
+static mim_val *impl_io_read_file(mim_val *path) {
     io_clear();
     const char *p = io_path(path, "read_file");
     FILE *f = fopen(p, "rb");
@@ -168,7 +181,7 @@ mim_val *mim_std_io_read_file(mim_val *path) {
 }
 
 /* write (or append) text; the number of bytes written */
-mim_val *mim_std_io_write_file(mim_val *path, mim_val *text, mim_val *append) {
+static mim_val *impl_io_write_file(mim_val *path, mim_val *text, mim_val *append) {
     io_clear();
     const char *p = io_path(path, "write_file");
     if (!text || text->dtype != MIM_CHAR || text->rank != 1) mim_panic("write_file: expected text (str)");
@@ -186,22 +199,22 @@ mim_val *mim_std_io_write_file(mim_val *path, mim_val *text, mim_val *append) {
 
 static int stat_of(const char *p, struct stat *st) { return stat(p, st) == 0; }
 
-mim_val *mim_std_exists(mim_val *path) {
+static mim_val *impl_exists(mim_val *path) {
     struct stat st;
     return mim_bool(stat_of(io_path(path, "exists"), &st));
 }
 
-mim_val *mim_std_is_dir(mim_val *path) {
+static mim_val *impl_is_dir(mim_val *path) {
     struct stat st;
     return mim_bool(stat_of(io_path(path, "is_dir"), &st) && S_ISDIR(st.st_mode));
 }
 
-mim_val *mim_std_is_file(mim_val *path) {
+static mim_val *impl_is_file(mim_val *path) {
     struct stat st;
     return mim_bool(stat_of(io_path(path, "is_file"), &st) && S_ISREG(st.st_mode));
 }
 
-mim_val *mim_std_io_file_size(mim_val *path) {
+static mim_val *impl_io_file_size(mim_val *path) {
     io_clear();
     struct stat st;
     const char *p = io_path(path, "file_size");
@@ -213,7 +226,7 @@ mim_val *mim_std_io_file_size(mim_val *path) {
 }
 
 /* remove a file or an empty directory */
-mim_val *mim_std_io_remove_file(mim_val *path) {
+static mim_val *impl_io_remove_file(mim_val *path) {
     io_clear();
     const char *p = io_path(path, "remove");
     struct stat st;
@@ -222,14 +235,14 @@ mim_val *mim_std_io_remove_file(mim_val *path) {
     return mim_bool(ok);
 }
 
-mim_val *mim_std_io_rename(mim_val *from, mim_val *to) {
+static mim_val *impl_io_rename(mim_val *from, mim_val *to) {
     io_clear();
     const char *a = io_path(from, "rename"), *b = io_path(to, "rename");
     if (rename(a, b) != 0) io_fail("cannot rename", a);
     return mim_bool(!io_failed);
 }
 
-mim_val *mim_std_io_copy_file(mim_val *from, mim_val *to) {
+static mim_val *impl_io_copy_file(mim_val *from, mim_val *to) {
     io_clear();
     const char *a = io_path(from, "copy_file"), *b = io_path(to, "copy_file");
     FILE *in = fopen(a, "rb");
@@ -263,7 +276,7 @@ mim_val *mim_std_io_copy_file(mim_val *from, mim_val *to) {
 static int cmp_cstr(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
 
 /* the names in a directory (no "." or ".."), sorted */
-mim_val *mim_std_io_list_dir(mim_val *path) {
+static mim_val *impl_io_list_dir(mim_val *path) {
     io_clear();
     const char *p = io_path(path, "list_dir");
     DIR *d = opendir(p);
@@ -308,7 +321,7 @@ static int mkdir_one(const char *p) {
 }
 
 /* create a directory and any missing parents; fine if it already exists */
-mim_val *mim_std_io_make_dir(mim_val *path) {
+static mim_val *impl_io_make_dir(mim_val *path) {
     io_clear();
     const char *p = io_path(path, "make_dir");
     size_t len = strlen(p);
@@ -338,13 +351,13 @@ mim_val *mim_std_io_make_dir(mim_val *path) {
     return mim_bool(1);
 }
 
-mim_val *mim_std_current_dir(void) {
+static mim_val *impl_current_dir(void) {
     char buf[4096];
     if (!getcwd(buf, sizeof buf)) return mim_str(".", 1);
     return mim_from_cstr(buf);
 }
 
-mim_val *mim_std_temp_dir(void) {
+static mim_val *impl_temp_dir(void) {
     const char *t = getenv("TMPDIR");
     if (!t || !*t) t = "/tmp";
     size_t n = strlen(t);
@@ -355,7 +368,7 @@ mim_val *mim_std_temp_dir(void) {
 /* ---- paths (pure) ------------------------------------------------------- */
 
 /* "a/b" + "c" → "a/b/c"; an absolute second part replaces the first */
-mim_val *mim_std_path_join(mim_val *a, mim_val *b) {
+static mim_val *impl_path_join(mim_val *a, mim_val *b) {
     const char *x = io_path(a, "path_join"), *y = io_path(b, "path_join");
     if (y[0] == '/' || x[0] == 0) return mim_from_cstr(y);
     size_t nx = strlen(x), ny = strlen(y);
@@ -370,7 +383,7 @@ mim_val *mim_std_path_join(mim_val *a, mim_val *b) {
 }
 
 /* the last component: "a/b/c.txt" → "c.txt" */
-mim_val *mim_std_file_name(mim_val *path) {
+static mim_val *impl_file_name(mim_val *path) {
     const char *p = io_path(path, "file_name");
     size_t n = strlen(p);
     while (n > 1 && p[n - 1] == '/') n--;
@@ -380,7 +393,7 @@ mim_val *mim_std_file_name(mim_val *path) {
 }
 
 /* everything before the last component: "a/b/c.txt" → "a/b"; "c" → "" */
-mim_val *mim_std_parent(mim_val *path) {
+static mim_val *impl_parent(mim_val *path) {
     const char *p = io_path(path, "parent");
     size_t n = strlen(p);
     while (n > 1 && p[n - 1] == '/') n--;
@@ -390,8 +403,8 @@ mim_val *mim_std_parent(mim_val *path) {
 }
 
 /* "c.tar.gz" → "gz"; no dot (or a leading dot only) → "" */
-mim_val *mim_std_extension(mim_val *path) {
-    mim_val *f = mim_std_file_name(path);
+static mim_val *impl_extension(mim_val *path) {
+    mim_val *f = impl_file_name(path);
     const char *s = (const char *)f->data;
     const char *dot = strrchr(s, '.');
     mim_val *r = dot && dot != s ? mim_from_cstr(dot + 1) : mim_str("", 0);
@@ -400,8 +413,8 @@ mim_val *mim_std_extension(mim_val *path) {
 }
 
 /* the file name without its extension: "a/report.pdf" → "report" */
-mim_val *mim_std_stem(mim_val *path) {
-    mim_val *f = mim_std_file_name(path);
+static mim_val *impl_stem(mim_val *path) {
+    mim_val *f = impl_file_name(path);
     const char *s = (const char *)f->data;
     const char *dot = strrchr(s, '.');
     mim_val *r = dot && dot != s ? mim_str(s, (int64_t)(dot - s)) : (mim_retain(f), f);
@@ -429,20 +442,20 @@ extern char **environ;
 /* ---- clocks ------------------------------------------------------------- */
 
 /* wall-clock time: nanoseconds since 1970-01-01 00:00:00 UTC */
-mim_val *mim_std_now(void) {
+static mim_val *impl_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return mim_int((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec);
 }
 
 /* a monotonic clock in nanoseconds: for measuring how long things take */
-mim_val *mim_std_clock(void) {
+static mim_val *impl_clock(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return mim_int((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec);
 }
 
-mim_val *mim_std_sleep(mim_val *d) {
+static mim_val *impl_sleep(mim_val *d) {
     int64_t ns = d && d->rank == 0 ? (d->dtype == MIM_F64 ? (int64_t)getf(d, 0) : geti(d, 0)) : 0;
     if (ns <= 0) return NULL;
     struct timespec ts = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)};
@@ -490,7 +503,7 @@ static mim_val *date_parts(int64_t t, int64_t offset) {
     return r;
 }
 
-mim_val *mim_std_time_utc_parts(mim_val *t) { return date_parts(geti(t, 0), 0); }
+static mim_val *impl_time_utc_parts(mim_val *t) { return date_parts(geti(t, 0), 0); }
 
 /* the local time zone's offset from UTC at instant t, in seconds */
 static int64_t local_offset(int64_t t) {
@@ -510,20 +523,20 @@ static int64_t local_offset(int64_t t) {
     return l - g;
 }
 
-mim_val *mim_std_time_local_parts(mim_val *t) {
+static mim_val *impl_time_local_parts(mim_val *t) {
     int64_t v = geti(t, 0);
     return date_parts(v, local_offset(v));
 }
 
 /* the instant of a UTC calendar date and time (ns since the epoch) */
-mim_val *mim_std_timestamp(mim_val *y, mim_val *mo, mim_val *d, mim_val *h, mim_val *mi, mim_val *s) {
+static mim_val *impl_timestamp(mim_val *y, mim_val *mo, mim_val *d, mim_val *h, mim_val *mi, mim_val *s) {
     int64_t days = days_from_civil(geti(y, 0), geti(mo, 0), geti(d, 0));
     int64_t secs = days * 86400 + geti(h, 0) * 3600 + geti(mi, 0) * 60 + geti(s, 0);
     return mim_int(secs * 1000000000);
 }
 
 /* ISO 8601 / RFC 3339 in UTC: 2026-11-12T02:40:05Z (milliseconds when present) */
-mim_val *mim_std_format_time(mim_val *t) {
+static mim_val *impl_format_time(mim_val *t) {
     mim_val *p = date_parts(geti(t, 0), 0);
     int64_t *v = (int64_t *)p->data;
     char buf[64];
@@ -584,10 +597,10 @@ static uint64_t rng_next(void) {
 }
 
 /* a float in [0, 1) */
-mim_val *mim_std_random(void) { return mim_float((double)(rng_next() >> 11) * 0x1.0p-53); }
+static mim_val *impl_random(void) { return mim_float((double)(rng_next() >> 11) * 0x1.0p-53); }
 
 /* an integer in [lo, hi), without modulo bias */
-mim_val *mim_std_random_int(mim_val *lo, mim_val *hi) {
+static mim_val *impl_random_int(mim_val *lo, mim_val *hi) {
     int64_t a = geti(lo, 0), b = geti(hi, 0);
     if (b <= a) mim_panic("random_int(lo, hi) needs lo < hi");
     uint64_t span = (uint64_t)b - (uint64_t)a, limit = UINT64_MAX - UINT64_MAX % span, x;
@@ -596,14 +609,14 @@ mim_val *mim_std_random_int(mim_val *lo, mim_val *hi) {
 }
 
 /* make this thread's random numbers repeatable */
-mim_val *mim_std_seed_random(mim_val *seed) {
+static mim_val *impl_seed_random(mim_val *seed) {
     rng_seed((uint64_t)geti(seed, 0));
     return NULL;
 }
 
 /* ---- processes ---------------------------------------------------------- */
 
-mim_val *mim_std_pid(void) {
+static mim_val *impl_pid(void) {
 #if defined(_WIN32) || defined(__wasi__)
     return mim_int(0);
 #else
@@ -613,7 +626,7 @@ mim_val *mim_std_pid(void) {
 
 /* run a program (looked up in PATH) with arguments; stdin is empty.
  * [status stdout stderr]; a signal gives status 128 + signal number */
-mim_val *mim_std_io_run(mim_val *program, mim_val *argv_list) {
+static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
     io_clear();
 #ifdef MIM_NO_SPAWN
     (void)program;
@@ -751,3 +764,124 @@ mim_val *mim_await(void *h) {
     free(fu);
     return r;
 }
+
+/* ==== the module functions: mim_std_<module>_<name> ======================== */
+
+/* the last error (if any) of an impl_ call as a Result around v */
+static mim_val *io_result(mim_val *v) {
+    if (io_failed) {
+        mim_release(v);
+        return err_of(io_err);
+    }
+    return ok_of(v);
+}
+
+/* ---- fs ----------------------------------------------------------------- */
+
+mim_val *mim_std_fs_read(mim_val *path) { return io_result(impl_io_read_file(path)); }
+
+mim_val *mim_std_fs_write(mim_val *path, mim_val *text) {
+    mim_val *no = mim_bool(0);
+    mim_val *r = io_result(impl_io_write_file(path, text, no));
+    mim_release(no);
+    return r;
+}
+
+mim_val *mim_std_fs_append(mim_val *path, mim_val *text) {
+    mim_val *yes = mim_bool(1);
+    mim_val *r = io_result(impl_io_write_file(path, text, yes));
+    mim_release(yes);
+    return r;
+}
+
+mim_val *mim_std_fs_size(mim_val *path) { return io_result(impl_io_file_size(path)); }
+mim_val *mim_std_fs_copy(mim_val *from, mim_val *to) { return io_result(impl_io_copy_file(from, to)); }
+mim_val *mim_std_fs_rename(mim_val *from, mim_val *to) { return io_result(impl_io_rename(from, to)); }
+mim_val *mim_std_fs_remove(mim_val *path) { return io_result(impl_io_remove_file(path)); }
+mim_val *mim_std_fs_list_dir(mim_val *path) { return io_result(impl_io_list_dir(path)); }
+mim_val *mim_std_fs_make_dir(mim_val *path) { return io_result(impl_io_make_dir(path)); }
+mim_val *mim_std_fs_exists(mim_val *path) { return impl_exists(path); }
+mim_val *mim_std_fs_is_file(mim_val *path) { return impl_is_file(path); }
+mim_val *mim_std_fs_is_dir(mim_val *path) { return impl_is_dir(path); }
+mim_val *mim_std_fs_current_dir(void) { return impl_current_dir(); }
+mim_val *mim_std_fs_temp_dir(void) { return impl_temp_dir(); }
+
+/* ---- path (pure) -------------------------------------------------------- */
+
+mim_val *mim_std_path_join(mim_val *a, mim_val *b) { return impl_path_join(a, b); }
+mim_val *mim_std_path_file_name(mim_val *p) { return impl_file_name(p); }
+mim_val *mim_std_path_parent(mim_val *p) { return impl_parent(p); }
+mim_val *mim_std_path_extension(mim_val *p) { return impl_extension(p); }
+mim_val *mim_std_path_stem(mim_val *p) { return impl_stem(p); }
+
+/* ---- io: standard input and error --------------------------------------- */
+
+mim_val *mim_std_io_read_line(void) {
+    mim_val *v = impl_io_read_line();
+    if (io_failed) {
+        mim_release(v);
+        return none_val();
+    }
+    return some_of(v);
+}
+
+mim_val *mim_std_io_read_input(void) { return impl_read_input(); }
+mim_val *mim_std_io_eprint(mim_val *v) { return impl_eprint(v); }
+
+/* ---- os ----------------------------------------------------------------- */
+
+mim_val *mim_std_os_args(void) { return impl_args(); }
+
+mim_val *mim_std_os_env(mim_val *name) {
+    mim_val *v = impl_io_env(name);
+    if (io_failed) {
+        mim_release(v);
+        return none_val();
+    }
+    return some_of(v);
+}
+
+mim_val *mim_std_os_set_env(mim_val *name, mim_val *value) { return io_result(impl_io_set_env(name, value)); }
+mim_val *mim_std_os_exit(mim_val *code) { return impl_exit(code); }
+mim_val *mim_std_os_pid(void) { return impl_pid(); }
+
+/* run a program: Ok(Output { status, stdout, stderr }) */
+mim_val *mim_std_os_run(mim_val *program, mim_val *args) {
+    mim_val *parts = impl_io_run(program, args);
+    if (io_failed) {
+        mim_release(parts);
+        return err_of(io_err);
+    }
+    mim_val *f[3];
+    for (int i = 0; i < 3; i++) f[i] = scalar_at(parts, i);
+    mim_release(parts);
+    return ok_of(obj_owned(&mim_desc_Output, 3, f));
+}
+
+/* ---- time --------------------------------------------------------------- */
+
+mim_val *mim_std_time_now(void) { return impl_now(); }
+mim_val *mim_std_time_clock(void) { return impl_clock(); }
+mim_val *mim_std_time_sleep(mim_val *d) { return impl_sleep(d); }
+mim_val *mim_std_time_format(mim_val *t) { return impl_format_time(t); }
+
+mim_val *mim_std_time_timestamp(mim_val *y, mim_val *mo, mim_val *d, mim_val *h, mim_val *mi, mim_val *s) {
+    return impl_timestamp(y, mo, d, h, mi, s);
+}
+
+/* [year month day hour minute second nanosecond weekday utc_offset] → DateTime */
+static mim_val *date_time_of(mim_val *parts) {
+    mim_val *f[9];
+    for (int i = 0; i < 9; i++) f[i] = mim_int(((int64_t *)parts->data)[i]);
+    mim_release(parts);
+    return obj_owned(&mim_desc_DateTime, 9, f);
+}
+
+mim_val *mim_std_time_utc(mim_val *t) { return date_time_of(impl_time_utc_parts(t)); }
+mim_val *mim_std_time_local(mim_val *t) { return date_time_of(impl_time_local_parts(t)); }
+
+/* ---- random ------------------------------------------------------------- */
+
+mim_val *mim_std_random_float(void) { return impl_random(); }
+mim_val *mim_std_random_int(mim_val *lo, mim_val *hi) { return impl_random_int(lo, hi); }
+mim_val *mim_std_random_seed(mim_val *seed) { return impl_seed_random(seed); }

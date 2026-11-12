@@ -19,12 +19,12 @@ fn server(port: i64) -> Result[i64, str] { http::serve_requests(port, handle, 7)
 fn get_when_up(url: str, tries: i64) -> Result[http::Response, str] {
     match http::fetch(url) {
         Ok(r) => Ok(r),
-        Err(e) => if tries <= 1 { Err(e) } else { sleep(20ms); get_when_up(url, tries - 1) },
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); get_when_up(url, tries - 1) },
     }
 }
 
 fn main() {
-    let port = 20000 + pid() % 20000
+    let port = 20000 + os::pid() % 20000
     let base = "http://127.0.0.1:{port}"
     let s = server(port)
     match get_when_up(base + "/", 100) {
