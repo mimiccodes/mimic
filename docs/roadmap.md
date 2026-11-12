@@ -62,7 +62,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | D1–D3 | Closures, functions/operators as values, loop words | ✅ |
 | D5, D6 (first part) | Maps (`["a": 1]`, `m[k]`, copy-on-write `m[k] = v`, `get`/`has`/`keys`/`values`/`put`/`remove`), list functions (`push`, `concat`, `sort`), the string library (`split`, `join`, `trim`, `replace`, `find`, `parse_int`, …), `+` and `==` on strings; built on `extern "mimic"` runtime intrinsics ([std.md](std.md)) | ✅ |
 | D4, D7–D10 | Generics (`Option[T]`, `fn f[T]`), bitwise operators and hex/binary literals, guards/alternatives/ranges/record/array patterns and `if let`, structural `==`, matrices (`⥊ ⍉ ⊠`, `m[i, j]`) | ✅ |
-| D (rest) | Sized integer types and byte arrays (with E4) | |
+| D (bytes) | `[u8]` byte arrays (compact; elements read as i64), the `bytes` module (text, hex, base64), `fs::read_bytes`/`write_bytes`, `tcp::send_bytes`/`receive_bytes` | ✅ |
+| D (rest) | Other sized element types (`[i32]`, `[f32]`, …), sized integer scalars | |
 | E1, E2 | Arguments, environment, stdin, files, directories, paths; clocks, dates, random numbers, running programs ([std.md](std.md)) | ✅ |
 | E3 (first part) | Implicit futures for overlapping effects; `¨` runs I/O-only functions in parallel ([syntax.md](syntax.md#concurrency-implicit-futures)) | ✅ |
 | E4 (first part) | `http` module (client, server with route patterns, parallel pure handlers) and `tcp` module; effect annotations on `extern` blocks (`pure`, `concurrent`, `ordered`, `sync`) for C libraries and the runtime | ✅ |

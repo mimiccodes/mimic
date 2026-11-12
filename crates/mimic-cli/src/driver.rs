@@ -155,13 +155,31 @@ pub module fs {
         fn temp_dir() -> str
     }
 
+    pub extern \"mimic\" concurrent {
+        fn read_bytes(path: str) -> Result[[u8], str]
+    }
+
     pub extern \"mimic\" sync {
+        fn write_bytes(path: str, data: [u8]) -> Result[i64, str]
         fn write(path: str, text: str) -> Result[i64, str]
         fn append(path: str, text: str) -> Result[i64, str]
         fn copy(from: str, to: str) -> Result[i64, str]
         fn rename(from: str, to: str) -> Result[bool, str]
         fn remove(path: str) -> Result[bool, str]
         fn make_dir(path: str) -> Result[bool, str]
+    }
+}
+
+// Bytes: `[u8]` arrays, one byte per element (each reads as an i64).
+pub module bytes {
+    pub extern \"mimic\" pure {
+        fn from(values: [i64]) -> [u8]
+        fn of_text(text: str) -> [u8]
+        fn to_text(data: [u8]) -> Result[str, str]
+        fn hex(data: [u8]) -> str
+        fn from_hex(text: str) -> Result[[u8], str]
+        fn base64(data: [u8]) -> str
+        fn from_base64(text: str) -> Result[[u8], str]
     }
 }
 
@@ -274,6 +292,8 @@ pub module tcp {
         fn accept(listener: Listener) -> Result[Socket, str]
         fn send(socket: Socket, text: str) -> Result[i64, str]
         fn receive(socket: Socket, limit: i64) -> Result[str, str]
+        fn send_bytes(socket: Socket, data: [u8]) -> Result[i64, str]
+        fn receive_bytes(socket: Socket, limit: i64) -> Result[[u8], str]
         fn close(socket: any)
     }
 }

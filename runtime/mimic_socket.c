@@ -40,6 +40,8 @@ mim_val *mim_std_tcp_accept(mim_val *l) { (void)l; return no_net(); }
 mim_val *mim_std_tcp_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_net(); }
 mim_val *mim_std_tcp_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
 mim_val *mim_std_tcp_close(mim_val *s) { (void)s; return NULL; }
+mim_val *mim_std_tcp_send_bytes(mim_val *s, mim_val *b) { (void)s; (void)b; return no_net(); }
+mim_val *mim_std_tcp_receive_bytes(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
 mim_val *mim_std_http_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
 mim_val *mim_std_http_fetch(mim_val *u) { (void)u; return no_net(); }
 mim_val *mim_std_http_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
@@ -199,6 +201,23 @@ mim_val *mim_std_tcp_receive(mim_val *s, mim_val *max) {
     mim_val *v = mim_str(buf, (int64_t)r);
     free(buf);
     return ok_of(v);
+}
+
+mim_val *mim_std_tcp_send_bytes(mim_val *s, mim_val *b) {
+    int fd = fd_of(s, "tcp::send_bytes");
+    if (!b || b->rank != 1 || (b->dtype != MIM_U8 && b->len != 0)) mim_panic("tcp::send_bytes: expected bytes ([u8])");
+    if (send_all(fd, (const char *)b->data, (size_t)b->len) != 0) return err_errno("cannot send", NULL);
+    return ok_of(mim_int(b->len));
+}
+
+mim_val *mim_std_tcp_receive_bytes(mim_val *s, mim_val *limit) {
+    mim_val *r = mim_std_tcp_receive(s, limit);
+    if (r->desc != &mim_desc_Ok) return r;
+    mim_val *t = ((mim_val **)r->data)[0];
+    mim_val *b = alloc(MIM_U8, 1, t->len);
+    if (t->len) memcpy(b->data, t->data, (size_t)t->len);
+    mim_release(r);
+    return ok_of(b);
 }
 
 mim_val *mim_std_tcp_close(mim_val *s) {

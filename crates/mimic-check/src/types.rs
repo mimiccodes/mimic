@@ -175,6 +175,8 @@ pub enum El {
     Str,
     /// records / unions (a list of records)
     Obj(u32),
+    /// bytes (`[u8]`): stored one per byte; each element reads as an i64
+    U8,
     Dyn,
 }
 
@@ -225,6 +227,7 @@ impl Ty {
             El::Char => Ty::Char,
             El::Str => Ty::Arr(El::Char),
             El::Obj(t) => Ty::Obj(t),
+            El::U8 => Ty::I64,
             El::Dyn => Ty::Dyn,
         }
     }
@@ -263,6 +266,7 @@ impl std::fmt::Display for Ty {
             El::Char => "char",
             El::Str => "str",
             El::Obj(_) => "record",
+            El::U8 => "u8",
             El::Dyn => "?",
         };
         match self {
@@ -336,6 +340,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             "any" => Ty::Dyn,
             _ => return None,
         },
+        Type::Array(inner, _) if matches!(&**inner, Type::Named(n, _) if n == "u8") => Ty::Arr(El::U8),
         Type::Array(inner, _) => match ann_ty(inner)? {
             Ty::I64 => Ty::Arr(El::I64),
             Ty::F64 => Ty::Arr(El::F64),
@@ -459,6 +464,7 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
             | (Ty::Arr(El::I64), Ty::Arr(El::I64 | El::Bool | El::Dyn))
             | (Ty::Arr(El::F64), Ty::Arr(El::I64 | El::F64 | El::Bool | El::Dyn))
             | (Ty::Arr(El::Bool), Ty::Arr(El::Bool | El::Dyn))
+            | (Ty::Arr(El::U8), Ty::Arr(El::U8 | El::Dyn))
     );
     if !ok {
         return Err(format!("expected {a}, found {got}"));

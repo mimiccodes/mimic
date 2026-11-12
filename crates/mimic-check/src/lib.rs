@@ -726,7 +726,8 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             other => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{other}`"), *s)),
         },
         Type::Array(inner, s) => match &**inner {
-            Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr") => 6,
+            Type::Named(n, _) if n == "u8" => 10, // TY_BYTES
+            Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr") => 6,
             Type::Named(n, _) if matches!(n.as_str(), "f32" | "f64") => 7,
             Type::Named(n, _) if n == "bool" => 8,
             _ => return Err(Diag::new(&C::UNSUPPORTED_TYPE, "only arrays of numbers or bools are supported in this version", *s)),

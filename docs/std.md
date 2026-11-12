@@ -71,14 +71,30 @@ Failures come back as values, never as crashes. Error messages name the operatio
 | Function | Result | Effect |
 |---|---|---|
 | `fs::read(path)` | `Result[str, str]` | concurrent |
+| `fs::read_bytes(path)` | `Result[[u8], str]` | concurrent |
 | `fs::size(path)` | `Result[i64, str]` | concurrent |
 | `fs::list_dir(path)` | `Result[[str], str]`: sorted names, without `.` and `..` | concurrent |
 | `fs::exists(path)`, `fs::is_file(path)`, `fs::is_dir(path)` | `bool` | concurrent |
 | `fs::current_dir()`, `fs::temp_dir()` | `str` | concurrent |
 | `fs::write(path, text)`, `fs::append(path, text)` | `Result[i64, str]`: bytes written | sync |
+| `fs::write_bytes(path, data)` | `Result[i64, str]` | sync |
 | `fs::copy(from, to)` | `Result[i64, str]` | sync |
 | `fs::rename(from, to)`, `fs::remove(path)` | `Result[bool, str]`; `remove` also removes empty directories | sync |
 | `fs::make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists | sync |
+
+### `bytes`: binary data (pure)
+
+`[u8]` is an array of bytes: one byte per element, so it is compact, and each element reads as an `i64`. Arithmetic on bytes gives `i64` results instead of silently wrapping at 256. Storing a value outside 0 … 255 into a `[u8]` stops the program. `push`, `concat`, `↑`, `↓`, `⌽` and indexing keep bytes as bytes.
+
+| Function | Result |
+|---|---|
+| `bytes::from(xs)` | `[u8]` from a list of integers 0 … 255 |
+| `bytes::of_text(s)` | the UTF-8 bytes of a string |
+| `bytes::to_text(b)` | `Result[str, str]`: `Err` unless the bytes are valid UTF-8 |
+| `bytes::hex(b)`, `bytes::from_hex(s)` | `"486921"` ↔ bytes; `from_hex` returns a `Result` |
+| `bytes::base64(b)`, `bytes::from_base64(s)` | standard base64 ↔ bytes; `from_base64` returns a `Result` |
+
+`fs::read_bytes`/`fs::write_bytes` and `tcp::send_bytes`/`tcp::receive_bytes` read and write bytes. A `[u8]` parameter accepts only bytes; passing a list of `i64` is a compile error.
 
 ### `path`: paths as text (pure)
 
@@ -229,6 +245,7 @@ How the client and server behave:
 | `tcp::accept(listener)` | `Result[tcp::Socket, str]` |
 | `tcp::send(socket, text)` | `Result[i64, str]`: everything is sent |
 | `tcp::receive(socket, limit)` | `Result[str, str]`: up to `limit` bytes; `""` when the other side closed |
+| `tcp::send_bytes(socket, data)`, `tcp::receive_bytes(socket, limit)` | The same with `[u8]` |
 | `tcp::close(socket)` | Close a socket or listener |
 
 TCP calls happen in program order.

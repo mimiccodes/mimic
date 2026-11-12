@@ -17,7 +17,7 @@
 
 /* BOXED: vector of handles (nested arrays, lists of strings/records).
  * OBJ: record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7, MIM_U8 = 8 } mim_dtype;
 
 typedef struct {
     const char *type_name;

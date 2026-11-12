@@ -15,6 +15,7 @@ They live in a few standard **modules**, used by path from any file, with no imp
 | Module | For | Examples |
 |---|---|---|
 | `fs` | files and directories | `fs::read`, `fs::write`, `fs::list_dir`, `fs::remove` |
+| `bytes` | binary data | `bytes::from`, `bytes::hex`, `bytes::base64`, `bytes::to_text` |
 | `path` | paths as text | `path::join`, `path::file_name`, `path::extension` |
 | `io` | standard input and error | `io::read_line`, `io::read_input`, `io::eprint` |
 | `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
@@ -90,6 +91,37 @@ How it works:
 * **Writing** returns `Ok(bytes written)`. `fs::write` replaces the file's contents and `fs::append` adds to the end.
 * **Reading** returns the text as `Ok(…)`. On failure you get `Err` with a reason like `cannot read todo.txt: No such file or directory`.
 * **`lines`** splits text into lines. A final newline doesn't produce an empty extra line, and Windows `\r\n` line endings are handled.
+
+## Bytes
+
+Text files are read as `str`. For binary data such as images, archives or protocol messages, use bytes: a `[u8]` array stores one byte per element.
+
+```mimic run
+module main
+
+fn main() {
+    let header = bytes::from([137 80 78 71])          // the start of a PNG file
+    print(bytes::hex(header))
+    let file = path::join(fs::temp_dir(), "mimic-tour.bin")
+    print(fs::write_bytes(file, header))
+    let back = fs::read_bytes(file) else { return }
+    print(bytes::hex(back))                            // the same four bytes
+    print(back[1] + back[2])                           // each byte reads as an i64
+    print(bytes::base64(bytes::of_text("Mimic")))
+    print(bytes::to_text(bytes::from([72 105])))
+    print(fs::remove(file))
+}
+```
+
+```output
+89504e47
+Ok(4)
+89504e47
+158
+TWltaWM=
+Ok("Hi")
+Ok(true)
+```
 
 ## Directories
 

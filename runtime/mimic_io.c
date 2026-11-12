@@ -885,3 +885,176 @@ mim_val *mim_std_time_local(mim_val *t) { return date_time_of(impl_time_local_pa
 mim_val *mim_std_random_float(void) { return impl_random(); }
 mim_val *mim_std_random_int(mim_val *lo, mim_val *hi) { return impl_random_int(lo, hi); }
 mim_val *mim_std_random_seed(mim_val *seed) { return impl_seed_random(seed); }
+
+/* ---- bytes (pure) ------------------------------------------------------- */
+
+static int hexdig(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static mim_val *bytes_n(const void *p, int64_t n) {
+    mim_val *r = alloc(MIM_U8, 1, n);
+    if (n) memcpy(r->data, p, (size_t)n);
+    return r;
+}
+
+static void need_bytes(const mim_val *b, const char *fn) {
+    if (!b || b->rank != 1 || (b->dtype != MIM_U8 && !(b->dtype == MIM_I64 && b->len == 0))) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s: expected bytes ([u8])", fn);
+        mim_panic(buf);
+    }
+}
+
+/* [72 105] → bytes; every element must be 0 … 255 */
+mim_val *mim_std_bytes_from(mim_val *xs) {
+    need(xs, "bytes::from");
+    if (xs->rank != 1 || IS_HANDLES(xs) || xs->dtype == MIM_F64) mim_panic("bytes::from: expected a list of integers");
+    mim_val *r = alloc(MIM_U8, 1, xs->len);
+    for (int64_t i = 0; i < xs->len; i++) {
+        int64_t v = geti(xs, i);
+        if (v < 0 || v > 255) {
+            mim_release(r);
+            char buf[128];
+            snprintf(buf, sizeof buf, "bytes::from: %lld at index %lld is not a byte (0 … 255)", (long long)v, (long long)i);
+            mim_panic(buf);
+        }
+        ((uint8_t *)r->data)[i] = (uint8_t)v;
+    }
+    return r;
+}
+
+/* the UTF-8 bytes of a string */
+mim_val *mim_std_bytes_of_text(mim_val *s) {
+    if (!s || s->dtype != MIM_CHAR || s->rank != 1) mim_panic("bytes::of_text: expected text (str)");
+    return bytes_n(s->data, s->len);
+}
+
+static int utf8_valid(const uint8_t *p, int64_t n, int64_t *bad) {
+    int64_t i = 0;
+    while (i < n) {
+        uint8_t c = p[i];
+        int64_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (!len || i + len > n) break;
+        int ok = 1;
+        for (int64_t k = 1; k < len; k++) ok &= (p[i + k] >> 6) == 2;
+        if (!ok) break;
+        uint32_t cp = len == 1 ? c : len == 2 ? (uint32_t)(c & 0x1F) : len == 3 ? (uint32_t)(c & 0x0F) : (uint32_t)(c & 0x07);
+        for (int64_t k = 1; k < len; k++) cp = (cp << 6) | (p[i + k] & 0x3F);
+        if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF)) break;
+        i += len;
+    }
+    *bad = i;
+    return i == n;
+}
+
+/* bytes as text: Err when they are not valid UTF-8 */
+mim_val *mim_std_bytes_to_text(mim_val *b) {
+    need_bytes(b, "bytes::to_text");
+    int64_t bad;
+    if (!utf8_valid((const uint8_t *)b->data, b->len, &bad)) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "not valid UTF-8 at byte %lld", (long long)bad);
+        return err_of(buf);
+    }
+    return ok_of(mim_str((const char *)b->data, b->len));
+}
+
+mim_val *mim_std_bytes_hex(mim_val *b) {
+    need_bytes(b, "bytes::hex");
+    static const char d[] = "0123456789abcdef";
+    mim_val *r = alloc(MIM_CHAR, 1, b->len * 2);
+    for (int64_t i = 0; i < b->len; i++) {
+        uint8_t c = ((uint8_t *)b->data)[i];
+        ((char *)r->data)[2 * i] = d[c >> 4];
+        ((char *)r->data)[2 * i + 1] = d[c & 15];
+    }
+    return r;
+}
+
+mim_val *mim_std_bytes_from_hex(mim_val *s) {
+    if (!s || s->dtype != MIM_CHAR || s->rank != 1) mim_panic("bytes::from_hex: expected text (str)");
+    if (s->len % 2) return err_of("hex text must have an even number of digits");
+    mim_val *r = alloc(MIM_U8, 1, s->len / 2);
+    const char *p = (const char *)s->data;
+    for (int64_t i = 0; i < s->len / 2; i++) {
+        int h = hexdig(p[2 * i]), l = hexdig(p[2 * i + 1]);
+        if (h < 0 || l < 0) {
+            mim_release(r);
+            char buf[64];
+            snprintf(buf, sizeof buf, "not a hex digit at %lld", (long long)(h < 0 ? 2 * i : 2 * i + 1));
+            return err_of(buf);
+        }
+        ((uint8_t *)r->data)[i] = (uint8_t)(h * 16 + l);
+    }
+    return ok_of(r);
+}
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+mim_val *mim_std_bytes_base64(mim_val *b) {
+    need_bytes(b, "bytes::base64");
+    const uint8_t *p = (const uint8_t *)b->data;
+    int64_t n = b->len, out = (n + 2) / 3 * 4;
+    mim_val *r = alloc(MIM_CHAR, 1, out);
+    char *o = (char *)r->data;
+    for (int64_t i = 0, k = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        o[k++] = B64[v >> 18 & 63];
+        o[k++] = B64[v >> 12 & 63];
+        o[k++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        o[k++] = i + 2 < n ? B64[v & 63] : '=';
+    }
+    return r;
+}
+
+mim_val *mim_std_bytes_from_base64(mim_val *s) {
+    if (!s || s->dtype != MIM_CHAR || s->rank != 1) mim_panic("bytes::from_base64: expected text (str)");
+    const char *p = (const char *)s->data;
+    sbuf b = {0};
+    uint32_t acc = 0;
+    int bits = 0;
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = p[i];
+        if (c == '=' || c == '\n' || c == '\r') continue;
+        const char *at = strchr(B64, c);
+        if (!at || !c) {
+            free(b.p);
+            char buf[64];
+            snprintf(buf, sizeof buf, "not base64 at character %lld", (long long)i);
+            return err_of(buf);
+        }
+        acc = acc << 6 | (uint32_t)(at - B64);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            char byte = (char)(acc >> bits & 0xFF);
+            sb_put(&b, &byte, 1);
+        }
+    }
+    mim_val *r = bytes_n(b.p, (int64_t)b.n);
+    free(b.p);
+    return ok_of(r);
+}
+
+/* ---- fs: bytes ---------------------------------------------------------- */
+
+mim_val *mim_std_fs_read_bytes(mim_val *path) {
+    mim_val *r = mim_std_fs_read(path);
+    if (r->desc != &mim_desc_Ok) return r;
+    mim_val *t = ((mim_val **)r->data)[0];
+    mim_val *b = bytes_n(t->data, t->len);
+    mim_release(r);
+    return ok_of(b);
+}
+
+mim_val *mim_std_fs_write_bytes(mim_val *path, mim_val *b) {
+    need_bytes(b, "fs::write_bytes");
+    mim_val *t = mim_str((const char *)b->data, b->len); /* a str holds any bytes */
+    mim_val *r = mim_std_fs_write(path, t);
+    mim_release(t);
+    return r;
+}

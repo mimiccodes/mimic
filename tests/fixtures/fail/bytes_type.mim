@@ -1,0 +1,4 @@
+// expect-error: E0401 expected [u8], found [i64]
+module main
+fn size(d: [u8]) -> i64 { ≢ d }
+fn main() { print(size([1 2 3])) }

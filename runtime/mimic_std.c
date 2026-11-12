@@ -283,6 +283,12 @@ mim_val *mim_std_push(mim_val *xs, mim_val *x) {
     need(xs, "push");
     if (xs->rank == 0) mim_panic("push: expected a list or array");
     if (xs->rank >= 2) mim_panic("push: expected a list, found a matrix (reshape it with ⥊ first)");
+    if (xs->dtype == MIM_U8 && x && x->rank == 0 && x->dtype != MIM_F64 && geti(x, 0) >= 0 && geti(x, 0) <= 255) {
+        mim_val *r = alloc(MIM_U8, 1, xs->len + 1); /* a byte onto bytes stays bytes */
+        memcpy(r->data, xs->data, (size_t)xs->len);
+        ((uint8_t *)r->data)[xs->len] = (uint8_t)geti(x, 0);
+        return r;
+    }
     int64_t n = xs->len;
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = scalar_at(xs, i);
@@ -304,6 +310,14 @@ mim_val *mim_std_concat(mim_val *xs, mim_val *ys) {
         return r;
     }
     if (xs->rank >= 2 || ys->rank >= 2) mim_panic("concat: expected lists, found a matrix (reshape it with ⥊ first)");
+    /* two arrays of the same plain element type (bytes, numbers): one copy */
+    if (xs->rank == 1 && ys->rank == 1 && xs->dtype == ys->dtype && !IS_HANDLES(xs)) {
+        size_t es = elsize(xs->dtype);
+        mim_val *r = alloc(xs->dtype, 1, xs->len + ys->len);
+        memcpy(r->data, xs->data, (size_t)xs->len * es);
+        memcpy((char *)r->data + (size_t)xs->len * es, ys->data, (size_t)ys->len * es);
+        return r;
+    }
     int64_t n = xs->rank == 0 ? 1 : xs->len, m = ys->rank == 0 ? 1 : ys->len;
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + m + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = xs->rank == 0 ? (mim_retain(xs), xs) : scalar_at(xs, i);

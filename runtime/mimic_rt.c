@@ -37,7 +37,7 @@
 
 /* BOXED: a vector of handles (nested arrays, lists of strings/records).
  * OBJ: a record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7, MIM_U8 = 8 } mim_dtype;
 
 /* Emitted by the compiler, one per record type / union variant. */
 typedef struct {
@@ -102,7 +102,7 @@ static int64_t floordiv(int64_t x, int64_t y) {
     if ((x % y != 0) && ((x < 0) != (y < 0))) q--;
     return q;
 }
-enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC, TY_FN };
+enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC, TY_FN, TY_BYTES };
 
 static void park_forever(void);
 
@@ -551,6 +551,7 @@ static const char *dtname(const mim_val *v) {
     if (v->dtype == MIM_BOXED) return "list";
     if (v->dtype == MIM_FN) return "function";
     if (v->dtype == MIM_MAP) return "map";
+    if (v->dtype == MIM_U8) return v->rank == 0 ? "i64" : "[u8]";
     return v->rank == 0 ? s[v->dtype] : vs[v->dtype];
 }
 
@@ -967,7 +968,8 @@ static void sb_str(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }
 static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     char buf[64];
     switch (v->dtype) {
-    case MIM_I64: snprintf(buf, sizeof buf, "%lld", (long long)geti(v, i)); sb_str(b, buf); break;
+    case MIM_I64:
+    case MIM_U8: snprintf(buf, sizeof buf, "%lld", (long long)geti(v, i)); sb_str(b, buf); break;
     case MIM_BOOL: sb_str(b, geti(v, i) ? "true" : "false"); break;
     case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
@@ -2178,6 +2180,16 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         return;
     }
     if (v->rank != 0 || IS_HANDLES(v)) mim_panic("indexed assignment: a numeric array can only hold scalars");
+    if (xs->dtype == MIM_U8) { /* bytes stay bytes: 0 … 255 */
+        if (v->dtype == MIM_F64 || geti(v, 0) < 0 || geti(v, 0) > 255) mim_panic("indexed assignment: a byte is an integer from 0 to 255");
+        if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
+            mim_val *c = copy_whole(xs);
+            mim_release(xs);
+            *slot = xs = c;
+        }
+        ((uint8_t *)xs->data)[k] = (uint8_t)geti(v, 0);
+        return;
+    }
     int newdt = xs->dtype;
     if (v->dtype == MIM_F64 && xs->dtype != MIM_F64) newdt = MIM_F64;
     if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
@@ -2221,7 +2233,7 @@ int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
 
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
     if (type_ok(v, ty)) return;
-    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function"};
+    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function", "[u8]"};
     char buf[256];
     snprintf(buf, sizeof buf, "type error: %s expected %s, found %s", what, names[ty], dtname(v));
     mim_panic(buf);
@@ -2241,6 +2253,7 @@ static int type_ok(mim_val *v, int32_t ty) {
         case TY_FLOATVEC: ok = !s && (v->dtype == MIM_F64 || v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
         case TY_BOOLVEC: ok = !s && v->dtype == MIM_BOOL; break;
         case TY_FN: ok = v->dtype == MIM_FN; break;
+        case TY_BYTES: ok = !s && v->dtype == MIM_U8; break;
         }
     }
     return ok;

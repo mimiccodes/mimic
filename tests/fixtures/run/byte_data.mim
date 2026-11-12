@@ -1,0 +1,33 @@
+module main
+
+// Bytes: [u8] arrays (one byte per element, each reads as an i64), the
+// bytes module (text, hex, base64), binary files.
+fn main() {
+    let b = bytes::from([72 105 33])
+    print(b)
+    print(≢ b)
+    print(b + 1)                                   // arithmetic promotes to i64
+    print(bytes::to_text(b))
+    print(bytes::hex(b))
+    print(bytes::from_hex("486921"))
+    print(bytes::from_hex("4x"))
+    print(bytes::base64(bytes::of_text("Mimic!")))
+    print(bytes::from_base64("TWltaWMh"))
+    print(bytes::to_text(bytes::from([255 254])))
+    let mut m = b
+    m[0] = 104
+    print((b, m))
+    print(push(b, 10))
+    print(concat(b, b))
+    print(b ↑ 2)
+    print(⌽ b)
+    print(b ▷ +/)
+    print(b == bytes::from([72 105 33]))
+    print(checksum(b))
+    let p = path::join(fs::temp_dir(), "mimic-bytes.bin")
+    print(fs::write_bytes(p, bytes::from([0 1 2 255])))
+    print(fs::read_bytes(p))
+    print(fs::remove(p))
+    print(json::encode(b))
+}
+fn checksum(data: [u8]) -> i64 { data ▷ gather((a, b) => (a + b) % 65521) }
