@@ -57,6 +57,25 @@ remove(born, "ada")                        // a new map without it
 * **Speed.** Lookups go through a hash index.
 * **Updates.** `m[k] = v` on a `let mut` map changes it in place when nothing else shares it, and copies it first otherwise.
 
+## `math`: numbers (pure)
+
+```mimic
+math::sqrt(2.0)                    // 1.4142135623731
+math::atan2(1.0, 1.0) * 4.0        // π
+[1.0 4.0 9.0] ¨ math::sqrt         // [1.0 2.0 3.0]
+```
+
+| Function | Result |
+|---|---|
+| `math::sqrt(x)`, `math::pow(x, y)`, `math::hypot(x, y)` | square root, power, √(x² + y²) |
+| `math::sin(x)`, `math::cos(x)`, `math::tan(x)` | trigonometry, in radians |
+| `math::asin(x)`, `math::acos(x)`, `math::atan(x)`, `math::atan2(y, x)` | inverse trigonometry |
+| `math::exp(x)`, `math::ln(x)`, `math::log2(x)`, `math::log10(x)` | exponential and logarithms |
+| `math::floor(x)`, `math::ceil(x)`, `math::round(x)` | rounding (to an `f64`) |
+| `math::pi()`, `math::e()` | the constants |
+
+All take and return `f64` (integers are converted). On numbers the compiler knows, each is one machine instruction or one call to the system's math library, so it costs what it does in C and runs inside parallel array kernels. Any function of a standard module can be passed as a value: `xs ¨ math::sqrt`.
+
 ## Standard modules
 
 Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name.

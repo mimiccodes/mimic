@@ -778,3 +778,38 @@ mim_val *mim_std_keys(mim_val *m) { return map_column(m, 0, "keys"); }
 mim_val *mim_std_values(mim_val *m) { return map_column(m, 1, "values"); }
 
 mim_val *mim_std_map_new(void) { return map_alloc(4); }
+
+/* ==== math (when the compiler does not know the numbers are floats) ======= */
+
+static double math_arg(mim_val *x, const char *fn) {
+    if (!x || x->rank != 0 || (x->dtype != MIM_F64 && x->dtype != MIM_I64 && x->dtype != MIM_U8)) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "math::%s: expected a number", fn);
+        mim_panic(buf);
+    }
+    return getf(x, 0);
+}
+
+#define MATH1(name, expr) \
+    mim_val *mim_std_math_##name(mim_val *a) { double x = math_arg(a, #name); return mim_float(expr); }
+#define MATH2(name, expr) \
+    mim_val *mim_std_math_##name(mim_val *a, mim_val *b) { double x = math_arg(a, #name), y = math_arg(b, #name); return mim_float(expr); }
+
+MATH1(sqrt, sqrt(x))
+MATH1(sin, sin(x))
+MATH1(cos, cos(x))
+MATH1(tan, tan(x))
+MATH1(asin, asin(x))
+MATH1(acos, acos(x))
+MATH1(atan, atan(x))
+MATH2(atan2, atan2(x, y))
+MATH2(hypot, hypot(x, y))
+MATH1(exp, exp(x))
+MATH1(ln, log(x))
+MATH1(log2, log2(x))
+MATH1(log10, log10(x))
+MATH2(pow, pow(x, y))
+MATH1(floor, floor(x))
+MATH1(ceil, ceil(x))
+MATH1(round, round(x))
+

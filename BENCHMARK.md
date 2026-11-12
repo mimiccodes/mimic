@@ -93,6 +93,34 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### The suite with seven benchmarks
+
+Same machine (Apple M3 Pro, 12 cores), load average 6–10, best of 5 after a warm-up. The ratio is to C:
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib(38) | 0.525 s | 1.14× | 1.24× | 1.96× | **0.31×** |
+| mandelbrot 2000², 200 steps | 2.386 s | 1.16× | 1.22× | 1.17× | **0.12×** |
+| matmul 1024² | 0.780 s | 0.99× | 2.69× | **0.09×** | **0.09×** |
+| nbody, 1M steps | 0.199 s | 1.07× | 1.33× | 16.6× | 16.9× |
+| prefix sum, 100M | 0.443 s | 2.45× | 1.07× | 1.45× | **0.65×** |
+| sort 10M integers | 4.706 s | 0.14× | 0.74× | **0.07×** | **0.03×** |
+| sum of squares, 100M | 0.130 s | 1.63× | 2.48× | 2.40× | **0.37×** |
+
+Notes:
+* **matmul.** Mimic's `⊠` uses the system's BLAS (Apple Accelerate here) instead of the triple loop the other versions run.
+* **nbody is the weak spot.** It runs a million tiny steps over 5 bodies, with records and closures in every step. It started out about 13 000× slower than C. The fixes so far:
+  * small `¨` loops run on the calling thread instead of waking the pool;
+  * fused `¨` lambdas may capture records;
+  * the fields of records of a known type are read directly, borrowed with no reference count.
+  
+  What remains is boxing and allocation per step: records and short arrays are heap values. Unboxed records and fewer reference-count updates are the next steps.
+
+Changes for these results:
+* **`math` module.** `math::sqrt`, the trigonometric, exponential and logarithmic functions, `pow`, rounding, `pi()` and `e()`. On known numbers each one is an LLVM intrinsic or a libm call, so it fuses into kernels.
+* **`trail` and `gather` of `+ × max min` over numbers** run as a two-pass parallel scan without boxing: prefix sum 51 s → 0.64 s. Over a fusible expression, `trail` builds no input array at all.
+* **`¨` on small inputs** times its first element and only spreads out the rest when that pays off.
+
 ### The suite, first run (`bench/run.py`)
 
 Apple M3 Pro (12 cores), macOS 26.6, load average 6–10 (other work running), best of 5 after a warm-up. The ratio is to C. C, Rust and Go run their straightforward sequential versions.

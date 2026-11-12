@@ -1,0 +1,10 @@
+module main
+
+// C = A ⊠ B for two 1024 × 1024 matrices; print the sum of C's entries
+fn main() {
+    let n = 1024
+    let a = ⍳ (n * n) ¨ (k => 1.0 * ((k div n) * (k % n) % 7)) ⥊ [n n]
+    let b = ⍳ (n * n) ¨ (k => 1.0 * ((k div n + 2 * (k % n)) % 5)) ⥊ [n n]
+    let c = a ⊠ b
+    print(c ▷ +/ ▷ +/)
+}

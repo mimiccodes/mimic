@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(__wasi__) || defined(MIMIC_NO_THREADS)
 #define MIM_THREADS 0
@@ -1856,10 +1857,13 @@ typedef struct {
     mim_val *xs;
     mim_val *f;
     mim_val **out;
+    int64_t base; /* the ranges count from here */
 } each_fn_ctx;
 
 static void each_fn_range(void *vc, int64_t lo, int64_t hi) {
     each_fn_ctx *c = (each_fn_ctx *)vc;
+    lo += c->base;
+    hi += c->base;
     for (int64_t i = lo; i < hi; i++) {
         mim_val *e = scalar_at(c->xs, i);
         mim_val *r = mim_call(c->f, 1, &e);
@@ -1875,9 +1879,23 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
     int64_t n = xs->len;
     if (n == 0) return alloc(MIM_I64, 1, 0);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
-    each_fn_ctx c = {xs, f, tmp};
-    if (f->dtype == MIM_FN && FN_DESC(f)->pure) parallel_for_grain(n, fine_grain(n), each_fn_range, &c);
-    else each_fn_range(&c, 0, n);
+    each_fn_ctx c = {xs, f, tmp, 0};
+    if (f->dtype == MIM_FN && FN_DESC(f)->pure && n > 1 && g_nthreads > 1 && !t_in_parallel) {
+        /* Waking the threads costs tens of microseconds: time the first
+         * element, and share out the rest only when it is worth that. */
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        each_fn_range(&c, 0, 1);
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        int64_t one = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+        c.base = 1;
+        if (one * (n - 1) > 50000) parallel_for_grain(n - 1, fine_grain(n - 1), each_fn_range, &c);
+        else each_fn_range(&c, 0, n - 1);
+    } else if (f->dtype == MIM_FN && FN_DESC(f)->pure) {
+        parallel_for_grain(n, fine_grain(n), each_fn_range, &c);
+    } else {
+        each_fn_range(&c, 0, n);
+    }
     /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
     int64_t units = 0;
     for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
@@ -1942,6 +1960,8 @@ static int64_t loop_chunks(int64_t n) {
 /* xs ▷ gather(f): combine every element with f. A pure f is applied as a
  * parallel tree (chunks fold on all cores, partial results combine in
  * order), which gives the same result as a left fold when f is associative. */
+static mim_val *num_scan(mim_val *xs, mim_val *f, int scan);
+
 mim_val *mim_gather(mim_val *xs, mim_val *f) {
     need(xs, "gather");
     if (xs->rank >= 2) mim_panic("gather works on lists; for a matrix reduce its rows with +/ ×/ ⌈/ ⌊/, or reshape it with ⥊");
@@ -1951,6 +1971,8 @@ mim_val *mim_gather(mim_val *xs, mim_val *f) {
     }
     int64_t n = xs->len;
     if (n == 0) mim_panic("gather of an empty array: there is no first value to start from");
+    mim_val *fast = num_scan(xs, f, 0);
+    if (fast) return fast;
     if (!fn_pure(f) || g_nthreads < 2 || n < 64) return fold_range(xs, f, 0, n);
     int64_t nch = loop_chunks(n);
     gather_ctx c = {xs, f, n, (n + nch - 1) / nch, NULL};
@@ -1966,6 +1988,117 @@ mim_val *mim_gather(mim_val *xs, mim_val *f) {
     }
     free(c.part);
     return acc;
+}
+
+/* ---- trail and gather of + × max min over numbers: no boxing ----------------
+ * A fixed chunk size (not the thread count) decides how the work is split,
+ * so float results are the same on any number of threads. */
+
+enum { SOP_NONE, SOP_ADD, SOP_MUL, SOP_MAX, SOP_MIN };
+
+static int fast_op(const mim_val *f) {
+    if (!f || f->dtype != MIM_FN || f->len != 0) return SOP_NONE; /* no captures */
+    const char *n = FN_DESC(f)->name;
+    if (!n) return SOP_NONE;
+    if (!strcmp(n, "(Add)")) return SOP_ADD;
+    if (!strcmp(n, "(Mul)")) return SOP_MUL;
+    if (!strcmp(n, "(Max)")) return SOP_MAX;
+    if (!strcmp(n, "(Min)")) return SOP_MIN;
+    return SOP_NONE;
+}
+
+#define SCAN_CHUNK ((int64_t)1 << 16)
+
+#define COMBINE(op, a, b) ((op) == SOP_ADD ? (a) + (b) : (op) == SOP_MUL ? (a) * (b) : (op) == SOP_MAX ? ((b) > (a) ? (b) : (a)) : ((b) < (a) ? (b) : (a)))
+
+typedef struct {
+    const void *src;
+    void *dst; /* NULL: reduce only */
+    int64_t n;
+    int op, isf;
+    void *last; /* per chunk: its own combined value */
+    void *offset; /* per chunk: what all earlier chunks combine to */
+} nscan_ctx;
+
+static void nscan_local(void *vc, int64_t lo, int64_t hi) {
+    nscan_ctx *c = (nscan_ctx *)vc;
+    for (int64_t k = lo; k < hi; k++) {
+        int64_t a = k * SCAN_CHUNK, b = a + SCAN_CHUNK < c->n ? a + SCAN_CHUNK : c->n;
+        if (c->isf) {
+            const double *x = (const double *)c->src;
+            double *d = (double *)c->dst, acc = x[a];
+            if (d) d[a] = acc;
+            for (int64_t i = a + 1; i < b; i++) {
+                acc = COMBINE(c->op, acc, x[i]);
+                if (d) d[i] = acc;
+            }
+            ((double *)c->last)[k] = acc;
+        } else {
+            const int64_t *x = (const int64_t *)c->src;
+            int64_t *d = (int64_t *)c->dst, acc = x[a];
+            if (d) d[a] = acc;
+            for (int64_t i = a + 1; i < b; i++) {
+                /* wrapping, as Mimic's integer arithmetic */
+                acc = c->op == SOP_ADD ? (int64_t)((uint64_t)acc + (uint64_t)x[i]) : c->op == SOP_MUL ? (int64_t)((uint64_t)acc * (uint64_t)x[i]) : COMBINE(c->op, acc, x[i]);
+                if (d) d[i] = acc;
+            }
+            ((int64_t *)c->last)[k] = acc;
+        }
+    }
+}
+
+static void nscan_fix(void *vc, int64_t lo, int64_t hi) {
+    nscan_ctx *c = (nscan_ctx *)vc;
+    for (int64_t k = lo < 1 ? 1 : lo; k < hi; k++) {
+        int64_t a = k * SCAN_CHUNK, b = a + SCAN_CHUNK < c->n ? a + SCAN_CHUNK : c->n;
+        if (c->isf) {
+            double off = ((double *)c->offset)[k], *d = (double *)c->dst;
+            for (int64_t i = a; i < b; i++) d[i] = COMBINE(c->op, off, d[i]);
+        } else {
+            int64_t off = ((int64_t *)c->offset)[k], *d = (int64_t *)c->dst;
+            for (int64_t i = a; i < b; i++)
+                d[i] = c->op == SOP_ADD ? (int64_t)((uint64_t)off + (uint64_t)d[i]) : c->op == SOP_MUL ? (int64_t)((uint64_t)off * (uint64_t)d[i]) : COMBINE(c->op, off, d[i]);
+        }
+    }
+}
+
+/* trail (scan = 1) or gather (scan = 0) of a non-empty number vector with
+ * a fast operator; NULL when this does not apply */
+static mim_val *num_scan(mim_val *xs, mim_val *f, int scan) {
+    int op = fast_op(f);
+    if (op == SOP_NONE || xs->rank != 1 || xs->len == 0 || (xs->dtype != MIM_I64 && xs->dtype != MIM_F64)) return NULL;
+    int64_t n = xs->len, nch = (n + SCAN_CHUNK - 1) / SCAN_CHUNK;
+    nscan_ctx c = {xs->data, NULL, n, op, xs->dtype == MIM_F64, malloc(8 * (size_t)nch), malloc(8 * (size_t)nch)};
+    mim_val *r = NULL;
+    if (scan) {
+        r = alloc(xs->dtype, 1, n);
+        c.dst = r->data;
+    }
+    parallel_for_grain(nch, 1, nscan_local, &c);
+    /* combine the chunks in order */
+    if (c.isf) {
+        double *last = (double *)c.last, *off = (double *)c.offset;
+        for (int64_t k = 1; k < nch; k++) off[k] = k == 1 ? last[0] : COMBINE(op, off[k - 1], last[k - 1]);
+        if (!scan) r = mim_float(nch == 1 ? last[0] : COMBINE(op, off[nch - 1], last[nch - 1]));
+    } else {
+        int64_t *last = (int64_t *)c.last, *off = (int64_t *)c.offset;
+        for (int64_t k = 1; k < nch; k++)
+            off[k] = k == 1 ? last[0]
+                            : op == SOP_ADD ? (int64_t)((uint64_t)off[k - 1] + (uint64_t)last[k - 1])
+                            : op == SOP_MUL ? (int64_t)((uint64_t)off[k - 1] * (uint64_t)last[k - 1])
+                                           : COMBINE(op, off[k - 1], last[k - 1]);
+        if (!scan) {
+            int64_t t = nch == 1 ? last[0]
+                                 : op == SOP_ADD ? (int64_t)((uint64_t)off[nch - 1] + (uint64_t)last[nch - 1])
+                                 : op == SOP_MUL ? (int64_t)((uint64_t)off[nch - 1] * (uint64_t)last[nch - 1])
+                                                : COMBINE(op, off[nch - 1], last[nch - 1]);
+            r = mim_int(t);
+        }
+    }
+    if (scan && nch > 1) parallel_for_grain(nch, 1, nscan_fix, &c);
+    free(c.last);
+    free(c.offset);
+    return r;
 }
 
 typedef struct {
@@ -2012,6 +2145,8 @@ mim_val *mim_trail(mim_val *xs, mim_val *f) {
     }
     int64_t n = xs->len;
     if (n == 0) return alloc(MIM_I64, 1, 0);
+    mim_val *fast = num_scan(xs, f, 1);
+    if (fast) return fast;
     trail_ctx c = {xs, f, n, n, NULL, NULL};
     c.out = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     if (!fn_pure(f) || g_nthreads < 2 || n < 64) {

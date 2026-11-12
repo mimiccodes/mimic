@@ -2666,6 +2666,22 @@ impl<'ctx> Cg<'ctx, '_> {
                 let r = self.fused_reduce(*p, &args[0])?;
                 return self.as_ty(r, ty, "reduction");
             }
+            // `xs ▷ trail(+ × max min)` over a fusible expression of numbers
+            ExprKind::Prim { prim: Prim::Trail, args }
+                if args.len() == 2
+                    && self.is_fae(&args[0])
+                    && matches!(fuse::num_el(self.ty_of(&args[0])), Some(El::I64 | El::F64))
+                    && matches!(&args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul | BinOp::Max | BinOp::Min)) =>
+            {
+                let ExprKind::OpRef(op) = &args[1].kind else { unreachable!() };
+                let prim = match op {
+                    BinOp::Add => Prim::Sum,
+                    BinOp::Mul => Prim::Product,
+                    BinOp::Max => Prim::Maximum,
+                    _ => Prim::Minimum,
+                };
+                return self.fused_trail(prim, &args[0]);
+            }
             ExprKind::Path(p) if p.len() == 1 && self.lazies.iter().any(|(n, _)| *n == p[0]) => return self.fused_map(e),
             _ if self.fusible_root(e) => return self.fused_map(e),
             _ => {}
@@ -2783,6 +2799,43 @@ impl<'ctx> Cg<'ctx, '_> {
                 let mut vals = Vec::new();
                 for a in args {
                     vals.push(self.expr(a)?);
+                }
+                // math:: on numbers: an LLVM intrinsic or a libm call, no boxing
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && self.p.mods[self.p.fns[fid].module].name == "math"
+                    && self.p.mods[self.p.fns[fid].module].package == "std"
+                    && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
+                {
+                    let name = decl.name.clone();
+                    let mut fargs: Vec<BasicMetadataValueEnum> = Vec::new();
+                    for v in &vals {
+                        fargs.push(self.to_f64(*v)?.into());
+                    }
+                    let llvm = match name.as_str() {
+                        "sqrt" => Some("llvm.sqrt"),
+                        "sin" => Some("llvm.sin"),
+                        "cos" => Some("llvm.cos"),
+                        "exp" => Some("llvm.exp"),
+                        "ln" => Some("llvm.log"),
+                        "log2" => Some("llvm.log2"),
+                        "log10" => Some("llvm.log10"),
+                        "pow" => Some("llvm.pow"),
+                        "floor" => Some("llvm.floor"),
+                        "ceil" => Some("llvm.ceil"),
+                        "round" => Some("llvm.round"),
+                        _ => None,
+                    };
+                    let f = match llvm {
+                        Some(i) => self.intrinsic(i)?,
+                        None => {
+                            let f64t = self.ctx.f64_type();
+                            let ps: Vec<BasicMetadataTypeEnum> = fargs.iter().map(|_| f64t.into()).collect();
+                            self.module.get_function(&name).unwrap_or_else(|| self.module.add_function(&name, f64t.fn_type(&ps, false), Some(Linkage::External)))
+                        }
+                    };
+                    let r = self.b.build_call(f, &fargs, "").s()?.try_as_basic_value().basic().unwrap();
+                    return self.as_ty(V::F(r.into_float_value()), ty, &format!("result of `math::{name}`"));
                 }
                 // a runtime intrinsic: Mimic values in, a Mimic value out
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
@@ -3089,7 +3142,21 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     Ty::Obj(t) => {
                         let i = self.p.types[types::obj_tid(t)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
-                        self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i as u64, false).into()])?
+                        // the type is known: read the field straight from the record
+                        // (borrowed while the record is; an owned record passes it on)
+                        let i32t = self.ctx.i32_type();
+                        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+                        let bp = self.basic(b).into_pointer_value();
+                        let dp = self.b.build_struct_gep(hdr, bp, 4, "").s()?;
+                        let data = self.b.build_load(self.ptr, dp, "").s()?.into_pointer_value();
+                        let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
+                        let fv = self.b.build_load(self.ptr, fp, "").s()?.into_pointer_value();
+                        if let V::P(_, true) = b {
+                            self.call_rt("mim_retain", &[fv.into()])?;
+                            V::P(fv, true)
+                        } else {
+                            V::P(fv, false)
+                        }
                     }
                     _ => {
                         let n = self.global_cstr(name);

@@ -1,0 +1,72 @@
+module main
+
+// 5 bodies, 1M steps of 0.01; each body's acceleration is the sum over the
+// other bodies in index order (the same order in every language)
+
+type Sys = { x: [f64], y: [f64], z: [f64], vx: [f64], vy: [f64], vz: [f64] }
+
+// one coordinate of body i's acceleration (a: that coordinate of every body)
+fn pull(a: [f64], s: Sys, m: [f64], i: i64) -> f64 {
+    ⍳ 5 ¨ (j => if j == i { 0.0 } else { (a[j] - a[i]) * (m[j] / cube(s, i, j)) }) ▷ +/
+}
+
+fn cube(s: Sys, i: i64, j: i64) -> f64 {
+    let dx = s.x[j] - s.x[i]
+    let dy = s.y[j] - s.y[i]
+    let dz = s.z[j] - s.z[i]
+    let d2 = dx * dx + dy * dy + dz * dz
+    d2 * math::sqrt(d2)
+}
+
+fn step(s: Sys, m: [f64]) -> Sys {
+    let vx = s.vx + 0.01 * (⍳ 5 ¨ (i => pull(s.x, s, m, i)))
+    let vy = s.vy + 0.01 * (⍳ 5 ¨ (i => pull(s.y, s, m, i)))
+    let vz = s.vz + 0.01 * (⍳ 5 ¨ (i => pull(s.z, s, m, i)))
+    Sys { x: s.x + 0.01 * vx, y: s.y + 0.01 * vy, z: s.z + 0.01 * vz, vx: vx, vy: vy, vz: vz }
+}
+
+fn energy(s: Sys, m: [f64]) -> f64 {
+    ⍳ 5 ¨ (i => 0.5 * m[i] * (s.vx[i] * s.vx[i] + s.vy[i] * s.vy[i] + s.vz[i] * s.vz[i]) - pairs(s, m, i)) ▷ gather((a, b) => a + b)
+}
+
+// the potential energy between body i and the bodies after it
+fn pairs(s: Sys, m: [f64], i: i64) -> f64 {
+    ⍳ 5 ¨ (j => if j <= i { 0.0 } else { m[i] * m[j] / math::sqrt(dist2(s, i, j)) }) ▷ +/
+}
+
+fn dist2(s: Sys, i: i64, j: i64) -> f64 {
+    let dx = s.x[i] - s.x[j]
+    let dy = s.y[i] - s.y[j]
+    let dz = s.z[i] - s.z[j]
+    dx * dx + dy * dy + dz * dz
+}
+
+// x with 9 decimals, like printf("%.9f")
+fn fixed9(x: f64) -> str {
+    let n = math::round(∣ x * 1000000000.0)
+    let whole = math::floor(n / 1000000000.0)
+    let frac = n - whole * 1000000000.0
+    let digits = "{frac + 1000000000.0}"
+    "{if x < 0.0 { "-" } else { "" }}{whole}." ▷ (h => replace(h, ".0.", ".")) ▷ (h => h + (digits ↓ 1 ↑ 9))
+}
+
+fn main() {
+    let pi = math::pi()
+    let sm = 4.0 * pi * pi
+    let days = 365.24
+    let m = [sm, 9.54791938424326609e-04 * sm, 2.85885980666130812e-04 * sm, 4.36624404335156298e-05 * sm, 5.15138902046611451e-05 * sm]
+    let vx = [0.0, 1.66007664274403694e-03 * days, -2.76742510726862411e-03 * days, 2.96460137564761618e-03 * days, 2.68067772490389322e-03 * days]
+    let vy = [0.0, 7.69901118419740425e-03 * days, 4.99852801234917238e-03 * days, 2.37847173959480950e-03 * days, 1.62824170038242295e-03 * days]
+    let vz = [0.0, -6.90460016972063023e-05 * days, 2.30417297573763929e-05 * days, -2.96589568540237556e-05 * days, -9.51592254519715870e-05 * days]
+    let start = Sys {
+        x: [0.0, 4.84143144246472090e+00, 8.34336671824457987e+00, 1.28943695621391310e+01, 1.53796971148509165e+01],
+        y: [0.0, -1.16032004402742839e+00, 4.12479856412430479e+00, -1.51111514016986312e+01, -2.59193146099879641e+01],
+        z: [0.0, -1.03622044471123109e-01, -4.03523417114321381e-01, -2.23307578892655734e-01, 1.79258772950371181e-01],
+        vx: put(vx, 0, 0.0 - (vx × m ▷ +/) / sm),
+        vy: put(vy, 0, 0.0 - (vy × m ▷ +/) / sm),
+        vz: put(vz, 0, 0.0 - (vz × m ▷ +/) / sm),
+    }
+    print(fixed9(energy(start, m)))
+    let done = start ▷ evolve(1000000, s => step(s, m))
+    print(fixed9(energy(done, m)))
+}

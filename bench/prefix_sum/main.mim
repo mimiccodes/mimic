@@ -1,0 +1,7 @@
+module main
+
+fn main() {
+    let n = 100000000
+    let s = ⍳ n % 1000 ▷ trail(+)
+    print("{s[n div 2]} {s[n - 1]}")
+}

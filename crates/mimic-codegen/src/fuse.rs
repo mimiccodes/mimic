@@ -66,6 +66,8 @@ pub(crate) struct Plan<'ctx> {
 enum Mode {
     Map(El),
     Reduce(Prim, bool), // primitive, float accumulator
+    /// running results: each chunk starts from its offset (slot after the grain)
+    Scan(Prim, El),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -108,7 +110,9 @@ impl<'ctx> Cg<'ctx, '_> {
                     && pts.len() == 1
                     && simple(pts[0])
                     && simple(rt)
-                    && self.captures(params, body).iter().all(|(_, t)| simple(*t) || num_el(*t).is_some())
+                    // captured values reach the kernel as they are (numbers
+                    // unboxed, anything else as a borrowed reference)
+                    && self.captures(params, body).iter().all(|(_, t)| *t != Ty::Unit && *t != Ty::Never)
             }
             ExprKind::Path(path) => {
                 let Ok(fid) = self.resolve_fn(path) else { return false };
@@ -358,6 +362,18 @@ impl<'ctx> Cg<'ctx, '_> {
                 .and_then(|i| i.get_declaration(&cg.module, &[]))
                 .ok_or("internal compiler error: llvm.assume")?;
             cg.b.build_call(assume, &[nonneg.into()], "").s()?;
+            // a scan's chunk starts from what the chunks before it combine to
+            let scan_start: Option<BasicValueEnum<'ctx>> = match mode {
+                Mode::Scan(_, el) => {
+                    let grain = load(cg, nslots + 1, i64t.into())?.into_int_value();
+                    let offs = load(cg, nslots + 2, cg.ptr.into())?.into_pointer_value();
+                    let k = cg.b.build_int_signed_div(lo, grain, "").s()?;
+                    let t: BasicTypeEnum = if el == El::F64 { cg.ctx.f64_type().into() } else { i64t.into() };
+                    let p = unsafe { cg.b.build_in_bounds_gep(t, offs, &[k], "").s()? };
+                    Some(cg.b.build_load(t, p, "").s()?)
+                }
+                _ => None,
+            };
             let entry = cg.b.get_insert_block().unwrap();
             let body = cg.ctx.append_basic_block(f, "body");
             let done = cg.ctx.append_basic_block(f, "done");
@@ -367,6 +383,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let iphi = cg.b.build_phi(i64t, "i").s()?;
             let (acc_ty, float) = match mode {
                 Mode::Reduce(_, fl) => (if fl { cg.ctx.f64_type().as_basic_type_enum() } else { i64t.as_basic_type_enum() }, fl),
+                Mode::Scan(_, el) => (if el == El::F64 { cg.ctx.f64_type().as_basic_type_enum() } else { i64t.as_basic_type_enum() }, el == El::F64),
                 Mode::Map(_) => (i64t.as_basic_type_enum(), false),
             };
             let accphi = cg.b.build_phi(acc_ty, "acc").s()?;
@@ -393,13 +410,24 @@ impl<'ctx> Cg<'ctx, '_> {
                     acc
                 }
                 Mode::Reduce(prim, _) => cg.combine(prim, float, acc, v)?,
+                Mode::Scan(prim, el) => {
+                    let next = cg.combine(prim, float, acc, v)?;
+                    let (t, p): (BasicTypeEnum, _) = if el == El::F64 {
+                        (cg.ctx.f64_type().into(), unsafe { cg.b.build_in_bounds_gep(cg.ctx.f64_type(), out, &[i], "").s()? })
+                    } else {
+                        (i64t.into(), unsafe { cg.b.build_in_bounds_gep(i64t, out, &[i], "").s()? })
+                    };
+                    let _ = t;
+                    cg.b.build_store(p, next).s()?;
+                    next
+                }
             };
             let i1 = cg.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
             let more = cg.b.build_int_compare(IntPredicate::SLT, i1, hi, "").s()?;
             let latch = cg.b.get_insert_block().unwrap();
             cg.b.build_conditional_branch(more, body, done).s()?;
             iphi.add_incoming(&[(&lo, entry), (&i1, latch)]);
-            let ident = cg.identity(mode, float);
+            let ident = scan_start.unwrap_or_else(|| cg.identity(mode, float));
             accphi.add_incoming(&[(&ident, entry), (&next_acc, latch)]);
             cg.b.position_at_end(done);
             if let Mode::Reduce(..) = mode {
@@ -422,7 +450,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let f64t = self.ctx.f64_type();
         match mode {
             Mode::Map(_) => i64t.const_zero().into(),
-            Mode::Reduce(p, _) => match (p, float) {
+            Mode::Scan(p, _) | Mode::Reduce(p, _) => match (p, float) {
                 (Prim::Product, true) => f64t.const_float(1.0).into(),
                 (Prim::Product, false) => i64t.const_int(1, false).into(),
                 (Prim::Maximum, true) => f64t.const_float(f64::NEG_INFINITY).into(),
@@ -548,6 +576,63 @@ impl<'ctx> Cg<'ctx, '_> {
         self.call_free(partials)?;
         let r = res.as_basic_value();
         Ok(if float { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) })
+    }
+
+    /// `xs ▷ trail(+)` (or × max min) over a fusible expression: one kernel
+    /// sums each chunk, the sums become each chunk's starting offset, and a
+    /// second kernel writes the running results. No input array is built.
+    pub(crate) fn fused_trail(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
+        let el = num_el(self.ty_of(arg)).ok_or("internal compiler error: fused_trail on a non-numeric array")?;
+        let float = el == El::F64;
+        let i64t = self.ctx.i64_type();
+        let acc_ty: BasicTypeEnum = if float { self.ctx.f64_type().into() } else { i64t.into() };
+        let mut plan = Plan::default();
+        let root = self.build(arg, &mut plan)?;
+        let n = self.plan_len(&plan)?;
+        let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
+        let data = self.call_rt("mim_dataptr", &[self.basic(out).into()])?.unwrap();
+        let grain = self.call_rt("mim_par_grain", &[])?.unwrap().into_int_value();
+        let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
+        let nc = self.b.build_int_add(n, g1, "").s()?;
+        let nc = self.b.build_int_signed_div(nc, grain, "").s()?;
+        let bytes = self.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
+        let bytes = self.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
+        let parts = self.call_malloc(bytes)?;
+        // 1: each chunk's own total
+        let k1 = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
+        let ctx1 = self.pack_ctx(&plan, &[parts.into(), grain.into()])?;
+        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k1).into(), ctx1.into()])?;
+        // 2: totals → starting offsets (in place, in chunk order)
+        let f = self.cur_fn.unwrap();
+        let pre = self.b.get_insert_block().unwrap();
+        let body = self.ctx.append_basic_block(f, "offs");
+        let done = self.ctx.append_basic_block(f, "offs_done");
+        let ident = self.identity(Mode::Reduce(prim, float), float);
+        let none = self.b.build_int_compare(IntPredicate::EQ, nc, i64t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(none, done, body).s()?;
+        self.b.position_at_end(body);
+        let kphi = self.b.build_phi(i64t, "k").s()?;
+        let rphi = self.b.build_phi(acc_ty, "run").s()?;
+        let kk = kphi.as_basic_value().into_int_value();
+        let p = unsafe { self.b.build_in_bounds_gep(acc_ty, parts, &[kk], "").s()? };
+        let total = self.b.build_load(acc_ty, p, "").s()?;
+        self.b.build_store(p, rphi.as_basic_value()).s()?;
+        let tv = if float { V::F(total.into_float_value()) } else { V::I(total.into_int_value()) };
+        let next = self.combine(prim, float, rphi.as_basic_value(), tv)?;
+        let k1n = self.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
+        let more = self.b.build_int_compare(IntPredicate::SLT, k1n, nc, "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_conditional_branch(more, body, done).s()?;
+        kphi.add_incoming(&[(&i64t.const_zero(), pre), (&k1n, latch)]);
+        rphi.add_incoming(&[(&ident, pre), (&next, latch)]);
+        self.b.position_at_end(done);
+        // 3: the running results
+        let k2 = self.emit_kernel(&root, &plan, Mode::Scan(prim, el))?;
+        let ctx2 = self.pack_ctx(&plan, &[data, grain.into(), parts.into()])?;
+        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k2).into(), ctx2.into()])?;
+        self.release_plan(&plan)?;
+        self.call_free(parts)?;
+        Ok(out)
     }
 
     fn call_malloc(&self, bytes: IntValue<'ctx>) -> R<PointerValue<'ctx>> {

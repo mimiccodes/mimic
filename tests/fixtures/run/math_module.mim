@@ -1,0 +1,18 @@
+module main
+
+// the math module: fast on known numbers, usable as values
+fn main() {
+    print(math::sqrt(2.0))
+    print(math::sqrt(16))
+    print(math::pow(2.0, 10.0))
+    print(math::atan2(1.0, 1.0) * 4.0)
+    print(math::hypot(3.0, 4.0))
+    print(math::floor(¯2.5))
+    print(math::round(2.5))
+    print(math::ln(math::e()))
+    print(math::sin(math::pi() / 2.0))
+    print([1.0 4.0 9.0] ¨ math::sqrt)
+    print(⍳ 1000000 ¨ (x => math::sqrt(x)) ▷ +/)
+    let xs: [f64] = [0.0 1.0]
+    print(xs ¨ (x => math::cos(x)))
+}

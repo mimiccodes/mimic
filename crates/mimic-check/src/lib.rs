@@ -249,9 +249,42 @@ impl Program {
             let module = self.fns[fid].module;
             let mut body = d.body.clone();
             let mut changed = false;
+            // names this function binds (parameters, lets, lambda parameters):
+            // those are its own, not the standard functions of the same name
+            let mut locals: Vec<String> = d.params.iter().map(|q| q.name.clone()).collect();
+            for st in &d.body.stmts {
+                match st {
+                    Stmt::Let { name, .. } | Stmt::LetElse { name, .. } => locals.push(name.clone()),
+                    Stmt::LetTuple { names, .. } => locals.extend(names.iter().cloned()),
+                    _ => {}
+                }
+            }
+            d.body.walk(&mut |x: &Expr| {
+                if let ExprKind::Lambda { params, .. } = &x.kind {
+                    locals.extend(params.iter().cloned());
+                }
+            });
             body.walk_mut(&mut |e: &mut Expr| match &mut e.kind {
                 ExprKind::Path(path) => {
-                    if let Some(Resolved::Variant(t, v)) = self.lookup(module, path) {
+                    // a runtime function (`math::sqrt`) as a value: the lambda calling it
+                    let intrinsic_arity = match self.lookup(module, path) {
+                        Some(Resolved::Fn(f)) => match &self.fns[f].kind {
+                            FnKind::Extern { decl, .. } if decl.intrinsic => Some(decl.params.len()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(n) = intrinsic_arity
+                        && n > 0
+                        && !(path.len() == 1 && (locals.contains(&path[0])))
+                    {
+                        let params: Vec<String> = (0..n).map(|i| format!("{PARAM}{i}")).collect();
+                        let span = e.span;
+                        let args = params.iter().map(|p| Expr { kind: ExprKind::Path(vec![p.clone()]), span }).collect();
+                        let call = Expr { kind: ExprKind::Call { callee: Box::new(Expr { kind: ExprKind::Path(path.clone()), span }), args }, span };
+                        e.kind = ExprKind::Lambda { params, body: Box::new(call) };
+                        changed = true;
+                    } else if let Some(Resolved::Variant(t, v)) = self.lookup(module, path) {
                         let n = self.types[t].variants()[v].fields.len();
                         if n > 0 {
                             let params: Vec<String> = (0..n).map(|i| format!("{PARAM}{i}")).collect();

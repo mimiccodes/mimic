@@ -111,6 +111,7 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 * **Constructors.** A variant with fields, written without parentheses, is the function that builds it: `Typed` means `x => Typed(x)`, and `Moved` (two fields) means `(x, y) => Moved(x, y)`.
 * **Purity follows the functions passed in.** A function that calls a function parameter is as pure as the function given to it. `fn twice(f, x) { f(f(x)) }` called with a pure lambda runs in parallel like any pure call. Called with a function that prints, the call counts as printing.
 * **Functions kept in data are pure.** A function stored in a record, variant, list or map must have no side effects (error E0605), so code that takes it out may call it freely.
+* **Standard functions are values too.** `xs ¨ math::sqrt` passes the function itself, the same as `xs ¨ (x => math::sqrt(x))`. C functions must be wrapped in a Mimic function first.
 * **Arity is checked.** Passing a function, lambda or constructor that takes the wrong number of arguments for a parameter's function type is a compile-time error.
 * **Capture.** Lambdas capture the variables they use, by value, when they are created. Values are immutable, so a closure always sees the value it was created with.
 * **No mutation.** A lambda may not modify a captured variable (error E0603).

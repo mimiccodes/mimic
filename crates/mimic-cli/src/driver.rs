@@ -417,7 +417,7 @@ pub module http {
     }
 }
 
-", include_str!("../../../runtime/ui.mim"));
+", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/ui.mim"));
 
 fn prelude_file() -> SourceFile {
     let ast = parse_file(PRELUDE).expect("the prelude parses");
