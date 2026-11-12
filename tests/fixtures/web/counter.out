@@ -1,0 +1,10 @@
+starting
+title: Counter, timers (ms): [250]
+<div data-p="0" style="display:flex;flex-direction:column"><span data-p="0.0">count: 0</span><button data-p="0.1" type="button" data-e="click">+</button><input data-p="0.2" type="text" value="count" data-e="input"><button data-p="0.3" type="button" data-e="click">×2</button><span data-p="0.4">ticks 0</span></div>
+[{"op":"children","p":"0.0","html":"count: 1","attrs":[],"at":0}]
+[{"op":"children","p":"0.0","html":"count: 2","attrs":[],"at":0}]
+[{"op":"children","p":"0.0","html":"clicks: 2","attrs":[],"at":0},{"op":"attrs","p":"0.2","html":"","attrs":["type","text","value","clicks","data-e","input"],"at":0}]
+[{"op":"children","p":"0.0","html":"clicks: 4","attrs":[],"at":0}]
+[{"op":"children","p":"0.4","html":"ticks 1","attrs":[],"at":0}]
+[]
+[]

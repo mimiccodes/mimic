@@ -688,3 +688,49 @@ fn c_callbacks() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1.0\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `mimic build --web`: the page's own loader (taken from its index.html)
+/// starts the program in node, then each line of `<name>.events` is sent as
+/// the page would send it; what comes back must match `<name>.out`.
+#[test]
+fn web_pages() {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: node is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mimic-golden-web-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let driver = dir.join("drive.cjs");
+    std::fs::write(
+        &driver,
+        r#"const fs = require('fs'), path = require('path')
+const [page, events] = process.argv.slice(2)
+let html = fs.readFileSync(path.join(page, 'index.html'), 'utf8')
+let js = html.slice(html.indexOf('<script type="module">') + 22, html.indexOf('</script>'))
+js = js.slice(0, js.indexOf('if (!ex.mim_ui_script)'))
+js = js.replace("await WebAssembly.instantiateStreaming(fetch('app.wasm'), imports)", "await WebAssembly.instantiate(fs.readFileSync(path.join(page, 'app.wasm')), imports)")
+js += `
+const start = JSON.parse(call(''))
+console.log('title: ' + start.title + ', timers (ms): ' + JSON.stringify(start.every))
+console.log(start.html)
+for (const e of fs.readFileSync(events, 'utf8').split(String.fromCharCode(10)).filter(l => l)) console.log(call(e))
+`
+new Function('fs', 'path', 'page', 'events', 'return (async () => {' + js.replace('const { instance }', 'var { instance }') + '})()')(fs, path, page, events)
+"#,
+    )
+    .unwrap();
+    let mut failures = Vec::new();
+    for f in fixtures("web") {
+        let out = mimic().arg("build").arg("--web").arg(&f).arg("--emit-json").output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        let page = v["artifacts"][0]["path"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+        let run = Command::new("node").arg(&driver).arg(&page).arg(f.with_extension("events")).output().unwrap();
+        let got = String::from_utf8_lossy(&run.stdout).to_string();
+        let want = std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
+        if got != want {
+            failures.push(format!("{}\n--- want\n{want}--- got\n{got}--- stderr\n{}", f.display(), String::from_utf8_lossy(&run.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+

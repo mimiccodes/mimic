@@ -185,6 +185,17 @@ fn main() {
 
 Click "Roll a die" and the clock keeps ticking while the roll takes its time. Jobs started together run in parallel, and every result comes back as a message in the tab's own order.
 
+## As a web page
+
+The same program can also run entirely inside the browser, with no server:
+
+```sh
+mimic run --web todo.mim          # builds WebAssembly and opens it at http://localhost:8080/
+mimic build --web todo.mim        # writes todo-web/: index.html and app.wasm
+```
+
+The `todo-web` folder works on any static web host. Your `view` and `update` run in the visitor's browser, and nothing else changes in your code. Inside a page there is no network access. Jobs run straight after the message that started them, and `print` writes to the browser's console.
+
 The full list of elements and settings is in the [standard library reference](../docs/std.md#interfaces-the-ui-module).
 
 Back to the [index](index.mdx).

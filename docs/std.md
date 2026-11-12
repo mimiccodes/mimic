@@ -443,5 +443,6 @@ How it works:
 * **Each tab handles one message at a time, in order.** Tabs run side by side, even when `update` or a job has effects.
 * **Built-in theme:** readable defaults with light and dark modes.
 * **Lists change cheaply.** A list that grows or shrinks at the end sends only the new rows, or only a removal. Give rows keys with `ui::keyed("{todo.id}", row)`, and inserting or removing anywhere sends only that row. Reordered rows re-send the list. With 10 000 rows, a click is handled in about 0.1 s on an M3 Pro, and adding or removing a row sends a few hundred bytes.
-* **Not yet:** other targets (WebAssembly, native windows).
+* **As a web page.** `mimic build --web` (or `mimic run --web`) turns a `ui` program into a page that runs entirely in the browser, as WebAssembly with no server. The same `view`, `update` and subscriptions work there. The differences: jobs run right after the message that started them, `time::sleep` returns at once, there is no networking, and `print` goes to the browser's console.
+* **Not yet:** native windows, terminal interfaces.
 

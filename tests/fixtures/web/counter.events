@@ -1,0 +1,7 @@
+{"p":"0.1","e":"click","v":""}
+{"p":"0.1","e":"click","v":""}
+{"p":"0.2","e":"input","v":"clicks"}
+{"p":"0.3","e":"click","v":""}
+@every 0
+{"p":"0.0","e":"click","v":""}
+not json

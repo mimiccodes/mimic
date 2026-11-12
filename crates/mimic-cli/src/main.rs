@@ -10,6 +10,7 @@ mod modfile;
 mod report;
 mod targets;
 mod toolchain;
+mod web;
 
 use clap::{Args, Parser, Subcommand};
 use driver::{Input, Profile};
@@ -107,6 +108,13 @@ enum Cmd {
         /// (program output stays on stdout)
         #[arg(long)]
         emit_json: bool,
+        /// Run it as a web page (WebAssembly): build, then serve it at
+        /// http://localhost:<port>/ (see `mimic build --web`)
+        #[arg(long)]
+        web: bool,
+        /// The port for --web
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
         /// Arguments passed to the program (after `--`)
         #[arg(last = true)]
         args: Vec<String>,
@@ -116,6 +124,10 @@ enum Cmd {
         file: Option<PathBuf>,
         #[command(flatten)]
         profile: ProfileArgs,
+        /// A web page: build for wasm32-wasi and write <name>-web/ with
+        /// index.html and app.wasm, ready for any static web server
+        #[arg(long)]
+        web: bool,
         /// Cross-compile for an LLVM target triple (vendor optional), e.g. x86_64-linux-musl, aarch64-linux, x86_64-apple-macosx13.0; `mimic targets` lists them
         #[arg(long)]
         target: Option<String>,
@@ -353,12 +365,13 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
         }
-        Cmd::Build { file, profile, target, all_targets, emit_ir, emit_net, emit_header, emit_json } => {
+        Cmd::Build { file, profile, web, target, all_targets, emit_ir, emit_net, emit_header, emit_json } => {
             let built = (|| -> Result<Vec<serde_json::Value>, Report> {
                 let input = driver::input_from(file.as_deref())?;
                 let mut prof = profile_of(&input, profile.clone(), true);
                 prof.emit_header = emit_header;
                 let mut targets = vec![match &target {
+                    _ if web => Target::parse("wasm32-wasi")?,
                     Some(t) => Target::parse(t)?,
                     None => Target::host(),
                 }];
@@ -374,6 +387,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         status("Compiling", format!("{} ({}, {})", input.name(), prof.name(), t.name()));
                     }
                     let a = driver::build(&input, &prof, t, emit_ir, emit_net)?;
+                    if web {
+                        let dir = web::package(&a.path).map_err(|e| Report::plain(&mimic_syntax::codes::BUILD, format!("cannot write the web page: {e}")))?;
+                        if !emit_json {
+                            status("Finished", format!("web page → {}", shown(&dir)));
+                        }
+                        out.push(serde_json::json!({ "target": t.name(), "profile": prof.name(), "kind": "web", "path": dir.display().to_string() }));
+                        continue;
+                    }
                     if !emit_json {
                         status("Finished", format!("{} → {}", a.kind.describe(), shown(&a.path)));
                         if let Some(n) = &a.note {
@@ -404,7 +425,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
         Cmd::Targets { cpus, features, check, json } => targets_cmd(cpus.as_deref(), features.as_deref(), check.as_deref(), json),
-        Cmd::Run { file, profile, emit_json, args } => {
+        Cmd::Run { file, profile, emit_json, web, port, args } => {
             let built = (|| -> Result<driver::Artifact, Report> {
                 let input = driver::input_from(file.as_deref())?;
                 if !input.is_bin() {
@@ -414,12 +435,18 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     ));
                 }
                 let prof = profile_of(&input, profile, false);
-                driver::build(&input, &prof, &Target::host(), false, false)
+                let target = if web { Target::parse("wasm32-wasi")? } else { Target::host() };
+                driver::build(&input, &prof, &target, false, false)
             })();
             let a = match built {
                 Ok(a) => a,
                 Err(r) => return fail(r, emit_json, "run", true),
             };
+            if web {
+                let dir = web::package(&a.path).map_err(|e| format!("cannot write the web page: {e}"))?;
+                web::serve(&dir, port).map_err(|e| format!("cannot serve the page on port {port}: {e}"))?;
+                return Ok(ExitCode::SUCCESS);
+            }
             status("Running", shown(&a.path));
             let st = std::process::Command::new(&a.path).args(&args).status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))

@@ -1,0 +1,32 @@
+module main
+
+// A ui app as a web page (mimic build --web), driven by tests/fixtures/web/
+// counter.events: each line is what the page would send.
+
+type Msg = Inc | Named(str) | Tick | Double | Doubled(i64)
+type State = { n: i64, name: str, ticks: i64 }
+
+fn update(s: State, m: Msg) -> ui::Step[State, Msg] {
+    match m {
+        Inc => ui::stay({ s with n: s.n + 1 }),
+        Named(t) => ui::stay({ s with name: t }),
+        Tick => ui::stay({ s with ticks: s.ticks + 1 }),
+        Double => ui::then(s, () => Doubled(s.n * 2)),         // runs right after, in a page
+        Doubled(v) => ui::stay({ s with n: v }),
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column([
+        ui::text("{s.name}: {s.n}"),
+        ui::button("+", on_click: Inc),
+        ui::input(s.name, on_input: Named),
+        ui::button("×2", on_click: Double),
+        ui::text("ticks {s.ticks}"),
+    ])
+}
+
+fn main() {
+    print("starting")                                              // goes to the console
+    print(ui::run_live(State { n: 0, name: "count", ticks: 0 }, view, update, subscriptions: [ui::every(250ms, Tick)], title: "Counter"))
+}

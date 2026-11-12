@@ -39,7 +39,17 @@ pub module ui {
     extern "mimic" concurrent {
         // run f() as a task of its own that nobody waits for
         fn detach(f: fn())
+        // in a web page (mimic build --web): keep the app, return to the page
+        fn hand_to_browser(app: fn(str) -> str)
     }
+
+    extern "mimic" {
+        fn in_browser() -> bool
+    }
+
+    // How a page starts: the first screen, and the subscriptions' intervals
+    // in milliseconds (the page runs the timers).
+    type BrowserStart = { html: str, every: [i64], css: str, title: str }
 
     // The next state and a job whose result (a message) comes back later.
     pub extern "mimic" {
@@ -158,7 +168,71 @@ pub module ui {
 
     // The same, with jobs (`update` returns a `ui::Step`) and subscriptions.
     pub fn run_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]] = [], port: i64 = 8080, title: str = "Mimic", connections: i64 = 0) -> Result[i64, str] {
+        if in_browser() { in_page(init, view, update, subscriptions, title) } else { serve_live(init, view, update, subscriptions, port, title, connections) }
+    }
+
+    fn serve_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]], port: i64, title: str, connections: i64) -> Result[i64, str] {
         serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update, subscriptions), connections)
+    }
+
+    // ---- in a web page (WebAssembly) ------------------------------------------
+    // The page calls the app with "" (start), "@every N" (a timer) or an event,
+    // and gets JSON back. The state lives in a channel between calls. Jobs run
+    // right after the message that started them.
+
+    fn in_page[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subs: [Sub[M]], title: str) -> Result[i64, str] {
+        let (tx, rx) = super::chan::new[(S, Node[M])]()
+        super::chan::send(tx, (init, view(init)))
+        hand_to_browser(input => page_step(input, tx, rx, view, update, subs, title))
+        Ok(0)
+    }
+
+    fn page_step[S, M](input: str, tx: super::chan::Sender[(S, Node[M])], rx: super::chan::Receiver[(S, Node[M])], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subs: [Sub[M]], title: str) -> str {
+        let now = super::chan::receive(rx) else { return "[]" }
+        let (state, tree) = now
+        if input == "" {
+            super::chan::send(tx, now)
+            super::json::encode(BrowserStart { html: html(tree), every: subs ¨ (sb => match sb { Every(d, _) => d div 1000000, _ => 0 }), css: theme(), title: title })
+        } else {
+            let m = if starts_with(input, "@every ") { sub_message(subs, parse_int(input ↓ 7)) } else { message(tree, input) }
+            match m {
+                Some(msg) => {
+                    let (s2, t2, patches) = apply_in_page(state, tree, view, update, msg)
+                    super::chan::send(tx, (s2, t2))
+                    super::json::encode(patches)
+                }
+                None => {
+                    super::chan::send(tx, now)
+                    "[]"
+                }
+            }
+        }
+    }
+
+    fn sub_message[M](subs: [Sub[M]], i: Option[i64]) -> Option[M] {
+        match i {
+            Some(k) if k >= 0 and k < ≢ subs => match subs[k] {
+                Every(_, m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn apply_in_page[S, M](state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], m: M) -> (S, Node[M], [Patch]) {
+        let step = update(state, m)
+        let next = view(step.state)
+        jobs_in_page(step.state, next, diff(tree, next, "0"), step.jobs, view, update)
+    }
+
+    fn jobs_in_page[S, M](state: S, tree: Node[M], patches: [Patch], jobs: [fn() -> M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M]) -> (S, Node[M], [Patch]) {
+        if ≢ jobs == 0 {
+            (state, tree, patches)
+        } else {
+            let job = jobs[0]
+            let (s2, t2, more) = apply_in_page(state, tree, view, update, job())
+            jobs_in_page(s2, t2, concat(patches, more), jobs ↓ 1, view, update)
+        }
     }
 
     fn page_for[M](req: super::http::Request, tree: Node[M], title: str) -> super::http::Response {
