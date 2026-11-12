@@ -9,5 +9,5 @@ true
 true
 Ok(7)
 true
-Err("https needs TLS, which this version of mimic does not support yet")
+true
 true

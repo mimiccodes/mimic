@@ -68,7 +68,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | E3 (first part) | Implicit futures for overlapping effects; `¨` runs I/O-only functions in parallel ([syntax.md](syntax.md#concurrency-implicit-futures)) | ✅ |
 | E4 (first part) | `http` module (client, server with route patterns, parallel pure handlers) and `tcp` module; effect annotations on `extern` blocks (`pure`, `concurrent`, `ordered`, `sync`) for C libraries and the runtime | ✅ |
 | E4 (JSON) | `json` module: `encode`/`encode_pretty` for any value, `decode[T]` into records (schemas emitted by the compiler; explicit type arguments), `parse` into `json::Value`; raw strings `'…'`; `http::json` | ✅ |
-| E3 (rest), E4 (rest), E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), UDP, websockets, TLS, tuple types in annotations, decoding unions, interfaces (`view(state)`) | |
+| E4 (TLS) | `https://` in the HTTP client through the system's TLS (Security framework / OpenSSL 3 via dlopen), certificate and host-name checks; redirects | ✅ |
+| E3 (rest), E4 (rest), E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), UDP, websockets, TLS servers and `tcp`-level TLS, tuple types in annotations, decoding unions, interfaces (`view(state)`) | |
 | F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |

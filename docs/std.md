@@ -234,7 +234,9 @@ How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
 * **The server runs a pure or overlapping handler in parallel**, one thread per connection. A handler that prints or writes files handles one request at a time, in order.
 * **One request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
-* **`https://` is not supported yet** (TLS is planned) and returns `Err`. WebAssembly has no sockets, so there every network function returns `Err`.
+* **`https://` uses the operating system's TLS**, loaded when first needed: the Security framework on Apple platforms, OpenSSL 3 (`libssl.so.3`) on Linux. Certificates and host names are checked against the system's trusted certificates, so an expired, self-signed or wrong-host certificate is an `Err` ("TLS with example.com failed: …"). Statically linked Linux programs cannot load OpenSSL, so there `https://` returns an `Err` that says so. Serving HTTPS is not supported yet.
+* **Redirects are followed** (301, 302, 303, 307, 308), up to 10. A 303, or a 301/302 after a non-GET, continues as a GET; 307 and 308 keep the method and body.
+* **WebAssembly has no sockets**, so there every network function returns `Err`.
 
 ### `tcp`
 

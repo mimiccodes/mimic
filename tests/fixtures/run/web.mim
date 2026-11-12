@@ -61,7 +61,7 @@ fn main() {
         }
         Err(e) => print("no listen: {e}"),
     }
-    print(http::fetch("https://example.com"))
+    print(is_err(http::fetch("https://127.0.0.1:1/")))       // nothing listens there
     print(is_err(http::fetch("http://127.0.0.1:1/")))
 }
 

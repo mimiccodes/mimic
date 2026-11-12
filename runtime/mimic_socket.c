@@ -225,17 +225,299 @@ mim_val *mim_std_tcp_close(mim_val *s) {
     return NULL;
 }
 
+/* ---- connections: plain or TLS ------------------------------------------ */
+
+typedef struct {
+    int fd;
+    void *tls; /* a TLS session (tls_open), or NULL */
+} mconn;
+
+static ssize_t tls_read(void *t, void *buf, size_t n);
+static int tls_write_all(void *t, const char *p, size_t n);
+
+static ssize_t conn_recv(mconn *c, void *buf, size_t n) {
+    if (c->tls) return tls_read(c->tls, buf, n);
+    return recv(c->fd, buf, n, 0);
+}
+
+static int conn_send_all(mconn *c, const char *p, size_t n) {
+    if (c->tls) return tls_write_all(c->tls, p, n);
+    return send_all(c->fd, p, n);
+}
+
+/* TLS with the operating system's own library, loaded on first use (no
+ * link-time dependency): Apple's Security framework, or OpenSSL 3 on Linux.
+ * Certificates and host names are checked against the system's trust store. */
+
+#if defined(__APPLE__)
+
+typedef int32_t OSStatus;
+typedef OSStatus (*st_io_fn)(const void *conn, void *data, size_t *len);
+static struct {
+    int ready;
+    void *(*create)(const void *alloc, int side, int type);
+    OSStatus (*set_io)(void *ctx, st_io_fn rd, st_io_fn wr);
+    OSStatus (*set_conn)(void *ctx, const void *conn);
+    OSStatus (*set_peer)(void *ctx, const char *name, size_t len);
+    OSStatus (*handshake)(void *ctx);
+    OSStatus (*write)(void *ctx, const void *data, size_t len, size_t *done);
+    OSStatus (*read)(void *ctx, void *data, size_t len, size_t *done);
+    OSStatus (*close)(void *ctx);
+    void (*release)(const void *cf);
+} st;
+static pthread_mutex_t st_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define ERR_WOULD_BLOCK (-9803)
+#define ERR_CLOSED (-9805)
+#define ERR_CLOSED_ABORT (-9806)
+#define ERR_CLOSED_NO_NOTIFY (-9816)
+
+static OSStatus st_read_cb(const void *conn, void *data, size_t *len) {
+    int fd = (int)(intptr_t)conn;
+    size_t want = *len, got = 0;
+    while (got < want) {
+        ssize_t r = recv(fd, (char *)data + got, want - got, 0);
+        if (r > 0) got += (size_t)r;
+        else if (r == 0) { *len = got; return ERR_CLOSED; }
+        else if (errno == EINTR) continue;
+        else { *len = got; return errno == EAGAIN || errno == EWOULDBLOCK ? ERR_WOULD_BLOCK : -36; }
+    }
+    *len = got;
+    return 0;
+}
+
+static OSStatus st_write_cb(const void *conn, void *data, size_t *len) {
+    int fd = (int)(intptr_t)conn;
+    size_t want = *len, put = 0;
+    while (put < want) {
+        ssize_t w = send(fd, (const char *)data + put, want - put, MIM_SEND_FLAGS);
+        if (w > 0) put += (size_t)w;
+        else if (w < 0 && errno == EINTR) continue;
+        else { *len = put; return errno == EAGAIN || errno == EWOULDBLOCK ? ERR_WOULD_BLOCK : -36; }
+    }
+    *len = put;
+    return 0;
+}
+
+static int tls_load(void) {
+    pthread_mutex_lock(&st_lock);
+    if (!st.ready) {
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_LOCAL);
+        void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY | RTLD_LOCAL);
+        if (sec && cf) {
+            *(void **)&st.create = dlsym(sec, "SSLCreateContext");
+            *(void **)&st.set_io = dlsym(sec, "SSLSetIOFuncs");
+            *(void **)&st.set_conn = dlsym(sec, "SSLSetConnection");
+            *(void **)&st.set_peer = dlsym(sec, "SSLSetPeerDomainName");
+            *(void **)&st.handshake = dlsym(sec, "SSLHandshake");
+            *(void **)&st.write = dlsym(sec, "SSLWrite");
+            *(void **)&st.read = dlsym(sec, "SSLRead");
+            *(void **)&st.close = dlsym(sec, "SSLClose");
+            *(void **)&st.release = dlsym(cf, "CFRelease");
+        }
+        st.ready = st.create && st.set_io && st.set_conn && st.set_peer && st.handshake && st.write && st.read && st.close && st.release ? 1 : -1;
+    }
+    pthread_mutex_unlock(&st_lock);
+    return st.ready == 1;
+}
+
+static const char *st_error(OSStatus e) {
+    switch (e) {
+    case -9807: return "the server's certificate chain is not valid";
+    case -9808: return "the server's certificate is bad";
+    case -9812: return "the server's certificate is not trusted (unknown root)";
+    case -9813: return "the server's certificate has no trusted root";
+    case -9814: return "the server's certificate has expired";
+    case -9815: return "the server's certificate is not valid yet";
+    case -9843: return "the server's certificate is for a different host name";
+    case -9802: return "the server's certificate failed verification";
+    case ERR_WOULD_BLOCK: return "timed out";
+    default: return NULL;
+    }
+}
+
+/* a TLS session over a connected socket, or NULL with a message */
+static void *tls_open(int fd, const char *host, char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "TLS is not available: the Security framework could not be loaded");
+        return NULL;
+    }
+    void *ctx = st.create(NULL, 1 /* client */, 0 /* stream */);
+    if (!ctx) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    st.set_io(ctx, st_read_cb, st_write_cb);
+    st.set_conn(ctx, (const void *)(intptr_t)fd);
+    st.set_peer(ctx, host, strlen(host));
+    OSStatus rc;
+    while ((rc = st.handshake(ctx)) == -9841 /* errSSLPeerAuthCompleted */) {
+    }
+    if (rc != 0) {
+        const char *why = st_error(rc);
+        if (why) snprintf(err, errn, "TLS with %s failed: %s", host, why);
+        else snprintf(err, errn, "TLS with %s failed (Security framework error %d)", host, (int)rc);
+        st.release(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static ssize_t tls_read(void *t, void *buf, size_t n) {
+    size_t got = 0;
+    OSStatus rc = st.read(t, buf, n, &got);
+    if (got > 0) return (ssize_t)got;
+    if (rc == ERR_CLOSED || rc == ERR_CLOSED_NO_NOTIFY || rc == ERR_CLOSED_ABORT) return 0;
+    errno = EIO;
+    return -1;
+}
+
+static int tls_write_all(void *t, const char *p, size_t n) {
+    while (n > 0) {
+        size_t done = 0;
+        OSStatus rc = st.write(t, p, n, &done);
+        if (rc != 0 && done == 0) return -1;
+        p += done;
+        n -= done;
+    }
+    return 0;
+}
+
+static void tls_close(void *t) {
+    st.close(t);
+    st.release(t);
+}
+
+#elif defined(__linux__)
+
+static struct {
+    int ready;
+    void *ctx;
+    void *(*method)(void);
+    void *(*ctx_new)(void *);
+    int (*default_paths)(void *);
+    void (*set_verify)(void *, int, void *);
+    void *(*ssl_new)(void *);
+    int (*set_fd)(void *, int);
+    long (*ctrl)(void *, int, long, void *);
+    int (*set1_host)(void *, const char *);
+    int (*connect)(void *);
+    int (*read)(void *, void *, int);
+    int (*write)(void *, const void *, int);
+    int (*shutdown)(void *);
+    void (*free)(void *);
+    long (*verify_result)(const void *);
+    const char *(*verify_string)(long);
+} os;
+static pthread_mutex_t os_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int tls_load(void) {
+    pthread_mutex_lock(&os_lock);
+    if (!os.ready) {
+        void *ssl = dlopen("libssl.so.3", RTLD_LAZY | RTLD_GLOBAL);
+        void *crypto = dlopen("libcrypto.so.3", RTLD_LAZY | RTLD_GLOBAL);
+        if (ssl) {
+            *(void **)&os.method = dlsym(ssl, "TLS_client_method");
+            *(void **)&os.ctx_new = dlsym(ssl, "SSL_CTX_new");
+            *(void **)&os.default_paths = dlsym(ssl, "SSL_CTX_set_default_verify_paths");
+            *(void **)&os.set_verify = dlsym(ssl, "SSL_CTX_set_verify");
+            *(void **)&os.ssl_new = dlsym(ssl, "SSL_new");
+            *(void **)&os.set_fd = dlsym(ssl, "SSL_set_fd");
+            *(void **)&os.ctrl = dlsym(ssl, "SSL_ctrl");
+            *(void **)&os.set1_host = dlsym(ssl, "SSL_set1_host");
+            *(void **)&os.connect = dlsym(ssl, "SSL_connect");
+            *(void **)&os.read = dlsym(ssl, "SSL_read");
+            *(void **)&os.write = dlsym(ssl, "SSL_write");
+            *(void **)&os.shutdown = dlsym(ssl, "SSL_shutdown");
+            *(void **)&os.free = dlsym(ssl, "SSL_free");
+            *(void **)&os.verify_result = dlsym(ssl, "SSL_get_verify_result");
+            if (crypto) *(void **)&os.verify_string = dlsym(crypto, "X509_verify_cert_error_string");
+        }
+        int ok = os.method && os.ctx_new && os.default_paths && os.set_verify && os.ssl_new && os.set_fd && os.ctrl && os.set1_host &&
+                 os.connect && os.read && os.write && os.shutdown && os.free && os.verify_result;
+        if (ok) {
+            os.ctx = os.ctx_new(os.method());
+            ok = os.ctx != NULL;
+            if (ok) {
+                os.default_paths(os.ctx);
+                os.set_verify(os.ctx, 1 /* SSL_VERIFY_PEER */, NULL);
+            }
+        }
+        os.ready = ok ? 1 : -1;
+    }
+    pthread_mutex_unlock(&os_lock);
+    return os.ready == 1;
+}
+
+static void *tls_open(int fd, const char *host, char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "TLS is not available: install OpenSSL 3 (libssl.so.3); static builds cannot load it");
+        return NULL;
+    }
+    void *ssl = os.ssl_new(os.ctx);
+    if (!ssl) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    os.set_fd(ssl, fd);
+    os.ctrl(ssl, 55 /* SSL_CTRL_SET_TLSEXT_HOSTNAME */, 0, (void *)host); /* SNI */
+    os.set1_host(ssl, host);                                                /* check the name */
+    if (os.connect(ssl) != 1) {
+        long v = os.verify_result(ssl);
+        if (v != 0 && os.verify_string) snprintf(err, errn, "TLS with %s failed: %s", host, os.verify_string(v));
+        else snprintf(err, errn, "TLS with %s failed", host);
+        os.free(ssl);
+        return NULL;
+    }
+    return ssl;
+}
+
+static ssize_t tls_read(void *t, void *buf, size_t n) {
+    int r = os.read(t, buf, (int)(n > 1 << 30 ? 1 << 30 : n));
+    if (r > 0) return r;
+    return 0; /* closed (or an error: treated as the end) */
+}
+
+static int tls_write_all(void *t, const char *p, size_t n) {
+    while (n > 0) {
+        int w = os.write(t, p, (int)(n > 1 << 30 ? 1 << 30 : n));
+        if (w <= 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+static void tls_close(void *t) {
+    os.shutdown(t);
+    os.free(t);
+}
+
+#else
+
+static void *tls_open(int fd, const char *host, char *err, size_t errn) {
+    (void)fd;
+    (void)host;
+    snprintf(err, errn, "TLS is not available on this platform yet");
+    return NULL;
+}
+static ssize_t tls_read(void *t, void *buf, size_t n) { (void)t; (void)buf; (void)n; return -1; }
+static int tls_write_all(void *t, const char *p, size_t n) { (void)t; (void)p; (void)n; return -1; }
+static void tls_close(void *t) { (void)t; }
+
+#endif
+
 /* ---- HTTP: shared parsing ----------------------------------------------- */
 
 /* read until the end of the headers; returns the offset just past "\r\n\r\n"
  * (or -1), leaving any body bytes already read in `b` */
-static int64_t read_head(int fd, sbuf *b) {
+static int64_t read_head(mconn *c, sbuf *b) {
     char tmp[16384];
     for (;;) {
         for (size_t i = b->n >= 4 ? 0 : 0; i + 3 < b->n; i++)
             if (b->p[i] == '\r' && b->p[i + 1] == '\n' && b->p[i + 2] == '\r' && b->p[i + 3] == '\n') return (int64_t)i + 4;
         if (b->n > (1 << 20)) return -1; /* headers over 1 MB */
-        ssize_t r = recv(fd, tmp, sizeof tmp, 0);
+        ssize_t r = conn_recv(c, tmp, sizeof tmp);
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) return -1;
         sb_put(b, tmp, (size_t)r);
@@ -299,11 +581,11 @@ static mim_val *parse_headers(const char *p, const char *end, int64_t *content_l
 }
 
 /* read the rest of a body: `have` bytes are in b->p[off..]; returns the body */
-static mim_val *read_body(int fd, sbuf *b, int64_t off, int64_t content_length, int chunked, int to_eof) {
+static mim_val *read_body(mconn *c, sbuf *b, int64_t off, int64_t content_length, int chunked, int to_eof) {
     char tmp[65536];
     if (content_length >= 0) {
         while ((int64_t)b->n - off < content_length) {
-            ssize_t r = recv(fd, tmp, sizeof tmp, 0);
+            ssize_t r = conn_recv(c, tmp, sizeof tmp);
             if (r < 0 && errno == EINTR) continue;
             if (r <= 0) break;
             sb_put(b, tmp, (size_t)r);
@@ -314,7 +596,7 @@ static mim_val *read_body(int fd, sbuf *b, int64_t off, int64_t content_length, 
     if (chunked) {
         /* read to the end first (we sent Connection: close), then decode */
         for (;;) {
-            ssize_t r = recv(fd, tmp, sizeof tmp, 0);
+            ssize_t r = conn_recv(c, tmp, sizeof tmp);
             if (r < 0 && errno == EINTR) continue;
             if (r <= 0) break;
             sb_put(b, tmp, (size_t)r);
@@ -336,7 +618,7 @@ static mim_val *read_body(int fd, sbuf *b, int64_t off, int64_t content_length, 
     }
     if (to_eof) {
         for (;;) {
-            ssize_t r = recv(fd, tmp, sizeof tmp, 0);
+            ssize_t r = conn_recv(c, tmp, sizeof tmp);
             if (r < 0 && errno == EINTR) continue;
             if (r <= 0) break;
             sb_put(b, tmp, (size_t)r);
@@ -347,17 +629,23 @@ static mim_val *read_body(int fd, sbuf *b, int64_t off, int64_t content_length, 
 
 /* ---- HTTP client -------------------------------------------------------- */
 
+static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val *body, int hops);
+
 mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, mim_val *body) {
-    const char *m = io_path(method, "request"), *u = io_path(url, "request");
-    if (strncmp(u, "https://", 8) == 0) return err_of("https needs TLS, which this version of mimic does not support yet");
-    if (strncmp(u, "http://", 7) != 0) return err_of("request: the URL must start with http://");
-    const char *hp = u + 7, *slash = strchr(hp, '/');
+    return http_do(io_path(method, "request"), io_path(url, "request"), headers, body, 0);
+}
+
+/* one request; redirects (301 302 303 307 308) are followed, up to 10 */
+static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val *body, int hops) {
+    int secure = strncmp(u, "https://", 8) == 0;
+    if (!secure && strncmp(u, "http://", 7) != 0) return err_of("request: the URL must start with http:// or https://");
+    const char *hp = u + (secure ? 8 : 7), *slash = strchr(hp, '/');
     size_t hl = slash ? (size_t)(slash - hp) : strlen(hp);
     char host[256];
     if (hl == 0 || hl >= sizeof host) return err_of("request: bad host in URL");
     memcpy(host, hp, hl);
     host[hl] = 0;
-    int64_t port = 80;
+    int64_t port = secure ? 443 : 80;
     char *colon = strrchr(host, ':');
     if (colon && !strchr(colon, ']')) {
         port = atoll(colon + 1);
@@ -368,6 +656,14 @@ mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, m
     int fd = dial(host, port, err, sizeof err);
     if (fd < 0) return err_of(err);
     sock_timeout(fd, 60);
+    mconn conn = {fd, NULL};
+    if (secure) {
+        conn.tls = tls_open(fd, host, err, sizeof err);
+        if (!conn.tls) {
+            close(fd);
+            return err_of(err);
+        }
+    }
     sbuf q = {0};
     char line[1024];
     /* Host: the host (and port) exactly as written in the URL */
@@ -394,17 +690,19 @@ mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, m
     }
     sb_put(&q, "\r\n", 2);
     if (blen) sb_put(&q, (const char *)body->data, (size_t)blen);
-    int bad = send_all(fd, q.p, q.n) != 0;
+    int bad = conn_send_all(&conn, q.p, q.n) != 0;
     free(q.p);
     if (bad) {
         mim_val *e = err_errno("cannot send the request to", host);
+        if (conn.tls) tls_close(conn.tls);
         close(fd);
         return e;
     }
     sbuf b = {0};
-    int64_t off = read_head(fd, &b);
+    int64_t off = read_head(&conn, &b);
     if (off < 0) {
         free(b.p);
+        if (conn.tls) tls_close(conn.tls);
         close(fd);
         return err_of("no HTTP response (connection closed or timed out)");
     }
@@ -416,9 +714,37 @@ mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, m
     int chunked;
     mim_val *hm = parse_headers(first_end + 2, b.p + off - 2, &clen, &chunked);
     int no_body = strcmp(m, "HEAD") == 0 || status == 204 || status == 304;
-    mim_val *bodyv = no_body ? mim_str("", 0) : read_body(fd, &b, off, clen, chunked, 1);
+    mim_val *bodyv = no_body ? mim_str("", 0) : read_body(&conn, &b, off, clen, chunked, 1);
+    if (conn.tls) tls_close(conn.tls);
     close(fd);
     free(b.p);
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        mim_val *key = mim_str("location", 8);
+        int64_t at = map_find(hm, key, NULL);
+        mim_release(key);
+        if (at >= 0) {
+            if (hops >= 10) {
+                mim_release(hm);
+                mim_release(bodyv);
+                return err_of("too many redirects");
+            }
+            mim_val *loc = ((mim_val **)hm->data)[2 * at + 1];
+            /* an absolute URL, or a path on the same server */
+            char next[2048];
+            const char *l = (const char *)loc->data;
+            if (strncmp(l, "http://", 7) == 0 || strncmp(l, "https://", 8) == 0) snprintf(next, sizeof next, "%s", l);
+            else snprintf(next, sizeof next, "%s%.*s%s%s", secure ? "https://" : "http://", (int)hl, hp, l[0] == '/' ? "" : "/", l);
+            /* 303 (and the old habit for 301/302 after POST): the next request is a GET */
+            int keep = status == 307 || status == 308;
+            const char *nm = keep ? m : (strcmp(m, "HEAD") == 0 ? "HEAD" : "GET");
+            mim_val *empty = mim_str("", 0);
+            mim_val *r = http_do(nm, next, headers, keep ? body : empty, hops + 1);
+            mim_release(empty);
+            mim_release(hm);
+            mim_release(bodyv);
+            return r;
+        }
+    }
     mim_val *fields[3] = {mim_int(status), hm, bodyv};
     return ok_of(obj_owned(&mim_desc_Response, 3, fields));
 }
@@ -456,8 +782,9 @@ static const char *reason(int64_t s) {
 /* one request on a connection: parse, call the handler, answer, close */
 static void serve_one(int fd, mim_val *handler) {
     sock_timeout(fd, 30);
+    mconn conn = {fd, NULL};
     sbuf b = {0};
-    int64_t off = read_head(fd, &b);
+    int64_t off = read_head(&conn, &b);
     if (off < 0) {
         free(b.p);
         close(fd);
@@ -477,7 +804,7 @@ static void serve_one(int fd, mim_val *handler) {
     int64_t clen;
     int chunked;
     mim_val *hm = parse_headers(line_end + 2, b.p + off - 2, &clen, &chunked);
-    mim_val *bodyv = read_body(fd, &b, off, clen < 0 && !chunked ? 0 : clen, chunked, 0);
+    mim_val *bodyv = read_body(&conn, &b, off, clen < 0 && !chunked ? 0 : clen, chunked, 0);
     mim_val *fields[5] = {
         mim_str(b.p, (int64_t)(sp1 - b.p)),
         mim_str(target, (int64_t)((q ? q : sp2) - target)),
