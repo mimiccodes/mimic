@@ -1,0 +1,30 @@
+module main
+
+// Variant constructors are functions: `Typed` alone means `x => Typed(x)`.
+
+type Msg = Add | Typed(str) | Moved(i64, i64)
+
+fn apply(f: fn(str) -> Msg, s: str) -> Msg { f(s) }
+
+fn twice(f: fn(i64, i64) -> Msg) -> Msg { f(2, 3) }
+
+fn describe(m: Msg) -> str {
+    match m {
+        Add => "add",
+        Typed(t) => "typed {t}",
+        Moved(x, y) => "moved {x},{y}",
+    }
+}
+
+fn main() {
+    print(apply(Typed, "hello"))
+    print(twice(Moved))
+    print(["a" "b"] ¨ Typed ¨ describe)
+    print([1 2 3] ¨ Some)
+    print(["x"] ¨ Ok)
+    print([1.5] ¨ json::Number ¨ (v => json::encode(v)))
+    let make = Typed
+    print(describe(make("later")))
+    print(describe(Typed("direct")))         // a direct call is unchanged
+    print(Add)
+}

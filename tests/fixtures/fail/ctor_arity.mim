@@ -1,0 +1,5 @@
+// expect-error: E0401 a function of 1 argument(s) is expected, but this constructor has 2
+module main
+type Msg = Typed(str) | Moved(i64, i64)
+fn apply(f: fn(str) -> Msg, s: str) -> Msg { f(s) }
+fn main() { print(apply(Moved, "x")) }

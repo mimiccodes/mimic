@@ -100,6 +100,7 @@ let add_k = x => x + k                 // a lambda capturing k (by value)
 let mul = (a, b) => a * b              // several parameters; `() => …` for none
 apply(double, 21)                      // a named function as a value
 fold(xs, (+), 0)                       // an operator as a value: (+) (*) (==) …
+[1 2] ¨ Some                           // a variant constructor as a value: x => Some(x)
 fn make_adder(n: i64) { x => x + n }   // returning a closure
 make_adder(100)(1)                     // calling a call's result
 xs ¨ add_k                             // ¨ with any function value
@@ -107,6 +108,8 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 ```
 
 **How they behave:**
+* **Constructors.** A variant with fields, written without parentheses, is the function that builds it: `Typed` means `x => Typed(x)`, and `Moved` (two fields) means `(x, y) => Moved(x, y)`.
+* **Arity is checked.** Passing a function, lambda or constructor that takes the wrong number of arguments for a parameter's function type is a compile-time error.
 * **Capture.** Lambdas capture the variables they use, by value, when they are created. Values are immutable, so a closure always sees the value it was created with.
 * **No mutation.** A lambda may not modify a captured variable (error E0603).
 * **Types.** A function type `fn(i64) -> i64` is checked as "a function" when the program runs.

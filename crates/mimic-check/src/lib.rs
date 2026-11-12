@@ -235,7 +235,51 @@ impl Program {
             let decl = p.files[fi].ast.module.clone();
             p.register_module(&decl, root, fi, true, &mut diags);
         }
+        p.constructors_as_values();
         (p, diags)
+    }
+
+    /// A variant constructor used as a value is the function that builds it:
+    /// `on_input: Typed` means `x => Typed(x)`. Rewritten into that lambda
+    /// here, so later stages see an ordinary lambda.
+    fn constructors_as_values(&mut self) {
+        const PARAM: &str = "ctor·";
+        for fid in 0..self.fns.len() {
+            let FnKind::User(d) = &self.fns[fid].kind else { continue };
+            let module = self.fns[fid].module;
+            let mut body = d.body.clone();
+            let mut changed = false;
+            body.walk_mut(&mut |e: &mut Expr| match &mut e.kind {
+                ExprKind::Path(path) => {
+                    if let Ok(Resolved::Variant(t, v)) = self.resolve(module, path) {
+                        let n = self.types[t].variants()[v].fields.len();
+                        if n > 0 {
+                            let params: Vec<String> = (0..n).map(|i| format!("{PARAM}{i}")).collect();
+                            let span = e.span;
+                            let args = params.iter().map(|p| Expr { kind: ExprKind::Path(vec![p.clone()]), span }).collect();
+                            let call = Expr { kind: ExprKind::Call { callee: Box::new(Expr { kind: ExprKind::Path(path.clone()), span }), args }, span };
+                            e.kind = ExprKind::Lambda { params, body: Box::new(call) };
+                            changed = true;
+                        }
+                    }
+                }
+                // children are visited first: a constructor that is called
+                // directly was wrapped above; unwrap it again
+                ExprKind::Call { callee, .. } => {
+                    if let ExprKind::Lambda { params, body } = &callee.kind
+                        && params.first().is_some_and(|p| p.starts_with(PARAM))
+                        && let ExprKind::Call { callee: inner, .. } = &body.kind
+                    {
+                        let inner = (**inner).clone();
+                        **callee = inner;
+                    }
+                }
+                _ => {}
+            });
+            if changed && let FnKind::User(d) = &mut self.fns[fid].kind {
+                d.body = body;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1,0 +1,9 @@
+Typed("hello")
+Moved(2, 3)
+["typed a" "typed b"]
+[Some(1) Some(2) Some(3)]
+[Ok("x")]
+["1.5"]
+typed later
+typed direct
+Add

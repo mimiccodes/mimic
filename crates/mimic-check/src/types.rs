@@ -779,6 +779,44 @@ impl Walk<'_, '_> {
     /// Mismatched arguments become `Dyn` so the callee is not blamed again.
     fn check_args_at_call(&mut self, call: &Expr, path: &[String], f: FnId, args: &[Expr], argt: &mut [Ty]) {
         let p = self.inf.p;
+        // a function argument must take as many arguments as the parameter's
+        // function type says (a lambda, a named function or a constructor)
+        let fn_params: Vec<(usize, &str, &Type)> = match &p.fns[f].kind {
+            FnKind::User(d) => d.params.iter().enumerate().filter_map(|(i, prm)| prm.ty.as_ref().map(|t| (i, prm.name.as_str(), t))).collect(),
+            FnKind::Extern { decl, .. } => decl.params.iter().enumerate().map(|(i, (n, t))| (i, n.as_str(), t)).collect(),
+        };
+        for (i, name, t) in fn_params {
+            let (Type::Fn(want, ..), Some(a)) = (t, args.get(i)) else { continue };
+            if !(a.span.start >= call.span.start && a.span.end <= call.span.end) {
+                continue;
+            }
+            let module = self.module;
+            let got = match &a.kind {
+                ExprKind::Lambda { params, .. } => Some(params.len()),
+                ExprKind::Path(path) if path.len() > 1 || self.lookup(&path[0]).is_none() => match p.resolve(module, path) {
+                    Ok(Resolved::Fn(g)) => Some(p.fns[g].arity()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(got) = got
+                && got != want.len()
+            {
+                let what = if matches!(&a.kind, ExprKind::Lambda { params, .. } if params.first().is_some_and(|p| p.starts_with("ctor·"))) {
+                    "this constructor has"
+                } else {
+                    "this function takes"
+                };
+                self.err(Diag::new(
+                    &C::TYPE_MISMATCH,
+                    format!("argument `{name}` of `{}`: a function of {} argument(s) is expected, but {what} {got}", path.join("::"), want.len()),
+                    a.span,
+                ));
+                if let Some(t) = argt.get_mut(i) {
+                    *t = Ty::Dyn;
+                }
+            }
+        }
         let FnKind::User(d) = &p.fns[f].kind else { return };
         let (module, file) = (p.fns[f].module, p.fns[f].file);
         for (i, prm) in d.params.iter().enumerate() {
