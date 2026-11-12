@@ -274,6 +274,46 @@ struct Local<'ctx> {
     mutable: bool,
 }
 
+/// An implicit future: `let name = f(…)` running on its own thread.
+struct Pending<'ctx> {
+    name: String,
+    /// where the runtime's future handle is kept until it is awaited
+    hslot: PointerValue<'ctx>,
+    ty: Ty,
+}
+
+/// Every single-segment path (variable use) in an expression.
+fn expr_names(e: &Expr, out: &mut Vec<String>) {
+    e.walk(&mut |x| {
+        if let ExprKind::Path(p) = &x.kind
+            && p.len() == 1
+        {
+            out.push(p[0].clone());
+        }
+    });
+}
+
+fn stmt_names(s: &Stmt) -> Vec<String> {
+    let mut out = Vec::new();
+    match s {
+        Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => expr_names(value, &mut out),
+        Stmt::Assign { name, index, value, .. } => {
+            out.push(name.clone());
+            if let Some(i) = index {
+                expr_names(i, &mut out);
+            }
+            expr_names(value, &mut out);
+        }
+        Stmt::Return(e, _) => {
+            if let Some(e) = e {
+                expr_names(e, &mut out);
+            }
+        }
+        Stmt::LetElse { value, .. } => expr_names(value, &mut out),
+    }
+    out
+}
+
 struct Cg<'ctx, 'p> {
     ctx: &'ctx Context,
     module: Module<'ctx>,
@@ -649,6 +689,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_rt_ensure" => void.fn_type(&[], false),
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
+            "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
+            "mim_await" => ptr.fn_type(&[p], false),
             "mim_each_fn" => ptr.fn_type(&[p, p], false),
             "mim_map_lit" => ptr.fn_type(&[i64t, p, p], false),
             "mim_gather" | "mim_trail" => ptr.fn_type(&[p, p], false),
@@ -1276,7 +1318,23 @@ impl<'ctx> Cg<'ctx, '_> {
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
         self.scopes.push(Vec::new());
         let lazy_mark = self.lazies.len();
+        // implicit futures started in this block and not awaited yet
+        let mut pending: Vec<Pending<'ctx>> = Vec::new();
         for (i, s) in b.stmts.iter().enumerate() {
+            if !pending.is_empty() {
+                if self.purity.stmt_may_overlap(self.p, self.cur_mod, s) {
+                    self.await_used(&mut pending, &stmt_names(s))?;
+                } else {
+                    self.await_all(&mut pending)?; // an ordered effect, or leaving the block
+                }
+            }
+            // `let x = f(…)` with only overlapping effects: start it, await at first use
+            if let Stmt::Let { name, mutable: false, value, .. } = s
+                && let Some(p) = self.start_future(s, name, value)?
+            {
+                pending.push(p);
+                continue;
+            }
             // an array `let` used only inside other array expressions is fused
             // into those uses rather than materialised
             if let Stmt::Let { name, mutable: false, ty: None, value, .. } = s
@@ -1287,6 +1345,16 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             self.stmt(s)?;
         }
+        if !pending.is_empty() && !self.terminated() {
+            match &b.tail {
+                Some(e) if self.purity.expr_may_overlap(self.p, self.cur_mod, e) => {
+                    let mut names = Vec::new();
+                    expr_names(e, &mut names);
+                    self.await_used(&mut pending, &names)?
+                }
+                _ => self.await_all(&mut pending)?,
+            }
+        }
         if self.terminated() {
             self.dead_block();
         }
@@ -1294,6 +1362,10 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(e) => self.expr(e)?,
             None => self.null(),
         };
+        // every future finishes before the block does
+        if !pending.is_empty() && !self.terminated() {
+            self.await_all(&mut pending)?;
+        }
         let v = self.own(v)?;
         let scope = self.scopes.pop().unwrap();
         self.lazies.truncate(lazy_mark);
@@ -1301,6 +1373,69 @@ impl<'ctx> Cg<'ctx, '_> {
             self.release_scope(&scope)?;
         }
         Ok(v)
+    }
+
+    /// Start `let name = f(args)` as an implicit future when `f` qualifies.
+    fn start_future(&mut self, s: &Stmt, name: &str, value: &Expr) -> R<Option<Pending<'ctx>>> {
+        if self.purity.future_call(self.p, self.cur_mod, value).is_none() {
+            return Ok(None);
+        }
+        let Some(k) = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(value)).cloned()) else { return Ok(None) };
+        let ExprKind::Call { args, .. } = &value.kind else { return Ok(None) };
+        let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);
+        // arguments now, in order; the call itself on its own thread
+        let mut vals = Vec::new();
+        for a in args {
+            let v = self.expr(a)?;
+            vals.push(self.boxed(v)?);
+        }
+        let n = vals.len();
+        let arr_ty = self.ptr.array_type(n.max(1) as u32);
+        let arr = self.entry_array(arr_ty)?;
+        let i64t = self.ctx.i64_type();
+        for (i, v) in vals.iter().enumerate() {
+            let at = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+            self.b.build_store(at, self.basic(*v)).s()?;
+        }
+        let f = self.spec_value(&k)?;
+        let h = self.call_rt("mim_spawn", &[self.basic(f).into(), self.i32c(n as i32), arr.into()])?.unwrap();
+        self.drop_tmp(f)?;
+        for v in vals {
+            self.drop_tmp(v)?;
+        }
+        let hslot = self.entry_alloca_ty(self.ptr.into(), &format!("{name}.future"))?;
+        self.b.build_store(hslot, h).s()?;
+        Ok(Some(Pending { name: name.to_string(), hslot, ty: t }))
+    }
+
+    /// Await the futures whose variables `names` mentions.
+    fn await_used(&mut self, pending: &mut Vec<Pending<'ctx>>, names: &[String]) -> R<()> {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(pending).into_iter().partition(|p| names.contains(&p.name));
+        *pending = later;
+        for p in now {
+            self.await_one(p)?;
+        }
+        Ok(())
+    }
+
+    fn await_all(&mut self, pending: &mut Vec<Pending<'ctx>>) -> R<()> {
+        for p in std::mem::take(pending) {
+            self.await_one(p)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for a future and bind its variable (from here on an ordinary local).
+    fn await_one(&mut self, p: Pending<'ctx>) -> R<()> {
+        let h = self.b.build_load(self.ptr, p.hslot, "").s()?;
+        let r = self.call_rt("mim_await", &[h.into()])?.unwrap().into_pointer_value();
+        let v = self.as_ty(V::P(r, true), p.ty, &format!("`let {}`", p.name))?;
+        let v = self.own(v)?;
+        let slot = self.entry_alloca(p.ty, &p.name)?;
+        self.b.build_store(slot, self.basic(v)).s()?;
+        let owned = matches!(v, V::P(..));
+        self.scopes.last_mut().unwrap().push(Local { name: p.name, slot, ty: p.ty, owned, mutable: false });
+        Ok(())
     }
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
@@ -1540,7 +1675,8 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             Ok(())
         })?;
-        let pure = self.purity.operand_is_pure(self.p, self.cur_mod, e);
+        // `¨` runs in parallel when the function is pure or its effects may overlap
+        let pure = self.purity.operand_overlaps(self.p, self.cur_mod, e);
         let desc = self.fn_desc("lambda", code, params.len(), pure);
         let mut env = Vec::new();
         for (name, _) in &caps {
@@ -1558,12 +1694,19 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// A named function as a value.
     fn fn_value(&mut self, fid: usize) -> R<V<'ctx>> {
-        let key = format!("fn:{fid}");
+        let n = self.p.fns[fid].arity();
+        self.spec_value(&(fid, vec![Ty::Dyn; n]))
+    }
+
+    /// One specialisation of a function as a value (boxed arguments and result).
+    fn spec_value(&mut self, k: &Key) -> R<V<'ctx>> {
+        let fid = k.0;
+        let key = format!("fn:{fid}:{:?}", k.1);
         let desc = match self.fn_descs.get(&key) {
             Some(d) => *d,
             None => {
                 let n = self.p.fns[fid].arity();
-                let k: Key = (fid, vec![Ty::Dyn; n]);
+                let k: Key = k.clone();
                 let kind = self.kind_for(fid);
                 let inner = self.thunk(&k, kind)?;
                 let code = self.module.add_function(
@@ -1583,7 +1726,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     Ok(())
                 })?;
                 let name = self.p.fn_path(fid).join("::");
-                let d = self.fn_desc(&name, code, n, self.purity.fns[fid]);
+                let d = self.fn_desc(&name, code, n, self.purity.overlap[fid]);
                 self.fn_descs.insert(key, d);
                 d
             }
@@ -2641,7 +2784,7 @@ impl<'ctx> Cg<'ctx, '_> {
                             self.thunk(&k, kind)?
                         }
                     };
-                    let pure = self.purity.operand_is_pure(self.p, self.cur_mod, &args[1]);
+                    let pure = self.purity.operand_overlaps(self.p, self.cur_mod, &args[1]);
                     self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;

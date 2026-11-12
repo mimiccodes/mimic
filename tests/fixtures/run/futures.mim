@@ -1,0 +1,94 @@
+module main
+
+// Implicit futures: a `let` of a function whose only effects may overlap
+// (reads, sleeping) starts at once and is awaited at its first use, before
+// any effect that must stay in order, and at the end of its block.
+fn main() {
+    let dir = temp_dir()
+    let f1 = path_join(dir, "fut1.txt")
+    let f2 = path_join(dir, "fut2.txt")
+    print(write_file(f1, "one"))
+    print(write_file(f2, "two"))
+
+    // three overlapping reads; the program goes on until one is needed
+    let a = slow_read(f1)
+    let b = slow_read(f2)
+    let c = slow_read(path_join(dir, "nope.txt"))
+    let n = 6 * 7                                   // pure work meanwhile
+    print(n)
+    print(a)
+    print((b, is_err(c)))
+
+    // a write waits for the pending read of the same file
+    let before = slow_read(f1)
+    print(write_file(f1, "changed"))
+    print(before)
+    print(read_file(f1))
+
+    // used inside a lambda, inside an if, never used, then an early return
+    print(lambda_use(f2))
+    print(branch_use(f1, true))
+    print(branch_use(f1, false))
+    print(unused(f2))
+    print(early(f1, true))
+    print(early(f1, false))
+    print(chain(f2))
+
+    // ¨ runs functions with overlapping effects in parallel; order is kept
+    print([3 1 2] ¨ (i => nap(i)))
+    print([f1, f2] ¨ (p => size_of(p)))
+
+    print(remove_file(f1))
+    print(remove_file(f2))
+}
+
+fn slow_read(path: str) -> Result[str, str] {
+    sleep(20ms)
+    read_file(path)
+}
+
+fn is_err(r: Result[str, str]) -> bool {
+    match r {
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}
+
+fn lambda_use(p: str) -> [str] {
+    let t = slow_read(p)
+    ["x" "y"] ¨ (s => s + string(t))
+}
+
+fn branch_use(p: str, flag: bool) -> str {
+    let t = slow_read(p)
+    if flag { string(t) } else { "skipped" }
+}
+
+fn unused(p: str) -> str {
+    let t = slow_read(p)                            // awaited at the end of the block
+    "done"
+}
+
+fn early(p: str, leave: bool) -> str {
+    let t = slow_read(p)
+    if leave {
+        return "left early"
+    }
+    string(t)
+}
+
+fn chain(p: str) -> str {
+    let r = slow_read(p)
+    let text = read_file(p) else { return "missing" }
+    text + "/" + string(r)
+}
+
+fn nap(i: i64) -> i64 {
+    sleep(10ms * i)
+    i * 10
+}
+
+fn size_of(p: str) -> i64 {
+    let s = file_size(p) else { return ¯1 }
+    s
+}

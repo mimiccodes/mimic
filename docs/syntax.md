@@ -298,6 +298,29 @@ fn name_of(id: i64) -> str {
 * The `else` block runs on `None` / `Err`, and must end with `return`.
 * The unwrapped value keeps its static type. For example, `let n = parse_int(s) else { … }` gives an `i64`.
 
+## Concurrency: implicit futures
+
+Mimic has no `async`, no `await` and no threads to manage. Effects come in two kinds:
+* **Ordered effects** happen exactly in program order: printing, writing files, changing the environment, reading standard input, random numbers, running programs.
+* **Overlapping effects** may happen at the same time as each other: reading files, listing directories, reading the environment, the clocks, `sleep`, and network requests (E4).
+
+The compiler works out which kind every function has, transitively, like purity. The rules:
+
+* **A `let` starts work early.** When `let x = f(…)` calls a function whose effects all overlap, it starts at once on its own thread. The program goes on, and waits only when the value is needed.
+* **When the program waits.** It waits right before the first statement that uses `x`, before any ordered effect, before anything that can leave the block (`return`, `let … else`), and at the end of the block. The arguments are evaluated first, in order.
+* **`¨` runs overlapping functions in parallel**, just as it does pure ones. Results stay in order.
+
+```mimic
+let a = fetch_page(url1)        // both start now
+let b = fetch_page(url2)
+let words = count(text)         // pure work runs meanwhile
+print(a + b)                    // waits here for both
+
+let pages = urls ¨ fetch_page   // all at once
+```
+
+**The program behaves as if it ran in order.** Because ordered effects wait for everything started before them, a write can never overtake an earlier read of the same file, and output never interleaves. The only things that may reorder are overlapping effects among themselves, and their results are the same in any order. On platforms without threads (WebAssembly), futures simply run where they are written.
+
 ## Durations
 
 `2s`, `500ms`, `1.5min`, `10us`, `3h` are `i64` nanoseconds, so `250ms + 1s` and `timeout div 1s` just work.

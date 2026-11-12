@@ -141,11 +141,18 @@ pub extern \"mimic\" {
 
 // The program and its surroundings. These have side effects, so they never
 // run in parallel or out of order (runtime/mimic_io.c).
+// \"mimic-io\": effects that must happen in program order.
 pub extern \"mimic-io\" {
-    fn args() -> [str]
     fn eprint(value: any)
     fn exit(code: i64)
     fn read_input() -> str
+}
+
+// \"mimic-io-concurrent\": effects that may overlap each other (reads). A
+// `let` of a function that only has these starts at once and is awaited at
+// its first use (an implicit future); `¨` runs such functions in parallel.
+pub extern \"mimic-io-concurrent\" {
+    fn args() -> [str]
     fn exists(path: str) -> bool
     fn is_dir(path: str) -> bool
     fn is_file(path: str) -> bool
@@ -153,20 +160,24 @@ pub extern \"mimic-io\" {
     fn temp_dir() -> str
 }
 
-// Low-level forms: on failure they set an error the wrappers below read.
-extern \"mimic-io\" {
+// Low-level forms: on failure they set an error (per thread) that the
+// wrappers below read on the same thread.
+extern \"mimic-io-concurrent\" {
     fn io_ok() -> bool
     fn io_error() -> str
     fn io_env(name: str) -> str
+    fn io_read_file(path: str) -> str
+    fn io_file_size(path: str) -> i64
+    fn io_list_dir(path: str) -> [str]
+}
+
+extern \"mimic-io\" {
     fn io_set_env(name: str, value: str) -> bool
     fn io_read_line() -> str
-    fn io_read_file(path: str) -> str
     fn io_write_file(path: str, text: str, append: bool) -> i64
-    fn io_file_size(path: str) -> i64
     fn io_remove_file(path: str) -> bool
     fn io_rename(from: str, to: str) -> bool
     fn io_copy_file(from: str, to: str) -> i64
-    fn io_list_dir(path: str) -> [str]
     fn io_make_dir(path: str) -> bool
 }
 
@@ -248,14 +259,17 @@ pub type DateTime = {
 // What a finished program left behind.
 pub type Output = { status: i64, stdout: str, stderr: str }
 
-pub extern \"mimic-io\" {
+pub extern \"mimic-io-concurrent\" {
     fn now() -> i64
     fn clock() -> i64
     fn sleep(duration: i64)
+    fn pid() -> i64
+}
+
+pub extern \"mimic-io\" {
     fn random() -> f64
     fn random_int(lo: i64, hi: i64) -> i64
     fn seed_random(seed: i64)
-    fn pid() -> i64
 }
 
 pub extern \"mimic\" {
@@ -267,8 +281,11 @@ extern \"mimic\" {
     fn time_utc_parts(t: i64) -> [i64]
 }
 
-extern \"mimic-io\" {
+extern \"mimic-io-concurrent\" {
     fn time_local_parts(t: i64) -> [i64]
+}
+
+extern \"mimic-io\" {
     fn io_run(program: str, arguments: [str]) -> any
 }
 

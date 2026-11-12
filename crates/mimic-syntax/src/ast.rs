@@ -225,6 +225,9 @@ pub struct ExternFn {
     /// `extern "mimic-io"`: an intrinsic with side effects (files, environment,
     /// stdin…): never run in parallel or out of order.
     pub effects: bool,
+    /// `extern "mimic-io-concurrent"`: effects that may overlap each other
+    /// (reads, sleeping): calls can run concurrently as implicit futures.
+    pub overlap: bool,
     pub ret: Option<Type>,
     pub span: Span,
 }

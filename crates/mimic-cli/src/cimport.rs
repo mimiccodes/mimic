@@ -75,6 +75,7 @@ impl Imported {
                 link_name: f.link_name.clone(),
                 intrinsic: false,
                 effects: false,
+                overlap: false,
                 ret: f.ret.as_deref().map(ty),
                 span,
             })

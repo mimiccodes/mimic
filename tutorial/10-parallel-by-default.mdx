@@ -17,6 +17,7 @@ Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compil
 | `xs ¨ f` | `f` is pure |
 | `gather`, `trail`, `arms` | the function or body is pure |
 | `f(a) + g(b)` inside a pure function | always: independent calls run at the same time |
+| `let x = f(…)` where `f` only reads, sleeps or fetches | always: `f` starts at once and the program waits only where `x` is used |
 
 **Pure** means the code never prints, never calls C and never does other input or output. The compiler works this out itself; you never annotate it.
 
@@ -45,6 +46,46 @@ fn fib(n: i64) -> i64 {
 100000000000000
 [75025 121393 196418 317811]
 ```
+
+## Waiting on many things at once
+
+Reading files, sleeping and, soon, network requests spend most of their time waiting. Mimic overlaps that waiting for you. A `let` whose function only does this kind of overlapping work starts right away, and the program carries on until it actually needs the value:
+
+```mimic run
+module main
+
+fn main() {
+    let dir = temp_dir()
+    print(write_file(path_join(dir, "a.txt"), "alpha"))
+    print(write_file(path_join(dir, "b.txt"), "beta"))
+
+    let start = clock()
+    let a = slow_read(path_join(dir, "a.txt"))   // starts now
+    let b = slow_read(path_join(dir, "b.txt"))   // starts now too
+    print(a)                                     // waits here for a
+    print(b)
+    print(clock() - start < 190ms)               // both sleeps overlapped (100ms, not 200ms)
+
+    // ¨ runs them in parallel as well
+    print(["a.txt" "b.txt"] ¨ (f => slow_read(path_join(dir, f))))
+}
+
+fn slow_read(path: str) -> Result[str, str] {
+    sleep(100ms)
+    read_file(path)
+}
+```
+
+```output
+Ok(5)
+Ok(4)
+Ok("alpha")
+Ok("beta")
+true
+[Ok("alpha") Ok("beta")]
+```
+
+Ordered effects such as `print` and `write_file` still happen exactly in program order. Before one runs, everything started earlier finishes, so a write never overtakes a read. You write plain sequential code, and the waiting overlaps by itself.
 
 ## Why it is safe
 

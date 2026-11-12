@@ -61,8 +61,11 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | B | Full C interop: import C headers directly, structs/unions/enums/function pointers/varargs/callbacks, `--emit-header`, compile C sources in a project | |
 | D1–D3 | Closures, functions/operators as values, loop words | ✅ |
 | D5, D6 (first part) | Maps (`["a": 1]`, `m[k]`, copy-on-write `m[k] = v`, `get`/`has`/`keys`/`values`/`put`/`remove`), list functions (`push`, `concat`, `sort`), the string library (`split`, `join`, `trim`, `replace`, `find`, `parse_int`, …), `+` and `==` on strings; built on `extern "mimic"` runtime intrinsics ([std.md](std.md)) | ✅ |
-| D (rest) | Generics, bytes, bitwise operators and integer types, richer patterns, structural equality, multi-dimensional arrays | |
-| E | Standard library and I/O (M3 step 6, M5, M6) | |
+| D4, D7–D10 | Generics (`Option[T]`, `fn f[T]`), bitwise operators and hex/binary literals, guards/alternatives/ranges/record/array patterns and `if let`, structural `==`, matrices (`⥊ ⍉ ⊠`, `m[i, j]`) | ✅ |
+| D (rest) | Sized integer types and byte arrays (with E4) | |
+| E1, E2 | Arguments, environment, stdin, files, directories, paths; clocks, dates, random numbers, running programs ([std.md](std.md)) | ✅ |
+| E3 (first part) | Implicit futures for overlapping effects; `¨` runs I/O-only functions in parallel ([syntax.md](syntax.md#concurrency-implicit-futures)) | ✅ |
+| E3 (rest), E4, E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), networking (TCP, UDP, HTTP, websockets, TLS, JSON ↔ records), interfaces (`view(state)`) | |
 | F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |

@@ -389,6 +389,16 @@ static void dealloc(mim_val *v) {
     }
 }
 
+/* Give this thread's cached blocks back to malloc (before the thread ends). */
+static void free_list_drain(void) {
+    while (t_free) {
+        mim_val *v = t_free;
+        t_free = *(mim_val **)v;
+        free(v);
+    }
+    t_free_len = 0;
+}
+
 /* A fresh vector for a fused kernel's output. */
 mim_val *mim_alloc_vec(int32_t dtype, int64_t n) { return alloc(dtype, 1, n); }
 

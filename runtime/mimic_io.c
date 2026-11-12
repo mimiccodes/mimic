@@ -689,3 +689,65 @@ mim_val *mim_std_io_run(mim_val *program, mim_val *argv_list) {
     return r;
 #endif
 }
+
+/* ==== E3: implicit futures ==================================================
+ * `let x = f(a, b)` where f's only effects may overlap (reads, sleeping) is
+ * started here on its own thread; the compiler awaits it right before the
+ * first statement that uses x, before any effect that must stay in order,
+ * and at the end of the block. Arguments are evaluated (in order) before. */
+
+typedef struct mim_future {
+    mim_val *f;
+    int32_t n;
+    mim_val **args;
+    mim_val *result;
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_t th;
+#endif
+    int started;
+} mim_future;
+
+static void *future_main(void *p) {
+    mim_future *fu = (mim_future *)p;
+    fu->result = mim_call(fu->f, fu->n, fu->args);
+    if (fu->started) free_list_drain(); /* this thread ends now */
+    return NULL;
+}
+
+/* start f(args…); retains f and the arguments */
+void *mim_spawn(mim_val *f, int32_t n, mim_val **args) {
+    mim_future *fu = (mim_future *)calloc(1, sizeof(mim_future));
+    if (!fu) mim_panic("out of memory");
+    fu->f = f;
+    mim_retain(f);
+    fu->n = n;
+    fu->args = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n ? n : 1));
+    for (int32_t i = 0; i < n; i++) {
+        fu->args[i] = args[i];
+        mim_retain(args[i]);
+    }
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, (size_t)32 << 20);
+    fu->started = 1; /* read by the thread: set before it starts */
+    if (pthread_create(&fu->th, &a, future_main, fu) != 0) fu->started = 0;
+    pthread_attr_destroy(&a);
+#endif
+    if (!fu->started) future_main(fu); /* no threads (WASI) or none left: run it now */
+    return fu;
+}
+
+/* the result of a started call (owned); frees the future */
+mim_val *mim_await(void *h) {
+    mim_future *fu = (mim_future *)h;
+#if MIM_THREADS && !defined(_WIN32)
+    if (fu->started) pthread_join(fu->th, NULL);
+#endif
+    mim_val *r = fu->result;
+    mim_release(fu->f);
+    for (int32_t i = 0; i < fu->n; i++) mim_release(fu->args[i]);
+    free(fu->args);
+    free(fu);
+    return r;
+}

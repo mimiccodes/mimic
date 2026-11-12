@@ -1635,7 +1635,11 @@ impl Norm<'_> {
 /// Which functions are free of side effects (no `print`, no FFI — transitively).
 /// Pure functions may be evaluated in parallel, in any order, or not at all.
 pub struct Purity {
+    /// No side effects at all: may run in parallel, be reordered, be skipped.
     pub fns: Vec<bool>,
+    /// Pure, or only effects that may overlap each other (reads, sleeping):
+    /// calls may run concurrently (implicit futures, parallel `¨`).
+    pub overlap: Vec<bool>,
 }
 
 impl Purity {
@@ -1643,10 +1647,20 @@ impl Purity {
         // Optimistic fixpoint: assume pure, then knock out until stable.
         // runtime intrinsics (strings, lists, maps) have no side effects;
         // `extern "mimic-io"` ones (files, environment, stdin) do
+        let pure = Self::fixpoint(p, |decl| decl.intrinsic && !decl.effects);
+        let overlap = Self::fixpoint(p, |decl| decl.intrinsic && (!decl.effects || decl.overlap));
+        Purity { fns: pure, overlap }
+    }
+
+    /// Functions that only use the externs `ok` allows (optimistic fixpoint).
+    fn fixpoint(p: &Program, ok: impl Fn(&ExternFn) -> bool) -> Vec<bool> {
         let mut pure: Vec<bool> = p
             .fns
             .iter()
-            .map(|f| matches!(&f.kind, FnKind::User(_)) || matches!(&f.kind, FnKind::Extern { decl, .. } if decl.intrinsic && !decl.effects))
+            .map(|f| match &f.kind {
+                FnKind::User(_) => true,
+                FnKind::Extern { decl, .. } => ok(decl),
+            })
             .collect();
         loop {
             let mut changed = false;
@@ -1666,7 +1680,55 @@ impl Purity {
                 break;
             }
         }
-        Purity { fns: pure }
+        pure
+    }
+
+    /// `let x = f(…)` that may start now and finish later: `f` is a function of
+    /// the program with effects, all of which may overlap (an implicit future).
+    pub fn future_call(&self, p: &Program, module: ModId, value: &Expr) -> Option<FnId> {
+        let ExprKind::Call { callee, args } = &value.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        let Ok(Resolved::Fn(f)) = p.resolve(module, path) else { return None };
+        let args_ok = args.iter().all(|a| PurityWalk { p, module, pure: &self.fns }.expr(a));
+        (matches!(p.fns[f].kind, FnKind::User(_)) && !self.fns[f] && self.overlap[f] && args_ok).then_some(f)
+    }
+
+    /// May this statement run while implicit futures are still pending? (It
+    /// has no effects that must stay in order, and cannot leave the block.)
+    pub fn stmt_may_overlap(&self, p: &Program, module: ModId, s: &Stmt) -> bool {
+        let w = PurityWalk { p, module, pure: &self.overlap };
+        let exits = |e: &Expr| {
+            let mut found = false;
+            // conservative: a `return` inside a lambda also counts
+            let leaves = |b: &Block| b.stmts.iter().any(|s| matches!(s, Stmt::Return(..) | Stmt::LetElse { .. }));
+            e.walk(&mut |x| match &x.kind {
+                ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } if leaves(b) => found = true,
+                _ => {}
+            });
+            found
+        };
+        match s {
+            Stmt::Return(..) | Stmt::LetElse { .. } => false,
+            Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => w.expr(value) && !exits(value),
+            Stmt::Assign { index, value, .. } => {
+                index.as_ref().is_none_or(|i| w.expr(i) && !exits(i)) && w.expr(value) && !exits(value)
+            }
+        }
+    }
+
+    /// The same, for an expression (a block's final value).
+    pub fn expr_may_overlap(&self, p: &Program, module: ModId, e: &Expr) -> bool {
+        let s = Stmt::Expr(e.clone());
+        self.stmt_may_overlap(p, module, &s)
+    }
+
+    /// May calls of a function operand overlap (pure, or overlapping effects)?
+    pub fn operand_overlaps(&self, p: &Program, module: ModId, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.overlap[f]),
+            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.overlap }.expr(body),
+            _ => false,
+        }
     }
 
     /// Is a function operand (path or lambda, as passed to `¨`) pure?
