@@ -77,10 +77,28 @@ mim_val *mim_std_chars(mim_val *s) {
     return r;
 }
 
+/* lines(s): split at "\n" (a "\r" before it is dropped too); a final newline
+ * ends the last line instead of starting an empty one */
 mim_val *mim_std_lines(mim_val *s) {
-    mim_val *nl = mim_str("\n", 1);
-    mim_val *r = mim_std_split(s, nl);
-    mim_release(nl);
+    const char *p = str_arg(s, "lines");
+    int64_t n = s->len, count = 0;
+    if (n > 0 && p[n - 1] == '\n') n--;
+    if (n == 0 && s->len == 0) return alloc(MIM_BOXED, 1, 0);
+    for (int64_t i = 0; i < n; i++) count += p[i] == '\n';
+    count++;
+    mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)count);
+    int64_t start = 0, k = 0;
+    for (int64_t i = 0; i <= n; i++) {
+        if (i == n || p[i] == '\n') {
+            int64_t end = i;
+            if (end > start && p[end - 1] == '\r') end--;
+            tmp[k++] = mim_str(p + start, end - start);
+            start = i + 1;
+        }
+    }
+    mim_val *r = mim_array_lit(count, tmp);
+    for (int64_t i = 0; i < count; i++) mim_release(tmp[i]);
+    free(tmp);
     return r;
 }
 

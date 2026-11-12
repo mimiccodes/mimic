@@ -2268,3 +2268,5 @@ void *mim_dataptr(mim_val *v) {
 #endif
 /* standard-library intrinsics (strings, lists, maps) */
 #include "mimic_std.c"
+/* program basics: arguments, environment, files, directories, paths */
+#include "mimic_io.c"

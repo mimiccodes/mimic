@@ -36,8 +36,12 @@ fn run_fixtures() {
             (&["--release"], &[("MIMIC_THREADS", "1")]),
             (&["--debug", "--no-net"], &[]),
         ];
-        for (profile, env) in runs {
-            let out = mimic().arg("run").arg(&f).args(profile).envs(env.iter().copied()).output().unwrap();
+        for (k, (profile, env)) in runs.into_iter().enumerate() {
+            // each run gets its own temporary directory: file tests cannot collide
+            let tmp = std::env::temp_dir().join(format!("mimic-golden-{}-{k}-{}", std::process::id(), f.file_stem().unwrap().to_string_lossy()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let out = mimic().arg("run").arg(&f).args(profile).envs(env.iter().copied()).env("TMPDIR", &tmp).output().unwrap();
+            let _ = std::fs::remove_dir_all(&tmp);
             let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
             let got = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -321,7 +325,7 @@ fn wasi_fixtures() {
     std::fs::write(
         &runner,
         "import { WASI } from 'node:wasi';\nimport { readFileSync } from 'node:fs';\nconst f = process.argv[2];\n\
-         const wasi = new WASI({ version: 'preview1', args: [f], env: {}, returnOnExit: true });\n\
+         const wasi = new WASI({ version: 'preview1', args: [f], env: {}, returnOnExit: true, preopens: { '/tmp': process.argv[3] } });\n\
          const m = await WebAssembly.compile(readFileSync(f));\n\
          process.exitCode = wasi.start(await WebAssembly.instantiate(m, wasi.getImportObject()));\n",
     )
@@ -344,12 +348,15 @@ fn wasi_fixtures() {
         // A WebAssembly program cannot crash its host: a signal kills Node only
         // through an engine fault (seen ~1-3% of runs on deep recursion under
         // load). Those runs are retried; wrong output or a trap fails at once.
-        let mut run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+        // the program's /tmp: a fresh host directory per fixture
+        let tmp = dir.join(format!("tmp-{stem}"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         for _ in 0..2 {
             use std::os::unix::process::ExitStatusExt;
             let Some(sig) = run.status.signal() else { break };
             eprintln!("{stem}: node died from signal {sig} (engine fault); retrying");
-            run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).output().unwrap();
+            run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         }
         let status = run.status;
         let want = std::fs::read_to_string(f.with_extension("out")).unwrap();

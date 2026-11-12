@@ -16,6 +16,7 @@ pub const RUNTIME_C: &str = include_str!("../../../runtime/mimic_rt.c");
 pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
 pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
+pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/mimic_io.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -127,6 +128,112 @@ pub fn parse_float(s: str) {
 // `Some(m[key])` when the map has the key, else `None`.
 pub fn get(m, key) {
     if has(m, key) { Some(m[key]) } else { None }
+}
+
+// Paths: pure text operations (runtime/mimic_io.c).
+pub extern \"mimic\" {
+    fn path_join(a: str, b: str) -> str
+    fn file_name(path: str) -> str
+    fn parent(path: str) -> str
+    fn extension(path: str) -> str
+    fn stem(path: str) -> str
+}
+
+// The program and its surroundings. These have side effects, so they never
+// run in parallel or out of order (runtime/mimic_io.c).
+pub extern \"mimic-io\" {
+    fn args() -> [str]
+    fn eprint(value: any)
+    fn exit(code: i64)
+    fn read_input() -> str
+    fn exists(path: str) -> bool
+    fn is_dir(path: str) -> bool
+    fn is_file(path: str) -> bool
+    fn current_dir() -> str
+    fn temp_dir() -> str
+}
+
+// Low-level forms: on failure they set an error the wrappers below read.
+extern \"mimic-io\" {
+    fn io_ok() -> bool
+    fn io_error() -> str
+    fn io_env(name: str) -> str
+    fn io_set_env(name: str, value: str) -> bool
+    fn io_read_line() -> str
+    fn io_read_file(path: str) -> str
+    fn io_write_file(path: str, text: str, append: bool) -> i64
+    fn io_file_size(path: str) -> i64
+    fn io_remove_file(path: str) -> bool
+    fn io_rename(from: str, to: str) -> bool
+    fn io_copy_file(from: str, to: str) -> i64
+    fn io_list_dir(path: str) -> [str]
+    fn io_make_dir(path: str) -> bool
+}
+
+// `Some(value)` of an environment variable, or `None` when it is not set.
+pub fn env(name: str) -> Option[str] {
+    let v = io_env(name)
+    if io_ok() { Some(v) } else { None }
+}
+
+pub fn set_env(name: str, value: str) -> Result[bool, str] {
+    let done = io_set_env(name, value)
+    if done { Ok(true) } else { Err(io_error()) }
+}
+
+// The next line of standard input (without its newline); `None` at the end.
+pub fn read_line() -> Option[str] {
+    let line = io_read_line()
+    if io_ok() { Some(line) } else { None }
+}
+
+pub fn read_file(path: str) -> Result[str, str] {
+    let text = io_read_file(path)
+    if io_ok() { Ok(text) } else { Err(io_error()) }
+}
+
+// Replace the file's contents; `Ok(bytes written)`.
+pub fn write_file(path: str, text: str) -> Result[i64, str] {
+    let n = io_write_file(path, text, false)
+    if io_ok() { Ok(n) } else { Err(io_error()) }
+}
+
+pub fn append_file(path: str, text: str) -> Result[i64, str] {
+    let n = io_write_file(path, text, true)
+    if io_ok() { Ok(n) } else { Err(io_error()) }
+}
+
+pub fn file_size(path: str) -> Result[i64, str] {
+    let n = io_file_size(path)
+    if io_ok() { Ok(n) } else { Err(io_error()) }
+}
+
+// Remove a file, or an empty directory.
+pub fn remove_file(path: str) -> Result[bool, str] {
+    let done = io_remove_file(path)
+    if done { Ok(true) } else { Err(io_error()) }
+}
+
+pub fn rename(from: str, to: str) -> Result[bool, str] {
+    let done = io_rename(from, to)
+    if done { Ok(true) } else { Err(io_error()) }
+}
+
+pub fn copy_file(from: str, to: str) -> Result[i64, str] {
+    let n = io_copy_file(from, to)
+    if io_ok() { Ok(n) } else { Err(io_error()) }
+}
+
+// The names in a directory, sorted (without `.` and `..`).
+pub fn list_dir(path: str) -> Result[[str], str] {
+    let names = io_list_dir(path)
+    if io_ok() { Ok(names) } else { Err(io_error()) }
+}
+
+// Create a directory and any missing parents (fine if it exists).
+pub fn make_dir(path: str) -> Result[bool, str] {
+    let done = io_make_dir(path)
+    if done { Ok(true) } else { Err(io_error()) }
 }
 ";
 
@@ -306,7 +413,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -322,6 +429,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);

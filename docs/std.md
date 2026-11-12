@@ -54,3 +54,44 @@ remove(born, "ada")                        // a new map without it
 * **Order.** Entries keep their insertion order, which is the order you see when printing and in `keys` and `values`.
 * **Speed.** Lookups go through a hash index.
 * **Updates.** `m[k] = v` on a `let mut` map changes it in place when nothing else shares it, and copies it first otherwise.
+
+## Program, files and directories
+
+These functions have side effects. The compiler knows this: a function that calls one of them, even indirectly, never runs in parallel and never moves past other effects, the same as `print`. Failures come back as values, never as crashes.
+
+| Function | Result |
+|---|---|
+| `args()` | `[str]`: the command-line arguments, without the program name (`mimic run file.mim -- a b`) |
+| `env(name)` | `Option[str]` |
+| `set_env(name, value)` | `Result[bool, str]` |
+| `read_line()` | `Option[str]`: the next line of standard input without its newline; `None` at the end |
+| `read_input()` | `str`: everything left on standard input |
+| `eprint(x)` | Print to standard error |
+| `exit(code)` | Leave the program now with that exit status |
+| `read_file(path)` | `Result[str, str]` |
+| `write_file(path, text)`, `append_file(path, text)` | `Result[i64, str]`: bytes written |
+| `file_size(path)` | `Result[i64, str]` |
+| `copy_file(from, to)` | `Result[i64, str]` |
+| `rename(from, to)`, `remove_file(path)` | `Result[bool, str]`; `remove_file` also removes empty directories |
+| `exists(path)`, `is_file(path)`, `is_dir(path)` | `bool` |
+| `list_dir(path)` | `Result[[str], str]`: sorted names, without `.` and `..` |
+| `make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists |
+| `current_dir()`, `temp_dir()` | `str` |
+
+Error messages name the operation, the path and the system's reason: `cannot read data.csv: No such file or directory`.
+
+## Paths
+
+Pure text operations, so they stay parallel:
+
+| Function | Example |
+|---|---|
+| `path_join(a, b)` | `path_join("logs", "today.txt")` → `"logs/today.txt"`; an absolute `b` replaces `a` |
+| `file_name(p)` | `"a/b/c.tar.gz"` → `"c.tar.gz"` |
+| `extension(p)` | `"a/b/c.tar.gz"` → `"gz"` |
+| `stem(p)` | `"a/report.pdf"` → `"report"` |
+| `parent(p)` | `"a/b/c.txt"` → `"a/b"`; `"c.txt"` → `""` |
+
+`lines(s)` splits at newlines and drops a `\r` before each one. A final newline ends the last line instead of starting an empty one, so `lines(read_file(…))` gives exactly the file's lines.
+
+The names in the standard library never block your own: a variable or function of yours may be called `args`, `parent` or `remove_file`, and your definition wins in your code.

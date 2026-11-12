@@ -1,0 +1,194 @@
+---
+title: Files and the outside world
+description: Command-line arguments, environment variables, standard input and output, files, directories and paths.
+order: 16
+---
+
+# Files and the outside world
+
+Real programs read their arguments, open files and talk to the terminal. In Mimic these operations have one thing in common: they have **side effects**. The compiler tracks this. A function that touches the outside world, even indirectly, never runs in parallel and never runs out of order, while everything around it stays parallel.
+
+None of these operations crash on failure. They return `Option` or `Result` ([chapter 7](07-errors.mdx)).
+
+## Arguments and environment
+
+```sh
+mimic run greet.mim -- Ada --loud
+```
+
+Everything after `--` goes to your program:
+
+```mimic
+module main
+
+fn main() {
+    let names = args()                         // ["Ada" "--loud"]
+    let who = if ≢ names > 0 { names[0] } else { "world" }
+    let shout = contains(names, "--loud")
+    let greeting = "hello, {who}!"
+    print(if shout { upper(greeting) } else { greeting })
+
+    match env("HOME") {
+        Some(home) => print("home is {home}"),
+        None => print("no HOME set"),
+    }
+}
+```
+
+## Reading and writing files
+
+```mimic run
+module main
+
+fn main() {
+    let dir = path_join(temp_dir(), "mimic-tutorial")
+    let path = path_join(dir, "todo.txt")
+    print(make_dir(dir))
+    print(write_file(path, "buy milk\nfix bike\n"))
+    print(append_file(path, "call mum\n"))
+
+    let text = read_file(path) else { return }
+    let items = lines(text)
+    print(items)
+    print("{≢ items} things to do")
+
+    match read_file(path_join(dir, "missing.txt")) {
+        Ok(_) => print("found it?"),
+        Err(why) => print(starts_with(why, "cannot read")),    // the reason names the file
+    }
+    print(remove_file(path))
+    print(remove_file(dir))
+}
+```
+
+```output
+Ok(true)
+Ok(18)
+Ok(9)
+["buy milk" "fix bike" "call mum"]
+3 things to do
+true
+Ok(true)
+Ok(true)
+```
+
+How it works:
+* **Writing** returns `Ok(bytes written)`. `write_file` replaces the file's contents and `append_file` adds to the end.
+* **Reading** returns the text as `Ok(…)`. On failure you get `Err` with a reason like `cannot read todo.txt: No such file or directory`.
+* **`lines`** splits text into lines. A final newline doesn't produce an empty extra line, and Windows `\r\n` line endings are handled.
+
+## Directories
+
+```mimic run
+module main
+
+fn main() {
+    let root = path_join(temp_dir(), "mimic-tour")
+    print(make_dir(path_join(root, "src/parts")))     // parents are created too
+    print(write_file(path_join(root, "src/main.mim"), "module main"))
+    print(write_file(path_join(root, "README.md"), "# tour"))
+    print(list_dir(root))                             // sorted
+    print(is_dir(path_join(root, "src")))
+    print(is_file(path_join(root, "README.md")))
+    print(file_size(path_join(root, "README.md")))
+
+    // clean up: remove_file removes files and empty directories
+    print(remove_file(path_join(root, "src/main.mim")))
+    print(remove_file(path_join(root, "src/parts")))
+    print(remove_file(path_join(root, "src")))
+    print(remove_file(path_join(root, "README.md")))
+    print(remove_file(root))
+    print(exists(root))
+}
+```
+
+```output
+Ok(true)
+Ok(11)
+Ok(6)
+Ok(["README.md" "src"])
+true
+true
+Ok(6)
+Ok(true)
+Ok(true)
+Ok(true)
+Ok(true)
+Ok(true)
+false
+```
+
+## Paths
+
+Path functions only work on text, so they have no side effects and stay parallel:
+
+```mimic run
+module main
+
+fn main() {
+    let p = "photos/2026/beach.jpeg"
+    print(file_name(p))
+    print(stem(p))
+    print(extension(p))
+    print(parent(p))
+    print(path_join(parent(p), stem(p) + ".png"))
+}
+```
+
+```output
+beach.jpeg
+beach
+jpeg
+photos/2026
+photos/2026/beach.png
+```
+
+## Standard input, output and errors
+
+```mimic
+module main
+
+// count the words of everything typed (or piped) in
+fn main() {
+    let text = read_input()
+    let words = split(text, " ") ▷ ≢
+    print("{words} words")
+    eprint("done")            // to standard error, not mixed into the output
+}
+```
+
+```sh
+echo "the quick brown fox" | mimic run count.mim
+```
+
+To read one line at a time, use `read_line()`, which returns `None` at the end of the input:
+
+```mimic
+fn total(acc: i64) -> i64 {
+    match read_line() {
+        None => acc,
+        Some(line) => match parse_int(trim(line)) {
+            Some(n) => total(acc + n),
+            None => total(acc),                // skip lines that are not numbers
+        },
+    }
+}
+```
+
+`exit(code)` ends the program at once with an exit status. A non-zero status tells the shell that something went wrong:
+
+```mimic
+let config = read_file("app.conf") else {
+    eprint("cannot start: app.conf is missing")
+    exit(1)
+    return
+}
+```
+
+## Names are never taken from you
+
+The standard library has functions called `args`, `env`, `parent` and `stem`, and you can still use those names for your own variables and functions. Your own definitions always win in your code.
+
+The full list of functions is in the [standard library reference](../docs/std.md).
+
+Back to the [index](index.mdx).

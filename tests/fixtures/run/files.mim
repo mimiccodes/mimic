@@ -1,0 +1,51 @@
+module main
+
+// Program basics: arguments, environment, files, directories, paths, stdin.
+// (The test harness gives every run its own temporary directory.)
+fn main() {
+    print(args())                                   // no arguments here
+    let dir = path_join(temp_dir(), "mimic-files")
+    print(make_dir(path_join(dir, "sub/deeper")))
+    let f = path_join(dir, "notes.txt")
+    print(write_file(f, "one\ntwo\n"))
+    print(append_file(f, "three\n"))
+    let text = read_file(f) else { return }
+    print(lines(text))
+    print(file_size(f))
+    print(copy_file(f, path_join(dir, "copy.txt")))
+    print(rename(path_join(dir, "copy.txt"), path_join(dir, "moved.txt")))
+    print(list_dir(dir))
+    print((exists(f), is_file(f), is_dir(dir), is_dir(f), exists(path_join(dir, "nope"))))
+    match read_file(path_join(dir, "nope")) {
+        Ok(_) => print("unexpected"),
+        Err(e) => print(contains(e, "cannot read")),
+    }
+    print(word_count(f))
+    print(remove_file(path_join(dir, "moved.txt")))
+    print(remove_file(f))
+    print(is_ok(remove_file(dir)))                  // not empty yet: fails
+    print(remove_file(path_join(dir, "sub/deeper")))
+    print(remove_file(path_join(dir, "sub")))
+    print(remove_file(dir))
+    print(exists(dir))
+    print(env("MIMIC_SURELY_UNSET_VARIABLE"))
+    print(set_env("MIMIC_FILES_TEST", "set"))
+    print(env("MIMIC_FILES_TEST"))
+    print((file_name("a/b/c.tar.gz"), extension("a/b/c.tar.gz"), stem("a/report.pdf"), parent("a/b/c.txt"), parent("c.txt")))
+    print(path_join("/x", "/abs"))
+    print(read_line())                              // stdin is empty here
+    print(lines("a\r\nb\n"))
+}
+
+fn is_ok(r: Result[bool, str]) -> bool {
+    match r {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+// a function that reads a file is not pure: it runs in program order
+fn word_count(path: str) -> i64 {
+    let text = read_file(path) else { return 0 }
+    ≢ lines(text)
+}

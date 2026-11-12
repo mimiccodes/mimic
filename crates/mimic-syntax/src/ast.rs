@@ -222,6 +222,9 @@ pub struct ExternFn {
     /// `extern "mimic"`: implemented in Mimic's runtime, taking and returning
     /// Mimic values (memory safe: no `unsafe` needed).
     pub intrinsic: bool,
+    /// `extern "mimic-io"`: an intrinsic with side effects (files, environment,
+    /// stdin…): never run in parallel or out of order.
+    pub effects: bool,
     pub ret: Option<Type>,
     pub span: Span,
 }

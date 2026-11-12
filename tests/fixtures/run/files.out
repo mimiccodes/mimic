@@ -1,0 +1,26 @@
+[]
+Ok(true)
+Ok(8)
+Ok(6)
+["one" "two" "three"]
+Ok(14)
+Ok(14)
+Ok(true)
+Ok(["moved.txt" "notes.txt" "sub"])
+(true, true, true, false, false)
+true
+3
+Ok(true)
+Ok(true)
+false
+Ok(true)
+Ok(true)
+Ok(true)
+false
+None
+Ok(true)
+Some("set")
+("c.tar.gz", "gz", "report", "a/b", "")
+/abs
+None
+["a" "b"]

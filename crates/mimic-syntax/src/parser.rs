@@ -328,7 +328,8 @@ impl Parser {
                     Token { tok: Tok::Str(s), .. } => s,
                     t => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected ABI string, e.g. extern \"C\"", t.span)),
                 };
-                let intrinsic = abi == "mimic";
+                let effects = abi == "mimic-io";
+                let intrinsic = abi == "mimic" || effects;
                 if abi != "C" && !intrinsic {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
@@ -388,7 +389,7 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, effects, ret, span: fstart });
                 }
                 let trusted = trusted || intrinsic;
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))

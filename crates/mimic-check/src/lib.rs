@@ -774,8 +774,11 @@ impl Checker<'_> {
                 .note("use `let mut` and reassign it, or pick a different name"));
             return;
         }
-        if let Ok(r) = self.p.resolve(self.module, &[name.to_string()])
-            && matches!(r, Resolved::Fn(_)) {
+        // a variable may not take the name of a function of the program; the
+        // standard library's names stay free (`let args = …` is fine), so new
+        // library functions never break existing code
+        if let Ok(Resolved::Fn(f)) = self.p.resolve(self.module, &[name.to_string()])
+            && self.p.mods[self.p.fns[f].module].package != "std" {
                 self.err(Diag::new(&C::DUPLICATE_DEFINITION, format!("variable `{name}` collides with a function of the same name"), span));
                 return;
             }
@@ -1638,9 +1641,13 @@ pub struct Purity {
 impl Purity {
     pub fn analyze(p: &Program) -> Purity {
         // Optimistic fixpoint: assume pure, then knock out until stable.
-        // runtime intrinsics (strings, lists, maps) have no side effects
-        let mut pure: Vec<bool> =
-            p.fns.iter().map(|f| matches!(&f.kind, FnKind::User(_)) || matches!(&f.kind, FnKind::Extern { decl, .. } if decl.intrinsic)).collect();
+        // runtime intrinsics (strings, lists, maps) have no side effects;
+        // `extern "mimic-io"` ones (files, environment, stdin) do
+        let mut pure: Vec<bool> = p
+            .fns
+            .iter()
+            .map(|f| matches!(&f.kind, FnKind::User(_)) || matches!(&f.kind, FnKind::Extern { decl, .. } if decl.intrinsic && !decl.effects))
+            .collect();
         loop {
             let mut changed = false;
             for (fid, f) in p.fns.iter().enumerate() {
