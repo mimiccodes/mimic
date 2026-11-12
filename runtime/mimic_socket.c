@@ -285,6 +285,9 @@ mim_val *mim_std_tcp_close(mim_val *s) {
 typedef struct {
     int fd;
     void *tls; /* a TLS session (tls_open), or NULL */
+    /* a server whose handler has effects: held while the handler runs, so
+     * handlers take turns (reading the request does not) */
+    pthread_mutex_t *turn;
 } mconn;
 
 static ssize_t tls_read(void *t, void *buf, size_t n);
@@ -1427,7 +1430,7 @@ static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val 
     int fd = dial(host, port, err, sizeof err);
     if (fd < 0) return err_of(err);
     sock_timeout(fd, 60);
-    mconn conn = {fd, NULL};
+    mconn conn = {fd, NULL, NULL};
     if (secure) {
         conn.tls = tls_open(fd, host, err, sizeof err);
         if (!conn.tls) {
@@ -1591,7 +1594,9 @@ static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     };
     mim_val *req = obj_owned(&mim_desc_http_Request, 5, fields);
     free(b.p);
+    if (c->turn) co_lock(c->turn);
     mim_val *resp = mim_call(handler, 1, &req);
+    if (c->turn) pthread_mutex_unlock(c->turn);
     mim_release(req);
     int64_t status = geti(field_of(resp, &mim_desc_http_Response, 0, "an HTTP handler's result"), 0);
     mim_val *rh = field_of(resp, &mim_desc_http_Response, 1, "an HTTP handler's result");
@@ -1634,11 +1639,12 @@ typedef struct {
     mim_val *handler;
     conn_fn one;
     void *identity; /* a TLS server identity, or NULL */
+    pthread_mutex_t *turn;
 } conn_job;
 
 /* serve one accepted connection: the TLS handshake first, if any */
-static void conn_run(int fd, mim_val *handler, conn_fn one, void *identity) {
-    mconn c = {fd, NULL};
+static void conn_run(int fd, mim_val *handler, conn_fn one, void *identity, pthread_mutex_t *turn) {
+    mconn c = {fd, NULL, turn};
     if (identity) {
         sock_timeout(fd, 30);
         char err[256];
@@ -1653,7 +1659,7 @@ static void conn_run(int fd, mim_val *handler, conn_fn one, void *identity) {
 
 static void *conn_main(void *p) {
     conn_job *j = (conn_job *)p;
-    conn_run(j->fd, j->handler, j->one, j->identity);
+    conn_run(j->fd, j->handler, j->one, j->identity, j->turn);
     mim_release(j->handler);
     free(j);
     free_list_drain(); /* this thread ends now */
@@ -1663,7 +1669,7 @@ static void *conn_main(void *p) {
 #if MIM_GREEN
 static void conn_co_main(void *p) {
     conn_job *j = (conn_job *)p;
-    conn_run(j->fd, j->handler, j->one, j->identity);
+    conn_run(j->fd, j->handler, j->one, j->identity, j->turn);
     mim_release(j->handler);
     free(j);
 }
@@ -1693,6 +1699,14 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
     int lfd = (int)geti(((mim_val **)l->data)[0], 0);
     mim_release(lr);
     int64_t served = 0;
+    /* every connection is a task (so one slow or idle client cannot hold up
+     * the others); handlers with effects take turns through `turn` */
+    pthread_mutex_t *turn = NULL;
+    if (!parallel) { /* kept for good when serving forever: tasks may outlive the loop */
+        turn = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+        pthread_mutex_init(turn, NULL);
+    }
+    parallel = MIM_THREADS;
 #if MIM_GREEN
     int green = parallel && green_on();
     mim_co **tasks = green && limit > 0 ? (mim_co **)calloc((size_t)limit, sizeof(mim_co *)) : NULL;
@@ -1714,6 +1728,7 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
             j->handler = handler;
             j->one = one;
             j->identity = identity;
+            j->turn = turn;
             mim_retain(handler);
 #if MIM_GREEN
             if (green) {
@@ -1736,7 +1751,7 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
             }
             pthread_attr_destroy(&a);
         } else {
-            conn_run(fd, handler, one, identity);
+            conn_run(fd, handler, one, identity, turn);
         }
         served++;
     }
@@ -1751,6 +1766,10 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
         for (int64_t i = 0; i < served; i++)
             if (threads[i]) pthread_join(threads[i], NULL);
         free(threads);
+    }
+    if (turn && limit > 0) { /* every task has been joined */
+        pthread_mutex_destroy(turn);
+        free(turn);
     }
     close(lfd);
     return ok_of(mim_int(served));
@@ -1971,7 +1990,7 @@ mim_val *mim_std_ws_connect(mim_val *url) {
     int fd = dial(host, port, err, sizeof err);
     if (fd < 0) return err_of(err);
     sock_timeout(fd, 30);
-    mconn c = {fd, NULL};
+    mconn c = {fd, NULL, NULL};
     if (secure && !(c.tls = tls_open(fd, host, err, sizeof err))) {
         close(fd);
         return err_of(err);
@@ -2155,7 +2174,9 @@ static void ws_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     ws_conn *w = ws_new(c->fd, c->tls, 0, b.p + off, b.n - (size_t)off);
     free(b.p);
     mim_val *sock = ws_socket_of(w);
+    if (c->turn) co_lock(c->turn);
     mim_val *r = mim_call(handler, 1, &sock);
+    if (c->turn) pthread_mutex_unlock(c->turn);
     if (r) mim_release(r);
     ws_drop(sock); /* closes it, if the handler did not */
     mim_release(sock);
@@ -2340,7 +2361,7 @@ mim_val *mim_std_tls_identity(mim_val *cert, mim_val *key) {
 }
 
 static mim_val *stream_val(int fd, void *tls) {
-    mconn *c = (mconn *)malloc(sizeof(mconn));
+    mconn *c = (mconn *)calloc(1, sizeof(mconn));
     c->fd = fd;
     c->tls = tls;
     mim_val *f = mim_int(tab_add((void ***)&tls_streams, &tls_streams_n, &tls_streams_cap, c));
@@ -2656,7 +2677,13 @@ mim_val *mim_std_ui_serve_app(mim_val *port, mim_val *page, mim_val *session, mi
     mim_retain(session);
     mim_val *two[2] = {page, session};
     mim_val *pair = obj_owned(&mim_desc_tuple, 2, two);
-    int parallel = MIM_THREADS && FN_DESC(page)->pure && FN_DESC(session)->pure;
+    /* tabs are independent (each has its own state): always side by side;
+     * within a tab, messages are handled one at a time, in order */
+    int parallel = MIM_THREADS;
+    if (geti(count, 0) == 0) { /* serving for good: say where (a notice, not output) */
+        printf("open http://localhost:%lld/\n", (long long)geti(port, 0));
+        fflush(stdout);
+    }
     mim_val *r = serve_loop_ex(port, pair, geti(count, 0), app_serve_one, NULL, parallel);
     mim_release(pair);
     return r;

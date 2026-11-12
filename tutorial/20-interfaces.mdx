@@ -136,6 +136,53 @@ Things to notice:
 * **One state per tab.** Open the page in two tabs and each has its own list. Each tab is a task on the event loop, so thousands of tabs are cheap.
 * **Functions inside a screen must be pure.** `on_input: t => { print(t); Typed(t) }` is error E0605, because the screen may be rendered at any time and in parallel.
 
+## Slow work and things that happen by themselves
+
+`update` is pure, so it cannot fetch a page or wait a second. Instead it returns a **step**: the next state, and maybe a **job**. A job is a function the runtime runs on its own, so the tab keeps working meanwhile. When the job finishes, the message it returns arrives like a click.
+
+Use `ui::run_live` for this. Its `update` returns `ui::stay(state)` (nothing else to do) or `ui::then(state, job)`. **Subscriptions** bring in messages nobody clicked: `ui::every(1s, Tick)` sends `Tick` every second, and `ui::listen(receiver)` sends whatever arrives through a channel ([chapter 19](19-tasks-and-channels.mdx)).
+
+```mimic
+module main
+
+// A clock that ticks by itself, and a button that starts slow work without
+// freezing the page: `mimic run examples/clock/clock.mim`.
+
+type Msg = Tick | Roll | Rolled(i64)
+type State = { now: i64, rolling: bool, rolls: [i64] }
+
+fn slow_roll() -> i64 {
+    time::sleep(800ms)                        // stands for a slow request
+    random::int(1, 7)
+}
+
+fn update(s: State, m: Msg) -> ui::Step[State, Msg] {
+    match m {
+        Tick => ui::stay({ s with now: time::now() }),
+        Roll => ui::then({ s with rolling: true }, () => Rolled(slow_roll())),
+        Rolled(n) => ui::stay({ s with rolling: false, rolls: push(s.rolls, n) }),
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 16, [
+        ui::text(time::format(s.now), size: 28, weight: "bold"),
+        ui::row([
+            ui::button("Roll a die", on_click: Roll),
+            ui::text(if s.rolling { "rolling…" } else { "" }, color: "#888"),
+        ]),
+        ui::text("rolls: {s.rolls}"),
+    ])
+}
+
+fn main() {
+    let init = State { now: time::now(), rolling: false, rolls: [] }
+    print(ui::run_live(init, view, update, subscriptions: [ui::every(1s, Tick)], title: "Clock"))
+}
+```
+
+Click "Roll a die" and the clock keeps ticking while the roll takes its time. Jobs started together run in parallel, and every result comes back as a message in the tab's own order.
+
 The full list of elements and settings is in the [standard library reference](../docs/std.md#interfaces-the-ui-module).
 
 Back to the [index](index.mdx).

@@ -838,6 +838,73 @@ mim_val *mim_await(void *h) {
     return r;
 }
 
+/* ---- ui: work that runs on its own ---------------------------------------
+ * ui::detach(f) starts f() as a task nobody waits for (a coroutine on the
+ * event loop, else a thread; without threads it runs now). The ui session
+ * uses it for jobs and subscriptions, which report back through a channel. */
+
+static void detach_run(void *p) {
+    mim_val *f = (mim_val *)p;
+    mim_val *r = mim_call(f, 0, NULL);
+    if (r) mim_release(r);
+    mim_release(f);
+    __atomic_fetch_sub(&g_detached_running, 1, __ATOMIC_ACQ_REL);
+}
+
+#if MIM_THREADS && !defined(_WIN32)
+static void *detach_thread(void *p) {
+    detach_run(p);
+    free_list_drain(); /* this thread ends now */
+    return NULL;
+}
+#endif
+
+mim_val *mim_std_ui_detach(mim_val *f) {
+    if (!f || f->dtype != MIM_FN) mim_panic("ui::detach: expected a function");
+    mim_retain(f);
+    __atomic_fetch_add(&g_detached_running, 1, __ATOMIC_ACQ_REL);
+#if MIM_GREEN
+    if (green_on()) {
+        co_spawn(detach_run, f, 1);
+        return NULL;
+    }
+#endif
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_t t;
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&a, (size_t)32 << 20);
+    int ok = pthread_create(&t, &a, detach_thread, f) == 0;
+    pthread_attr_destroy(&a);
+    if (ok) return NULL;
+#endif
+    detach_run(f);
+    return NULL;
+}
+
+/* ui::then(state, job): the next state, and one job to run (ui::Step). Made
+ * here rather than in Mimic: a job may have effects (that is its point), and
+ * Mimic code cannot keep such a function in a value (E0605). */
+extern const mim_desc mim_desc_ui_Step;
+
+mim_val *mim_std_ui_then(mim_val *state, mim_val *job) {
+    if (!job || job->dtype != MIM_FN) mim_panic("ui::then: expected a function");
+    mim_retain(state);
+    mim_val *f[2] = {state, mim_array_lit(1, &job)};
+    return obj_owned(&mim_desc_ui_Step, 2, f);
+}
+
+/* ui::also(step, job): the same step with one more job */
+mim_val *mim_std_ui_also(mim_val *step, mim_val *job) {
+    if (!step || step->dtype != MIM_OBJ || step->desc != &mim_desc_ui_Step) mim_panic("ui::also: expected a ui::Step");
+    if (!job || job->dtype != MIM_FN) mim_panic("ui::also: expected a function");
+    mim_val **h = (mim_val **)step->data;
+    mim_retain(h[0]);
+    mim_val *f[2] = {h[0], mim_std_push(h[1], job)};
+    return obj_owned(&mim_desc_ui_Step, 2, f);
+}
+
 /* ==== the module functions: mim_std_<module>_<name> ======================== */
 
 /* the last error (if any) of an impl_ call as a Result around v */

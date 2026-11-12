@@ -16,6 +16,18 @@ pub module ui {
     // A change for the browser to make (runtime/mimic_ui.c applies it).
     pub type Patch = { op: str, p: str, html: str, attrs: [str] }
 
+    // What `update` returns in `ui::run_live`: the next state, and jobs to run
+    // on their own (fetching, saving, …); each job's result comes back as a
+    // message. Make one with `ui::stay(state)` or `ui::then(state, job)`.
+    pub type Step[S, M] = { state: S, jobs: [fn() -> M] }
+
+    // Messages that arrive by themselves: every `interval` (a duration), or
+    // whenever a value comes through a channel.
+    pub type Sub[M] = Every(i64, M) | Listen(super::chan::Receiver[M])
+
+    // What a tab's session waits for.
+    type Incoming[M] = FromBrowser(str) | FromWork(M) | Gone
+
     extern "mimic" concurrent {
         fn serve_app(port: i64, page: fn(super::http::Request) -> super::http::Response, session: fn(super::ws::Socket), count: i64) -> Result[i64, str]
     }
@@ -23,6 +35,26 @@ pub module ui {
     extern "mimic" {
         fn client_script() -> str
     }
+
+    extern "mimic" concurrent {
+        // run f() as a task of its own that nobody waits for
+        fn detach(f: fn())
+    }
+
+    // The next state and a job whose result (a message) comes back later.
+    pub extern "mimic" {
+        fn then[S, M](state: S, job: fn() -> M) -> Step[S, M]
+        fn also[S, M](step: Step[S, M], job: fn() -> M) -> Step[S, M]
+    }
+
+    // The next state, with nothing else to do.
+    pub fn stay[S, M](state: S) -> Step[S, M] { Step { state: state, jobs: [] } }
+
+    // A message every `interval`.
+    pub fn every[M](interval: i64, message: M) -> Sub[M] { Every(interval, message) }
+
+    // Each value that comes through `receiver`, as a message.
+    pub fn listen[M](receiver: super::chan::Receiver[M]) -> Sub[M] { Listen(receiver) }
 
     // ---- layout -------------------------------------------------------------
 
@@ -108,16 +140,16 @@ pub module ui {
 
     // ---- running --------------------------------------------------------------
 
-    // Serve the interface at http://localhost:{port}/, each browser tab with its
-    // own state, until the program is stopped.
-    pub fn run[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, port: i64 = 8080, title: str = "Mimic") -> Result[i64, str] {
-        print("open http://localhost:{port}/")
-        serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update), 0)
+    // Serve the interface at http://localhost:{port}/ until the program is
+    // stopped, each browser tab with its own state. `connections` > 0 stops
+    // after that many connections (page loads and tabs), for tests.
+    pub fn run[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, port: i64 = 8080, title: str = "Mimic", connections: i64 = 0) -> Result[i64, str] {
+        run_live(init, view, (s, m) => stay(update(s, m)), port: port, title: title, connections: connections)
     }
 
-    // The same, stopping after `connections` connections (page loads and tabs).
-    pub fn run_for[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, connections: i64, port: i64 = 8080, title: str = "Mimic") -> Result[i64, str] {
-        serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update), connections)
+    // The same, with jobs (`update` returns a `ui::Step`) and subscriptions.
+    pub fn run_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]] = [], port: i64 = 8080, title: str = "Mimic", connections: i64 = 0) -> Result[i64, str] {
+        serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update, subscriptions), connections)
     }
 
     fn page_for[M](req: super::http::Request, tree: Node[M], title: str) -> super::http::Response {
@@ -131,26 +163,69 @@ pub module ui {
         super::http::Response { status: 200, headers: ["content-type": "text/html; charset=utf-8"], body: head + body }
     }
 
-    // One browser tab: wait for events, update, and send what changed.
-    fn session[S, M](sock: super::ws::Socket, state: S, view: fn(S) -> Node[M], update: fn(S, M) -> S) {
-        handle_events(sock, state, view(state), view, update)
+    // One browser tab. Everything it reacts to arrives through one channel:
+    // the browser's events (read by a task of their own), the results of
+    // jobs and the subscriptions' messages.
+    fn session[S, M](sock: super::ws::Socket, init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subs: [Sub[M]]) {
+        let (tx, rx) = super::chan::new[Incoming[M]]()
+        detach(() => forward(sock, tx))
+        subs ¨ (sb => start(sb, tx))
+        serve_tab(sock, rx, tx, init, view(init), view, update)
+        super::chan::close(tx)                     // ends the subscriptions
     }
 
-    fn handle_events[S, M](sock: super::ws::Socket, state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> S) {
+    fn forward[M](sock: super::ws::Socket, tx: super::chan::Sender[Incoming[M]]) {
         match super::ws::receive(sock) {
             Ok(super::ws::Text(t)) => {
+                super::chan::send(tx, FromBrowser(t))
+                forward(sock, tx)
+            }
+            _ => { super::chan::send(tx, Gone) }
+        }
+    }
+
+    fn start[M](sb: Sub[M], tx: super::chan::Sender[Incoming[M]]) {
+        match sb {
+            Every(interval, m) => detach(() => tick(interval, m, tx)),
+            Listen(r) => detach(() => relay(r, tx)),
+        }
+    }
+
+    // (a send fails once the tab is gone: then the subscription stops)
+    fn tick[M](interval: i64, m: M, tx: super::chan::Sender[Incoming[M]]) {
+        super::time::sleep(interval)
+        if super::chan::send(tx, FromWork(m)) { tick(interval, m, tx) }
+    }
+
+    fn relay[M](r: super::chan::Receiver[M], tx: super::chan::Sender[Incoming[M]]) {
+        match super::chan::receive(r) {
+            Some(m) => { if super::chan::send(tx, FromWork(m)) { relay(r, tx) } }
+            None => {}
+        }
+    }
+
+    fn run_job[M](job: fn() -> M, tx: super::chan::Sender[Incoming[M]]) { super::chan::send(tx, FromWork(job())) }
+
+    fn serve_tab[S, M](sock: super::ws::Socket, rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M]) {
+        match super::chan::receive(rx) {
+            Some(FromBrowser(t)) => {
                 match message(tree, t) {
-                    Some(m) => {
-                        let next = update(state, m)
-                        let next_tree = view(next)
-                        super::ws::send(sock, super::json::encode(diff(tree, next_tree, "0")))
-                        handle_events(sock, next, next_tree, view, update)
-                    }
-                    None => handle_events(sock, state, tree, view, update),
+                    Some(m) => react(sock, rx, tx, state, tree, view, update, m),
+                    None => serve_tab(sock, rx, tx, state, tree, view, update),
                 }
             }
+            Some(FromWork(m)) => react(sock, rx, tx, state, tree, view, update, m),
             _ => {}
         }
+    }
+
+    // one message: the next state, what changed on the screen, and the jobs
+    fn react[S, M](sock: super::ws::Socket, rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], m: M) {
+        let step = update(state, m)
+        let next_tree = view(step.state)
+        super::ws::send(sock, super::json::encode(diff(tree, next_tree, "0")))
+        step.jobs ¨ (job => detach(() => run_job(job, tx)))
+        serve_tab(sock, rx, tx, step.state, next_tree, view, update)
     }
 
     // ---- HTML -------------------------------------------------------------------

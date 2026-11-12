@@ -2052,7 +2052,7 @@ impl Purity {
     }
 
     fn walk<'a>(&'a self, p: &'a Program, module: ModId, set: &'a [bool], print_ok: bool, params: &'a [String]) -> PurityWalk<'a> {
-        PurityWalk { p, module, pure: set, print_ok, params, fn_params: &self.fn_params }
+        PurityWalk { p, module, pure: set, print_ok, params, fn_params: &self.fn_params, locals_free: true }
     }
 
     /// Functions that only use the externs `ok` allows (optimistic fixpoint).
@@ -2073,7 +2073,7 @@ impl Purity {
                 }
                 if let FnKind::User(d) = &f.kind {
                     let params = param_names(p, Some(fid));
-                    let ok = PurityWalk { p, module: f.module, pure: &pure, print_ok, params: &params, fn_params }.block(&d.body);
+                    let ok = PurityWalk { p, module: f.module, pure: &pure, print_ok, params: &params, fn_params, locals_free: true }.block(&d.body);
                     if !ok {
                         pure[fid] = false;
                         changed = true;
@@ -2096,7 +2096,7 @@ impl Purity {
         let params = param_names(p, cur);
         // the arguments are evaluated now; functions among them run later, inside
         let w = self.walk(p, module, &self.fns, false, &params);
-        let wo = self.walk(p, module, &self.overlap, false, &params);
+        let wo = PurityWalk { locals_free: false, ..self.walk(p, module, &self.overlap, false, &params) };
         let uses = self.fn_params.get(f).cloned().unwrap_or_default();
         let args_ok = args.iter().enumerate().all(|(j, a)| if uses.get(j).copied().unwrap_or(false) { wo.fn_operand(a) } else { w.expr(a) });
         (matches!(p.fns[f].kind, FnKind::User(_)) && !self.fns[f] && self.overlap[f] && args_ok).then_some(f)
@@ -2148,6 +2148,11 @@ struct PurityWalk<'a> {
     /// function is called (see [`Purity::fn_params`])
     params: &'a [String],
     fn_params: &'a [Vec<bool>],
+    /// Function values held in other local variables count as checked:
+    /// taken out of data (pure, E0605) or bound by a `let` whose value was
+    /// charged where it was made. Off where a call is about to start in the
+    /// background, so a function bound earlier cannot slip into it.
+    locals_free: bool,
 }
 
 impl PurityWalk<'_> {
@@ -2159,7 +2164,11 @@ impl PurityWalk<'_> {
             ExprKind::OpRef(_) => true,
             // a parameter of the enclosing function: checked where that is called
             ExprKind::Path(path) if path.len() == 1 && self.params.contains(&path[0]) => true,
-            ExprKind::Path(path) => matches!(self.p.lookup(self.module, path).ok_or(()), Ok(Resolved::Fn(f)) if self.pure[f]),
+            ExprKind::Path(path) => match self.p.lookup(self.module, path) {
+                Some(Resolved::Fn(f)) => self.pure[f],
+                Some(_) => false,
+                None => self.locals_free,
+            },
             _ => false,
         }
     }

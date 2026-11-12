@@ -22,7 +22,7 @@ fn view(s: State) -> ui::Node[Msg] {
     ])
 }
 
-fn app(port: i64) -> Result[i64, str] { ui::run_for(State { todos: [], draft: "" }, view, update, 2, port: port) }
+fn app(port: i64) -> Result[i64, str] { ui::run(State { todos: [], draft: "" }, view, update, port: port, connections: 2) }
 
 fn when_up(url: str, tries: i64) -> Result[http::Response, str] {
     match http::fetch(url) {

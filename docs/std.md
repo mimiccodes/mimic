@@ -268,7 +268,7 @@ http::serve(8080, handle)                                     // runs until the 
 
 How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
-* **The server runs a pure or overlapping handler in parallel**, one task per connection on the event loop (see [the event loop](#the-event-loop)). A handler that prints or writes files handles one request at a time, in order.
+* **The server runs a pure or overlapping handler in parallel**, one task per connection on the event loop (see [the event loop](#the-event-loop)). A handler that prints or writes files takes turns: one request at a time. Requests are still read side by side, so an idle client never holds up the others.
 * **One request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
 * **`https://` uses the operating system's TLS**, loaded when first needed: the Security framework on Apple platforms, OpenSSL 3 (`libssl.so.3`) on Linux. Certificates and host names are checked against the system's trusted certificates, so an expired, self-signed or wrong-host certificate is an `Err` ("TLS with example.com failed: …"). Statically linked Linux programs cannot load OpenSSL, so there `https://` returns an `Err` that says so. Serving HTTPS: see [`tls`](#tls-encryption).
 * **Redirects are followed** (301, 302, 303, 307, 308), up to 10. A 303, or a 301/302 after a non-GET, continues as a GET; 307 and 308 keep the method and body.
@@ -423,8 +423,12 @@ ui::run(State { count: 0 }, view, update)               // http://localhost:8080
 
 | Function | Result |
 |---|---|
-| `ui::run(init, view, update)` | Serve the interface (`port: 8080`, `title: "Mimic"` by default) until the program is stopped |
-| `ui::run_for(init, view, update, n)` | The same, stopping after `n` connections (for tests) |
+| `ui::run(init, view, update)` | Serve the interface until the program is stopped. Settings: `port` (8080), `title` ("Mimic"), `connections` (stop after that many, for tests; 0 = never) |
+| `ui::run_live(init, view, update)` | The same, with an `update` that returns a `ui::Step` (jobs), and `subscriptions: [ui::Sub[Msg]]` |
+| `ui::stay(state)` | A `ui::Step` with nothing else to do |
+| `ui::then(state, job)`, `ui::also(step, job)` | A step with a job: `job()` runs as a task of its own, and the message it returns is handled when it is done |
+| `ui::every(interval, message)` | A subscription: `message` every `interval` (a duration such as `1s`) |
+| `ui::listen(receiver)` | A subscription: each value that comes through a `chan::Receiver[Msg]` |
 | `ui::html(node)` | The screen as HTML |
 | `ui::diff(a, b, "0")` | The changes (`[ui::Patch]`) that turn screen `a` into screen `b` |
 | `ui::message(node, event)` | The message a browser event (JSON) stands for, if any |
@@ -432,7 +436,9 @@ ui::run(State { count: 0 }, view, update)               // http://localhost:8080
 How it works:
 * **Each browser tab is a task with its own state.** The first page is complete HTML. After that, events travel to the program over a WebSocket, and only the changed parts travel back.
 * **`view` and `update` are pure.** Lists of children built with `¨` are built in parallel, and so is the comparison of the old and new screens. Different tabs run in parallel too.
-* **Functions inside a screen must be pure** (`on_input: Typed` or `t => Typed(trim(t))`). Printing or other effects there is error E0605. Do effects in `update`'s caller, or wait for the jobs described in ui.md.
+* **Functions inside a screen must be pure** (`on_input: Typed` or `t => Typed(trim(t))`). Printing or other effects there is error E0605. Effects belong in jobs.
+* **Jobs keep the page responsive.** A job (fetching, saving, a slow computation) runs on its own, while the tab keeps handling clicks. Its result arrives as an ordinary message. Several jobs run at the same time.
+* **Each tab handles one message at a time, in order.** Tabs run side by side, even when `update` or a job has effects.
 * **Built-in theme:** readable defaults with light and dark modes.
-* **Not yet:** jobs (`ui::Step`), timers and subscriptions, keyed lists, other targets (WebAssembly, native windows).
+* **Not yet:** keyed lists, other targets (WebAssembly, native windows).
 

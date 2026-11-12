@@ -491,8 +491,13 @@ char *mim_cstr_dup(mim_val *v) {
     return d;
 }
 
+/* tasks started with ui::detach that are still running (nobody waits for
+ * them): what they hold is alive at exit by design */
+static int64_t g_detached_running = 0;
+
 int32_t mim_rt_shutdown(int32_t leak_check) {
     fflush(stdout);
+    if (__atomic_load_n(&g_detached_running, __ATOMIC_ACQUIRE) > 0) leak_check = 0;
     int64_t live = 0;
     for (int i = 0; i < MAX_SLOTS; i++) live += __atomic_load_n(&g_live_slots[i].n, __ATOMIC_ACQUIRE);
     if (leak_check && live != 0) {
