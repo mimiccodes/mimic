@@ -1,0 +1,4 @@
+// expect-error: E0401 expected (i64, str), found (str, i64)
+module main
+fn f(t: (i64, str)) -> i64 { t.0 }
+fn main() { print(f(("a", 1))) }

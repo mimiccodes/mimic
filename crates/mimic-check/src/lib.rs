@@ -143,6 +143,8 @@ pub struct ResolveError {
     pub suggestion: Option<String>,
     /// The item exists but is private.
     pub private: Option<Resolved>,
+    /// Extra explanation (e.g. a program named `http` hiding `http::`).
+    pub note: Option<String>,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -171,6 +173,9 @@ impl ResolveError {
             } else {
                 d = d.help(format!("did you mean `{fixed}`?"));
             }
+        }
+        if let Some(n) = &self.note {
+            d = d.note(n.clone());
         }
         if let Some(r) = self.private
             && let Some((df, ds)) = p.decl_site(r)
@@ -420,6 +425,13 @@ impl Program {
         {
             return self.local(*lib, name);
         }
+        // the standard library's root exposes its prelude: `std::json::encode`
+        if self.mods[m].parent.is_none()
+            && self.mods[m].package == "std"
+            && let Some(pre) = self.mods[m].children.get("prelude")
+        {
+            return self.local(*pre, name);
+        }
         None
     }
 
@@ -469,7 +481,7 @@ impl Program {
     }
 
     fn resolve_depth(&self, from: ModId, path: &[String], depth: usize) -> Result<Resolved, ResolveError> {
-        let plain = |code: &'static mimic_syntax::Code, msg: String| ResolveError { code, msg, suggestion: None, private: None };
+        let plain = |code: &'static mimic_syntax::Code, msg: String| ResolveError { code, msg, suggestion: None, private: None, note: None };
         if depth > 16 {
             return Err(plain(&C::BAD_PATH, "`use` cycle detected".into()));
         }
@@ -524,6 +536,7 @@ impl Program {
                 msg: format!("cannot find `{first}` in this scope"),
                 suggestion,
                 private: None,
+                note: None,
             });
         };
         for (i, seg) in path.iter().enumerate().skip(1) {
@@ -542,11 +555,26 @@ impl Program {
                     fixed[i] = best.to_string();
                     fixed.join("::")
                 });
+                // `http::fetch` in a program (or module) itself called `http`:
+                // the standard module of that name is hidden, by design
+                let note = (i == 1 && self.mods[m].package != "std")
+                    .then(|| {
+                        let std = self.roots.get("std")?;
+                        let pre = self.mods[*std].children.get("prelude")?;
+                        let sm = self.mods[*pre].children.get(&path[0])?;
+                        self.local(*sm, seg)?;
+                        Some(format!(
+                            "your own `{0}` (this program or one of its modules) hides the standard `{0}` module; rename yours, or write `std::{0}::{seg}`",
+                            path[0]
+                        ))
+                    })
+                    .flatten();
                 return Err(ResolveError {
                     code: &C::UNRESOLVED_NAME,
                     msg: format!("cannot find `{seg}` in {}", self.describe(cur)),
                     suggestion,
                     private: None,
+                    note,
                 });
             };
             if !self.accessible(from, next) {
@@ -555,6 +583,7 @@ impl Program {
                     msg: format!("{} is private", self.describe(next)),
                     suggestion: None,
                     private: Some(next),
+                    note: None,
                 });
             }
             cur = next;
@@ -710,6 +739,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
         Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
         Type::App(n, _, s) => Err(Diag::new(&C::NOT_C_TYPE, format!("`{n}[…]` is not a C type; use one of {}", C_TYPES.join(", ")), *s)),
         Type::Map(_, _, s) => Err(Diag::new(&C::NOT_C_TYPE, "maps cannot cross the FFI boundary", *s)),
+        Type::Tuple(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "tuples cannot cross the FFI boundary; use a record (a C struct)", *s)),
         Type::Fn(_, _, s) => Err(Diag::new(&C::FFI_UNSUPPORTED, "C callbacks (function pointers) are not supported yet", *s)),
     }
 }
@@ -736,6 +766,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
         Type::Fn(..) => 9, // TY_FN: any function value
         Type::App(n, _, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("`{n}[…]` is checked statically"), *s)),
         Type::Map(_, _, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, "maps are checked statically", *s)),
+        Type::Tuple(_, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, "tuples are checked statically", *s)),
     })
 }
 
@@ -820,6 +851,7 @@ impl Checker<'_> {
             },
             Type::Array(inner, _) => self.ann_result(inner),
             Type::Map(k, v, _) => self.ann_result(k).and_then(|_| self.ann_result(v)),
+            Type::Tuple(ts, _) => ts.iter().try_for_each(|t| self.ann_result(t)),
             Type::Ptr(_, s) => Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
             Type::Fn(ps, r, _) => {
                 for p in ps {

@@ -57,7 +57,9 @@ remove(born, "ada")                        // a new map without it
 
 ## Standard modules
 
-Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name. A module of your program with the same name comes first. The global names are only `print`, `Option`/`Result` and the string, list and map functions above.
+Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name.
+
+Your own names come first. A program (or one of its modules) called `json` hides the standard `json` module. The compiler says so when that is the problem. Then `std::json::encode` still reaches the standard one, as `std::` names every standard module. The global names are only `print`, `Option`/`Result` and the string, list and map functions above.
 
 Functions with effects are known to the compiler for what they are (see [ffi.md](ffi.md#what-c-functions-do-effects)):
 * **concurrent:** may overlap; `let x = …` starts an implicit future, and `¨` runs them in parallel.

@@ -144,6 +144,13 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
             }
             None => env.push((n.clone(), got)),
         },
+        Type::Tuple(ts, _) => {
+            if let Ty::Tup(id) = got {
+                for (t, g) in ts.iter().zip(tuple_elems(id)) {
+                    unify(p, module, t, g, params, env, conflict);
+                }
+            }
+        }
         Type::Array(inner, _) => {
             if let Ty::Arr(el) = got
                 && el != El::Dyn
@@ -177,6 +184,8 @@ pub enum El {
     Obj(u32),
     /// bytes (`[u8]`): stored one per byte; each element reads as an i64
     U8,
+    /// tuples (a list of tuples)
+    Tup(u32),
     Dyn,
 }
 
@@ -216,6 +225,7 @@ impl Ty {
             Ty::Char => El::Char,
             Ty::Arr(El::Char) => El::Str,
             Ty::Obj(t) => El::Obj(t),
+            Ty::Tup(t) => El::Tup(t),
             _ => El::Dyn,
         }
     }
@@ -228,6 +238,7 @@ impl Ty {
             El::Str => Ty::Arr(El::Char),
             El::Obj(t) => Ty::Obj(t),
             El::U8 => Ty::I64,
+            El::Tup(t) => Ty::Tup(t),
             El::Dyn => Ty::Dyn,
         }
     }
@@ -267,6 +278,7 @@ impl std::fmt::Display for Ty {
             El::Str => "str",
             El::Obj(_) => "record",
             El::U8 => "u8",
+            El::Tup(_) => "tuple",
             El::Dyn => "?",
         };
         match self {
@@ -347,7 +359,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             Ty::Bool => Ty::Arr(El::Bool),
             _ => return None,
         },
-        Type::Ptr(..) | Type::App(..) => return None,
+        Type::Ptr(..) | Type::App(..) | Type::Tuple(..) => return None,
         Type::Fn(..) | Type::Map(..) => Ty::Dyn, // function values and maps are handles
     })
 }
@@ -384,6 +396,10 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
         },
         Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el())),
         Type::Map(..) => Some(Ty::Dyn),
+        Type::Tuple(ts, _) => {
+            let elems: Vec<Ty> = ts.iter().map(|t| ann_env(p, module, t, env).unwrap_or(Ty::Dyn)).collect();
+            Some(Ty::Tup(tuple_id(&elems)))
+        }
         Type::Ptr(..) => None,
         Type::Fn(..) => Some(Ty::Dyn),
     }
@@ -407,7 +423,7 @@ pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: 
 pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
     match a {
         Ty::Dyn => Ok(Ty::Dyn),
-        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str) => match got {
+        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_)) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
             Ty::Arr(El::Dyn) if matches!(a, Ty::Arr(_)) => Ok(a),
             g if compatible(a, g) => Ok(refine(a, g)),
@@ -430,6 +446,7 @@ pub fn show(p: &Program, t: Ty) -> String {
             format!("{name}[{}]", a.join(", "))
         }
         Ty::Arr(El::Obj(id)) => format!("[{}]", show(p, Ty::Obj(id))),
+        Ty::Arr(El::Tup(id)) => format!("[{}]", show(p, Ty::Tup(id))),
         Ty::Arr(El::Str) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),

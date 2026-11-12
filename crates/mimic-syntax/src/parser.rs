@@ -585,6 +585,18 @@ impl Parser {
             self.expect(&Tok::RBracket)?;
             return Ok(Type::Array(Box::new(inner), s));
         }
+        // `(i64, str)`: a tuple; `(T)` is just T
+        if self.eat(&Tok::LParen) {
+            let mut ts = vec![self.ty()?];
+            while self.eat(&Tok::Comma) {
+                ts.push(self.ty()?);
+            }
+            self.expect(&Tok::RParen)?;
+            if ts.len() == 1 {
+                return Ok(ts.pop().unwrap());
+            }
+            return Ok(Type::Tuple(ts, s.to(self.prev_span())));
+        }
         // `fn(i64, f64) -> bool`
         if self.eat(&Tok::Fn) {
             self.expect(&Tok::LParen)?;
@@ -1056,7 +1068,7 @@ impl Parser {
             Type::Named(n, _) | Type::App(n, _, _) => {
                 n.split("::").last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase())) || BUILTIN.contains(&n.as_str())
             }
-            Type::Array(..) | Type::Map(..) => true,
+            Type::Array(..) | Type::Map(..) | Type::Tuple(..) => true,
             _ => false,
         };
         let attempt = (|| {

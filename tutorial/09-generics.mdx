@@ -108,6 +108,31 @@ fn main() {
 ["ada" "mimic" "zig"]
 ```
 
+## Tuples in types
+
+Tuple types are written like tuple values: `(i64, str)`. They work everywhere a type does, including generics and lists:
+
+```mimic run
+module main
+
+fn divmod(a: i64, b: i64) -> (i64, i64) { (a div b, a % b) }
+
+fn swap[A, B](p: (A, B)) -> (B, A) { (p.1, p.0) }
+
+fn main() {
+    print(divmod(17, 5))
+    print(swap((1, "one")))
+    let scores: [(str, i64)] = [("ada", 3), ("alan", 5)]
+    print(scores ¨ (s => s.1) ▷ +/)
+}
+```
+
+```output
+(3, 2)
+("one", 1)
+8
+```
+
 ## Type errors are caught at compile time
 
 ```mimic

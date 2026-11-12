@@ -284,7 +284,7 @@ match point {
 }
 ```
 
-Tuple types are tracked statically: `(i64, str)` keeps its `i64` unboxed.
+Tuple types are tracked statically: `(i64, str)` keeps its `i64` unboxed. They can be written in annotations like any other type: `fn divmod(a: i64, b: i64) -> (i64, i64)`, `[(str, i64)]`, `fn swap[A, B](p: (A, B)) -> (B, A)`.
 
 ## Errors without exceptions: `Option`, `Result` and `let … else`
 
@@ -371,6 +371,9 @@ The annotation types are:
 * `str`;
 * arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`;
 * records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
+* tuples: `(i64, str)`;
+* maps: `[str: i64]`;
+* types from other modules by path: `http::Response`, `time::DateTime`;
 * function types: `fn(i64) -> i64`.
 
 ### Generics

@@ -1,0 +1,3 @@
+// expect-error: E0303 cannot find `fetch` in module `http`
+module main
+fn main() { print(http::fetch("http://x/")) }

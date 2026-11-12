@@ -20,6 +20,9 @@ fn main() {
     print(json::decode[Page[User]]('{"items": [], "total": 0}'))
     print(json::decode[[str: i64]]('{"a": 1, "b": 2}'))
     print(json::decode[Option[f64]]("null"))
+    print(json::decode[(i64, str)]('[7, "seven"]'))           // tuple types
+    print(json::decode[[(str, i64)]]('[["a", 1], ["b", 2]]'))
+    print(swap((1, "one")))
     print(json::decode[i64]("[1, 2,]"))
     match json::parse('{"x": [1, true, null, "s\u00e9"]}') {
         Ok(json::Object(m)) => print(m["x"]),
@@ -32,3 +35,5 @@ fn main() {
     print(json::encode("quote \" and \n newline"))
     print(json::encode(⍳ 6 ⥊ [2 3]))
 }
+
+fn swap[A, B](p: (A, B)) -> (B, A) { (p.1, p.0) }

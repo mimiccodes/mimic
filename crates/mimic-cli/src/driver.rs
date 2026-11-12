@@ -71,7 +71,7 @@ impl Profile {
 }
 
 /// The standard prelude: compiled into every program, visible everywhere.
-pub const PRELUDE: &str = "module prelude
+pub const PRELUDE: &str = "pub module prelude
 
 // Optional values: `let x = find(…) else { return … }` unwraps Some.
 pub type Option[T] = Some(T) | None

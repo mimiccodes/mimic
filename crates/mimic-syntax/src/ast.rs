@@ -151,6 +151,8 @@ pub enum Type {
     Array(Box<Type>, Span),
     /// `[str: i64]`: a map from keys to values
     Map(Box<Type>, Box<Type>, Span),
+    /// `(i64, str)`: a tuple
+    Tuple(Vec<Type>, Span),
     Ptr(Box<Type>, Span),
     /// `fn(i64, f64) -> bool`: a function value.
     Fn(Vec<Type>, Option<Box<Type>>, Span),
@@ -159,7 +161,7 @@ pub enum Type {
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named(_, s) | Type::App(_, _, s) | Type::Array(_, s) | Type::Map(_, _, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
+            Type::Named(_, s) | Type::App(_, _, s) | Type::Array(_, s) | Type::Map(_, _, s) | Type::Tuple(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
         }
     }
 }
@@ -174,6 +176,10 @@ impl std::fmt::Display for Type {
             }
             Type::Array(t, _) => write!(f, "[{t}]"),
             Type::Map(k, v, _) => write!(f, "[{k}: {v}]"),
+            Type::Tuple(ts, _) => {
+                let a: Vec<String> = ts.iter().map(|t| t.to_string()).collect();
+                write!(f, "({})", a.join(", "))
+            }
             Type::Ptr(t, _) => write!(f, "ptr[{t}]"),
             Type::Fn(ps, r, _) => {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();

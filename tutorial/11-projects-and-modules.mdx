@@ -76,6 +76,8 @@ fn main() {
 | `self::helper` | an item of the current module |
 | `super::helper` | an item of the enclosing module |
 
+The standard library's modules (`fs`, `http`, `json`, …) are found the same way, after your own. A module or program of yours named `json` hides the standard `json` module; the compiler tells you when that happens, and `std::json::encode` still reaches the standard one.
+
 `use a::b::c` and `use a::b as x` are optional shortcuts. There are no wildcard imports, so every name is easy to trace back to where it comes from.
 
 ## Visibility
