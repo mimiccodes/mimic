@@ -2280,3 +2280,5 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_std.c"
 /* program basics: arguments, environment, files, directories, paths */
 #include "mimic_io.c"
+/* networking: TCP, HTTP client and server */
+#include "mimic_socket.c"

@@ -76,6 +76,7 @@ impl Imported {
                 intrinsic: false,
                 effects: false,
                 overlap: false,
+                sync: false,
                 ret: f.ret.as_deref().map(ty),
                 span,
             })

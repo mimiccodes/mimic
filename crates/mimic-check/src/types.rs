@@ -343,7 +343,7 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             _ => return None,
         },
         Type::Ptr(..) | Type::App(..) => return None,
-        Type::Fn(..) => Ty::Dyn, // function values are handles
+        Type::Fn(..) | Type::Map(..) => Ty::Dyn, // function values and maps are handles
     })
 }
 
@@ -378,6 +378,7 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
             _ => None,
         },
         Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el())),
+        Type::Map(..) => Some(Ty::Dyn),
         Type::Ptr(..) => None,
         Type::Fn(..) => Some(Ty::Dyn),
     }

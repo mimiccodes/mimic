@@ -300,14 +300,15 @@ fn name_of(id: i64) -> str {
 
 ## Concurrency: implicit futures
 
-Mimic has no `async`, no `await` and no threads to manage. Effects come in two kinds:
-* **Ordered effects** happen exactly in program order: printing, writing files, changing the environment, reading standard input, random numbers, running programs.
-* **Overlapping effects** may happen at the same time as each other: reading files, listing directories, reading the environment, the clocks, `sleep`, and network requests (E4).
+Mimic has no `async`, no `await` and no threads to manage. Effects come in three kinds:
+* **Overlapping effects** may happen at the same time as each other: reading files, listing directories, reading the environment, the clocks, `sleep`, HTTP requests, and serving HTTP with a handler that is itself overlapping.
+* **Ordered effects** happen in program order on the main thread: printing, standard input, random numbers, TCP sockets, `exit`.
+* **Synchronizing effects** change what overlapping effects could read: writing, renaming or removing files, changing the environment, running programs.
 
 The compiler works out which kind every function has, transitively, like purity. The rules:
 
 * **A `let` starts work early.** When `let x = f(…)` calls a function whose effects all overlap, it starts at once on its own thread. The program goes on, and waits only when the value is needed.
-* **When the program waits.** It waits right before the first statement that uses `x`, before any ordered effect, before anything that can leave the block (`return`, `let … else`), and at the end of the block. The arguments are evaluated first, in order.
+* **When the program waits.** It waits right before the first statement that uses `x`, before any synchronizing effect, at every `return`, and at the end of the block. The arguments are evaluated first, in order. Printing does not wait, so a program can print while its own server, running as a future, keeps answering.
 * **`¨` runs overlapping functions in parallel**, just as it does pure ones. Results stay in order.
 
 ```mimic
@@ -319,7 +320,7 @@ print(a + b)                    // waits here for both
 let pages = urls ¨ fetch_page   // all at once
 ```
 
-**The program behaves as if it ran in order.** Because ordered effects wait for everything started before them, a write can never overtake an earlier read of the same file, and output never interleaves. The only things that may reorder are overlapping effects among themselves, and their results are the same in any order. On platforms without threads (WebAssembly), futures simply run where they are written.
+**The program behaves as if it ran in order.** Because synchronizing effects wait for everything started before them, a write can never overtake an earlier read of the same file, and output never interleaves, because futures never print. The only things that may reorder are overlapping effects among themselves, and their results are the same in any order. On platforms without threads (WebAssembly), futures simply run where they are written.
 
 ## Durations
 

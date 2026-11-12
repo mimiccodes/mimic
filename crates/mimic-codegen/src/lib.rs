@@ -208,8 +208,21 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         lambdas: 0,
         descs: HashMap::new(),
         lazies: Vec::new(),
+        futures: Vec::new(),
         opt_level: settings.opt_level,
     };
+    // every standard-library type descriptor, for the runtime (see desc())
+    for (t, td) in p.types.iter().enumerate() {
+        if p.mods[td.module].package == "std" {
+            if td.is_record() {
+                cg.desc(t, None);
+            } else {
+                for v in 0..td.variants().len() {
+                    cg.desc(t, Some(v));
+                }
+            }
+        }
+    }
     if !cg.plan.book.defs.is_empty() {
         let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
         cg.net_ensure = Some(f);
@@ -275,6 +288,7 @@ struct Local<'ctx> {
 }
 
 /// An implicit future: `let name = f(…)` running on its own thread.
+#[derive(Clone)]
 struct Pending<'ctx> {
     name: String,
     /// where the runtime's future handle is kept until it is awaited
@@ -315,6 +329,8 @@ fn stmt_names(s: &Stmt) -> Vec<String> {
 }
 
 struct Cg<'ctx, 'p> {
+    /// implicit futures still pending, per enclosing block (awaited at `return`)
+    futures: Vec<Vec<Pending<'ctx>>>,
     ctx: &'ctx Context,
     module: Module<'ctx>,
     b: Builder<'ctx>,
@@ -924,6 +940,13 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Convert to the return type, release every owned local, and return.
     fn ret(&mut self, v: V<'ctx>) -> R<()> {
+        // leaving the function: every implicit future still running finishes first
+        let pending: Vec<Pending<'ctx>> = self.futures.iter().flatten().cloned().collect();
+        for p in pending {
+            let h = self.b.build_load(self.ptr, p.hslot, "").s()?;
+            let r = self.call_rt("mim_await", &[h.into()])?.unwrap().into_pointer_value();
+            self.call_rt("mim_release", &[r.into()])?;
+        }
         let v = match self.cur_ret {
             Ty::Unit | Ty::Never => {
                 self.drop_tmp(v)?;
@@ -955,6 +978,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_depth = self.cur_depth.take();
         let saved_ret = self.cur_ret;
         let saved_what = std::mem::take(&mut self.ret_what);
+        let saved_futures = std::mem::take(&mut self.futures);
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
         let r = f(self);
@@ -964,6 +988,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.cur_depth = saved_depth;
         self.cur_ret = saved_ret;
         self.ret_what = saved_what;
+        self.futures = saved_futures;
         if let Some(bb) = saved_bb {
             self.b.position_at_end(bb);
         }
@@ -1228,7 +1253,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
-            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) | Type::App(..) => self.ptr.into(),
+            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) | Type::App(..) | Type::Map(..) => self.ptr.into(),
         }
     }
 
@@ -1320,6 +1345,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let lazy_mark = self.lazies.len();
         // implicit futures started in this block and not awaited yet
         let mut pending: Vec<Pending<'ctx>> = Vec::new();
+        self.futures.push(Vec::new());
         for (i, s) in b.stmts.iter().enumerate() {
             if !pending.is_empty() {
                 if self.purity.stmt_may_overlap(self.p, self.cur_mod, s) {
@@ -1343,6 +1369,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.lazies.push((name.clone(), value as *const Expr));
                 continue;
             }
+            *self.futures.last_mut().unwrap() = pending.clone(); // for `return`s inside
             self.stmt(s)?;
         }
         if !pending.is_empty() && !self.terminated() {
@@ -1358,6 +1385,7 @@ impl<'ctx> Cg<'ctx, '_> {
         if self.terminated() {
             self.dead_block();
         }
+        *self.futures.last_mut().unwrap() = pending.clone();
         let v = match &b.tail {
             Some(e) => self.expr(e)?,
             None => self.null(),
@@ -1366,6 +1394,7 @@ impl<'ctx> Cg<'ctx, '_> {
         if !pending.is_empty() && !self.terminated() {
             self.await_all(&mut pending)?;
         }
+        self.futures.pop();
         let v = self.own(v)?;
         let scope = self.scopes.pop().unwrap();
         self.lazies.truncate(lazy_mark);
@@ -1873,10 +1902,16 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
         let val = st.const_named_struct(&[tname.into(), vname.into(), i32t.const_int(tag, false).into(), i32t.const_int(n, false).into(), fields.into()]);
-        let g = self.module.add_global(st, None, "desc");
+        // the standard library's types are known to the runtime by name
+        // (`mim_desc_Ok`, `mim_desc_Response`), so intrinsics can build them
+        let std_name = (self.p.mods[td.module].package == "std").then(|| match variant {
+            Some(v) => format!("mim_desc_{}", td.variants()[v].name),
+            None => format!("mim_desc_{}", td.name),
+        });
+        let g = self.module.add_global(st, None, std_name.as_deref().unwrap_or("desc"));
         g.set_initializer(&val);
         g.set_constant(true);
-        g.set_linkage(Linkage::Private);
+        g.set_linkage(if std_name.is_some() { Linkage::WeakODR } else { Linkage::Private });
         let p = self.gaddr(g);
         self.descs.insert((t, variant), p);
         p

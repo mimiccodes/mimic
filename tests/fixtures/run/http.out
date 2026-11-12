@@ -1,0 +1,13 @@
+(200, "hello", Some("text/plain; charset=utf-8"))
+200 user #42
+200 user #7
+404 not found
+201 x=1 data Some("yes")
+404 not found
+Ok(27)
+true
+true
+Ok(7)
+true
+Err("https needs TLS, which this version of mimic does not support yet")
+true

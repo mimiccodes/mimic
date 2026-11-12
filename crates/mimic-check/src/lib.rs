@@ -708,6 +708,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
         }
         Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
         Type::App(n, _, s) => Err(Diag::new(&C::NOT_C_TYPE, format!("`{n}[…]` is not a C type; use one of {}", C_TYPES.join(", ")), *s)),
+        Type::Map(_, _, s) => Err(Diag::new(&C::NOT_C_TYPE, "maps cannot cross the FFI boundary", *s)),
         Type::Fn(_, _, s) => Err(Diag::new(&C::FFI_UNSUPPORTED, "C callbacks (function pointers) are not supported yet", *s)),
     }
 }
@@ -732,6 +733,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
         Type::Ptr(_, s) => return Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
         Type::Fn(..) => 9, // TY_FN: any function value
         Type::App(n, _, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("`{n}[…]` is checked statically"), *s)),
+        Type::Map(_, _, s) => return Err(Diag::new(&C::UNKNOWN_TYPE, "maps are checked statically", *s)),
     })
 }
 
@@ -815,6 +817,7 @@ impl Checker<'_> {
                 }
             },
             Type::Array(inner, _) => self.ann_result(inner),
+            Type::Map(k, v, _) => self.ann_result(k).and_then(|_| self.ann_result(v)),
             Type::Ptr(_, s) => Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
             Type::Fn(ps, r, _) => {
                 for p in ps {
@@ -1640,6 +1643,9 @@ pub struct Purity {
     /// Pure, or only effects that may overlap each other (reads, sleeping):
     /// calls may run concurrently (implicit futures, parallel `¨`).
     pub overlap: Vec<bool>,
+    /// Never reaches an effect that must wait for pending futures (writes,
+    /// environment changes, processes, C calls); printing is fine.
+    pub calm: Vec<bool>,
 }
 
 impl Purity {
@@ -1647,13 +1653,14 @@ impl Purity {
         // Optimistic fixpoint: assume pure, then knock out until stable.
         // runtime intrinsics (strings, lists, maps) have no side effects;
         // `extern "mimic-io"` ones (files, environment, stdin) do
-        let pure = Self::fixpoint(p, |decl| decl.intrinsic && !decl.effects);
-        let overlap = Self::fixpoint(p, |decl| decl.intrinsic && (!decl.effects || decl.overlap));
-        Purity { fns: pure, overlap }
+        let pure = Self::fixpoint(p, false, |decl| decl.intrinsic && !decl.effects);
+        let overlap = Self::fixpoint(p, false, |decl| decl.intrinsic && (!decl.effects || decl.overlap));
+        let calm = Self::fixpoint(p, true, |decl| decl.intrinsic && !decl.sync);
+        Purity { fns: pure, overlap, calm }
     }
 
     /// Functions that only use the externs `ok` allows (optimistic fixpoint).
-    fn fixpoint(p: &Program, ok: impl Fn(&ExternFn) -> bool) -> Vec<bool> {
+    fn fixpoint(p: &Program, print_ok: bool, ok: impl Fn(&ExternFn) -> bool) -> Vec<bool> {
         let mut pure: Vec<bool> = p
             .fns
             .iter()
@@ -1669,7 +1676,7 @@ impl Purity {
                     continue;
                 }
                 if let FnKind::User(d) = &f.kind {
-                    let ok = PurityWalk { p, module: f.module, pure: &pure }.block(&d.body);
+                    let ok = PurityWalk { p, module: f.module, pure: &pure, print_ok }.block(&d.body);
                     if !ok {
                         pure[fid] = false;
                         changed = true;
@@ -1689,30 +1696,21 @@ impl Purity {
         let ExprKind::Call { callee, args } = &value.kind else { return None };
         let ExprKind::Path(path) = &callee.kind else { return None };
         let Ok(Resolved::Fn(f)) = p.resolve(module, path) else { return None };
-        let args_ok = args.iter().all(|a| PurityWalk { p, module, pure: &self.fns }.expr(a));
+        let args_ok = args.iter().all(|a| PurityWalk { p, module, pure: &self.fns, print_ok: false }.expr(a));
         (matches!(p.fns[f].kind, FnKind::User(_)) && !self.fns[f] && self.overlap[f] && args_ok).then_some(f)
     }
 
-    /// May this statement run while implicit futures are still pending? (It
-    /// has no effects that must stay in order, and cannot leave the block.)
+    /// May this statement run while implicit futures are still pending? It
+    /// changes nothing they might read (printing is fine; writing files,
+    /// changing the environment or running programs is not). A `return`
+    /// inside it awaits the pending futures itself, where it actually leaves.
     pub fn stmt_may_overlap(&self, p: &Program, module: ModId, s: &Stmt) -> bool {
-        let w = PurityWalk { p, module, pure: &self.overlap };
-        let exits = |e: &Expr| {
-            let mut found = false;
-            // conservative: a `return` inside a lambda also counts
-            let leaves = |b: &Block| b.stmts.iter().any(|s| matches!(s, Stmt::Return(..) | Stmt::LetElse { .. }));
-            e.walk(&mut |x| match &x.kind {
-                ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } if leaves(b) => found = true,
-                _ => {}
-            });
-            found
-        };
+        let w = PurityWalk { p, module, pure: &self.calm, print_ok: true };
         match s {
-            Stmt::Return(..) | Stmt::LetElse { .. } => false,
-            Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => w.expr(value) && !exits(value),
-            Stmt::Assign { index, value, .. } => {
-                index.as_ref().is_none_or(|i| w.expr(i) && !exits(i)) && w.expr(value) && !exits(value)
-            }
+            Stmt::Return(e, _) => e.as_ref().is_none_or(|e| w.expr(e)),
+            Stmt::LetElse { value, els, .. } => w.expr(value) && w.block(els),
+            Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => w.expr(value),
+            Stmt::Assign { index, value, .. } => index.as_ref().is_none_or(|i| w.expr(i)) && w.expr(value),
         }
     }
 
@@ -1726,7 +1724,7 @@ impl Purity {
     pub fn operand_overlaps(&self, p: &Program, module: ModId, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.overlap[f]),
-            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.overlap }.expr(body),
+            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.overlap, print_ok: false }.expr(body),
             _ => false,
         }
     }
@@ -1735,7 +1733,7 @@ impl Purity {
     pub fn operand_is_pure(&self, p: &Program, module: ModId, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.fns[f]),
-            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.fns }.expr(body),
+            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.fns, print_ok: false }.expr(body),
             _ => false,
         }
     }
@@ -1745,9 +1743,22 @@ struct PurityWalk<'a> {
     p: &'a Program,
     module: ModId,
     pure: &'a [bool],
+    /// `print` allowed (the "calm" analysis)
+    print_ok: bool,
 }
 
 impl PurityWalk<'_> {
+    /// A function passed as an argument: a named function or a lambda whose
+    /// effects are allowed; any other function value is unknown.
+    fn fn_operand(&self, a: &Expr) -> bool {
+        match &a.kind {
+            ExprKind::Lambda { body, .. } => self.expr(body),
+            ExprKind::OpRef(_) => true,
+            ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+            _ => false,
+        }
+    }
+
     fn block(&self, b: &Block) -> bool {
         b.stmts.iter().all(|s| match s {
             Stmt::Let { value, .. } => self.expr(value),
@@ -1772,6 +1783,13 @@ impl PurityWalk<'_> {
                         ExprKind::Lambda { body, .. } => self.expr(body),
                         ExprKind::OpRef(_) => true,
                         ExprKind::Path(path) => match self.p.resolve(self.module, path) {
+                            // a runtime intrinsic that calls a function it is given
+                            // (`serve(port, handle)`) has that function's effects too
+                            Ok(Resolved::Fn(f)) if matches!(&self.p.fns[f].kind, FnKind::Extern { decl, .. } if decl.intrinsic) => {
+                                let FnKind::Extern { decl, .. } = &self.p.fns[f].kind else { unreachable!() };
+                                self.pure[f]
+                                    && decl.params.iter().zip(args).all(|((_, t), a)| !matches!(t, Type::Fn(..)) || self.fn_operand(a))
+                            }
                             Ok(Resolved::Fn(f)) => self.pure[f],
                             Ok(Resolved::Variant(..)) => true,
                             _ => false,
@@ -1802,7 +1820,7 @@ impl PurityWalk<'_> {
                 })
             }
             ExprKind::Prim { prim, args } => {
-                *prim != Prim::Print
+                (*prim != Prim::Print || self.print_ok)
                     && if *prim == Prim::Each {
                         self.expr(&args[0])
                             && match &args[1].kind {

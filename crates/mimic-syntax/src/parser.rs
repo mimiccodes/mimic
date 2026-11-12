@@ -329,7 +329,8 @@ impl Parser {
                     t => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected ABI string, e.g. extern \"C\"", t.span)),
                 };
                 let overlap = abi == "mimic-io-concurrent";
-                let effects = abi == "mimic-io" || overlap;
+                let sync = abi == "mimic-io-sync";
+                let effects = abi == "mimic-io" || overlap || sync;
                 let intrinsic = abi == "mimic" || effects;
                 if abi != "C" && !intrinsic {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
@@ -390,7 +391,7 @@ impl Parser {
                     self.nl_ignore -= 1;
                     self.expect(&Tok::RParen)?;
                     let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, effects, overlap, ret, span: fstart });
+                    fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, effects, overlap, sync, ret, span: fstart });
                 }
                 let trusted = trusted || intrinsic;
                 Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
@@ -566,6 +567,11 @@ impl Parser {
         let s = self.span();
         if self.eat(&Tok::LBracket) {
             let inner = self.ty()?;
+            if self.eat(&Tok::Colon) {
+                let v = self.ty()?;
+                self.expect(&Tok::RBracket)?;
+                return Ok(Type::Map(Box::new(inner), Box::new(v), s));
+            }
             self.expect(&Tok::RBracket)?;
             return Ok(Type::Array(Box::new(inner), s));
         }

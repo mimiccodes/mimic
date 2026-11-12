@@ -85,7 +85,7 @@ true
 [Ok("alpha") Ok("beta")]
 ```
 
-Ordered effects such as `print` and `write_file` still happen exactly in program order. Before one runs, everything started earlier finishes, so a write never overtakes a read. You write plain sequential code, and the waiting overlaps by itself.
+Ordered effects such as `print` still happen exactly in program order. Before anything that changes files, the environment or other programs runs, everything started earlier finishes, so a write never overtakes a read. You write plain sequential code, and the waiting overlaps by itself.
 
 ## Why it is safe
 

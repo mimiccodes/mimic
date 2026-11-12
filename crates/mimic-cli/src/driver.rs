@@ -17,6 +17,7 @@ pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
 pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
 pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/mimic_io.c");
+pub const RUNTIME_SOCKET_C: &str = include_str!("../../../runtime/mimic_socket.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -141,7 +142,8 @@ pub extern \"mimic\" {
 
 // The program and its surroundings. These have side effects, so they never
 // run in parallel or out of order (runtime/mimic_io.c).
-// \"mimic-io\": effects that must happen in program order.
+// \"mimic-io\": effects that happen in program order (they change nothing
+// that overlapping reads see, so pending implicit futures keep running).
 pub extern \"mimic-io\" {
     fn eprint(value: any)
     fn exit(code: i64)
@@ -172,8 +174,13 @@ extern \"mimic-io-concurrent\" {
 }
 
 extern \"mimic-io\" {
-    fn io_set_env(name: str, value: str) -> bool
     fn io_read_line() -> str
+}
+
+// \"mimic-io-sync\": changes what overlapping reads would see, so pending
+// implicit futures finish first.
+extern \"mimic-io-sync\" {
+    fn io_set_env(name: str, value: str) -> bool
     fn io_write_file(path: str, text: str, append: bool) -> i64
     fn io_remove_file(path: str) -> bool
     fn io_rename(from: str, to: str) -> bool
@@ -285,7 +292,7 @@ extern \"mimic-io-concurrent\" {
     fn time_local_parts(t: i64) -> [i64]
 }
 
-extern \"mimic-io\" {
+extern \"mimic-io-sync\" {
     fn io_run(program: str, arguments: [str]) -> any
 }
 
@@ -308,6 +315,46 @@ pub fn run(program: str, arguments: [str]) -> Result[Output, str] {
     let r = io_run(program, arguments)
     if io_ok() { Ok(Output { status: r[0], stdout: r[1], stderr: r[2] }) } else { Err(io_error()) }
 }
+
+// ---- networking ------------------------------------------------------------
+
+pub type Socket = { fd: i64 }
+pub type Listener = { fd: i64, port: i64 }
+
+// An HTTP request as a server receives it. Header names are lower case.
+pub type Request = { method: str, path: str, query: str, headers: [str: str], body: str }
+
+// An HTTP response (both what a server sends and what a client receives).
+pub type Response = { status: i64, headers: [str: str], body: str }
+
+// TCP: in program order.
+pub extern \"mimic-io\" {
+    fn tcp_connect(host: str, port: i64) -> Result[Socket, str]
+    fn tcp_listen(port: i64) -> Result[Listener, str]
+    fn tcp_accept(listener: Listener) -> Result[Socket, str]
+    fn send(socket: Socket, text: str) -> Result[i64, str]
+    fn receive(socket: Socket, limit: i64) -> Result[str, str]
+    fn close(socket: any)
+}
+
+// HTTP: requests overlap (`let a = fetch(u1)` and `let b = fetch(u2)` run at
+// the same time); a server runs its handler in parallel when the handler's
+// effects may overlap, else one request at a time, in order.
+pub extern \"mimic-io-concurrent\" {
+    fn fetch(url: str) -> Result[Response, str]
+    fn request(method: str, url: str, headers: [str: str], body: str) -> Result[Response, str]
+    fn serve(port: i64, handler: fn(Request) -> Response) -> Result[i64, str]
+    fn serve_requests(port: i64, handler: fn(Request) -> Response, count: i64) -> Result[i64, str]
+}
+
+// Responses for handlers.
+pub fn respond(status: i64, body: str) -> Response {
+    Response { status: status, headers: [\"content-type\": \"text/plain; charset=utf-8\"], body: body }
+}
+
+pub fn ok(body: str) -> Response { respond(200, body) }
+
+pub fn not_found() -> Response { respond(404, \"not found\") }
 
 // Run a command line through the system shell (/bin/sh -c).
 pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
@@ -489,7 +536,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -506,6 +553,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
     let mut c = toolchain::cc(tc, target);

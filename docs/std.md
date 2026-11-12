@@ -130,3 +130,51 @@ Pure text operations, so they stay parallel:
 `lines(s)` splits at newlines and drops a `\r` before each one. A final newline ends the last line instead of starting an empty one, so `lines(read_file(…))` gives exactly the file's lines.
 
 The names in the standard library never block your own: a variable or function of yours may be called `args`, `parent` or `remove_file`, and your definition wins in your code.
+
+## Networking
+
+### HTTP
+
+```mimic
+let r = fetch("http://example.com/") else { return }      // Result[Response, str]
+print((r.status, r.body, get(r.headers, "content-type")))
+request("POST", url, ["content-type": "application/json"], body)
+
+fn handle(req: Request) -> Response {
+    match (req.method, req.path) {
+        ("GET", "/") => ok("hello"),
+        ("GET", "/users/{id: i64}") => ok("user #{id}"),
+        _ => not_found(),
+    }
+}
+serve(8080, handle)                                        // runs until the program ends
+```
+
+| Function / type | Meaning |
+|---|---|
+| `fetch(url)` | `Result[Response, str]`: a GET request |
+| `request(method, url, headers, body)` | Any method, with `[str: str]` headers and a body |
+| `serve(port, handler)` | An HTTP/1.1 server; `handler` is a `fn(Request) -> Response` |
+| `serve_requests(port, handler, n)` | The same, stopping after `n` requests; `Ok(n)` |
+| `Request` | `{ method, path, query, headers, body }`: header names are lower case, `query` is the part after `?` |
+| `Response` | `{ status, headers, body }` |
+| `ok(body)`, `respond(status, body)`, `not_found()` | Responses (text/plain unless the headers say otherwise) |
+
+How the client and server behave:
+* **Requests overlap.** `let a = fetch(u1)` and `let b = fetch(u2)` are in flight at the same time (implicit futures).
+* **The server runs a pure handler in parallel**, or one whose effects may overlap: each connection gets its own thread. A handler that prints or writes files handles one request at a time, in order.
+* **One request per connection** (`Connection: close`). Request and response bodies use `Content-Length`; chunked responses are decoded.
+* **`https://` is not supported yet** (TLS is planned) and returns `Err`. WebAssembly has no sockets, so there every network function returns `Err`.
+
+### TCP
+
+| Function | Result |
+|---|---|
+| `tcp_connect(host, port)` | `Result[Socket, str]` |
+| `tcp_listen(port)` | `Result[Listener, str]`; port 0 picks a free port, see `.port` |
+| `tcp_accept(listener)` | `Result[Socket, str]` |
+| `send(socket, text)` | `Result[i64, str]`: everything is sent |
+| `receive(socket, limit)` | `Result[str, str]`: up to `limit` bytes; `""` when the other side closed |
+| `close(socket)` | Close a socket or listener |
+
+TCP calls happen in program order.
