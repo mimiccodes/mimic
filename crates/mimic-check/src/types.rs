@@ -1234,6 +1234,52 @@ impl Walk<'_, '_> {
                         (_, r) => r,             // `¨` on a scalar applies f once
                     };
                 }
+                // x ▷ evolve(n, step) / x ▷ settle(step, done): the step
+                // function takes the state; when it gives back the same type,
+                // the state keeps that type throughout (else it is dynamic)
+                if matches!(prim, Prim::Evolve | Prim::Settle) && a != Ty::Never && a != Ty::Dyn {
+                    let (step, done) = if *prim == Prim::Evolve {
+                        self.expr(&args[1]);
+                        (&args[2], None)
+                    } else {
+                        (&args[1], Some(&args[2]))
+                    };
+                    let ExprKind::Lambda { params, .. } = &step.kind else {
+                        args.iter().skip(1).for_each(|x| {
+                            self.expr(x);
+                        });
+                        return Ty::Dyn;
+                    };
+                    if params.len() != 1 {
+                        args.iter().skip(1).for_each(|x| {
+                            self.expr(x);
+                        });
+                        return Ty::Dyn;
+                    }
+                    let r = self.lambda(step, vec![a]);
+                    let st = if r == a {
+                        a
+                    } else {
+                        if r != Ty::Never {
+                            self.lambda(step, vec![Ty::Dyn]);
+                        }
+                        Ty::Dyn
+                    };
+                    if let Some(d) = done {
+                        match &d.kind {
+                            ExprKind::Lambda { params, .. } if params.len() == 1 => {
+                                self.lambda(d, vec![st]);
+                                self.out.exprs.insert(id(d), Ty::Dyn);
+                            }
+                            _ => {
+                                self.expr(d);
+                            }
+                        }
+                    }
+                    // the lambdas themselves are function values
+                    self.out.exprs.insert(id(step), Ty::Dyn);
+                    return if r == Ty::Never { Ty::Never } else { st };
+                }
                 let b = if args.len() > 1 { self.expr(&args[1]) } else { Ty::Unit };
                 for extra in args.iter().skip(2) {
                     self.expr(extra);

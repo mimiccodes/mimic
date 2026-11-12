@@ -10,6 +10,7 @@
  *   MIMIC_PAR_GRAIN   elements per chunk (default 16384)
  */
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,7 +331,7 @@ static size_t elsize(int dt) {
 
 #define SMALL_BYTES 16 /* payload bytes (incl. NUL) served by the free list */
 #define MID_BYTES 64   /* a second free list: short vectors, small records, short strings */
-#define FREE_LIST_CAP 4096
+#define FREE_LIST_CAP 4096 /* also in the compiler (release_fn) */
 #define MAX_SLOTS 257
 
 /* per-thread counters, padded to 128-byte lines (Apple Silicon) */
@@ -360,6 +361,20 @@ static padded_count *live_of(heap_state *h) {
 }
 
 static padded_count *live_slot(void) { return live_of(&t_heap); }
+
+/* This thread's heap, for compiled code: a function fetches it once and
+ * then allocates and frees short vectors inline (codegen: alloc_vec_fn and
+ * release_fn mirror alloc and dealloc below for that case). A coroutine
+ * never moves between threads, so the pointer stays right for the whole
+ * call. The layout is shared with the compiler: keep them in step. */
+_Static_assert(SIZE_CLASSES == 3, "the compiler's inline allocator knows three size classes");
+_Static_assert(offsetof(heap_state, free_len) == 3 * sizeof(void *), "heap_state layout is shared with the compiler");
+_Static_assert(offsetof(padded_count, n) == 0, "padded_count layout is shared with the compiler");
+heap_state *mim_heap(void) {
+    heap_state *h = &t_heap;
+    live_of(h);
+    return h;
+}
 
 /* The size class of a payload, or SIZE_CLASSES when it is bigger. */
 static inline int size_class(size_t bytes) {
@@ -395,15 +410,26 @@ void mim_release(mim_val *v);
 
 static void map_dealloc_meta(mim_val *m);
 
-static void dealloc(mim_val *v) {
-    if (IS_HANDLES(v)) { /* release children */
+static void dealloc_in(heap_state *h, mim_val *v);
+
+/* Drop one reference (h: this thread's heap). The only reference: no other
+ * thread can see the value, so no atomic update. */
+static inline void release_in(heap_state *h, mim_val *v) {
+    if (!v) return;
+    int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
+    if (rc == 1) dealloc_in(h, v);
+    else if (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0) dealloc_in(h, v);
+}
+
+static void dealloc_in(heap_state *h, mim_val *v) {
+    int dt = v->dtype;
+    if (dt == MIM_BOXED || dt == MIM_OBJ || dt == MIM_FN || dt == MIM_MAP) { /* release children */
         mim_val **hs = (mim_val **)v->data;
-        for (int64_t i = 0; i < v->len; i++) mim_release(hs[i]);
+        for (int64_t i = 0; i < v->len; i++) release_in(h, hs[i]);
+        if (dt == MIM_MAP) map_dealloc_meta(v);
     }
-    if (v->dtype == MIM_MAP) map_dealloc_meta(v);
-    else if (v->rank >= 2) free((void *)v->desc); /* the shape of a matrix */
-    size_t bytes = (size_t)v->len * elsize(v->dtype) + 1;
-    heap_state *h = &t_heap;
+    if (v->rank >= 2 && dt != MIM_MAP) free((void *)v->desc); /* the shape of a matrix */
+    size_t bytes = (size_t)v->len * elsize(dt) + 1;
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
     int c = size_class(bytes);
@@ -415,6 +441,8 @@ static void dealloc(mim_val *v) {
         free(v);
     }
 }
+
+static void dealloc(mim_val *v) { dealloc_in(&t_heap, v); }
 
 /* Give this thread's cached blocks back to malloc (before the thread ends). */
 static void free_list_drain(void) {
@@ -439,9 +467,7 @@ void mim_retain(mim_val *v) {
 void mim_release(mim_val *v) {
     if (!v) return;
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
-    /* the only reference: no other thread can see it, so no atomic update */
-    if (rc == 1) dealloc(v);
-    else if (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0) dealloc(v);
+    if (rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0)) dealloc_in(&t_heap, v);
 }
 
 /* Immortal values are never counted, refcounted or freed. */

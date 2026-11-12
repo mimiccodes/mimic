@@ -510,7 +510,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
         let n = self.plan_len(&plan)?;
-        let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
+        let out = self.alloc_vec(dtype_of(el), n)?;
         let data = self.data_of(out)?;
         let mode = Mode::Map(el);
         self.small_or_kernel(&root, &plan, n, mode, data, |cg| {
@@ -571,6 +571,28 @@ impl<'ctx> Cg<'ctx, '_> {
         })
     }
 
+    /// out[i] = v, for a map's output of element type `el`.
+    fn store_elem(&mut self, out: BasicValueEnum<'ctx>, el: El, i: IntValue<'ctx>, v: V<'ctx>) -> R<()> {
+        let i64t = self.ctx.i64_type();
+        let base = out.into_pointer_value();
+        match el {
+            El::F64 => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
+                self.b.build_store(p, self.to_f64(v)?).s()?;
+            }
+            El::Bool => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
+                let t = self.truth(v)?;
+                self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+            }
+            _ => {
+                let p = unsafe { self.b.build_in_bounds_gep(i64t, base, &[i], "").s()? };
+                self.b.build_store(p, self.to_i64(v)?).s()?;
+            }
+        }
+        Ok(())
+    }
+
     /// The loop itself, in the current function, over `0..n`.
     fn inline_loop(&mut self, root: &Node, plan: &Plan<'ctx>, n: IntValue<'ctx>, mode: Mode, out: BasicValueEnum<'ctx>) -> R<Option<V<'ctx>>> {
         let i64t = self.ctx.i64_type();
@@ -594,22 +616,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let acc = aphi.as_basic_value();
         let next: BasicValueEnum = match mode {
             Mode::Map(el) => {
-                let base = out.into_pointer_value();
-                match el {
-                    El::F64 => {
-                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
-                        self.b.build_store(p, self.to_f64(v)?).s()?;
-                    }
-                    El::Bool => {
-                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
-                        let t = self.truth(v)?;
-                        self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
-                    }
-                    _ => {
-                        let p = unsafe { self.b.build_in_bounds_gep(i64t, base, &[i], "").s()? };
-                        self.b.build_store(p, self.to_i64(v)?).s()?;
-                    }
-                }
+                self.store_elem(out, el, i, v)?;
                 acc
             }
             Mode::Reduce(prim, _) => self.combine(prim, float, acc, v)?,
@@ -708,7 +715,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut plan = Plan::default();
         let root = self.build(arg, &mut plan)?;
         let n = self.plan_len(&plan)?;
-        let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
+        let out = self.alloc_vec(dtype_of(el), n)?;
         let data = self.data_of(out)?;
         let grain = self.grain()?;
         let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
@@ -754,13 +761,13 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(out)
     }
 
-    /// The elements of a vector just allocated (its header's data pointer).
+    /// The elements of a vector just allocated: a new vector keeps them
+    /// right after its header (alloc in mimic_rt.c), so this is an address,
+    /// not a load, and LLVM sees they belong to the new vector alone.
     fn data_of(&mut self, v: V<'ctx>) -> R<BasicValueEnum<'ctx>> {
-        let i64t = self.ctx.i64_type();
-        let i32t = self.ctx.i32_type();
-        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
-        let fp = self.b.build_struct_gep(hdr, self.basic(v).into_pointer_value(), 4, "").s()?;
-        self.b.build_load(self.ptr, fp, "data").s()
+        let vt = self.val_ty();
+        let p = self.basic(v).into_pointer_value();
+        Ok(unsafe { self.b.build_in_bounds_gep(vt, p, &[self.ctx.i32_type().const_int(1, false)], "data").s()? }.into())
     }
 
     /// The runtime's chunk size (a global it sets once).
@@ -782,9 +789,14 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(v).into_pointer_value();
+        // a vector's header never changes while it is alive (as in index_fast)
+        let invariant = self.ctx.get_kind_id("invariant.load");
+        let empty = self.ctx.metadata_node(&[]);
         let load = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
-            cg.b.build_load(t, fp, "").s()
+            let v = cg.b.build_load(t, fp, "").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+            Ok(v)
         };
         let dtype = load(self, 1, i32t.into())?.into_int_value();
         let rank = load(self, 2, i32t.into())?.into_int_value();
@@ -800,8 +812,9 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_unreachable().s()?;
         self.b.position_at_end(good);
         let len = load(self, 3, i64t.into())?.into_int_value();
-        let data = load(self, 4, self.ptr.into())?;
-        Ok((len, data))
+        // the elements always follow the header (alloc in mimic_rt.c)
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "data").s()? };
+        Ok((len, data.into()))
     }
 
     /// Run kernel `k` over `0..n`: directly when it is one chunk (no thread

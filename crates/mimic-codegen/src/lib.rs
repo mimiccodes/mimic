@@ -207,6 +207,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         native_frame: false,
         cur_depth: None,
         lambdas: 0,
+        heaps: Default::default(),
         descs: HashMap::new(),
         lazies: Vec::new(),
         futures: Vec::new(),
@@ -372,6 +373,9 @@ struct Cg<'ctx, 'p> {
     lazies: Vec<(String, *const Expr)>,
     /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
     opt_level: u8,
+    /// This thread's heap (`mim_heap()`), fetched once at the top of each
+    /// function that allocates or frees inline.
+    heaps: std::cell::RefCell<Vec<(FunctionValue<'ctx>, PointerValue<'ctx>)>>,
 }
 
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
@@ -600,9 +604,224 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn drop_tmp(&self, v: V<'ctx>) -> R<()> {
         if let V::P(p, true) = v {
-            self.call_rt("mim_release", &[p.into()])?;
+            self.release(p)?;
         }
         Ok(())
+    }
+
+    /// Release a value: short numeric vectors held once go straight back to
+    /// this thread's free list, inline; everything else through mim_release.
+    fn release(&self, p: PointerValue<'ctx>) -> R<()> {
+        match self.heap()? {
+            Some(h) => {
+                let f = self.release_fn();
+                self.b.build_call(f, &[h.into(), p.into()], "").s()?;
+            }
+            None => {
+                self.call_rt("mim_release", &[p.into()])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A fresh vector of `n` elements of `dtype` (uninitialised elements).
+    fn alloc_vec(&self, dtype: i32, n: IntValue<'ctx>) -> R<V<'ctx>> {
+        match self.heap()? {
+            Some(h) => {
+                let f = self.alloc_vec_fn();
+                let r = self.b.build_call(f, &[h.into(), self.i32c(dtype), n.into()], "").s()?;
+                Ok(V::P(r.try_as_basic_value().basic().unwrap().into_pointer_value(), true))
+            }
+            None => self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype), n.into()]),
+        }
+    }
+
+    /// This thread's heap for the current function: one `mim_heap()` call at
+    /// the top of the function (optimised builds only).
+    fn heap(&self) -> R<Option<PointerValue<'ctx>>> {
+        let Some(f) = self.cur_fn else { return Ok(None) };
+        if self.opt_level < 2 {
+            return Ok(None);
+        }
+        // eBPF cannot express the atomic loads the inline paths use
+        if self.module.get_triple().as_str().to_string_lossy().starts_with("bpf") {
+            return Ok(None);
+        }
+        if let Some((_, h)) = self.heaps.borrow().iter().find(|(g, _)| *g == f) {
+            return Ok(Some(*h));
+        }
+        let entry = f.get_first_basic_block().ok_or("function without a body")?;
+        let b = self.ctx.create_builder();
+        match entry.get_first_instruction() {
+            Some(i) => b.position_before(&i),
+            None => b.position_at_end(entry),
+        }
+        let h = b.build_call(self.rt("mim_heap"), &[], "heap").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        self.heaps.borrow_mut().push((f, h));
+        Ok(Some(h))
+    }
+
+    /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
+    fn val_ty(&self) -> inkwell::types::StructType<'ctx> {
+        let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
+        self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into(), self.ptr.into()], false)
+    }
+
+    fn heap_ty(&self) -> inkwell::types::StructType<'ctx> {
+        let i32t = self.ctx.i32_type();
+        self.ctx.struct_type(&[self.ptr.array_type(3).into(), i32t.array_type(3).into(), self.ptr.into()], false)
+    }
+
+    /// The size class of a payload of `bytes` (0, 1, 2; 3: too big), as in
+    /// the runtime's size_class.
+    fn size_class_of(&self, b: &Builder<'ctx>, bytes: IntValue<'ctx>) -> R<IntValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let le = |n: u64| b.build_int_compare(IntPredicate::ULE, bytes, i64t.const_int(n, false), "");
+        let c2 = b.build_select(le(256).s()?, i64t.const_int(2, false), i64t.const_int(3, false), "").s()?.into_int_value();
+        let c1 = b.build_select(le(64).s()?, i64t.const_int(1, false), c2, "").s()?.into_int_value();
+        Ok(b.build_select(le(16).s()?, i64t.const_zero(), c1, "").s()?.into_int_value())
+    }
+
+    /// `_mimic_alloc_vec(heap, dtype, n)`: alloc (mimic_rt.c) for a vector,
+    /// inline when its size class has a free block, else mim_alloc_vec.
+    fn alloc_vec_fn(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("_mimic_alloc_vec") {
+            return f;
+        }
+        let (i64t, i32t, i8t) = (self.ctx.i64_type(), self.ctx.i32_type(), self.ctx.i8_type());
+        let f = self.module.add_function("_mimic_alloc_vec", self.ptr.fn_type(&[self.ptr.into(), i32t.into(), i64t.into()], false), Some(Linkage::Internal));
+        // a new vector: nothing else points into it
+        f.add_attribute(inkwell::attributes::AttributeLoc::Return, self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("noalias"), 0));
+        let build = || -> R<()> {
+            let (vt, ht) = (self.val_ty(), self.heap_ty());
+            let b = self.ctx.create_builder();
+            let entry = self.ctx.append_basic_block(f, "entry");
+            let pop = self.ctx.append_basic_block(f, "pop");
+            let take = self.ctx.append_basic_block(f, "take");
+            let slow = self.ctx.append_basic_block(f, "slow");
+            let h = f.get_nth_param(0).unwrap().into_pointer_value();
+            let dt = f.get_nth_param(1).unwrap().into_int_value();
+            let n = f.get_nth_param(2).unwrap().into_int_value();
+            b.position_at_end(entry);
+            // bool, char and byte vectors take 1 byte per element, numbers 8
+            let small = |k: u64| b.build_int_compare(IntPredicate::EQ, dt, i32t.const_int(k, false), "");
+            let one = b.build_or(b.build_or(small(2).s()?, small(3).s()?, "").s()?, small(8).s()?, "").s()?;
+            let es = b.build_select(one, i64t.const_int(1, false), i64t.const_int(8, false), "").s()?.into_int_value();
+            let bytes = b.build_int_add(b.build_int_mul(n, es, "").s()?, i64t.const_int(1, false), "bytes").s()?;
+            let c = self.size_class_of(&b, bytes)?;
+            let fits = b.build_int_compare(IntPredicate::ULT, c, i64t.const_int(3, false), "").s()?;
+            b.build_conditional_branch(fits, pop, slow).s()?;
+            b.position_at_end(pop);
+            let zero = i32t.const_zero();
+            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), zero.into(), c.into()], "").s()? };
+            let v = b.build_load(self.ptr, slot, "v").s()?.into_pointer_value();
+            let some = b.build_is_not_null(v, "").s()?;
+            b.build_conditional_branch(some, take, slow).s()?;
+            b.position_at_end(take);
+            let next = b.build_load(self.ptr, v, "").s()?;
+            b.build_store(slot, next).s()?;
+            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), i32t.const_int(1, false).into(), c.into()], "").s()? };
+            let fl = b.build_load(i32t, lenp, "").s()?.into_int_value();
+            b.build_store(lenp, b.build_int_sub(fl, i32t.const_int(1, false), "").s()?).s()?;
+            // the header, as alloc writes it
+            let fld = |k: u32| b.build_struct_gep(vt, v, k, "");
+            b.build_store(fld(0).s()?, i64t.const_int(1, false)).s()?;
+            b.build_store(fld(1).s()?, dt).s()?;
+            b.build_store(fld(2).s()?, i32t.const_int(1, false)).s()?;
+            b.build_store(fld(3).s()?, n).s()?;
+            let data = unsafe { b.build_in_bounds_gep(vt, v, &[i32t.const_int(1, false)], "data").s()? };
+            b.build_store(fld(4).s()?, data).s()?;
+            b.build_store(fld(5).s()?, self.ptr.const_null()).s()?;
+            let last = unsafe { b.build_in_bounds_gep(i8t, data, &[b.build_int_sub(bytes, i64t.const_int(1, false), "").s()?], "").s()? };
+            b.build_store(last, i8t.const_zero()).s()?;
+            // one more live value on this thread
+            let livep = b.build_struct_gep(ht, h, 2, "").s()?;
+            let live = b.build_load(self.ptr, livep, "").s()?.into_pointer_value();
+            let cnt = b.build_load(i64t, live, "").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&cnt).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
+            let st = b.build_store(live, b.build_int_add(cnt.into_int_value(), i64t.const_int(1, false), "").s()?).s()?;
+            st.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
+            b.build_return(Some(&v)).s()?;
+            b.position_at_end(slow);
+            let r = b.build_call(self.rt("mim_alloc_vec"), &[dt.into(), n.into()], "").s()?.try_as_basic_value().basic().unwrap();
+            b.build_return(Some(&r)).s()?;
+            Ok(())
+        };
+        build().expect("building _mimic_alloc_vec");
+        f
+    }
+
+    /// `_mimic_release(heap, v)`: mim_release, with dealloc inline for a
+    /// vector of numbers held once whose block fits a free list.
+    fn release_fn(&self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.module.get_function("_mimic_release") {
+            return f;
+        }
+        let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
+        let f = self.module.add_function("_mimic_release", self.ctx.void_type().fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(Linkage::Internal));
+        let build = || -> R<()> {
+            let (vt, ht) = (self.val_ty(), self.heap_ty());
+            let b = self.ctx.create_builder();
+            let entry = self.ctx.append_basic_block(f, "entry");
+            let check = self.ctx.append_basic_block(f, "check");
+            let kind_bb = self.ctx.append_basic_block(f, "kind");
+            let push_bb = self.ctx.append_basic_block(f, "push");
+            let done = self.ctx.append_basic_block(f, "done");
+            let slow = self.ctx.append_basic_block(f, "slow");
+            let h = f.get_nth_param(0).unwrap().into_pointer_value();
+            let v = f.get_nth_param(1).unwrap().into_pointer_value();
+            b.position_at_end(entry);
+            let null = b.build_is_null(v, "").s()?;
+            b.build_conditional_branch(null, done, check).s()?;
+            b.position_at_end(check);
+            let rcp = b.build_struct_gep(vt, v, 0, "").s()?;
+            let rc = b.build_load(i64t, rcp, "rc").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+            let once = b.build_int_compare(IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+            b.build_conditional_branch(once, kind_bb, slow).s()?;
+            // a vector (rank 1) of i64 or f64: nothing inside to release
+            b.position_at_end(kind_bb);
+            let kp = b.build_struct_gep(vt, v, 1, "").s()?;
+            let kind = b.build_load(i64t, kp, "").s()?.into_int_value();
+            let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+            let k = |dt: u64| if little { (1u64 << 32) | dt } else { (dt << 32) | 1 };
+            let is_i = b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(k(0), false), "").s()?;
+            let is_f = b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(k(1), false), "").s()?;
+            let num = b.build_or(is_i, is_f, "").s()?;
+            let len = b.build_load(i64t, b.build_struct_gep(vt, v, 3, "").s()?, "").s()?.into_int_value();
+            let bytes = b.build_int_add(b.build_int_mul(len, i64t.const_int(8, false), "").s()?, i64t.const_int(1, false), "").s()?;
+            let c = self.size_class_of(&b, bytes)?;
+            let fits = b.build_int_compare(IntPredicate::ULT, c, i64t.const_int(3, false), "").s()?;
+            let zero = i32t.const_zero();
+            // c < 3 is checked before the free-list length is read
+            let c_safe = b.build_select(fits, c, i64t.const_zero(), "").s()?.into_int_value();
+            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), i32t.const_int(1, false).into(), c_safe.into()], "").s()? };
+            let fl = b.build_load(i32t, lenp, "").s()?.into_int_value();
+            let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(4096, false), "").s()?;
+            let ok = b.build_and(b.build_and(num, fits, "").s()?, room, "").s()?;
+            b.build_conditional_branch(ok, push_bb, slow).s()?;
+            b.position_at_end(push_bb);
+            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), zero.into(), c_safe.into()], "").s()? };
+            let head = b.build_load(self.ptr, slot, "").s()?;
+            b.build_store(v, head).s()?;
+            b.build_store(slot, v).s()?;
+            b.build_store(lenp, b.build_int_add(fl, i32t.const_int(1, false), "").s()?).s()?;
+            let livep = b.build_struct_gep(ht, h, 2, "").s()?;
+            let live = b.build_load(self.ptr, livep, "").s()?.into_pointer_value();
+            let cnt = b.build_load(i64t, live, "").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&cnt).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
+            let st = b.build_store(live, b.build_int_sub(cnt.into_int_value(), i64t.const_int(1, false), "").s()?).s()?;
+            st.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
+            b.build_unconditional_branch(done).s()?;
+            b.position_at_end(slow);
+            b.build_call(self.rt("mim_release"), &[v.into()], "").s()?;
+            b.build_unconditional_branch(done).s()?;
+            b.position_at_end(done);
+            b.build_return(None).s()?;
+            Ok(())
+        };
+        build().expect("building _mimic_release");
+        f
     }
 
     /// Box a value into a runtime handle (owned for new boxes).
@@ -739,11 +958,24 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
             "mim_alloc_vec" => ptr.fn_type(&[i32t, i64t], false),
+            "mim_heap" => ptr.fn_type(&[], false),
             "mim_vec_len" => self.ctx.i64_type().fn_type(&[p, i32t], false),
             "mim_route" => self.ctx.i64_type().fn_type(&[p, i64t, p, p, p], false),
             other => panic!("unknown runtime function {other}"),
         };
         let f = self.module.add_function(name, ty, Some(Linkage::External));
+        let attr = |n: &str| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(n), 0);
+        if name == "mim_alloc_vec" {
+            // a new vector: nothing else points into it
+            f.add_attribute(inkwell::attributes::AttributeLoc::Return, attr("noalias"));
+        }
+        // these never free a value nor synchronise with other threads: values
+        // read before them stay readable after them (so reads may move
+        // around them, out of loops)
+        if matches!(name, "mim_alloc_vec" | "mim_heap" | "mim_index_fail" | "mim_vec_len") {
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr("nofree"));
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr("nosync"));
+        }
         f
     }
 
@@ -814,10 +1046,11 @@ impl<'ctx> Cg<'ctx, '_> {
         // a vector parameter always points at a live header (rc, dtype, rank,
         // len, data): LLVM may read it early, so header checks leave loops
         for (i, t) in s.params.iter().enumerate() {
-            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool)) {
+            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool) | Ty::Obj(_)) {
                 let attr = |name: &str, v: u64| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), v);
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("nonnull", 0));
-                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", 32));
+                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", self.live_bytes(*t)));
+                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("align", 8));
             }
         }
         self.fns.insert((k.clone(), kind), f);
@@ -888,6 +1121,11 @@ impl<'ctx> Cg<'ctx, '_> {
             let slot = self.entry_alloca(t, &prm.name)?;
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
             self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: false, mutable: false });
+        }
+        if self.opt_level >= 2 {
+            for (i, t) in spec.params.iter().enumerate() {
+                self.assume_params_live(fv.get_nth_param(i as u32).unwrap(), *t)?;
+            }
         }
         match kind {
             Kind::NetWrap => {
@@ -2628,6 +2866,63 @@ impl<'ctx> Cg<'ctx, '_> {
         self.as_ty(v, to, what)
     }
 
+    /// At the top of a function: tell LLVM, with `llvm.assume` bundles, that
+    /// a parameter's vector (or a record parameter and its vector fields) can
+    /// be read. A borrowed value lives through the whole call, and unlike
+    /// parameter attributes these facts survive inlining: header checks in
+    /// loops, also in functions inlined into them, can then be hoisted.
+    fn assume_params_live(&self, v: BasicValueEnum<'ctx>, t: Ty) -> R<()> {
+        let BasicValueEnum::PointerValue(p) = v else { return Ok(()) };
+        let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+        let assume = |p: PointerValue<'ctx>, bytes: u64| -> R<()> {
+            let f = Intrinsic::find("llvm.assume").ok_or("no llvm.assume")?.get_declaration(&self.module, &[]).ok_or("no llvm.assume")?;
+            let bundles = [
+                inkwell::values::OperandBundle::create("dereferenceable", &[p.into(), i64t.const_int(bytes, false).into()]),
+                inkwell::values::OperandBundle::create("align", &[p.into(), i64t.const_int(8, false).into()]),
+            ];
+            self.b.build_direct_call_with_operand_bundles(f, &[self.ctx.bool_type().const_int(1, false).into()], &bundles, "").s()?;
+            Ok(())
+        };
+        match t {
+            Ty::Arr(El::F64 | El::I64 | El::Bool) => assume(p, self.live_bytes(t))?,
+            Ty::Obj(id) => {
+                assume(p, self.live_bytes(t))?;
+                let td = &self.p.types[types::obj_tid(id)];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return Ok(()) };
+                let invariant = self.ctx.get_kind_id("invariant.load");
+                let empty = self.ctx.metadata_node(&[]);
+                let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
+                for (i, (_, ft, _)) in fs.iter().enumerate() {
+                    let fty = types::ann_in(self.p, td.module, ft).unwrap_or(Ty::Dyn);
+                    if !matches!(fty, Ty::Arr(El::F64 | El::I64 | El::Bool)) {
+                        continue;
+                    }
+                    let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
+                    let fv = self.b.build_load(self.ptr, fp, "field").s()?;
+                    inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                    self.assume_live(fv, fty)?;
+                    assume(fv.into_pointer_value(), self.live_bytes(fty))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// How many bytes at a live value of type `t` can always be read: the
+    /// header, and for a record also its fields, which follow the header.
+    fn live_bytes(&self, t: Ty) -> u64 {
+        let pb = self.size.get_bit_width() as u64 / 8;
+        let header = (24 + 2 * pb).div_ceil(8) * 8;
+        match t {
+            Ty::Obj(id) => match &self.p.types[types::obj_tid(id)].decl.kind {
+                mimic_syntax::ast::TypeKind::Record(fs) => header + pb * fs.len() as u64,
+                _ => header,
+            },
+            _ => header,
+        }
+    }
+
     /// A loaded value of type `t` that is always a live vector or record:
     /// tell LLVM its header can be read anywhere, so checks on it may leave
     /// loops.
@@ -2638,8 +2933,11 @@ impl<'ctx> Cg<'ctx, '_> {
         let i = inkwell::values::BasicValue::as_instruction_value(&load).ok_or("not an instruction")?;
         let empty = self.ctx.metadata_node(&[]);
         i.set_metadata(empty, self.ctx.get_kind_id("nonnull")).map_err(|e| e.to_string())?;
-        let n = self.ctx.metadata_node(&[self.ctx.i64_type().const_int(32, false).into()]);
+        let n = self.ctx.metadata_node(&[self.ctx.i64_type().const_int(self.live_bytes(t), false).into()]);
         i.set_metadata(n, self.ctx.get_kind_id("dereferenceable")).map_err(|e| e.to_string())?;
+        // values are 8-byte aligned: with that, header loads may be hoisted
+        let a = self.ctx.metadata_node(&[self.ctx.i64_type().const_int(8, false).into()]);
+        i.set_metadata(a, self.ctx.get_kind_id("align")).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -2671,7 +2969,8 @@ impl<'ctx> Cg<'ctx, '_> {
         inkwell::values::BasicValue::as_instruction_value(&kind).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
         let kind = kind.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
-        let data = field(self, 4, self.ptr.into())?.into_pointer_value();
+        // a value's elements always follow its header (alloc in mimic_rt.c)
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "data").s()? };
         let want: u64 = match el {
             El::F64 => 1,
             El::Bool => 2,
@@ -3209,17 +3508,11 @@ impl<'ctx> Cg<'ctx, '_> {
                         // the type is known: read the field straight from the record
                         // (borrowed while the record is; an owned record passes it on)
                         let i32t = self.ctx.i32_type();
-                        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
                         let bp = self.basic(b).into_pointer_value();
-                        let dp = self.b.build_struct_gep(hdr, bp, 4, "").s()?;
-                        // fields only change through `with`, which consumes the
-                        // record and returns it as a new value: within one use of
-                        // this pointer the loads may be hoisted and shared
+                        // a record's fields always follow its header (alloc in mimic_rt.c)
+                        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), bp, &[i32t.const_int(1, false)], "fields").s()? };
                         let invariant = self.ctx.get_kind_id("invariant.load");
                         let empty = self.ctx.metadata_node(&[]);
-                        let data = self.b.build_load(self.ptr, dp, "").s()?;
-                        inkwell::values::BasicValue::as_instruction_value(&data).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
-                        let data = data.into_pointer_value();
                         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
                         let fv = self.b.build_load(self.ptr, fp, "").s()?;
                         inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
