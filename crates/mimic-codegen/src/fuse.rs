@@ -217,6 +217,15 @@ impl<'ctx> Cg<'ctx, '_> {
         let t = self.ty_of(x);
         if let Some(el) = num_el(t) {
             let v = self.expr(x)?;
+            // a list in registers: the loop reads a stack copy of it
+            if let V::A(a, _) = v {
+                let at = a.get_type();
+                let tmp = self.entry_alloca_ty(at.into(), "leaf")?;
+                self.b.build_store(tmp, a).s()?;
+                plan.lens.push(self.ctx.i64_type().const_int(at.len() as u64, false));
+                plan.slots.push(tmp.into());
+                return Ok(Node::Leaf(plan.slots.len() - 1, el));
+            }
             let v = self.boxed(v)?;
             let (len, data) = self.vec_header(v, el)?;
             plan.lens.push(len);
@@ -510,6 +519,17 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
         let n = self.plan_len(&plan)?;
+        // a result of known length: written to the stack, kept in registers
+        if let Some((_, len)) = super::fixed(self.ty_of(e)) {
+            let at = self.el_ty(el).array_type(len);
+            let buf = self.entry_alloca_ty(at.into(), "fixed")?;
+            let mode = Mode::Map(el);
+            let n = self.ctx.i64_type().const_int(len as u64, false);
+            self.inline_loop(&root, &plan, n, mode, buf.into())?;
+            self.release_plan(&plan)?;
+            let a = self.b.build_load(at, buf, "").s()?.into_array_value();
+            return Ok(V::A(a, el));
+        }
         let out = self.alloc_vec(dtype_of(el), n)?;
         let data = self.data_of(out)?;
         let mode = Mode::Map(el);

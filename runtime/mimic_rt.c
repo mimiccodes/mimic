@@ -2376,6 +2376,23 @@ mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
     return r;
 }
 
+/* A vector of `n` elements stored as `dtype`, for a list the compiler keeps
+ * in registers (codegen as_fixed): a new reference, converted from integers
+ * or truth values when needed; anything else stops the program. */
+mim_val *mim_fixed_in(mim_val *v, int32_t dtype, int64_t n, const char *what) {
+    if (v && v->rank == 1 && v->len == n && v->dtype == dtype) {
+        mim_retain(v);
+        return v;
+    }
+    mim_val *r = mim_vec_as(v, dtype);
+    if (r && r->rank == 1 && r->len == n && r->dtype == dtype) return r;
+    char buf[200];
+    snprintf(buf, sizeof buf, "%s: expected a list of %lld %s, found %s", what, (long long)n,
+             dtype == MIM_F64 ? "floats" : dtype == MIM_BOOL ? "truth values" : "integers", r ? dtname(r) : "nothing");
+    mim_panic(buf);
+    return NULL;
+}
+
 mim_val *mim_index(mim_val *xs, mim_val *i) {
     if (xs && xs->dtype == MIM_MAP) return map_get(xs, i);
     if (is_tuple(i)) {

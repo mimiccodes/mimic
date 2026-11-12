@@ -38,16 +38,27 @@ pub fn tuple_elems(id: u32) -> Vec<Ty> {
 /// copyable id. A type without arguments is `Ty::Obj(type id)`; an instance is
 /// `Ty::Obj(INST | index)`. Values are represented the same whatever the
 /// arguments (fields are boxed handles), so instances only sharpen types.
-static INSTANCES: Mutex<Vec<(usize, Vec<Ty>)>> = Mutex::new(Vec::new());
+///
+/// A record instance can also carry a *shape*: the known length of each of
+/// its list fields (`lens`, one per field, 0 = not known; see Ty::Arr), when
+/// it was built from lists whose lengths the compiler knows. Reading such a
+/// field gives a list of that length, so functions are specialised on it.
+static INSTANCES: Mutex<Vec<(usize, Vec<Ty>, Vec<u8>)>> = Mutex::new(Vec::new());
 const INST: u32 = 1 << 31;
 
 /// The record/union type `tid` with type arguments `args` (`Never` = not known yet).
 pub fn obj(tid: usize, args: &[Ty]) -> Ty {
-    if args.is_empty() {
+    obj_shaped(tid, args, &[])
+}
+
+/// [`obj`] with the known lengths of the record's list fields.
+pub fn obj_shaped(tid: usize, args: &[Ty], lens: &[u8]) -> Ty {
+    let lens: &[u8] = if lens.iter().all(|n| *n == 0) { &[] } else { lens };
+    if args.is_empty() && lens.is_empty() {
         return Ty::Obj(tid as u32);
     }
     let mut t = INSTANCES.lock().unwrap();
-    let key = (tid, args.to_vec());
+    let key = (tid, args.to_vec(), lens.to_vec());
     let i = match t.iter().position(|e| *e == key) {
         Some(i) => i,
         None => {
@@ -68,6 +79,19 @@ pub fn obj_args(id: u32) -> Vec<Ty> {
     if id & INST == 0 { Vec::new() } else { INSTANCES.lock().unwrap()[(id & !INST) as usize].1.clone() }
 }
 
+/// The known lengths of a record instance's list fields (empty: none known).
+pub fn obj_lens(id: u32) -> Vec<u8> {
+    if id & INST == 0 { Vec::new() } else { INSTANCES.lock().unwrap()[(id & !INST) as usize].2.clone() }
+}
+
+/// Lengths both shapes agree on (0 where they differ).
+fn join_lens(a: &[u8], b: &[u8]) -> Vec<u8> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    a.iter().zip(b).map(|(x, y)| if x == y { *x } else { 0 }).collect()
+}
+
 /// Type-parameter bindings of an instance: `T → i64`. Unknown arguments are dynamic.
 pub fn inst_env(p: &Program, id: u32) -> Vec<(String, Ty)> {
     let td = &p.types[obj_tid(id)];
@@ -86,7 +110,18 @@ pub fn field_type(p: &Program, tid: usize, of: Ty, ft: &Type) -> Ty {
         Ty::Obj(id) if obj_tid(id) == tid => inst_env(p, id),
         _ => p.types[tid].decl.params.iter().map(|n| (n.clone(), Ty::Dyn)).collect(),
     };
-    ann_env(p, p.types[tid].module, ft, &env).unwrap_or(Ty::Dyn)
+    let t = ann_env(p, p.types[tid].module, ft, &env).unwrap_or(Ty::Dyn);
+    // a list field of a shaped record: its known length
+    if let (Ty::Obj(id), Ty::Arr(el, 0)) = (of, t)
+        && let TypeKind::Record(fs) = &p.types[tid].decl.kind
+        && let Some(i) = fs.iter().position(|(_, f, _)| std::ptr::eq(f, ft))
+    {
+        let lens = obj_lens(id);
+        if let Some(n) = lens.get(i).copied().filter(|n| *n > 0) {
+            return Ty::Arr(el, fixed_len(el, n as usize));
+        }
+    }
+    t
 }
 
 /// Can a value of type `b` stand where `a` is expected (and vice versa)?
@@ -116,11 +151,13 @@ pub fn refine(a: Ty, got: Ty) -> Ty {
         (Ty::Dyn | Ty::Never, g) => g,
         (Ty::Obj(x), Ty::Obj(y)) if obj_tid(x) == obj_tid(y) => {
             let (p, q) = (obj_args(x), obj_args(y));
+            // a value's shape is more precise than a declaration's
+            let lens = if obj_lens(y).is_empty() { obj_lens(x) } else { obj_lens(y) };
             if p.is_empty() || q.is_empty() || p.len() != q.len() {
-                return a;
+                return obj_shaped(obj_tid(x), &p, &lens);
             }
             let r: Vec<Ty> = p.iter().zip(&q).map(|(s, t)| refine(*s, *t)).collect();
-            obj(obj_tid(x), &r)
+            obj_shaped(obj_tid(x), &r, &lens)
         }
         (Ty::Arr(El::Dyn, _), g @ Ty::Arr(_, _)) => g,
         _ => a,
@@ -190,12 +227,21 @@ pub enum El {
 }
 
 /// The longest list whose length types carry (see [`Ty::Arr`]).
-pub const MAX_FIXED: usize = 32;
+pub const MAX_FIXED: usize = 8;
 
 /// The known length of a list of `el` with `n` elements: lists of numbers
 /// and truth values of 1..=MAX_FIXED elements; else 0 (not known).
 pub fn fixed_len(el: El, n: usize) -> u8 {
     if matches!(el, El::I64 | El::F64 | El::Bool) && (1..=MAX_FIXED).contains(&n) { n as u8 } else { 0 }
+}
+
+/// A record field's known length: declared as a list of numbers, given a
+/// list of known length (its elements are converted to the declared type).
+fn shape_len(declared: Ty, given: Option<Ty>) -> u8 {
+    match (declared, given) {
+        (Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), 0), Some(Ty::Arr(g, n))) if n > 0 && matches!(g, El::I64 | El::F64 | El::Bool) => fixed_len(el, n as usize),
+        _ => 0,
+    }
 }
 
 /// The length an elementwise operation on `a` and `b` gives, when known.
@@ -273,11 +319,12 @@ impl Ty {
             (Ty::Arr(_, _), Ty::Arr(_, _)) => Ty::Arr(El::Dyn, 0),
             (Ty::Obj(a), Ty::Obj(b)) if obj_tid(a) == obj_tid(b) => {
                 let (x, y) = (obj_args(a), obj_args(b));
+                let lens = join_lens(&obj_lens(a), &obj_lens(b));
                 if x.len() != y.len() {
-                    return Ty::Obj(obj_tid(a) as u32);
+                    return obj_shaped(obj_tid(a), &[], &lens);
                 }
                 let j: Vec<Ty> = x.iter().zip(&y).map(|(p, q)| p.join(*q)).collect();
-                obj(obj_tid(a), &j)
+                obj_shaped(obj_tid(a), &j, &lens)
             }
             (Ty::Tup(a), Ty::Tup(b)) => {
                 let (x, y) = (tuple_elems(a), tuple_elems(b));
@@ -868,6 +915,22 @@ impl Walk<'_, '_> {
             let FnKind::Extern { decl, .. } = &self.inf.p.fns[fid].kind else { unreachable!() };
             if decl.intrinsic {
                 let m = self.inf.p.fns[fid].module;
+                // put(xs, i, x) and sort(xs) on a list of numbers give that
+                // kind of list back, of the same length
+                if self.inf.p.mods[m].name == "prelude" {
+                    match (decl.name.as_str(), args.as_slice()) {
+                        // not known yet (inference has not reached it): wait,
+                        // so an early guess does not stick to the result
+                        ("put" | "sort", a) if a.contains(&Ty::Never) => return Ty::Never,
+                        ("put", [a @ Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _), Ty::I64 | Ty::Bool, x])
+                            if *x == Ty::of_el(*el) || (*el == El::F64 && *x == Ty::I64) =>
+                        {
+                            return *a;
+                        }
+                        ("sort", [a @ Ty::Arr(El::I64 | El::F64, _)]) => return *a,
+                        _ => {}
+                    }
+                }
                 return match &decl.ret {
                     None => Ty::Unit,
                     Some(t) => ann_in(self.inf.p, m, t).unwrap_or(Ty::Dyn),
@@ -1162,6 +1225,11 @@ impl Walk<'_, '_> {
                 let td = &p.types[t];
                 let TypeKind::Record(decl) = &td.decl.kind else { return Ty::Dyn };
                 let vts: Vec<Ty> = fields.iter().map(|(_, v, _)| self.expr(v)).collect();
+                // a field not known yet: the record is not either (an early
+                // guess at its shape would stick, types only grow)
+                if vts.contains(&Ty::Never) {
+                    return Ty::Never;
+                }
                 let mut env = Vec::new();
                 let mut conflict = None;
                 for ((n, _, _), vt) in fields.iter().zip(&vts) {
@@ -1181,7 +1249,15 @@ impl Walk<'_, '_> {
                 }
                 let targs: Vec<Ty> =
                     td.decl.params.iter().map(|n| env.iter().find(|(m, _)| m == n).map(|(_, t)| *t).unwrap_or(Ty::Never)).collect();
-                obj(t, &targs)
+                // the shape: list fields given lists of known length keep it
+                let lens: Vec<u8> = decl
+                    .iter()
+                    .map(|(n, ft, _)| {
+                        let vt = fields.iter().zip(&vts).find(|((m, _, _), _)| m == n).map(|(_, vt)| *vt);
+                        shape_len(ann_env(p, td.module, ft, &env).unwrap_or(Ty::Dyn), vt)
+                    })
+                    .collect();
+                obj_shaped(t, &targs, &lens)
             }
             ExprKind::Field { base, name } => {
                 let b = self.expr(base);
@@ -1207,6 +1283,23 @@ impl Walk<'_, '_> {
                             TypeKind::Union(_) => self.err(Diag::new(&C::UNION_NOT_RECORD, format!("`{}` is a union; `with` works on records", td.name), e.span)),
                         }
                     }
+                }
+                // the updated fields' new lengths
+                if let Ty::Obj(oid) = b
+                    && let TypeKind::Record(decl) = &self.inf.p.types[obj_tid(oid)].decl.kind
+                {
+                    let p = self.inf.p;
+                    let tid = obj_tid(oid);
+                    let mut lens = obj_lens(oid);
+                    lens.resize(decl.len(), 0);
+                    for (n, v, _) in fields {
+                        if let Some(i) = decl.iter().position(|(d, _, _)| d == n) {
+                            let vt = self.out.exprs.get(&id(v)).copied();
+                            let declared = ann_env(p, p.types[tid].module, &decl[i].1, &inst_env(p, oid)).unwrap_or(Ty::Dyn);
+                            lens[i] = shape_len(declared, vt);
+                        }
+                    }
+                    return obj_shaped(tid, &obj_args(oid), &lens);
                 }
                 match b {
                     Ty::Obj(_) | Ty::Never => b,
@@ -1484,7 +1577,7 @@ impl Walk<'_, '_> {
                 }
                 if let Some(Some(n)) = rest {
                     // the rest has the array's own type; keyed one past the pattern
-                    let rt = if matches!(t, Ty::Arr(_, _)) { t } else { Ty::Dyn };
+                    let rt = if let Ty::Arr(e, _) = t { Ty::Arr(e, 0) } else { Ty::Dyn };
                     self.out.binds.insert(id(pat) + 1, rt);
                     self.scopes.last_mut().unwrap().insert(n.clone(), (id(pat) + 1, rt));
                 }
@@ -1544,7 +1637,7 @@ pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
         Prim::Len => Ty::I64,
         Prim::Print => Ty::Unit,
         Prim::Take | Prim::Drop | Prim::Keep => match a {
-            Ty::Arr(_, _) => a,
+            Ty::Arr(e, _) => Ty::Arr(e, 0), // the length changes
             _ => Ty::Dyn,
         },
         Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle => Ty::Dyn,
@@ -1591,8 +1684,12 @@ mod tests {
     fn arrays_and_reductions() {
         let p = prog("module main\nfn main() { print(f(⍳ 10)) }\nfn f(xs) { (xs × 2.0 ▷ +/) + (xs ▷ ≢) }\n");
         let t = infer(&p, &default_roots(&p, false));
-        // ⍳ 10: ten numbers, a length the compiler knows
-        assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64, 10)])).ret, Ty::F64);
+        // ⍳ 10: longer than MAX_FIXED, so its length is not carried
+        assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64, 0)])).ret, Ty::F64);
+        let p = prog("module main\nfn main() { print(f(⍳ 5)) }\nfn f(xs) { xs × 2 ▷ +/ }\n");
+        let t = infer(&p, &default_roots(&p, false));
+        // ⍳ 5: five numbers, a length the compiler knows
+        assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64, 5)])).ret, Ty::I64);
     }
 
     #[test]
