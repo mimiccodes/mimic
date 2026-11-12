@@ -2332,3 +2332,5 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_socket.c"
 /* the json module */
 #include "mimic_json.c"
+/* native windows for ui (macOS) */
+#include "mimic_window.c"

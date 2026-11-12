@@ -115,6 +115,12 @@ enum Cmd {
         /// The port for --web
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Show a `ui` program in this terminal instead of the browser
+        #[arg(long, conflicts_with_all = ["web", "window"])]
+        terminal: bool,
+        /// Show a `ui` program in a native window instead of the browser
+        #[arg(long, conflicts_with = "web")]
+        window: bool,
         /// Arguments passed to the program (after `--`)
         #[arg(last = true)]
         args: Vec<String>,
@@ -425,7 +431,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
         Cmd::Targets { cpus, features, check, json } => targets_cmd(cpus.as_deref(), features.as_deref(), check.as_deref(), json),
-        Cmd::Run { file, profile, emit_json, web, port, args } => {
+        Cmd::Run { file, profile, emit_json, web, port, terminal, window, args } => {
             let built = (|| -> Result<driver::Artifact, Report> {
                 let input = driver::input_from(file.as_deref())?;
                 if !input.is_bin() {
@@ -448,7 +454,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             status("Running", shown(&a.path));
-            let st = std::process::Command::new(&a.path).args(&args).status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
+            let mut child = std::process::Command::new(&a.path);
+            child.args(&args);
+            if terminal {
+                child.env("MIMIC_UI", "terminal");
+            } else if window {
+                child.env("MIMIC_UI", "window");
+            }
+            let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
         }
         Cmd::Mod { cmd } => mod_cmd(cmd),

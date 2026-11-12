@@ -7,6 +7,7 @@
 | `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. |
 | `mimic init [--name N] [--bin] [--lib]` | Turn the current directory into a project. |
 | `mimic run [file.mim] [--debug\|--release] [--emit-json] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. With `--emit-json`, compile errors go to stderr as JSON. |
+| `mimic run --terminal [file.mim]`, `mimic run --window [file.mim]` | Show a `ui` program in the terminal, or in a native window, instead of the browser (sets `MIMIC_UI`). |
 | `mimic run --web [file.mim] [--port 8080]` | Build a `ui` program as a web page (WebAssembly) and serve it at `http://localhost:8080/`. |
 | `mimic build --web [file.mim]` | Write the web page: `<name>-web/index.html` and `app.wasm`, ready for any static web server. |
 | `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--cpu CPU] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |

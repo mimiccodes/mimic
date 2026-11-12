@@ -425,7 +425,7 @@ ui::run(State { count: 0 }, view, update)               // http://localhost:8080
 
 | Function | Result |
 |---|---|
-| `ui::run(init, view, update)` | Serve the interface until the program is stopped. Settings: `port` (8080), `title` ("Mimic"), `connections` (stop after that many, for tests; 0 = never) |
+| `ui::run(init, view, update)` | Show the interface until the program is stopped. Settings: `show` (`"browser"`, `"terminal"` or `"window"`; by default the `MIMIC_UI` environment variable, else the browser), `port` (8080), `title` ("Mimic"), `connections` (stop after that many, for tests; 0 = never) |
 | `ui::run_live(init, view, update)` | The same, with an `update` that returns a `ui::Step` (jobs), and `subscriptions: [ui::Sub[Msg]]` |
 | `ui::stay(state)` | A `ui::Step` with nothing else to do |
 | `ui::then(state, job)`, `ui::also(step, job)` | A step with a job: `job()` runs as a task of its own, and the message it returns is handled when it is done |
@@ -434,6 +434,8 @@ ui::run(State { count: 0 }, view, update)               // http://localhost:8080
 | `ui::html(node)` | The screen as HTML |
 | `ui::diff(a, b, "0")` | The changes (`[ui::Patch]`) that turn screen `a` into screen `b` |
 | `ui::message(node, event)` | The message a browser event (JSON) stands for, if any |
+| `ui::terminal_text(node, focus, title)`, `ui::plain(text)` | The screen as terminal text (with styles), and text without them |
+| `ui::focusables(node, "0")`, `ui::key_message(node, focus, key)` | The elements a key can reach, and the message a key stands for on one |
 
 How it works:
 * **Each browser tab is a task with its own state.** The first page is complete HTML. After that, events travel to the program over a WebSocket, and only the changed parts travel back.
@@ -444,5 +446,7 @@ How it works:
 * **Built-in theme:** readable defaults with light and dark modes.
 * **Lists change cheaply.** A list that grows or shrinks at the end sends only the new rows, or only a removal. Give rows keys with `ui::keyed("{todo.id}", row)`, and inserting or removing anywhere sends only that row. Reordered rows re-send the list. With 10 000 rows, a click is handled in about 0.1 s on an M3 Pro, and adding or removing a row sends a few hundred bytes.
 * **As a web page.** `mimic build --web` (or `mimic run --web`) turns a `ui` program into a page that runs entirely in the browser, as WebAssembly with no server. The same `view`, `update` and subscriptions work there. The differences: jobs run right after the message that started them, `time::sleep` returns at once, there is no networking, and `print` goes to the browser's console.
-* **Not yet:** native windows, terminal interfaces.
+* **In a terminal.** `mimic run --terminal` (or `show: "terminal"`) draws the same screens as text. Tab and the arrow keys move the focus, Enter or Space presses buttons and ticks boxes, typing edits the focused text box, Enter in a text box submits its form, and Esc or Ctrl-C quits (`ui::run` then returns `Ok(messages handled)`). Timers and jobs work as in the browser. Layout follows the elements: rows side by side, columns one below the other, and `gap` and `padding` become spaces and blank lines.
+* **In a native window (macOS).** `mimic run --window` (or `show: "window"`) shows the screens with the system's own controls. Columns, rows and forms become stack views, text becomes labels, buttons, check boxes and text boxes are the native ones, grids line their columns up, and links open in the browser. The tab's loop runs as a task, so timers and jobs never freeze the window. Closing the window makes `ui::run` return. Call `ui::run` from `main`, because macOS needs windows on the main thread. Elsewhere `show: "window"` returns an `Err` for now. Setting `MIMIC_UI_TEST` to a file of steps (`click PATH`, `type PATH TEXT`, `enter PATH`, `wait MS`, `dump`, `close`) drives the window through its real controls and prints the views, which is how window tests are written.
+* **Not yet:** native windows on Windows and Linux.
 

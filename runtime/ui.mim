@@ -45,6 +45,22 @@ pub module ui {
 
     extern "mimic" {
         fn in_browser() -> bool
+        fn host() -> str
+        fn esc() -> str
+    }
+
+    // the terminal (runtime/mimic_ui.c). Only a tab's own loop draws, and the
+    // end of the loop is an argument of the clean-up (see in_terminal), so
+    // these may count as overlapping: serving a page is not held back by them.
+    extern "mimic" concurrent {
+        fn term_start() -> Result[bool, str]
+        fn term_stop()
+        fn term_draw(text: str)
+        fn term_size() -> (i64, i64)
+        fn term_key() -> str
+        // a native window (runtime/mimic_window.c)
+        fn window_run(html: str, title: str, post: fn(str) -> bool) -> Result[i64, str]
+        fn window_apply(patches: str)
     }
 
     // How a page starts: the first screen, and the subscriptions' intervals
@@ -162,13 +178,26 @@ pub module ui {
     // Serve the interface at http://localhost:{port}/ until the program is
     // stopped, each browser tab with its own state. `connections` > 0 stops
     // after that many connections (page loads and tabs), for tests.
-    pub fn run[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, port: i64 = 8080, title: str = "Mimic", connections: i64 = 0) -> Result[i64, str] {
-        run_live(init, view, (s, m) => stay(update(s, m)), port: port, title: title, connections: connections)
+    //
+    // `show` chooses where: "browser" (served), "window" (a native window),
+    // "terminal"; by default the MIMIC_UI environment variable decides, as
+    // `mimic run --window` / `--terminal` set it, else the browser.
+    pub fn run[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, port: i64 = 8080, title: str = "Mimic", connections: i64 = 0, show: str = "") -> Result[i64, str] {
+        run_live(init, view, (s, m) => stay(update(s, m)), port: port, title: title, connections: connections, show: show)
     }
 
     // The same, with jobs (`update` returns a `ui::Step`) and subscriptions.
-    pub fn run_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]] = [], port: i64 = 8080, title: str = "Mimic", connections: i64 = 0) -> Result[i64, str] {
-        if in_browser() { in_page(init, view, update, subscriptions, title) } else { serve_live(init, view, update, subscriptions, port, title, connections) }
+    pub fn run_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]] = [], port: i64 = 8080, title: str = "Mimic", connections: i64 = 0, show: str = "") -> Result[i64, str] {
+        let where = if show != "" { show } else { host() }
+        if in_browser() {
+            in_page(init, view, update, subscriptions, title)
+        } else if where == "terminal" {
+            in_terminal(init, view, update, subscriptions, title)
+        } else if where == "window" {
+            in_window(init, view, update, subscriptions, title)
+        } else {
+            serve_live(init, view, update, subscriptions, port, title, connections)
+        }
     }
 
     fn serve_live[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subscriptions: [Sub[M]], port: i64, title: str, connections: i64) -> Result[i64, str] {
@@ -233,6 +262,342 @@ pub module ui {
             let (s2, t2, more) = apply_in_page(state, tree, view, update, job())
             jobs_in_page(s2, t2, concat(patches, more), jobs ↓ 1, view, update)
         }
+    }
+
+    // ---- in a native window ------------------------------------------------------
+    // The tab's loop runs as a task and sends patches to the window, which the
+    // main thread runs (AppKit); clicks and typing come back as events.
+
+    fn in_window[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subs: [Sub[M]], title: str) -> Result[i64, str] {
+        let (tx, rx) = super::chan::new[Incoming[M]]()
+        let first = view(init)
+        detach(() => window_loop(rx, tx, init, first, view, update))
+        subs ¨ (sb => start(sb, tx))
+        // (the window is an argument: it is closed before the channel is)
+        window_end(window_run(html(first), title, k => super::chan::send(tx, if k == "@close" { Gone } else { FromBrowser(k) })), tx)
+    }
+
+    fn window_end[M](r: Result[i64, str], tx: super::chan::Sender[Incoming[M]]) -> Result[i64, str] {
+        super::chan::close(tx)
+        r
+    }
+
+    fn window_loop[S, M](rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M]) {
+        match super::chan::receive(rx) {
+            Some(FromBrowser(t)) => {
+                match message(tree, t) {
+                    Some(m) => window_react(rx, tx, state, tree, view, update, m),
+                    None => window_loop(rx, tx, state, tree, view, update),
+                }
+            }
+            Some(FromWork(m)) => window_react(rx, tx, state, tree, view, update, m),
+            _ => {}
+        }
+    }
+
+    fn window_react[S, M](rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], m: M) {
+        let step = update(state, m)
+        let next = view(step.state)
+        window_apply(super::json::encode(diff(tree, next, "0")))
+        step.jobs ¨ (job => detach(() => run_job(job, tx)))
+        window_loop(rx, tx, step.state, next, view, update)
+    }
+
+    // ---- in a terminal --------------------------------------------------------
+    // The screen is drawn from the tree each time it changes. Tab and the
+    // arrow keys move the focus, Enter or Space presses, typing edits the
+    // focused text box, Enter in a text box submits its form, Esc quits.
+
+    fn in_terminal[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], subs: [Sub[M]], title: str) -> Result[i64, str] {
+        match term_start() {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let (tx, rx) = super::chan::new[Incoming[M]]()
+                detach(() => read_keys(tx))
+                subs ¨ (sb => start(sb, tx))
+                // (the loop is an argument: it ends before the terminal is restored)
+                Ok(term_end(term_loop(rx, tx, init, view(init), 0, view, update, title, 0), tx))
+            }
+        }
+    }
+
+    fn term_end[M](handled: i64, tx: super::chan::Sender[Incoming[M]]) -> i64 {
+        term_stop()
+        super::chan::close(tx)
+        handled
+    }
+
+    fn read_keys[M](tx: super::chan::Sender[Incoming[M]]) {
+        let k = term_key()
+        if super::chan::send(tx, FromBrowser(k)) {
+            if k != "esc" and k != "ctrl-c" and k != "eof" { read_keys(tx) }
+        }
+    }
+
+    // -> how many messages were handled
+    fn term_loop[S, M](rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], focus: i64, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], title: str, handled: i64) -> i64 {
+        let fs = focusables(tree, "0")
+        let f = if ≢ fs == 0 { 0 } else { focus % ≢ fs }
+        let here = if ≢ fs == 0 { "" } else { fs[f] }
+        term_draw(screen(tree, here, title))
+        match super::chan::receive(rx) {
+            Some(FromBrowser(k)) => {
+                if k == "esc" or k == "ctrl-c" or k == "eof" {
+                    handled
+                } else if k == "tab" or k == "down" or k == "right" {
+                    term_loop(rx, tx, state, tree, f + 1, view, update, title, handled)
+                } else if k == "backtab" or k == "up" or k == "left" {
+                    term_loop(rx, tx, state, tree, f - 1, view, update, title, handled)
+                } else {
+                    match key_message(tree, here, k) {
+                        Some(m) => term_apply(rx, tx, state, tree, f, view, update, title, handled, m),
+                        None => term_loop(rx, tx, state, tree, f, view, update, title, handled),
+                    }
+                }
+            }
+            Some(FromWork(m)) => term_apply(rx, tx, state, tree, f, view, update, title, handled, m),
+            _ => handled,
+        }
+    }
+
+    fn term_apply[S, M](rx: super::chan::Receiver[Incoming[M]], tx: super::chan::Sender[Incoming[M]], state: S, tree: Node[M], f: i64, view: fn(S) -> Node[M], update: fn(S, M) -> Step[S, M], title: str, handled: i64, m: M) -> i64 {
+        let step = update(state, m)
+        step.jobs ¨ (job => detach(() => run_job(job, tx)))
+        term_loop(rx, tx, step.state, view(step.state), f, view, update, title, handled + 1)
+    }
+
+    // the elements a key can reach, in reading order
+    pub fn focusables[M](n: Node[M], path: str) -> [str] {
+        match n {
+            Txt(_) => [],
+            Elem(_, attrs, kids) => {
+                let submits = match prop(attrs, "type") { Some(t) => t == "submit", None => false }
+                let mine = if submits or has_event(attrs, "click") or has_event(attrs, "input") or has_event(attrs, "change") { [path] } else { [] }
+                concat(mine, flatten(⍳ ≢ kids ¨ (i => focusables(kids[i], "{path}.{i}"))))
+            }
+        }
+    }
+
+    fn has_event[M](attrs: [Attr[M]], e: str) -> bool {
+        ((attrs ¨ (a => match a { On(x, _) => if x == e { 1 } else { 0 }, OnText(x, _) => if x == e { 1 } else { 0 }, _ => 0 })) ▷ +/) > 0
+    }
+
+    fn prop[M](attrs: [Attr[M]], name: str) -> Option[str] {
+        if ≢ attrs == 0 {
+            None
+        } else {
+            match attrs[0] {
+                Prop(k, v) if k == name => Some(v),
+                _ => prop(attrs ↓ 1, name),
+            }
+        }
+    }
+
+    fn prop_or[M](attrs: [Attr[M]], name: str) -> str {
+        match prop(attrs, name) {
+            Some(v) => v,
+            None => "",
+        }
+    }
+
+    // the message a key stands for on the focused element
+    pub fn key_message[M](tree: Node[M], here: str, k: str) -> Option[M] {
+        let at = (split(here, ".") ↓ 1) ¨ (x => match parse_int(x) { Some(i) => i, None => -1 })
+        match node_at(tree, at) {
+            Some(Elem(tag, attrs, _)) => {
+                let kind = if tag == "input" { prop_or(attrs, "type") } else { tag }
+                let press = k == "enter" or k == " "
+                if kind == "checkbox" {
+                    if press { handler(attrs, Event { p: here, e: "change", v: if has_attr(attrs, "checked") { "false" } else { "true" } }) } else { None }
+                } else if kind == "text" {
+                    let v = prop_or(attrs, "value")
+                    if k == "enter" {
+                        submit_above(tree, here)
+                    } else if k == "backspace" {
+                        handler(attrs, Event { p: here, e: "input", v: join(chars(v) ↓ ¯1, "") })
+                    } else if ≢ chars(k) == 1 {
+                        handler(attrs, Event { p: here, e: "input", v: v + k })
+                    } else {
+                        None
+                    }
+                } else if press and prop_or(attrs, "type") == "submit" {
+                    submit_above(tree, here)
+                } else if press {
+                    handler(attrs, Event { p: here, e: "click", v: "" })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn has_attr[M](attrs: [Attr[M]], name: str) -> bool {
+        match prop(attrs, name) {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    // Enter in a text box: the nearest form around it
+    fn submit_above[M](tree: Node[M], path: str) -> Option[M] {
+        let parts = split(path, ".")
+        if ≢ parts <= 1 {
+            None
+        } else {
+            let up = join(parts ↓ ¯1, ".")
+            let at = (split(up, ".") ↓ 1) ¨ (x => match parse_int(x) { Some(i) => i, None => -1 })
+            match node_at(tree, at) {
+                Some(Elem(_, attrs, _)) if has_event(attrs, "submit") => handler(attrs, Event { p: up, e: "submit", v: "" }),
+                _ => submit_above(tree, up),
+            }
+        }
+    }
+
+    // ---- drawing in a terminal: blocks of lines with known widths ------------
+
+    type Block = { lines: [str], widths: [i64] }
+
+    // A screen as terminal text (with styles), `focus` being the path of the
+    // focused element ("" for none).
+    pub fn terminal_text[M](tree: Node[M], focus: str, title: str) -> str { screen(tree, focus, title) }
+
+    fn screen[M](tree: Node[M], focus: str, title: str) -> str {
+        let b = draw(tree, "0", focus)
+        let head = style("1", title)
+        let help = style("2", "Tab: next   Enter or Space: press   Esc: quit")
+        join(concat(concat([head ""], b.lines), ["" help]), "\n")
+    }
+
+    // terminal text without its styles (for tests and logs)
+    pub fn plain(t: str) -> str {
+        let parts = split(t, esc())
+        if ≢ parts == 0 { t } else { parts[0] + join((parts ↓ 1) ¨ (p => match find(p, "m") { Some(i) => p ↓ (i + 1), None => p }), "") }
+    }
+
+    fn style(codes: str, t: str) -> str { if codes == "" { t } else { esc() + "[" + codes + "m" + t + esc() + "[0m" } }
+
+    fn text_block(t: str, codes: str) -> Block { Block { lines: [style(codes, t)], widths: [≢ chars(t)] } }
+
+    fn draw[M](n: Node[M], path: str, focus: str) -> Block {
+        match n {
+            Txt(t) => text_block(t, ""),
+            Elem(tag, attrs, kids) => {
+                let css = prop_or(attrs, "style")
+                let focused = path == focus
+                let mark = if focused { "7" } else { "" }
+                if tag == "button" {
+                    text_block("[ " + inner_text(kids) + " ]", mark)
+                } else if tag == "input" and prop_or(attrs, "type") == "checkbox" {
+                    text_block(if has_attr(attrs, "checked") { "[x]" } else { "[ ]" }, mark)
+                } else if tag == "input" {
+                    let v = prop_or(attrs, "value")
+                    let shown = if v == "" and not focused { prop_or(attrs, "placeholder") } else { v }
+                    let cursor = if focused { "_" } else { "" }
+                    let w = ≢ chars(shown) + ≢ chars(cursor)
+                    let pad = repeat(" ", if w < 16 { 16 - w } else { 0 })
+                    Block { lines: ["[" + style(if focused { "4" } else if v == "" { "2" } else { "" }, shown + cursor + pad) + "]"], widths: [w + ≢ chars(pad) + 2] }
+                } else if tag == "span" {
+                    text_block(inner_text(kids), text_codes(css))
+                } else if tag == "a" {
+                    text_block(inner_text(kids), "4")
+                } else if tag == "img" {
+                    text_block("[image " + prop_or(attrs, "alt") + "]", "2")
+                } else if tag == "hr" {
+                    text_block(repeat("─", 32), "2")
+                } else if contains(css, "flex:1") and ≢ kids == 0 {
+                    text_block("  ", "")
+                } else if contains(css, "display:grid") {
+                    grid_block(⍳ ≢ kids ¨ (i => draw(kids[i], "{path}.{i}", focus)), columns_of(css))
+                } else if tag == "form" or contains(css, "flex-direction:row") {
+                    side_by_side(⍳ ≢ kids ¨ (i => draw(kids[i], "{path}.{i}", focus)), 1 + px_of(css, "gap:") div 12)
+                } else {
+                    let pad = px_of(css, "padding:")
+                    indent(stack(⍳ ≢ kids ¨ (i => draw(kids[i], "{path}.{i}", focus)), px_of(css, "gap:") div 12), pad div 8)
+                }
+            }
+        }
+    }
+
+    // the text of an element's children (texts, nested spans)
+    fn inner_text[M](kids: [Node[M]]) -> str {
+        join(kids ¨ (k => match k { Txt(t) => t, Elem(_, _, ks) => inner_text(ks) }), "")
+    }
+
+    fn text_codes(css: str) -> str {
+        let parts = [
+            if contains(css, "font-weight:bold") or contains(css, "font-weight:6") or contains(css, "font-weight:7") { "1" } else { "" },
+            if contains(css, "line-through") { "9" } else { "" },
+            if contains(css, "color:") { "2" } else { "" },
+        ]
+        join(parts ⌿ (parts ¨ (c => c != "")), ";")
+    }
+
+    // the number of pixels after `key` in a style ("gap:12px" -> 12), or 0
+    fn px_of(css: str, key: str) -> i64 {
+        match find(css, key) {
+            Some(i) => {
+                let rest = css ↓ (i + ≢ key)
+                match find(rest, "px") {
+                    Some(j) => match parse_int(rest ↑ j) { Some(n) => n, None => 0 },
+                    None => 0,
+                }
+            }
+            None => 0,
+        }
+    }
+
+    fn columns_of(css: str) -> i64 {
+        match find(css, "repeat(") {
+            Some(i) => {
+                let rest = css ↓ (i + 7)
+                match find(rest, ",") {
+                    Some(j) => match parse_int(rest ↑ j) { Some(n) => if n > 0 { n } else { 1 }, None => 1 },
+                    None => 1,
+                }
+            }
+            None => 1,
+        }
+    }
+
+    fn block_width(b: Block) -> i64 { if ≢ b.widths == 0 { 0 } else { b.widths ▷ ⌈/ } }
+
+    fn pad_line(line: str, w: i64, to: i64) -> str { if w >= to { line } else { line + repeat(" ", to - w) } }
+
+    // blocks one below the other, `gap` empty lines between
+    fn stack(bs: [Block], gap: i64) -> Block {
+        if ≢ bs == 0 {
+            Block { lines: [], widths: [] }
+        } else {
+            let spaced = ⍳ ≢ bs ¨ (i => if i == 0 or gap == 0 { bs[i] } else { Block { lines: concat(repeat_lines(gap), bs[i].lines), widths: concat(⍳ gap ¨ (_ => 0), bs[i].widths) } })
+            Block { lines: flatten(spaced ¨ (b => b.lines)), widths: flatten(spaced ¨ (b => b.widths)) }
+        }
+    }
+
+    fn repeat_lines(n: i64) -> [str] { ⍳ n ¨ (_ => "") }
+
+    // blocks side by side, `gap` spaces between, aligned at the top
+    fn side_by_side(bs: [Block], gap: i64) -> Block {
+        if ≢ bs == 0 {
+            Block { lines: [], widths: [] }
+        } else {
+            let height = (bs ¨ (b => ≢ b.lines)) ▷ ⌈/
+            let ws = bs ¨ block_width
+            let total = (ws ▷ +/) + gap * (≢ bs - 1)
+            let rows = ⍳ height ¨ (r => join(⍳ ≢ bs ¨ (i => cell(bs[i], r, ws[i])), repeat(" ", gap)))
+            Block { lines: rows, widths: ⍳ height ¨ (_ => total) }
+        }
+    }
+
+    fn cell(b: Block, r: i64, w: i64) -> str { if r < ≢ b.lines { pad_line(b.lines[r], b.widths[r], w) } else { repeat(" ", w) } }
+
+    fn grid_block(bs: [Block], columns: i64) -> Block {
+        let rows = (≢ bs + columns - 1) div columns
+        stack(⍳ rows ¨ (r => side_by_side((bs ↓ (r * columns)) ↑ columns, 2)), 0)
+    }
+
+    fn indent(b: Block, n: i64) -> Block {
+        if n == 0 { b } else { Block { lines: b.lines ¨ (l => repeat(" ", n) + l), widths: b.widths ¨ (w => w + n) } }
     }
 
     fn page_for[M](req: super::http::Request, tree: Node[M], title: str) -> super::http::Response {

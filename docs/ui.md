@@ -1,6 +1,6 @@
 # Interfaces (E5): design proposal
 
-Status: **agreed design** (2026-11-12): functions with named arguments, a server-driven browser target first, and `update` returning jobs. Steps 1 to 5 of the build order are done, and the WebAssembly target (`mimic build --web`) works. In step 5, keyed lists and insert/remove patches came first: they matter more than a parallel diff, which `¨` already gives. `subscriptions` is a list given to `ui::run_live` rather than a function of the state. The `ui` module is in `runtime/ui.mim` and the browser script in `runtime/mimic_ui.c`.
+Status: **agreed design** (2026-11-12): functions with named arguments, a server-driven browser target first, and `update` returning jobs. Steps 1 to 5 of the build order are done, and the WebAssembly (`mimic build --web`), terminal (`mimic run --terminal`) and macOS window (`mimic run --window`) targets work. In step 5, keyed lists and insert/remove patches came first: they matter more than a parallel diff, which `¨` already gives. `subscriptions` is a list given to `ui::run_live` rather than a function of the state. The `ui` module is in `runtime/ui.mim` and the browser script in `runtime/mimic_ui.c`.
 
 ## The idea in one paragraph
 

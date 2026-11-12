@@ -185,6 +185,39 @@ fn main() {
 
 Click "Roll a die" and the clock keeps ticking while the roll takes its time. Jobs started together run in parallel, and every result comes back as a message in the tab's own order.
 
+## In a window
+
+On a Mac the same program can open a window of its own, with the system's real buttons, text boxes and check boxes:
+
+```sh
+mimic run --window todo.mim
+```
+
+Nothing in the program changes. Clicks and typing reach `update` as messages, as they do in the browser. Closing the window ends `ui::run`. (Windows and Linux windows come later. There, use the browser or the terminal.)
+
+## In a terminal
+
+The same program can also draw itself as text:
+
+```sh
+mimic run --terminal todo.mim
+```
+
+```text
+To do
+
+[What needs doing?] [ Add ]
+
+[x] Try Mimic    [ × ]
+[ ] Buy milk     [ × ]
+
+1 left    [ Clear done ]
+
+Tab: next   Enter or Space: press   Esc: quit
+```
+
+Tab moves between the boxes and buttons. Typing fills the focused box, Enter presses, and Esc quits. To choose in code, write `ui::run(…, show: "terminal")`.
+
 ## As a web page
 
 The same program can also run entirely inside the browser, with no server:

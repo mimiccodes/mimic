@@ -120,3 +120,162 @@ mim_val *mim_std_ui_hand_to_browser(mim_val *f) {
 #endif
     return NULL;
 }
+
+/* where ui::run shows the app: MIMIC_UI=window|terminal|browser (set by
+ * `mimic run --window` / `--terminal`), "" when not set */
+mim_val *mim_std_ui_host(void) {
+    const char *e = getenv("MIMIC_UI");
+    return mim_str(e ? e : "", e ? (int64_t)strlen(e) : 0);
+}
+
+/* ==== the terminal: raw keys in, whole screens out ========================= */
+
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <poll.h>
+
+static struct termios g_term_saved;
+static int g_term_on;
+
+static void term_write(const char *s, size_t n) {
+    while (n > 0) {
+        ssize_t w = write(1, s, n);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            return;
+        }
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+static void term_restore(void) {
+    if (!g_term_on) return;
+    g_term_on = 0;
+    const char *bye = "\x1b[0m\x1b[?25h\x1b[?1049l";
+    term_write(bye, strlen(bye));
+    tcsetattr(0, TCSAFLUSH, &g_term_saved);
+}
+
+/* raw keys, the alternate screen, no cursor; restored at exit */
+mim_val *mim_std_ui_term_start(void) {
+    if (!isatty(0) || !isatty(1)) return err_of("ui: a terminal interface needs a terminal (standard input and output)");
+    if (tcgetattr(0, &g_term_saved) != 0) return err_of("ui: cannot set up the terminal");
+    struct termios raw = g_term_saved;
+    raw.c_lflag &= ~(tcflag_t)(ECHO | ICANON | ISIG | IEXTEN);
+    raw.c_iflag &= ~(tcflag_t)(IXON | ICRNL | BRKINT | INPCK | ISTRIP);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSAFLUSH, &raw);
+    g_term_on = 1;
+    atexit(term_restore);
+    const char *hi = "\x1b[?1049h\x1b[?25l";
+    term_write(hi, strlen(hi));
+    return ok_of(mim_bool(1));
+}
+
+mim_val *mim_std_ui_term_stop(void) {
+    term_restore();
+    return NULL;
+}
+
+/* (columns, rows) */
+mim_val *mim_std_ui_term_size(void) {
+    struct winsize w = {0};
+    int64_t c = 80, r = 24;
+    if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+        c = w.ws_col;
+        r = w.ws_row;
+    }
+    mim_val *f[2] = {mim_int(c), mim_int(r)};
+    return obj_owned(&mim_desc_tuple, 2, f);
+}
+
+static int term_byte(int wait_ms) {
+    if (wait_ms >= 0) {
+        struct pollfd p = {0, POLLIN, 0};
+        if (poll(&p, 1, wait_ms) <= 0) return -1;
+    } else {
+        mim_wait_readable(0); /* on the event loop: park, do not block */
+    }
+    unsigned char b;
+    ssize_t n;
+    while ((n = read(0, &b, 1)) < 0 && errno == EINTR) {
+    }
+    return n == 1 ? b : -2;
+}
+
+/* the next key: a name ("up", "enter", "tab", "backtab", "backspace",
+ * "esc", "ctrl-c", "eof", …) or the character typed */
+mim_val *mim_std_ui_term_key(void) {
+    const char *name = NULL;
+    char buf[8];
+    int b = term_byte(-1);
+    if (b < 0) name = "eof";
+    else if (b == 3) name = "ctrl-c";
+    else if (b == 4) name = "eof";
+    else if (b == 13 || b == 10) name = "enter";
+    else if (b == 9) name = "tab";
+    else if (b == 127 || b == 8) name = "backspace";
+    else if (b == 27) {
+        int c = term_byte(30);
+        if (c == '[' || c == 'O') {
+            int d = term_byte(30);
+            switch (d) {
+            case 'A': name = "up"; break;
+            case 'B': name = "down"; break;
+            case 'C': name = "right"; break;
+            case 'D': name = "left"; break;
+            case 'Z': name = "backtab"; break;
+            case 'H': name = "home"; break;
+            case 'F': name = "end"; break;
+            default: /* eat the rest of a longer sequence (…~) */
+                while (d >= 0 && !(d >= 0x40 && d <= 0x7e)) d = term_byte(30);
+                name = "unknown";
+            }
+        } else name = "esc";
+    } else {
+        int n = b < 0x80 ? 1 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+        buf[0] = (char)b;
+        for (int i = 1; i < n; i++) {
+            int c = term_byte(30);
+            buf[i] = (char)(c < 0 ? '?' : c);
+        }
+        if (b < 32) name = "unknown";
+        else return mim_str(buf, n);
+    }
+    return mim_str(name, (int64_t)strlen(name));
+}
+
+/* the whole screen, drawn from the top left */
+mim_val *mim_std_ui_term_draw(mim_val *text) {
+    if (!text || text->dtype != MIM_CHAR) mim_panic("ui: expected text");
+    const char *home = "\x1b[H\x1b[2J";
+    term_write(home, strlen(home));
+    /* raw mode keeps \n as a bare line feed: return to the start of the line */
+    const char *p = (const char *)text->data, *end = p + text->len;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t n = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        term_write(p, n);
+        if (!nl) break;
+        term_write("\r\n", 2);
+        p = nl + 1;
+    }
+    return NULL;
+}
+
+#else
+mim_val *mim_std_ui_term_start(void) { return err_of("ui: terminal interfaces are not available on this platform"); }
+mim_val *mim_std_ui_term_stop(void) { return NULL; }
+mim_val *mim_std_ui_term_size(void) {
+    mim_val *f[2] = {mim_int(80), mim_int(24)};
+    return obj_owned(&mim_desc_tuple, 2, f);
+}
+mim_val *mim_std_ui_term_key(void) { return mim_str("eof", 3); }
+mim_val *mim_std_ui_term_draw(mim_val *t) { (void)t; return NULL; }
+#endif
+
+/* the escape character, for terminal styles */
+mim_val *mim_std_ui_esc(void) { return mim_str("\x1b", 1); }

@@ -1,0 +1,26 @@
+module main
+
+// The terminal side of ui, without a terminal: the screen as text, which
+// elements take the focus, and what keys mean on them.
+type Msg = Add | Typed(str) | Toggle(i64, bool) | Remove(i64)
+type State = { todos: [str], done: [bool], draft: str }
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 12, [
+        ui::text("To do", size: 28, weight: "bold"),
+        ui::form(on_submit: Add, [ui::input(s.draft, on_input: Typed, placeholder: "What needs doing?"), ui::submit("Add")]),
+        ui::column(⍳ ≢ s.todos ¨ (i => ui::row([ui::checkbox(s.done[i], on_change: on => Toggle(i, on)), ui::text(s.todos[i], strike: s.done[i]), ui::button("×", on_click: Remove(i))]))),
+    ])
+}
+fn plain(t: str) -> str { ui::plain(t) }
+fn main() {
+    let s = State { todos: ["milk" "bike"], done: [false true], draft: "" }
+    let tree = view(s)
+    print(ui::focusables(tree, "0"))
+    print(plain(ui::terminal_text(tree, "0.2.0.0", "Todo")))
+    print(ui::key_message(tree, "0.1.0", "m"))
+    print(ui::key_message(view({ s with draft: "mil" }), "0.1.0", "backspace"))
+    print(ui::key_message(view({ s with draft: "milk" }), "0.1.0", "enter"))
+    print(ui::key_message(tree, "0.2.0.0", " "))
+    print(ui::key_message(tree, "0.2.1.2", "enter"))
+    print(ui::key_message(tree, "0.2.1.2", "x"))
+}
