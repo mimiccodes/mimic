@@ -1,0 +1,33 @@
+module main
+
+// Every element in a native window, driven by gallery.steps through the real
+// controls (MIMIC_UI_TEST); the views are dumped as text (gallery.out).
+
+type Msg = Typed(str) | Add | Check(bool) | Count | Remove(i64)
+type State = { draft: str, items: [str], ok: bool, n: i64 }
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Typed(t) => { s with draft: t },
+        Add => { s with items: push(s.items, s.draft), draft: "" },
+        Check(b) => { s with ok: b },
+        Count => { s with n: s.n + 1 },
+        Remove(i) => { s with items: s.items ⌿ (⍳ ≢ s.items ¨ (k => k != i)) },
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 8, padding: 4, [
+        ui::text("Gallery", size: 24, weight: "bold"),
+        ui::form(on_submit: Add, [ui::input(s.draft, on_input: Typed, placeholder: "item"), ui::submit("Add")]),
+        ui::column(⍳ ≢ s.items ¨ (i => ui::keyed(s.items[i], ui::row([ui::text(s.items[i]), ui::spacer(), ui::button("×", on_click: Remove(i))])))),
+        ui::divider(),
+        ui::row([ui::checkbox(s.ok, on_change: Check), ui::text(if s.ok { "checked" } else { "not checked" }, strike: not s.ok, color: "#888888")]),
+        ui::grid(columns: 2, [ui::text("a"), ui::text("b"), ui::text("c"), ui::button("count {s.n}", on_click: Count)]),
+        ui::link("Mimic", "https://example.com/"),
+    ])
+}
+
+fn main() {
+    print(ui::run(State { draft: "", items: ["one"], ok: false, n: 0 }, view, update, show: "window", title: "Gallery"))
+}

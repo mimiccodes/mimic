@@ -1,0 +1,11 @@
+dump
+type 0.1.0 two
+enter 0.1.0
+type 0.1.0 three
+click 0.1.1
+click 0.2.0.2
+click 0.4.0
+click 0.5.3
+click 0.5.3
+dump
+close

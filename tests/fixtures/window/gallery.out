@@ -1,0 +1,47 @@
+--
+column
+  text "Gallery"
+  row
+    input "" (item)
+    button "Add"
+  column
+    row
+      text "one"
+      spacer
+      button "×"
+  divider
+  row
+    checkbox off
+    text "not checked" struck
+  grid
+    text "a"
+    text "b"
+    text "c"
+    button "count 0"
+  link "Mimic"
+--
+column
+  text "Gallery"
+  row
+    input "" (item)
+    button "Add"
+  column
+    row
+      text "two"
+      spacer
+      button "×"
+    row
+      text "three"
+      spacer
+      button "×"
+  divider
+  row
+    checkbox on
+    text "checked"
+  grid
+    text "a"
+    text "b"
+    text "c"
+    button "count 2"
+  link "Mimic"
+Ok(0)

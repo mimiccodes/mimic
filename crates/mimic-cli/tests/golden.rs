@@ -734,3 +734,28 @@ new Function('fs', 'path', 'page', 'events', 'return (async () => {' + js.replac
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Native windows (macOS): each tests/fixtures/window/*.mim is driven by its
+/// .steps through the real controls (MIMIC_UI_TEST) and prints its views;
+/// that must match its .out. It opens windows on the screen, so it only runs
+/// with MIMIC_TEST_WINDOWS=1.
+#[test]
+fn windows() {
+    if !cfg!(target_os = "macos") || std::env::var_os("MIMIC_TEST_WINDOWS").is_none() {
+        eprintln!("skipping: set MIMIC_TEST_WINDOWS=1 to open test windows");
+        return;
+    }
+    let mut failures = Vec::new();
+    for f in fixtures("window") {
+        let out = mimic().arg("build").arg(&f).arg("--emit-json").output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        let exe = v["artifacts"][0]["path"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
+        let run = Command::new(&exe).env("MIMIC_UI", "window").env("MIMIC_UI_TEST", f.with_extension("steps")).output().unwrap();
+        let got = String::from_utf8_lossy(&run.stdout).to_string();
+        let want = std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
+        if got != want {
+            failures.push(format!("{}\n--- want\n{want}--- got\n{got}--- stderr\n{}", f.display(), String::from_utf8_lossy(&run.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
