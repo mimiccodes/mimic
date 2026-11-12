@@ -131,50 +131,52 @@ Pure text operations, so they stay parallel:
 
 The names in the standard library never block your own: a variable or function of yours may be called `args`, `parent` or `remove_file`, and your definition wins in your code.
 
-## Networking
+## Networking: the `http` and `tcp` modules
 
-### HTTP
+Networking lives in two standard modules, used by path from any file with no import: `http::fetch`, `tcp::connect`. (`use http::fetch` works too.) Your own modules come first: a project or module called `http` hides the standard one.
+
+### `http`
 
 ```mimic
-let r = fetch("http://example.com/") else { return }      // Result[Response, str]
-print((r.status, r.body, get(r.headers, "content-type")))
-request("POST", url, ["content-type": "application/json"], body)
+let r = http::fetch("http://example.com/") else { return }   // Result[http::Response, str]
+print((r.status, get(r.headers, "content-type")))
+http::request("POST", url, ["content-type": "application/json"], body)
 
-fn handle(req: Request) -> Response {
+fn handle(req: http::Request) -> http::Response {
     match (req.method, req.path) {
-        ("GET", "/") => ok("hello"),
-        ("GET", "/users/{id: i64}") => ok("user #{id}"),
-        _ => not_found(),
+        ("GET", "/") => http::ok("hello"),
+        ("GET", "/users/{id: i64}") => http::ok("user #{id}"),
+        _ => http::not_found(),
     }
 }
-serve(8080, handle)                                        // runs until the program ends
+http::serve(8080, handle)                                     // runs until the program ends
 ```
 
 | Function / type | Meaning |
 |---|---|
-| `fetch(url)` | `Result[Response, str]`: a GET request |
-| `request(method, url, headers, body)` | Any method, with `[str: str]` headers and a body |
-| `serve(port, handler)` | An HTTP/1.1 server; `handler` is a `fn(Request) -> Response` |
-| `serve_requests(port, handler, n)` | The same, stopping after `n` requests; `Ok(n)` |
-| `Request` | `{ method, path, query, headers, body }`: header names are lower case, `query` is the part after `?` |
-| `Response` | `{ status, headers, body }` |
-| `ok(body)`, `respond(status, body)`, `not_found()` | Responses (text/plain unless the headers say otherwise) |
+| `http::fetch(url)` | `Result[Response, str]`: a GET request |
+| `http::request(method, url, headers, body)` | Any method, with `[str: str]` headers and a body |
+| `http::serve(port, handler)` | An HTTP/1.1 server; `handler` is a `fn(http::Request) -> http::Response` |
+| `http::serve_requests(port, handler, n)` | The same, stopping after `n` requests; `Ok(n)` |
+| `http::Request` | `{ method, path, query, headers, body }`: header names are lower case, `query` is the part after `?` |
+| `http::Response` | `{ status, headers, body }` |
+| `http::ok(body)`, `http::respond(status, body)`, `http::not_found()` | Responses (text/plain unless the headers say otherwise) |
 
 How the client and server behave:
-* **Requests overlap.** `let a = fetch(u1)` and `let b = fetch(u2)` are in flight at the same time (implicit futures).
-* **The server runs a pure handler in parallel**, or one whose effects may overlap: each connection gets its own thread. A handler that prints or writes files handles one request at a time, in order.
-* **One request per connection** (`Connection: close`). Request and response bodies use `Content-Length`; chunked responses are decoded.
+* **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
+* **The server runs a pure or overlapping handler in parallel**, one thread per connection. A handler that prints or writes files handles one request at a time, in order.
+* **One request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
 * **`https://` is not supported yet** (TLS is planned) and returns `Err`. WebAssembly has no sockets, so there every network function returns `Err`.
 
-### TCP
+### `tcp`
 
 | Function | Result |
 |---|---|
-| `tcp_connect(host, port)` | `Result[Socket, str]` |
-| `tcp_listen(port)` | `Result[Listener, str]`; port 0 picks a free port, see `.port` |
-| `tcp_accept(listener)` | `Result[Socket, str]` |
-| `send(socket, text)` | `Result[i64, str]`: everything is sent |
-| `receive(socket, limit)` | `Result[str, str]`: up to `limit` bytes; `""` when the other side closed |
-| `close(socket)` | Close a socket or listener |
+| `tcp::connect(host, port)` | `Result[tcp::Socket, str]` |
+| `tcp::listen(port)` | `Result[tcp::Listener, str]`; port 0 picks a free port, see `.port` |
+| `tcp::accept(listener)` | `Result[tcp::Socket, str]` |
+| `tcp::send(socket, text)` | `Result[i64, str]`: everything is sent |
+| `tcp::receive(socket, limit)` | `Result[str, str]`: up to `limit` bytes; `""` when the other side closed |
+| `tcp::close(socket)` | Close a socket or listener |
 
 TCP calls happen in program order.

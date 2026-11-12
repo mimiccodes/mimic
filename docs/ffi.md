@@ -45,6 +45,29 @@ fn main() {
   * C must not keep the pointer after the call returns.
   * C must not write through it unless the array is uniquely owned (`mut` and not shared).
 
+## What C functions do: effects
+
+The compiler decides what may run in parallel from what each function does. It can see inside Mimic code, but not inside C, so an `extern` block can declare its functions' effects with one word after the ABI string:
+
+```mimic
+trusted extern "C" pure { fn crc32(crc: u32, buf: ptr[u8], len: usize) -> u32 }
+trusted extern "C" concurrent include "libpq-fe.h"
+extern "C" ordered { fn syslog(priority: i32, fmt: cstr, ...) }
+extern "C" { fn remove(path: cstr) -> i32 }                // sync: the default
+```
+
+| Word | Meaning | What the compiler does |
+|---|---|---|
+| `pure` | No effects at all: the result depends only on the arguments | Calls run in parallel (`¨`, pure functions, interaction nets), may be reordered |
+| `concurrent` | Effects that may overlap each other: reads, queries, requests, waiting | `let x = f(…)` becomes an implicit future; `¨` runs calls in parallel |
+| `ordered` | Effects in program order that change nothing other calls read: logging, printing | Calls happen in order on the main thread; pending futures keep running |
+| `sync` (default) | Changes shared state: files, the environment, the database, anything | Pending implicit futures finish first; everything happens in order |
+
+How the declaration is used:
+* **It is a promise the compiler trusts**, like `trusted` is for memory safety. A function declared `pure` or `concurrent` that secretly writes shared state can produce races. When unsure, leave it out: `sync` is always correct, only slower.
+* **It covers headers too.** It applies to every function of the block, including those imported with `include`.
+* **The runtime uses the same words.** Mimic's own runtime functions, declared with `extern "mimic"`, carry the same annotations. That's how `http::fetch` (concurrent) and `write_file` (sync) get their behavior. Library authors use the same mechanism for their C bindings.
+
 ## Importing C headers directly
 
 No binding code is needed: name the header, and every C function it makes visible becomes an extern declaration. This works the same way C's `#include` does.

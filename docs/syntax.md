@@ -305,7 +305,7 @@ Mimic has no `async`, no `await` and no threads to manage. Effects come in three
 * **Ordered effects** happen in program order on the main thread: printing, standard input, random numbers, TCP sockets, `exit`.
 * **Synchronizing effects** change what overlapping effects could read: writing, renaming or removing files, changing the environment, running programs.
 
-The compiler works out which kind every function has, transitively, like purity. The rules:
+The compiler works out which kind every function has, transitively, like purity. For C functions, which it cannot see inside, the `extern` block says so (`extern "C" concurrent { … }`, see [ffi.md](ffi.md#what-c-functions-do-effects)). The rules:
 
 * **A `let` starts work early.** When `let x = f(…)` calls a function whose effects all overlap, it starts at once on its own thread. The program goes on, and waits only when the value is needed.
 * **When the program waits.** It waits right before the first statement that uses `x`, before any synchronizing effect, at every `return`, and at the end of the block. The arguments are evaluated first, in order. Printing does not wait, so a program can print while its own server, running as a future, keeps answering.

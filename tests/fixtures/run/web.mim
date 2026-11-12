@@ -1,0 +1,80 @@
+module main
+
+// An HTTP server and its clients in one program (modules `http` and `tcp`). The handler is pure, so the
+// server (`let s = server(port)`) runs as an implicit future and handles
+// requests in parallel; the client requests overlap too.
+// (WASI has no sockets: web.wasi.out has its output.)
+fn handle(req: http::Request) -> http::Response {
+    match (req.method, req.path) {
+        ("GET", "/") => http::ok("hello"),
+        ("GET", "/users/{id: i64}") => http::ok("user #{id}"),
+        ("POST", "/echo") => http::respond(201, "{req.query} {req.body} {get(req.headers, "x-test")}"),
+        _ => http::not_found(),
+    }
+}
+
+fn server(port: i64) -> Result[i64, str] { http::serve_requests(port, handle, 7) }
+
+// the server may not be listening yet: try again for a while
+fn get_when_up(url: str, tries: i64) -> Result[http::Response, str] {
+    match http::fetch(url) {
+        Ok(r) => Ok(r),
+        Err(e) => if tries <= 1 { Err(e) } else { sleep(20ms); get_when_up(url, tries - 1) },
+    }
+}
+
+fn main() {
+    let port = 20000 + pid() % 20000
+    let base = "http://127.0.0.1:{port}"
+    let s = server(port)
+    match get_when_up(base + "/", 100) {
+        Ok(r) => print((r.status, r.body, get(r.headers, "content-type"))),
+        Err(e) => print("no server: {e}"),
+    }
+    // three requests in flight at once
+    let a = http::fetch(base + "/users/42")
+    let b = http::fetch(base + "/users/7")
+    let c = http::fetch(base + "/nope")
+    print(summary(a))
+    print(summary(b))
+    print(summary(c))
+    print(summary(http::request("POST", base + "/echo?x=1", ["x-test": "yes"], "data")))
+    print(summary(http::request("DELETE", base + "/", [:], "")))
+
+    // raw TCP: speak HTTP by hand
+    match tcp::connect("127.0.0.1", port) {
+        Ok(sock) => {
+            print(tcp::send(sock, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+            let reply = tcp::receive(sock, 4096) else { return }
+            print(starts_with(reply, "HTTP/1.1 200 OK"))
+            print(ends_with(reply, "hello"))
+            tcp::close(sock)
+        }
+        Err(e) => print("no tcp: {e}"),
+    }
+    print(s)                                        // 7 requests served
+
+    match tcp::listen(0) {                           // port 0: the system picks one
+        Ok(l) => {
+            print(l.port > 0)
+            tcp::close(l)
+        }
+        Err(e) => print("no listen: {e}"),
+    }
+    print(http::fetch("https://example.com"))
+    print(is_err(http::fetch("http://127.0.0.1:1/")))
+}
+
+fn summary(r: Result[http::Response, str]) -> str {
+    match r {
+        Ok(resp) => "{resp.status} {resp.body}",
+        Err(e) => "error: {e}",
+    }
+}
+
+fn is_err(r: Result[http::Response, str]) -> bool {
+    match r {
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}

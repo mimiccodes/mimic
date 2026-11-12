@@ -11,7 +11,7 @@
 use crate::targets::Target;
 use crate::toolchain::{self, Toolchain};
 use mimic_syntax::Span;
-use mimic_syntax::ast::{ExternFn, Type};
+use mimic_syntax::ast::{Effect, ExternFn, Type};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -58,7 +58,8 @@ pub struct Imported {
 
 impl Imported {
     /// The imported functions as extern declarations (spans point at the `include`).
-    pub fn extern_fns(&self, is_pub: bool, span: Span) -> Vec<ExternFn> {
+    pub fn extern_fns(&self, is_pub: bool, effect: Effect, span: Span) -> Vec<ExternFn> {
+        let (effects, overlap, sync) = effect.flags();
         let ty = |t: &str| -> Type {
             match t.strip_prefix("ptr[").and_then(|r| r.strip_suffix(']')) {
                 Some(inner) => Type::Ptr(Box::new(Type::Named(inner.into(), span)), span),
@@ -74,9 +75,9 @@ impl Imported {
                 variadic: f.variadic,
                 link_name: f.link_name.clone(),
                 intrinsic: false,
-                effects: false,
-                overlap: false,
-                sync: false,
+                effects,
+                overlap,
+                sync,
                 ret: f.ret.as_deref().map(ty),
                 span,
             })

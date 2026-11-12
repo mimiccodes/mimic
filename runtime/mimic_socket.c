@@ -50,13 +50,13 @@ static mim_val *no_net(void) { return err_of("networking is not available on thi
 mim_val *mim_std_tcp_connect(mim_val *h, mim_val *p) { (void)h; (void)p; return no_net(); }
 mim_val *mim_std_tcp_listen(mim_val *p) { (void)p; return no_net(); }
 mim_val *mim_std_tcp_accept(mim_val *l) { (void)l; return no_net(); }
-mim_val *mim_std_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_net(); }
-mim_val *mim_std_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
-mim_val *mim_std_close(mim_val *s) { (void)s; return NULL; }
-mim_val *mim_std_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
-mim_val *mim_std_fetch(mim_val *u) { (void)u; return no_net(); }
-mim_val *mim_std_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
-mim_val *mim_std_serve_requests(mim_val *p, mim_val *h, mim_val *n) { (void)p; (void)h; (void)n; return no_net(); }
+mim_val *mim_std_tcp_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_net(); }
+mim_val *mim_std_tcp_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
+mim_val *mim_std_tcp_close(mim_val *s) { (void)s; return NULL; }
+mim_val *mim_std_http_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
+mim_val *mim_std_http_fetch(mim_val *u) { (void)u; return no_net(); }
+mim_val *mim_std_http_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
+mim_val *mim_std_http_serve_requests(mim_val *p, mim_val *h, mim_val *n) { (void)p; (void)h; (void)n; return no_net(); }
 
 #else
 
@@ -189,16 +189,16 @@ mim_val *mim_std_tcp_accept(mim_val *l) {
     return ok_of(socket_of(fd));
 }
 
-mim_val *mim_std_send(mim_val *s, mim_val *text) {
-    int fd = fd_of(s, "send");
-    if (!text || text->dtype != MIM_CHAR || text->rank != 1) mim_panic("send: expected text (str)");
+mim_val *mim_std_tcp_send(mim_val *s, mim_val *text) {
+    int fd = fd_of(s, "tcp::send");
+    if (!text || text->dtype != MIM_CHAR || text->rank != 1) mim_panic("tcp::send: expected text (str)");
     if (send_all(fd, (const char *)text->data, (size_t)text->len) != 0) return err_errno("cannot send", NULL);
     return ok_of(mim_int(text->len));
 }
 
 /* up to `max` bytes; "" when the other side has closed the connection */
-mim_val *mim_std_receive(mim_val *s, mim_val *max) {
-    int fd = fd_of(s, "receive");
+mim_val *mim_std_tcp_receive(mim_val *s, mim_val *max) {
+    int fd = fd_of(s, "tcp::receive");
     int64_t n = geti(max, 0);
     if (n <= 0) n = 65536;
     char *buf = (char *)malloc((size_t)n);
@@ -214,8 +214,8 @@ mim_val *mim_std_receive(mim_val *s, mim_val *max) {
     return ok_of(v);
 }
 
-mim_val *mim_std_close(mim_val *s) {
-    close(fd_of(s, "close"));
+mim_val *mim_std_tcp_close(mim_val *s) {
+    close(fd_of(s, "tcp::close"));
     return NULL;
 }
 
@@ -341,7 +341,7 @@ static mim_val *read_body(int fd, sbuf *b, int64_t off, int64_t content_length, 
 
 /* ---- HTTP client -------------------------------------------------------- */
 
-mim_val *mim_std_request(mim_val *method, mim_val *url, mim_val *headers, mim_val *body) {
+mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, mim_val *body) {
     const char *m = io_path(method, "request"), *u = io_path(url, "request");
     if (strncmp(u, "https://", 8) == 0) return err_of("https needs TLS, which this version of mimic does not support yet");
     if (strncmp(u, "http://", 7) != 0) return err_of("request: the URL must start with http://");
@@ -417,9 +417,9 @@ mim_val *mim_std_request(mim_val *method, mim_val *url, mim_val *headers, mim_va
     return ok_of(obj_owned(&mim_desc_Response, 3, fields));
 }
 
-mim_val *mim_std_fetch(mim_val *url) {
+mim_val *mim_std_http_fetch(mim_val *url) {
     mim_val *m = mim_str("GET", 3), *h = mim_map_lit(0, NULL, NULL), *b = mim_str("", 0);
-    mim_val *r = mim_std_request(m, url, h, b);
+    mim_val *r = mim_std_http_request(m, url, h, b);
     mim_release(m);
     mim_release(h);
     mim_release(b);
@@ -581,9 +581,9 @@ static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) {
     return ok_of(mim_int(served));
 }
 
-mim_val *mim_std_serve(mim_val *port, mim_val *handler) { return serve_loop(port, handler, 0); }
+mim_val *mim_std_http_serve(mim_val *port, mim_val *handler) { return serve_loop(port, handler, 0); }
 
-mim_val *mim_std_serve_requests(mim_val *port, mim_val *handler, mim_val *count) {
+mim_val *mim_std_http_serve_requests(mim_val *port, mim_val *handler, mim_val *count) {
     return serve_loop(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1);
 }
 

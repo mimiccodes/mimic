@@ -204,6 +204,8 @@ impl UseDecl {
 pub struct ExternBlock {
     pub abi: String,
     pub trusted: bool,
+    /// What the functions do besides computing a result (`extern "C" pure { … }`).
+    pub effect: Effect,
     pub fns: Vec<ExternFn>,
     /// `include "math.h"`: C headers whose declarations are imported
     /// (filled into `fns` by the C importer before checking).
@@ -211,6 +213,45 @@ pub struct ExternBlock {
     /// `pub extern …`: imported declarations are public.
     pub is_pub: bool,
     pub span: Span,
+}
+
+/// The effects of foreign functions, declared on their `extern` block. The
+/// compiler trusts the declaration: it decides what may run in parallel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// No effects at all: calls may run in parallel, be reordered or skipped.
+    Pure,
+    /// Effects that may overlap each other (reads, queries, requests):
+    /// calls become implicit futures and run in parallel under `¨`.
+    Concurrent,
+    /// Effects in program order that change nothing other calls read
+    /// (printing, logging).
+    Ordered,
+    /// Effects that change shared state (writes): pending futures finish
+    /// first. The default for C functions.
+    Sync,
+}
+
+impl Effect {
+    pub fn from_word(w: &str) -> Option<Effect> {
+        Some(match w {
+            "pure" => Effect::Pure,
+            "concurrent" => Effect::Concurrent,
+            "ordered" => Effect::Ordered,
+            "sync" => Effect::Sync,
+            _ => return None,
+        })
+    }
+
+    /// (effects, overlap, sync) flags of an extern function.
+    pub fn flags(self) -> (bool, bool, bool) {
+        match self {
+            Effect::Pure => (false, false, false),
+            Effect::Concurrent => (true, true, false),
+            Effect::Ordered => (true, false, false),
+            Effect::Sync => (true, false, true),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

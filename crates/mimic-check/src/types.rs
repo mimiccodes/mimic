@@ -10,7 +10,7 @@
 //! Recursion is solved by fixpoint iteration: return types start at
 //! [`Ty::Never`] (no information yet) and are joined upwards until stable.
 
-use crate::{FileDiag, FnId, FnKind, ModId, Program, Resolved};
+use crate::{type_path, FileDiag, FnId, FnKind, ModId, Program, Resolved};
 use mimic_syntax::ast::*;
 use mimic_syntax::codes as C;
 use mimic_syntax::glyphs::Prim;
@@ -152,7 +152,7 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
             }
         }
         Type::App(n, targs, _) => {
-            if let (Ok(Resolved::Type(tid)), Ty::Obj(id)) = (p.resolve(module, std::slice::from_ref(n)), got)
+            if let (Ok(Resolved::Type(tid)), Ty::Obj(id)) = (p.resolve(module, &type_path(n)), got)
                 && obj_tid(id) == tid
             {
                 for (ta, ga) in targs.iter().zip(obj_args(id)) {
@@ -363,12 +363,12 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
         return Some(x);
     }
     match t {
-        Type::Named(n, _) => match p.resolve(module, std::slice::from_ref(n)) {
+        Type::Named(n, _) => match p.resolve(module, &type_path(n)) {
             // a generic type named without arguments: any instance
             Ok(Resolved::Type(id)) => Some(obj(id, &vec![Ty::Dyn; p.types[id].decl.params.len()])),
             _ => None,
         },
-        Type::App(n, args, _) => match p.resolve(module, std::slice::from_ref(n)) {
+        Type::App(n, args, _) => match p.resolve(module, &type_path(n)) {
             Ok(Resolved::Type(id)) => {
                 let want = p.types[id].decl.params.len();
                 let mut a: Vec<Ty> = args.iter().map(|x| ann_env(p, module, x, env).unwrap_or(Ty::Dyn)).collect();

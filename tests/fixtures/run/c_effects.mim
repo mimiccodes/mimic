@@ -1,0 +1,31 @@
+module main
+
+// The effects of C functions are declared on their extern block. Without a
+// declaration, C calls are assumed to change shared state (`sync`).
+trusted extern "C" pure {
+    fn sqrt(x: f64) -> f64
+}
+
+// may overlap each other: calls become implicit futures, `¨` runs them in parallel
+trusted extern "C" concurrent {
+    fn usleep(us: u32) -> i32
+}
+
+trusted extern "C" ordered include "stdio.h"
+
+fn roots(xs: [f64]) -> [f64] { xs ¨ (x => sqrt(x)) }      // pure: parallel
+
+fn nap(ms: i64) -> i64 {
+    usleep(ms * 1000)
+    ms
+}
+
+fn main() {
+    print(roots([1.0 4.0 9.0 16.0]))
+    let a = nap(30)                                       // both naps overlap
+    let b = nap(30)
+    print(a + b)
+    print([10 20 30] ¨ nap)                               // in parallel
+    puts("printed by C, in order")
+    print("after C")
+}

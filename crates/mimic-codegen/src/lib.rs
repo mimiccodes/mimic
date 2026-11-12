@@ -2587,7 +2587,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
                     && decl.intrinsic
                 {
-                    let name = format!("mim_std_{}", decl.name);
+                    // `tcp::send` → mim_std_tcp_send; prelude functions → mim_std_<name>
+                    let m = &self.p.mods[self.p.fns[fid].module];
+                    let name = if m.name == "prelude" { format!("mim_std_{}", decl.name) } else { format!("mim_std_{}_{}", m.name, decl.name) };
                     let f = match self.module.get_function(&name) {
                         Some(f) => f,
                         None => {

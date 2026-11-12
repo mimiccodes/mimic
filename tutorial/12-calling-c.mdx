@@ -93,6 +93,51 @@ let k = 10
 apply_twice(x => x + k, 1)                 // a closure works too
 ```
 
+## Telling Mimic what C functions do
+
+Mimic decides by itself what can run in parallel, but it cannot look inside C. Unless told otherwise, it assumes a C function might change anything, and runs every call strictly in order. That is always safe, but it can be slow. One word after `extern "C"` says more:
+
+```mimic run
+module main
+
+trusted extern "C" pure {                // depends only on its arguments
+    fn sqrt(x: f64) -> f64
+}
+
+trusted extern "C" concurrent {          // waits, but changes nothing others read
+    fn usleep(us: u32) -> i32
+}
+
+fn nap(ms: i64) -> i64 {
+    usleep(ms * 1000)
+    ms
+}
+
+fn main() {
+    print([1.0 4.0 9.0] ¨ (x => sqrt(x)))   // pure: in parallel
+    let start = clock()
+    let a = nap(100)                         // concurrent: both naps overlap
+    let b = nap(100)
+    print(a + b)
+    print(clock() - start < 190ms)           // about 100ms, not 200ms
+}
+```
+
+```output
+[1.0 2.0 3.0]
+200
+true
+```
+
+| Word | Use it for |
+|---|---|
+| `pure` | Math and other functions whose result depends only on their arguments |
+| `concurrent` | Reads, database queries, network requests, waiting |
+| `ordered` | Logging and printing: in order, but nothing else depends on it |
+| `sync` | Anything that changes shared state. This is the default. |
+
+The word is a promise, like `trusted`. If a function marked `concurrent` secretly writes files, runs may race. Leave it out when unsure. The full rules are in [the FFI reference](../docs/ffi.md#what-c-functions-do-effects).
+
 ## Calling Mimic from C
 
 Mark a function `extern "C"` and it is exported with C types and the C calling convention. `--emit-header` writes the matching `.h` file:

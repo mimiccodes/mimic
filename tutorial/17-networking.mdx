@@ -1,20 +1,22 @@
 ---
 title: Networking
-description: Fetch from the web, write an HTTP server with route patterns, and talk TCP — with requests that overlap by themselves.
+description: The http and tcp modules — fetch from the web, write an HTTP server with route patterns, and talk TCP, with requests that overlap by themselves.
 order: 17
 ---
 
 # Networking
 
+Networking lives in two standard modules, `http` and `tcp`. Like all standard modules they need no import: write `http::fetch(…)` or `tcp::connect(…)` from any file. If you prefer short names, `use http::fetch` brings one in. A module of your own with the same name, for example a project called `http`, takes precedence.
+
 ## Fetching
 
-`fetch` makes an HTTP GET request and returns a `Result[Response, str]`:
+`http::fetch` makes an HTTP GET request and returns a `Result[http::Response, str]`:
 
 ```mimic
 module main
 
 fn main() {
-    let r = fetch("http://example.com/") else { return }
+    let r = http::fetch("http://example.com/") else { return }
     print(r.status)
     print(get(r.headers, "content-type"))
     print(≢ r.body)
@@ -24,35 +26,35 @@ fn main() {
 Several requests written one after another are **in flight at the same time**: each `let` starts its request, and the program waits only where a result is used ([chapter 10](10-parallel-by-default.mdx)):
 
 ```mimic
-let news = fetch("http://news.example/")
-let weather = fetch("http://weather.example/")
+let news = http::fetch("http://news.example/")
+let weather = http::fetch("http://weather.example/")
 print(summary(news) + summary(weather))     // both were downloading at once
 ```
 
-`request(method, url, headers, body)` sends any method, with headers and a body:
+`http::request(method, url, headers, body)` sends any method, with headers and a body:
 
 ```mimic
-request("POST", "http://api.example/notes", ["content-type": "text/plain"], "remember the milk")
+http::request("POST", "http://api.example/notes", ["content-type": "text/plain"], "remember the milk")
 ```
 
 `https://` addresses are not supported yet; they return an `Err` that says so.
 
 ## Serving
 
-A server is a function from `Request` to `Response`. Routes are ordinary `match` patterns, and route captures are typed:
+A server is a function from `http::Request` to `http::Response`. Routes are ordinary `match` patterns, and route captures are typed:
 
 ```mimic
-fn handle(req: Request) -> Response {
+fn handle(req: http::Request) -> http::Response {
     match (req.method, req.path) {
-        ("GET", "/") => ok("hello"),
-        ("GET", "/users/{id: i64}") => ok("user #{id}"),
-        ("POST", "/notes") => respond(201, "saved: {req.body}"),
-        _ => not_found(),
+        ("GET", "/") => http::ok("hello"),
+        ("GET", "/users/{id: i64}") => http::ok("user #{id}"),
+        ("POST", "/notes") => http::respond(201, "saved: {req.body}"),
+        _ => http::not_found(),
     }
 }
 
 fn main() {
-    print(serve(8080, handle))               // runs until the program is stopped
+    print(http::serve(8080, handle))               // runs until the program is stopped
 }
 ```
 
@@ -65,18 +67,18 @@ Because a server with a pure handler only has overlapping effects, starting it w
 ```mimic run
 module main
 
-fn handle(req: Request) -> Response {
+fn handle(req: http::Request) -> http::Response {
     match req.path {
-        "/hello/{name}" => ok("hello, {name}!"),
-        _ => not_found(),
+        "/hello/{name}" => http::ok("hello, {name}!"),
+        _ => http::not_found(),
     }
 }
 
-fn server(port: i64) -> Result[i64, str] { serve_requests(port, handle, 3) }
+fn server(port: i64) -> Result[i64, str] { http::serve_requests(port, handle, 3) }
 
 // wait until the server answers (it starts at the same moment we do)
-fn when_up(url: str, tries: i64) -> Result[Response, str] {
-    match fetch(url) {
+fn when_up(url: str, tries: i64) -> Result[http::Response, str] {
+    match http::fetch(url) {
         Ok(r) => Ok(r),
         Err(e) => if tries <= 1 { Err(e) } else { sleep(20ms); when_up(url, tries - 1) },
     }
@@ -87,14 +89,14 @@ fn main() {
     let base = "http://127.0.0.1:{port}"
     let s = server(port)                         // starts serving in the background
     print(show(when_up(base + "/hello/ada", 100)))
-    let a = fetch(base + "/hello/grace")         // these two overlap
-    let b = fetch(base + "/missing")
+    let a = http::fetch(base + "/hello/grace")   // these two overlap
+    let b = http::fetch(base + "/missing")
     print(show(a))
     print(show(b))
     print(s)                                     // the server stops after 3 requests
 }
 
-fn show(r: Result[Response, str]) -> str {
+fn show(r: Result[http::Response, str]) -> str {
     match r {
         Ok(resp) => "{resp.status}: {resp.body}",
         Err(e) => "failed: {e}",
@@ -114,13 +116,13 @@ Ok(3)
 For other protocols, use TCP sockets directly:
 
 ```mimic
-let sock = tcp_connect("example.com", 80) else { return }
-print(send(sock, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))
-let reply = receive(sock, 4096) else { return }
+let sock = tcp::connect("example.com", 80) else { return }
+print(tcp::send(sock, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))
+let reply = tcp::receive(sock, 4096) else { return }
 print(lines(reply)[0])                          // HTTP/1.1 200 OK
-close(sock)
+tcp::close(sock)
 ```
 
-A server side uses `tcp_listen(port)` and `tcp_accept(listener)`. All TCP calls happen in program order.
+A server side uses `tcp::listen(port)` and `tcp::accept(listener)`. All TCP calls happen in program order.
 
 Next: the full list of networking functions is in the [standard library reference](../docs/std.md#networking). Back to the [index](index.mdx).

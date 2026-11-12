@@ -142,18 +142,18 @@ pub extern \"mimic\" {
 
 // The program and its surroundings. These have side effects, so they never
 // run in parallel or out of order (runtime/mimic_io.c).
-// \"mimic-io\": effects that happen in program order (they change nothing
+// `ordered`: effects that happen in program order (they change nothing
 // that overlapping reads see, so pending implicit futures keep running).
-pub extern \"mimic-io\" {
+pub extern \"mimic\" ordered {
     fn eprint(value: any)
     fn exit(code: i64)
     fn read_input() -> str
 }
 
-// \"mimic-io-concurrent\": effects that may overlap each other (reads). A
+// `concurrent`: effects that may overlap each other (reads). A
 // `let` of a function that only has these starts at once and is awaited at
 // its first use (an implicit future); `¨` runs such functions in parallel.
-pub extern \"mimic-io-concurrent\" {
+pub extern \"mimic\" concurrent {
     fn args() -> [str]
     fn exists(path: str) -> bool
     fn is_dir(path: str) -> bool
@@ -164,7 +164,7 @@ pub extern \"mimic-io-concurrent\" {
 
 // Low-level forms: on failure they set an error (per thread) that the
 // wrappers below read on the same thread.
-extern \"mimic-io-concurrent\" {
+extern \"mimic\" concurrent {
     fn io_ok() -> bool
     fn io_error() -> str
     fn io_env(name: str) -> str
@@ -173,13 +173,13 @@ extern \"mimic-io-concurrent\" {
     fn io_list_dir(path: str) -> [str]
 }
 
-extern \"mimic-io\" {
+extern \"mimic\" ordered {
     fn io_read_line() -> str
 }
 
-// \"mimic-io-sync\": changes what overlapping reads would see, so pending
+// `sync`: changes what overlapping reads would see, so pending
 // implicit futures finish first.
-extern \"mimic-io-sync\" {
+extern \"mimic\" sync {
     fn io_set_env(name: str, value: str) -> bool
     fn io_write_file(path: str, text: str, append: bool) -> i64
     fn io_remove_file(path: str) -> bool
@@ -266,14 +266,14 @@ pub type DateTime = {
 // What a finished program left behind.
 pub type Output = { status: i64, stdout: str, stderr: str }
 
-pub extern \"mimic-io-concurrent\" {
+pub extern \"mimic\" concurrent {
     fn now() -> i64
     fn clock() -> i64
     fn sleep(duration: i64)
     fn pid() -> i64
 }
 
-pub extern \"mimic-io\" {
+pub extern \"mimic\" ordered {
     fn random() -> f64
     fn random_int(lo: i64, hi: i64) -> i64
     fn seed_random(seed: i64)
@@ -288,11 +288,11 @@ extern \"mimic\" {
     fn time_utc_parts(t: i64) -> [i64]
 }
 
-extern \"mimic-io-concurrent\" {
+extern \"mimic\" concurrent {
     fn time_local_parts(t: i64) -> [i64]
 }
 
-extern \"mimic-io-sync\" {
+extern \"mimic\" sync {
     fn io_run(program: str, arguments: [str]) -> any
 }
 
@@ -316,45 +316,49 @@ pub fn run(program: str, arguments: [str]) -> Result[Output, str] {
     if io_ok() { Ok(Output { status: r[0], stdout: r[1], stderr: r[2] }) } else { Err(io_error()) }
 }
 
-// ---- networking ------------------------------------------------------------
+// ---- networking: the `tcp` and `http` modules ------------------------------
 
-pub type Socket = { fd: i64 }
-pub type Listener = { fd: i64, port: i64 }
+// TCP sockets: `tcp::connect(host, port)`, … (in program order).
+pub module tcp {
+    pub type Socket = { fd: i64 }
+    pub type Listener = { fd: i64, port: i64 }
 
-// An HTTP request as a server receives it. Header names are lower case.
-pub type Request = { method: str, path: str, query: str, headers: [str: str], body: str }
-
-// An HTTP response (both what a server sends and what a client receives).
-pub type Response = { status: i64, headers: [str: str], body: str }
-
-// TCP: in program order.
-pub extern \"mimic-io\" {
-    fn tcp_connect(host: str, port: i64) -> Result[Socket, str]
-    fn tcp_listen(port: i64) -> Result[Listener, str]
-    fn tcp_accept(listener: Listener) -> Result[Socket, str]
-    fn send(socket: Socket, text: str) -> Result[i64, str]
-    fn receive(socket: Socket, limit: i64) -> Result[str, str]
-    fn close(socket: any)
+    pub extern \"mimic\" ordered {
+        fn connect(host: str, port: i64) -> Result[Socket, str]
+        fn listen(port: i64) -> Result[Listener, str]
+        fn accept(listener: Listener) -> Result[Socket, str]
+        fn send(socket: Socket, text: str) -> Result[i64, str]
+        fn receive(socket: Socket, limit: i64) -> Result[str, str]
+        fn close(socket: any)
+    }
 }
 
-// HTTP: requests overlap (`let a = fetch(u1)` and `let b = fetch(u2)` run at
-// the same time); a server runs its handler in parallel when the handler's
-// effects may overlap, else one request at a time, in order.
-pub extern \"mimic-io-concurrent\" {
-    fn fetch(url: str) -> Result[Response, str]
-    fn request(method: str, url: str, headers: [str: str], body: str) -> Result[Response, str]
-    fn serve(port: i64, handler: fn(Request) -> Response) -> Result[i64, str]
-    fn serve_requests(port: i64, handler: fn(Request) -> Response, count: i64) -> Result[i64, str]
+// HTTP: `http::fetch(url)`, `http::serve(port, handler)`, …
+pub module http {
+    // A request as a server receives it. Header names are lower case.
+    pub type Request = { method: str, path: str, query: str, headers: [str: str], body: str }
+
+    // A response (what a server sends and what a client receives).
+    pub type Response = { status: i64, headers: [str: str], body: str }
+
+    // Requests overlap (`let a = http::fetch(u1)` and `let b = http::fetch(u2)`
+    // are in flight together); a server runs its handler in parallel when the
+    // handler's effects may overlap, else one request at a time, in order.
+    pub extern \"mimic\" concurrent {
+        fn fetch(url: str) -> Result[Response, str]
+        fn request(method: str, url: str, headers: [str: str], body: str) -> Result[Response, str]
+        fn serve(port: i64, handler: fn(Request) -> Response) -> Result[i64, str]
+        fn serve_requests(port: i64, handler: fn(Request) -> Response, count: i64) -> Result[i64, str]
+    }
+
+    pub fn respond(status: i64, body: str) -> Response {
+        Response { status: status, headers: [\"content-type\": \"text/plain; charset=utf-8\"], body: body }
+    }
+
+    pub fn ok(body: str) -> Response { respond(200, body) }
+
+    pub fn not_found() -> Response { respond(404, \"not found\") }
 }
-
-// Responses for handlers.
-pub fn respond(status: i64, body: str) -> Response {
-    Response { status: status, headers: [\"content-type\": \"text/plain; charset=utf-8\"], body: body }
-}
-
-pub fn ok(body: str) -> Response { respond(200, body) }
-
-pub fn not_found() -> Response { respond(404, \"not found\") }
 
 // Run a command line through the system shell (/bin/sh -c).
 pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
@@ -676,7 +680,7 @@ fn import_headers(
                 for (header, span) in b.includes.clone() {
                     match crate::cimport::import(&header, dirs, target) {
                         Ok(imp) => {
-                            for f in imp.extern_fns(b.is_pub, span) {
+                            for f in imp.extern_fns(b.is_pub, b.effect, span) {
                                 if taken.insert(f.name.clone()) {
                                     b.fns.push(f);
                                 }

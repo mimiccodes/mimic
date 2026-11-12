@@ -328,13 +328,22 @@ impl Parser {
                     Token { tok: Tok::Str(s), .. } => s,
                     t => return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected ABI string, e.g. extern \"C\"", t.span)),
                 };
-                let overlap = abi == "mimic-io-concurrent";
-                let sync = abi == "mimic-io-sync";
-                let effects = abi == "mimic-io" || overlap || sync;
-                let intrinsic = abi == "mimic" || effects;
+                let intrinsic = abi == "mimic";
                 if abi != "C" && !intrinsic {
                     return Err(Diag::new(&C::UNSUPPORTED_SYNTAX, format!("unsupported ABI \"{abi}\"; only \"C\" is supported"), start));
                 }
+                // `extern "C" concurrent { … }`: what the functions do besides
+                // returning a value. C functions without it are assumed to
+                // change shared state (`sync`); runtime intrinsics to be `pure`.
+                let effect = match self.peek().clone() {
+                    Tok::Ident(w) if Effect::from_word(&w).is_some() => {
+                        self.next();
+                        Effect::from_word(&w).unwrap()
+                    }
+                    _ if intrinsic => Effect::Pure,
+                    _ => Effect::Sync,
+                };
+                let (effects, overlap, sync) = effect.flags();
                 // `extern "C" fn f(x: f64) -> f64 { … }`: a Mimic function exported to C
                 if self.at(&Tok::Fn) {
                     if trusted {
@@ -349,7 +358,7 @@ impl Parser {
                 // `extern "C" include "math.h"`: a whole header, no braces
                 if let Some(inc) = self.include_directive()? {
                     includes.push(inc);
-                    return Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }));
+                    return Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, span: start }));
                 }
                 self.expect(&Tok::LBrace)?;
                 loop {
@@ -394,7 +403,7 @@ impl Parser {
                     fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, effects, overlap, sync, ret, span: fstart });
                 }
                 let trusted = trusted || intrinsic;
-                Ok(Item::Extern(ExternBlock { abi, trusted, fns, includes, is_pub, span: start }))
+                Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, span: start }))
             }
             other => Err(Diag::new(&C::UNEXPECTED_TOKEN, 
                 format!("expected an item (`fn`, `module`, `use`, `extern`), found {}", other.describe()),
@@ -589,7 +598,12 @@ impl Parser {
             let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.ty()?)) } else { None };
             return Ok(Type::Fn(ps, ret, s));
         }
-        let (n, _) = self.ident()?;
+        let (mut n, _) = self.ident()?;
+        // `http::Response`: a type from another module
+        while self.eat(&Tok::PathSep) {
+            n.push_str("::");
+            n.push_str(&self.ident()?.0);
+        }
         if n == "ptr" {
             self.expect(&Tok::LBracket)?;
             let inner = self.ty()?;

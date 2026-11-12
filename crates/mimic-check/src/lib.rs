@@ -794,7 +794,7 @@ impl Checker<'_> {
         }
         match t {
             Type::Named(n, _) if self.type_params.contains(n) => Ok(()),
-            Type::App(n, args, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
+            Type::App(n, args, s) => match self.p.resolve(self.module, &type_path(n)) {
                 Ok(Resolved::Type(id)) => {
                     let want = self.p.types[id].decl.params.len();
                     if want == 0 {
@@ -807,7 +807,7 @@ impl Checker<'_> {
                 }
                 _ => self.ann_result(&Type::Named(n.clone(), *s)),
             },
-            Type::Named(n, s) => match self.p.resolve(self.module, std::slice::from_ref(n)) {
+            Type::Named(n, s) => match self.p.resolve(self.module, &type_path(n)) {
                 Ok(Resolved::Type(_)) => Ok(()),
                 _ if n == "str" || n == "any" => Ok(()),
                 _ => {
@@ -1448,6 +1448,11 @@ fn arrays_exhaustive(arms: &[Arm]) -> bool {
     from.is_some_and(|k| (0..k).all(|n| exact.contains(&n)))
 }
 
+/// A type's name as a path: `http::Response` → ["http", "Response"].
+pub fn type_path(n: &str) -> Vec<String> {
+    n.split("::").map(str::to_string).collect()
+}
+
 // ---- named and default arguments ------------------------------------------
 
 /// Is `e` a constant (usable as a parameter default)?
@@ -1653,9 +1658,11 @@ impl Purity {
         // Optimistic fixpoint: assume pure, then knock out until stable.
         // runtime intrinsics (strings, lists, maps) have no side effects;
         // `extern "mimic-io"` ones (files, environment, stdin) do
-        let pure = Self::fixpoint(p, false, |decl| decl.intrinsic && !decl.effects);
-        let overlap = Self::fixpoint(p, false, |decl| decl.intrinsic && (!decl.effects || decl.overlap));
-        let calm = Self::fixpoint(p, true, |decl| decl.intrinsic && !decl.sync);
+        // externs (C functions and runtime intrinsics) are what their block
+        // declares: `extern "C" pure { … }`; C defaults to `sync`
+        let pure = Self::fixpoint(p, false, |decl| !decl.effects);
+        let overlap = Self::fixpoint(p, false, |decl| !decl.effects || decl.overlap);
+        let calm = Self::fixpoint(p, true, |decl| !decl.sync);
         Purity { fns: pure, overlap, calm }
     }
 

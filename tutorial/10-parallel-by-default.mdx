@@ -18,6 +18,7 @@ Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compil
 | `gather`, `trail`, `arms` | the function or body is pure |
 | `f(a) + g(b)` inside a pure function | always: independent calls run at the same time |
 | `let x = f(…)` where `f` only reads, sleeps or fetches | always: `f` starts at once and the program waits only where `x` is used |
+| C functions | when their `extern` block says `pure` or `concurrent` ([chapter 12](12-calling-c.mdx)) |
 
 **Pure** means the code never prints, never calls C and never does other input or output. The compiler works this out itself; you never annotate it.
 

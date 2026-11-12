@@ -65,7 +65,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | D (rest) | Sized integer types and byte arrays (with E4) | |
 | E1, E2 | Arguments, environment, stdin, files, directories, paths; clocks, dates, random numbers, running programs ([std.md](std.md)) | ✅ |
 | E3 (first part) | Implicit futures for overlapping effects; `¨` runs I/O-only functions in parallel ([syntax.md](syntax.md#concurrency-implicit-futures)) | ✅ |
-| E3 (rest), E4, E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), networking (TCP, UDP, HTTP, websockets, TLS, JSON ↔ records), interfaces (`view(state)`) | |
+| E4 (first part) | `http` module (client, server with route patterns, parallel pure handlers) and `tcp` module; effect annotations on `extern` blocks (`pure`, `concurrent`, `ordered`, `sync`) for C libraries and the runtime | ✅ |
+| E3 (rest), E4 (rest), E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), UDP, websockets, TLS, JSON ↔ records, interfaces (`view(state)`) | |
 | F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
@@ -146,12 +147,12 @@ fn handle(req: Request) -> Response {
     }
 }
 
-let a = http::get(url1)                 // both requests are in flight at once
-let b = http::get(url2)
+let a = http::fetch(url1)                // both requests are in flight at once
+let b = http::fetch(url2)
 print(a.status + b.status)              // waits only here, where the values are used
 
 let user = db::user(id) else { return not_found() }
-let page = http::get(url) ▷ timeout(2s) ▷ retry(3) else { return error("upstream down") }
+let page = http::fetch(url) ▷ timeout(2s) ▷ retry(3) else { return error("upstream down") }
 ```
 
 ## Memory model
