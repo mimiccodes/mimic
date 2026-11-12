@@ -71,7 +71,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | E4 (TLS) | `https://` in the HTTP client through the system's TLS (Security framework / OpenSSL 3 via dlopen), certificate and host-name checks; redirects | ✅ |
 | E4 (WebSockets) | `ws` module: client (`ws://`, `wss://`) and server, RFC 6455 framing, pings, fragments | ✅ |
 | E3 (channels) | `chan` module: typed channels between tasks; deferred tasks without threads (WASI); `¨` with effect-only functions; nested `match` exhaustiveness | ✅ |
-| E3 (rest), E4 (rest), E5 | Event loop for sockets (kqueue / epoll / io_uring / IOCP), UDP, TLS servers and `tcp`-level TLS, decoding unions, interfaces (`view(state)`) | |
+| E3 (event loop) | Connections and their tasks run as coroutines on a few scheduler threads; one poller (kqueue / epoll) for sockets and timers; channels, sleeps and awaits park instead of blocking ([std.md](std.md#the-event-loop)) | ✅ |
+| E3 (rest), E4 (rest), E5 | Event loop on Windows (IOCP), io_uring, socket timeouts inside tasks, UDP, TLS servers and `tcp`-level TLS, decoding unions, interfaces (`view(state)`) | |
 | F | Performance (typed `¨` kernels, fusion through `¨`/`↑`/`↓`/`⌽`/`⌿`, RC elision, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |

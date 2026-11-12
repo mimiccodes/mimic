@@ -83,6 +83,31 @@ static void sock_timeout(int fd, int seconds) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
+/* connect; on the event loop the coroutine waits for the connection
+ * instead of blocking its thread */
+static int connect_co(int fd, const struct sockaddr *addr, socklen_t len) {
+#if MIM_GREEN
+    if (t_co) {
+        int fl = fcntl(fd, F_GETFL);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        int rc = connect(fd, addr, len);
+        if (rc != 0 && errno == EINPROGRESS) {
+            co_wait_fd(fd, 1);
+            int e = 0;
+            socklen_t el = sizeof e;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el);
+            rc = e ? -1 : 0;
+            errno = e;
+        }
+        int saved = errno;
+        fcntl(fd, F_SETFL, fl);
+        errno = saved;
+        return rc;
+    }
+#endif
+    return connect(fd, addr, len);
+}
+
 /* a connected socket, or -1 with an error message */
 static int dial(const char *host, int64_t port, char *err, size_t errn) {
     char ps[16];
@@ -102,7 +127,7 @@ static int dial(const char *host, int64_t port, char *err, size_t errn) {
             saved = errno;
             continue;
         }
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
+        if (connect_co(fd, a->ai_addr, a->ai_addrlen) == 0) break;
         saved = errno;
         close(fd);
         fd = -1;
@@ -118,7 +143,7 @@ static int dial(const char *host, int64_t port, char *err, size_t errn) {
 
 static int send_all(int fd, const char *p, size_t n) {
     while (n > 0) {
-        ssize_t w = send(fd, p, n, MIM_SEND_FLAGS);
+        ssize_t w = msend(fd, p, n, MIM_SEND_FLAGS);
         if (w < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -178,6 +203,7 @@ mim_val *mim_std_tcp_listen(mim_val *port) {
 mim_val *mim_std_tcp_accept(mim_val *l) {
     int lfd = fd_of(l, "tcp_accept");
     int fd;
+    mim_wait_readable(lfd);
     while ((fd = accept(lfd, NULL, NULL)) < 0 && errno == EINTR) {
     }
     if (fd < 0) return err_errno("cannot accept", NULL);
@@ -199,7 +225,7 @@ mim_val *mim_std_tcp_receive(mim_val *s, mim_val *max) {
     if (n <= 0) n = 65536;
     char *buf = (char *)malloc((size_t)n);
     ssize_t r;
-    while ((r = recv(fd, buf, (size_t)n, 0)) < 0 && errno == EINTR) {
+    while ((r = mrecv(fd, buf, (size_t)n)) < 0 && errno == EINTR) {
     }
     if (r < 0) {
         free(buf);
@@ -244,7 +270,7 @@ static int tls_write_all(void *t, const char *p, size_t n);
 
 static ssize_t conn_recv(mconn *c, void *buf, size_t n) {
     if (c->tls) return tls_read(c->tls, buf, n);
-    return recv(c->fd, buf, n, 0);
+    return mrecv(c->fd, buf, n);
 }
 
 static int conn_send_all(mconn *c, const char *p, size_t n) {
@@ -283,7 +309,7 @@ static OSStatus st_read_cb(const void *conn, void *data, size_t *len) {
     int fd = (int)(intptr_t)conn;
     size_t want = *len, got = 0;
     while (got < want) {
-        ssize_t r = recv(fd, (char *)data + got, want - got, 0);
+        ssize_t r = mrecv(fd, (char *)data + got, want - got);
         if (r > 0) got += (size_t)r;
         else if (r == 0) { *len = got; return ERR_CLOSED; }
         else if (errno == EINTR) continue;
@@ -297,7 +323,7 @@ static OSStatus st_write_cb(const void *conn, void *data, size_t *len) {
     int fd = (int)(intptr_t)conn;
     size_t want = *len, put = 0;
     while (put < want) {
-        ssize_t w = send(fd, (const char *)data + put, want - put, MIM_SEND_FLAGS);
+        ssize_t w = msend(fd, (const char *)data + put, want - put, MIM_SEND_FLAGS);
         if (w > 0) put += (size_t)w;
         else if (w < 0 && errno == EINTR) continue;
         else { *len = put; return errno == EAGAIN || errno == EWOULDBLOCK ? ERR_WOULD_BLOCK : -36; }
@@ -415,6 +441,8 @@ static struct {
     void (*free)(void *);
     long (*verify_result)(const void *);
     const char *(*verify_string)(long);
+    int (*pending)(const void *); /* optional: for the event loop */
+    int (*get_fd)(const void *);
 } os;
 static pthread_mutex_t os_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -438,6 +466,8 @@ static int tls_load(void) {
             *(void **)&os.shutdown = dlsym(ssl, "SSL_shutdown");
             *(void **)&os.free = dlsym(ssl, "SSL_free");
             *(void **)&os.verify_result = dlsym(ssl, "SSL_get_verify_result");
+            *(void **)&os.pending = dlsym(ssl, "SSL_pending");
+            *(void **)&os.get_fd = dlsym(ssl, "SSL_get_fd");
             if (crypto) *(void **)&os.verify_string = dlsym(crypto, "X509_verify_cert_error_string");
         }
         int ok = os.method && os.ctx_new && os.default_paths && os.set_verify && os.ssl_new && os.set_fd && os.ctrl && os.set1_host &&
@@ -480,6 +510,10 @@ static void *tls_open(int fd, const char *host, char *err, size_t errn) {
 }
 
 static ssize_t tls_read(void *t, void *buf, size_t n) {
+#if MIM_GREEN
+    /* nothing decrypted yet: wait on the event loop rather than in SSL_read */
+    if (t_co && os.pending && os.get_fd && os.pending(t) == 0) co_wait_fd(os.get_fd(t), 0);
+#endif
     int r = os.read(t, buf, (int)(n > 1 << 30 ? 1 << 30 : n));
     if (r > 0) return r;
     return 0; /* closed (or an error: treated as the end) */
@@ -874,8 +908,18 @@ static void *conn_main(void *p) {
     return NULL;
 }
 
+#if MIM_GREEN
+static void conn_co_main(void *p) {
+    conn_job *j = (conn_job *)p;
+    j->one(j->fd, j->handler);
+    mim_release(j->handler);
+    free(j);
+}
+#endif
+
 /* accept `limit` connections (0 = forever); handlers whose effects may
- * overlap get a thread each, others run one at a time in order */
+ * overlap get a task each (a coroutine on the event loop, else a thread),
+ * others run one at a time in order */
 static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one);
 
 static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) { return serve_loop_with(port, handler, limit, serve_one); }
@@ -890,8 +934,15 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
     mim_release(lr);
     int parallel = MIM_THREADS && FN_DESC(handler)->pure;
     int64_t served = 0;
-    pthread_t *threads = limit > 0 && parallel ? (pthread_t *)calloc((size_t)limit, sizeof(pthread_t)) : NULL;
+#if MIM_GREEN
+    int green = parallel && green_on();
+    mim_co **tasks = green && limit > 0 ? (mim_co **)calloc((size_t)limit, sizeof(mim_co *)) : NULL;
+#else
+    int green = 0;
+#endif
+    pthread_t *threads = limit > 0 && parallel && !green ? (pthread_t *)calloc((size_t)limit, sizeof(pthread_t)) : NULL;
     while (limit == 0 || served < limit) {
+        mim_wait_readable(lfd);
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
@@ -904,6 +955,14 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
             j->handler = handler;
             j->one = one;
             mim_retain(handler);
+#if MIM_GREEN
+            if (green) {
+                mim_co *co = co_spawn(conn_co_main, j, tasks == NULL);
+                if (tasks) tasks[served] = co;
+                served++;
+                continue;
+            }
+#endif
             pthread_t t;
             pthread_attr_t a;
             pthread_attr_init(&a);
@@ -921,6 +980,13 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
         }
         served++;
     }
+#if MIM_GREEN
+    if (tasks) {
+        for (int64_t i = 0; i < served; i++) co_join(tasks[i]);
+        free(tasks);
+    }
+#endif
+    (void)green;
     if (threads) {
         for (int64_t i = 0; i < served; i++)
             if (threads[i]) pthread_join(threads[i], NULL);
@@ -1093,7 +1159,7 @@ static int ws_write_frame(ws_conn *w, int op, const void *data, size_t n) {
     }
     memcpy(frame, hdr, h);
     for (size_t k = 0; k < n; k++) frame[h + k] = (char)(((const uint8_t *)data)[k] ^ (w->client ? mask[k & 3] : 0));
-    pthread_mutex_lock(&w->send_lock); /* frames from different threads never interleave */
+    co_lock(&w->send_lock); /* frames from different tasks never interleave */
     int rc = conn_send_all(&w->c, frame, h + n);
     pthread_mutex_unlock(&w->send_lock);
     free(frame);

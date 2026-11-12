@@ -458,6 +458,12 @@ static mim_val *impl_clock(void) {
 static mim_val *impl_sleep(mim_val *d) {
     int64_t ns = d && d->rank == 0 ? (d->dtype == MIM_F64 ? (int64_t)getf(d, 0) : geti(d, 0)) : 0;
     if (ns <= 0) return NULL;
+#if MIM_GREEN
+    if (t_co) { /* a coroutine waits on the event loop's timer */
+        co_sleep(ns);
+        return NULL;
+    }
+#endif
     struct timespec ts = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)};
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
     }
@@ -717,6 +723,9 @@ typedef struct mim_future {
 #if MIM_THREADS && !defined(_WIN32)
     pthread_t th;
 #endif
+#if MIM_GREEN
+    mim_co *co; /* started from a coroutine: a coroutine too */
+#endif
     int started;
     int done;                /* without threads: has the deferred call run? */
     struct mim_future *next; /* without threads: the queue of deferred calls */
@@ -760,6 +769,14 @@ static void *future_main(void *p) {
     return NULL;
 }
 
+#if MIM_GREEN
+static void future_co_main(void *p) {
+    mim_future *fu = (mim_future *)p;
+    fu->result = mim_call(fu->f, fu->n, fu->args);
+    fu->done = 1;
+}
+#endif
+
 static void future_main_now(mim_future *fu) {
     if (!fu->done) future_main(fu);
 }
@@ -776,6 +793,13 @@ void *mim_spawn(mim_val *f, int32_t n, mim_val **args) {
         fu->args[i] = args[i];
         mim_retain(args[i]);
     }
+#if MIM_GREEN
+    if (t_co) { /* tasks started by tasks on the event loop stay on it */
+        fu->started = 1;
+        fu->co = co_spawn(future_co_main, fu, 0);
+        return fu;
+    }
+#endif
 #if MIM_THREADS && !defined(_WIN32)
     pthread_attr_t a;
     pthread_attr_init(&a);
@@ -795,6 +819,10 @@ void *mim_spawn(mim_val *f, int32_t n, mim_val **args) {
 /* the result of a started call (owned); frees the future */
 mim_val *mim_await(void *h) {
     mim_future *fu = (mim_future *)h;
+#if MIM_GREEN
+    if (fu->co) co_join(fu->co);
+    else
+#endif
 #if MIM_THREADS && !defined(_WIN32)
     if (fu->started) pthread_join(fu->th, NULL);
 #endif
@@ -1119,6 +1147,9 @@ typedef struct {
     mim_val **q;
     int64_t head, n, cap;
     int closed;
+#if MIM_GREEN
+    mim_co *waiters, *waiters_tail; /* coroutines waiting in receive */
+#endif
 } chan_t;
 
 static chan_t **ch_tab;
@@ -1191,9 +1222,36 @@ mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
 #if MIM_THREADS && !defined(_WIN32)
     pthread_cond_signal(&c->c);
 #endif
+#if MIM_GREEN
+    mim_co *w = c->waiters;
+    if (w) {
+        c->waiters = w->next;
+        if (!c->waiters) c->waiters_tail = NULL;
+    }
     CH_UNLOCK(&c->m);
+    if (w) co_ready(w);
+#else
+    CH_UNLOCK(&c->m);
+#endif
     return mim_bool(1);
 }
+
+#if MIM_GREEN
+/* runs once the receiving coroutine is off its stack */
+static void chan_park(mim_co *co, void *arg) {
+    chan_t *c = (chan_t *)arg;
+    CH_LOCK(&c->m);
+    int now = c->n > 0 || c->closed;
+    if (!now) {
+        co->next = NULL;
+        if (c->waiters_tail) c->waiters_tail->next = co;
+        else c->waiters = co;
+        c->waiters_tail = co;
+    }
+    CH_UNLOCK(&c->m);
+    if (now) co_ready(co);
+}
+#endif
 
 static mim_val *chan_take(chan_t *c) {
     mim_val *v = c->q[c->head];
@@ -1207,6 +1265,13 @@ mim_val *mim_std_chan_receive(mim_val *rx) {
     chan_t *c = chan_of(rx, "chan::receive");
     CH_LOCK(&c->m);
 #if MIM_THREADS && !defined(_WIN32)
+#if MIM_GREEN
+    while (t_co && c->n == 0 && !c->closed) {
+        CH_UNLOCK(&c->m);
+        co_park(chan_park, c);
+        CH_LOCK(&c->m);
+    }
+#endif
     while (c->n == 0 && !c->closed) pthread_cond_wait(&c->c, &c->m);
 #else
     /* without threads: let deferred tasks run until there is something */
@@ -1236,6 +1301,17 @@ mim_val *mim_std_chan_close(mim_val *tx) {
 #if MIM_THREADS && !defined(_WIN32)
     pthread_cond_broadcast(&c->c);
 #endif
+#if MIM_GREEN
+    mim_co *w = c->waiters;
+    c->waiters = c->waiters_tail = NULL;
     CH_UNLOCK(&c->m);
+    while (w) {
+        mim_co *n = w->next;
+        co_ready(w);
+        w = n;
+    }
+#else
+    CH_UNLOCK(&c->m);
+#endif
     return NULL;
 }

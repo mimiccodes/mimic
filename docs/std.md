@@ -111,6 +111,7 @@ How channels behave:
 * **Unbounded and safe to share.** Channels are unbounded queues, and values can be handed between threads safely because they are immutable.
 * **Ends are ordinary values.** A `Sender` or `Receiver` can be stored in a list, sent through another channel or captured by a closure.
 * **Tasks.** A task is any `let` of a function whose effects may overlap, which channel operations are, and `ws::serve`/`http::serve` handlers run as tasks too.
+* **Waiting is cheap.** On the event loop a `receive` that waits parks only its own task, not a thread.
 * **Without threads (WebAssembly),** tasks are deferred. A `receive` that would wait first runs deferred tasks, so producer/consumer code still works.
 
 ### `bytes`: binary data (pure)
@@ -263,11 +264,24 @@ http::serve(8080, handle)                                     // runs until the 
 
 How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
-* **The server runs a pure or overlapping handler in parallel**, one thread per connection. A handler that prints or writes files handles one request at a time, in order.
+* **The server runs a pure or overlapping handler in parallel**, one task per connection on the event loop (see [the event loop](#the-event-loop)). A handler that prints or writes files handles one request at a time, in order.
 * **One request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
 * **`https://` uses the operating system's TLS**, loaded when first needed: the Security framework on Apple platforms, OpenSSL 3 (`libssl.so.3`) on Linux. Certificates and host names are checked against the system's trusted certificates, so an expired, self-signed or wrong-host certificate is an `Err` ("TLS with example.com failed: …"). Statically linked Linux programs cannot load OpenSSL, so there `https://` returns an `Err` that says so. Serving HTTPS is not supported yet.
 * **Redirects are followed** (301, 302, 303, 307, 308), up to 10. A 303, or a 301/302 after a non-GET, continues as a GET; 307 and 308 keep the method and body.
 * **WebAssembly has no sockets**, so there every network function returns `Err`.
+
+### The event loop
+
+Every connection of `http::serve` and `ws::serve` runs as a **task**, and so does every implicit future started by such a task. A task is a coroutine with its own small stack, not an operating-system thread. When a task would wait it parks, and its thread runs other tasks meanwhile. A task waits when it receives from a socket, sends to a full one, connects, accepts, sleeps (`time::sleep`), receives from an empty channel or awaits another task. A few scheduler threads (one per core) run all the tasks. One poller thread watches the waiting sockets (kqueue on Apple systems, epoll on Linux) and the timers.
+
+You never write `async` or `await`, and nothing changes in your code. The difference shows at scale: a WebSocket echo server holds 3000 open connections with 14 threads, where one thread per connection would need 3000. A task always stays on the same thread, so pure work inside a handler still uses the parallel array kernels as usual.
+
+Details:
+* **Where it runs.** On Apple systems and Linux, on arm64 and x86-64. Elsewhere (Windows, WebAssembly, other CPUs) tasks are threads or deferred calls, as before.
+* **Switching it off.** Set the environment variable `MIMIC_NO_EVENT_LOOP=1` to run each connection on its own thread instead.
+* **Calls that still block their thread for a moment:** looking up a host name, the TLS handshake on Linux, file I/O, `os::run` and `io::read_line`. Other tasks on the same thread wait meanwhile. Tasks on other threads keep running.
+* **No socket timeouts inside tasks yet.** A request made from a connection task waits as long as the other side takes.
+* **Futures started outside a task**, from `main` for example, still get a thread each. That is cheap, because there are few of them.
 
 ### `ws`: WebSockets
 
@@ -297,7 +311,7 @@ ws::close(sock)
 
 How WebSockets behave:
 * **Protocol.** RFC 6455: fragmented messages are joined, pings are answered automatically, and messages may be up to 64 MB.
-* **Sending.** Sends on one socket from different threads never interleave.
+* **Sending.** Sends on one socket from different tasks never interleave.
 * **Connections run in parallel** when the handler's effects may overlap, the same rule as `http::serve`.
 * **Connections talk through channels** (`chan`): see the chat room in tutorial chapter 19.
 

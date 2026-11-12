@@ -2307,6 +2307,8 @@ void *mim_dataptr(mim_val *v) {
 #endif
 /* standard-library intrinsics (strings, lists, maps) */
 #include "mimic_std.c"
+/* the event loop: coroutines for tasks that wait */
+#include "mimic_sched.c"
 /* program basics: arguments, environment, files, directories, paths */
 #include "mimic_io.c"
 /* networking: TCP, HTTP client and server */

@@ -16,6 +16,7 @@ pub const RUNTIME_C: &str = include_str!("../../../runtime/mimic_rt.c");
 pub const RUNTIME_H: &str = include_str!("../../../runtime/mimic_rt.h");
 pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
+pub const RUNTIME_SCHED_C: &str = include_str!("../../../runtime/mimic_sched.c");
 pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/mimic_io.c");
 pub const RUNTIME_SOCKET_C: &str = include_str!("../../../runtime/mimic_socket.c");
 pub const RUNTIME_JSON_C: &str = include_str!("../../../runtime/mimic_json.c");
@@ -546,7 +547,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -562,6 +563,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_sched.c"), RUNTIME_SCHED_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_json.c"), RUNTIME_JSON_C.as_bytes())?;

@@ -210,4 +210,10 @@ Ok(2)
 
 Notice what you did not write: no locks, no threads, no `async`. The server runs each connection in parallel because `session`'s effects (WebSockets and channels) may overlap. The hub owns its state in its parameters, and everything else is a message.
 
+## Thousands of connections
+
+Each connection is a **task**, not a thread. A task that waits for a message, a socket or a timer steps aside, and its thread runs other tasks meanwhile. A few threads, one per core, carry all of them. The chat room above serves thousands of people as easily as two, with the same code.
+
+The details, and how to switch this off, are in the [standard library reference](../docs/std.md#the-event-loop).
+
 Back to the [index](index.mdx).
