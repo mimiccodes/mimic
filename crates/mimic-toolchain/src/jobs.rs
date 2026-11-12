@@ -99,3 +99,40 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
+
+/// Mark a finished cache directory: `marker` lists every file under `dir`
+/// with its size. Caches can live where the system deletes old files (macOS
+/// purges unused files from the temporary directory after a few days), so a
+/// marker alone proves nothing; [`intact`] checks the files are still there.
+pub fn seal(dir: &std::path::Path, marker: &str) -> Result<(), String> {
+    fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut String) -> std::io::Result<()> {
+        for e in std::fs::read_dir(d)? {
+            let e = e?;
+            let p = e.path();
+            let ft = e.file_type()?;
+            if ft.is_dir() {
+                walk(base, &p, out)?;
+            } else if ft.is_file() {
+                let rel = p.strip_prefix(base).unwrap_or(&p);
+                out.push_str(&format!("{}\t{}\n", e.metadata()?.len(), rel.display()));
+            }
+        }
+        Ok(())
+    }
+    let mut list = String::new();
+    walk(dir, dir, &mut list).map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+    write_atomic(&dir.join(marker), list.as_bytes())
+}
+
+/// Is the cache directory complete: its marker present and every file it
+/// lists still there with the same size?
+pub fn intact(dir: &std::path::Path, marker: &str) -> bool {
+    let Ok(list) = std::fs::read_to_string(dir.join(marker)) else { return false };
+    if list.is_empty() {
+        return false; // an old-style empty marker: rebuild once and seal properly
+    }
+    list.lines().all(|l| {
+        let Some((size, rel)) = l.split_once('\t') else { return false };
+        std::fs::metadata(dir.join(rel)).is_ok_and(|m| m.len().to_string() == size)
+    })
+}

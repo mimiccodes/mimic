@@ -19,23 +19,35 @@ pub fn unpack(blob: &[u8], dest: &Path) -> Result<PathBuf, String> {
     if blob.is_empty() {
         return Err("this mimic was built without the bundled sources (run tools/deps.sh and rebuild)".into());
     }
-    let done = dest.join(".unpacked");
-    if done.is_file() {
+    if crate::jobs::intact(dest, ".unpacked") {
         return Ok(dest.to_path_buf());
     }
     let parent = dest.parent().ok_or("bad cache path")?;
     fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), dest.file_name().unwrap().to_string_lossy()));
+    let name = dest.file_name().unwrap().to_string_lossy().to_string();
+    let tmp = parent.join(format!(".tmp-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     let gz = flate2::read::GzDecoder::new(blob);
     tar::Archive::new(gz).unpack(&tmp).map_err(|e| format!("cannot unpack into {}: {e}", tmp.display()))?;
-    fs::write(tmp.join(".unpacked"), b"").map_err(|e| e.to_string())?;
-    if fs::rename(&tmp, dest).is_err() {
-        // another process won the race
-        let _ = fs::remove_dir_all(&tmp);
-        if !done.is_file() {
-            return Err(format!("cannot unpack into {}", dest.display()));
+    crate::jobs::seal(&tmp, ".unpacked")?;
+    for attempt in 0..3 {
+        // another process may have finished first
+        if crate::jobs::intact(dest, ".unpacked") {
+            let _ = fs::remove_dir_all(&tmp);
+            return Ok(dest.to_path_buf());
+        }
+        // a damaged copy (files purged from a temporary directory, an
+        // interrupted run): move it aside atomically, never delete in place
+        if dest.exists() {
+            let stale = parent.join(format!(".stale-{}-{attempt}-{name}", std::process::id()));
+            if fs::rename(dest, &stale).is_ok() {
+                let _ = fs::remove_dir_all(&stale);
+            }
+        }
+        if fs::rename(&tmp, dest).is_ok() {
+            return Ok(dest.to_path_buf());
         }
     }
-    Ok(dest.to_path_buf())
+    let _ = fs::remove_dir_all(&tmp);
+    if crate::jobs::intact(dest, ".unpacked") { Ok(dest.to_path_buf()) } else { Err(format!("cannot unpack into {}", dest.display())) }
 }

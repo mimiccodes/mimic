@@ -82,11 +82,15 @@ impl Sysroot {
 /// The musl sysroot for `triple`, building it if needed (about a minute, once).
 pub fn ensure(cache: &Path, triple: &str) -> Result<Sysroot, String> {
     let arch = arch(triple).ok_or_else(|| format!("musl does not support the architecture of `{triple}`"))?;
-    let root = cache.join(format!("musl-{VERSION}")).join(triple);
-    let done = root.join(".built");
-    if done.is_file() {
-        return Ok(Sysroot { root });
+    let dest = cache.join(format!("musl-{VERSION}")).join(triple);
+    if crate::jobs::intact(&dest, ".built") {
+        return Ok(Sysroot { root: dest });
     }
+    // built in a private directory, then moved into place atomically: other
+    // mimic processes may be building or using the same sysroot right now
+    let parent = dest.parent().ok_or("bad cache path")?.to_path_buf();
+    fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    let root = parent.join(format!(".tmp-{}-{triple}", std::process::id()));
     eprintln!("    Building musl {VERSION} for {triple} (first use; cached afterwards)");
     let src = bundle::unpack(bundle::MUSL, &cache.join(format!("src/musl-{VERSION}")))?.join(format!("musl-{VERSION}"));
     let work = root.join("obj");
@@ -200,8 +204,24 @@ pub fn ensure(cache: &Path, triple: &str) -> Result<Sysroot, String> {
         crate::write_archive(&lib.join(empty), crate::ArchiveKind::Gnu, &[])?;
     }
     let _ = fs::remove_dir_all(&work);
-    fs::write(&done, b"").map_err(|e| e.to_string())?;
-    Ok(Sysroot { root })
+    crate::jobs::seal(&root, ".built")?;
+    for attempt in 0..3 {
+        if crate::jobs::intact(&dest, ".built") {
+            let _ = fs::remove_dir_all(&root);
+            return Ok(Sysroot { root: dest });
+        }
+        if dest.exists() {
+            let stale = parent.join(format!(".stale-{}-{attempt}-{triple}", std::process::id()));
+            if fs::rename(&dest, &stale).is_ok() {
+                let _ = fs::remove_dir_all(&stale);
+            }
+        }
+        if fs::rename(&root, &dest).is_ok() {
+            return Ok(Sysroot { root: dest });
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    if crate::jobs::intact(&dest, ".built") { Ok(Sysroot { root: dest }) } else { Err(format!("cannot install musl into {}", dest.display())) }
 }
 
 fn stem(p: &Path) -> String {
