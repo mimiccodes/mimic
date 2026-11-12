@@ -1,0 +1,7 @@
+Some("text/html; charset=utf-8")
+true
+true
+[{"op":"attrs","p":"0.1.0","html":"","attrs":["type","text","value","milk","data-e","input"]}]
+[{"op":"children","p":"0.0","html":"1 to do","attrs":[]},{"op":"attrs","p":"0.1.0","html":"","attrs":["type","text","data-e","input"]},{"op":"children","p":"0.2","html":"<div data-p=\"0.2.0\" style=\"display:flex;flex-direction:row;gap:8px;align-items:center\"><span data-p=\"0.2.0.0\">milk</span><button data-p=\"0.2.0.1\" type=\"button\" data-e=\"click\">×</button></div>","attrs":[]}]
+[{"op":"children","p":"0.0","html":"0 to do","attrs":[]},{"op":"children","p":"0.2","html":"","attrs":[]}]
+Ok(2)

@@ -1150,6 +1150,16 @@ mim_val *mim_closure(const mim_fn_desc *d, int64_t nenv, mim_val **env) {
     return v;
 }
 
+/* A closure that is pure as long as the function values it captures are:
+ * the pure description when they all are, else the other one. (Data never
+ * holds functions with effects, E0605, so only direct captures matter.) */
+mim_val *mim_closure_checked(const mim_fn_desc *pure, const mim_fn_desc *effects, int64_t nenv, mim_val **env) {
+    const mim_fn_desc *d = pure;
+    for (int64_t i = 0; i < nenv; i++)
+        if (env[i] && env[i]->dtype == MIM_FN && !FN_DESC(env[i])->pure) d = effects;
+    return mim_closure(d, nenv, env);
+}
+
 mim_val *mim_call(mim_val *f, int32_t argc, mim_val **args) {
     need(f, "function call");
     if (f->dtype != MIM_FN) {
@@ -2311,6 +2321,8 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_sched.c"
 /* program basics: arguments, environment, files, directories, paths */
 #include "mimic_io.c"
+/* the browser side of ui::run */
+#include "mimic_ui.c"
 /* networking: TCP, HTTP client and server */
 #include "mimic_socket.c"
 /* the json module */

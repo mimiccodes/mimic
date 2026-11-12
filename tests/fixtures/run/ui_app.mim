@@ -1,0 +1,65 @@
+module main
+
+// A ui app served for real: load the page, then click and type over the
+// WebSocket as the browser script would. (WASI: see ui_app.wasi.out.)
+
+type Msg = Add | Typed(str) | Remove(i64)
+type State = { todos: [str], draft: str }
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Typed(t) => { s with draft: t },
+        Add => { s with todos: push(s.todos, s.draft), draft: "" },
+        Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 8, [
+        ui::text("{≢ s.todos} to do", weight: "bold"),
+        ui::form(on_submit: Add, [ui::input(s.draft, on_input: Typed), ui::submit("Add")]),
+        ui::column(⍳ ≢ s.todos ¨ (i => ui::row([ui::text(s.todos[i]), ui::button("×", on_click: Remove(i))]))),
+    ])
+}
+
+fn app(port: i64) -> Result[i64, str] { ui::run_for(State { todos: [], draft: "" }, view, update, 2, port: port) }
+
+fn when_up(url: str, tries: i64) -> Result[http::Response, str] {
+    match http::fetch(url) {
+        Ok(r) => Ok(r),
+        Err(e) => if tries <= 1 or starts_with(e, "networking is not available") { Err(e) } else { time::sleep(20ms); when_up(url, tries - 1) },
+    }
+}
+
+fn event(p: str, e: str, v: str) -> str { json::encode(ui::Event { p: p, e: e, v: v }) }
+
+fn reply(sock: ws::Socket) -> str {
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => t,
+        _ => "(nothing)",
+    }
+}
+
+fn main() {
+    let port = 30000 + os::pid() % 20000
+    let s = app(port)
+    let page = match when_up("http://127.0.0.1:{port}/", 100) {
+        Ok(r) => r,
+        Err(e) => {
+            print("no server: {e}")
+            return
+        }
+    }
+    print(get(page.headers, "content-type"))
+    print(contains(page.body, "<span data-p=\"0.0\" style=\"font-weight:bold\">0 to do</span>"))
+    print(contains(page.body, "new WebSocket"))
+    let sock = ws::connect("ws://127.0.0.1:{port}/ui") else { return }
+    ws::send(sock, event("0.1.0", "input", "milk"))
+    print(reply(sock))
+    ws::send(sock, event("0.1", "submit", ""))
+    print(reply(sock))
+    ws::send(sock, event("0.2.0.1", "click", ""))
+    print(reply(sock))
+    ws::close(sock)
+    print(s)
+}

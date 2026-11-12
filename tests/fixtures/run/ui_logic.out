@@ -1,0 +1,12 @@
+<div data-p="0" style="display:flex;flex-direction:column;gap:12px"><span data-p="0.0" style="font-size:24px">Count: 0</span><div data-p="0.1" style="display:flex;flex-direction:row;gap:8px;align-items:center"><button data-p="0.1.0" type="button" data-e="click">-</button><button data-p="0.1.1" type="button" data-e="click">+</button></div><input data-p="0.2" type="text" placeholder="name" data-e="input"><input data-p="0.3" type="checkbox" data-e="change"></div>
+Some(Inc)
+Some(Dec)
+Some(Typed("Ada <3"))
+Some(Checked(true))
+None
+None
+None
+[{"op":"children","p":"0.0","html":"Count: 1","attrs":[]}]
+[{"op":"attrs","p":"0.2","html":"","attrs":["type","text","value","Ada <3","placeholder","name","data-e","input"]}]
+[{"op":"attrs","p":"0.3","html":"","attrs":["type","checkbox","checked","","data-e","change"]}]
+[]

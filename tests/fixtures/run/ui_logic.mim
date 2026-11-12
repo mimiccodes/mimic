@@ -1,0 +1,49 @@
+module main
+
+// The pure half of ui: rendering, finding the message for an event, and
+// the patches between two screens. (ui_app.mim drives a real session.)
+
+type Msg = Inc | Dec | Typed(str) | Checked(bool)
+type State = { n: i64, name: str, ok: bool }
+
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 12, [
+        ui::text("Count: {s.n}", size: 24),
+        ui::row([ui::button("-", on_click: Dec), ui::button("+", on_click: Inc)]),
+        ui::input(s.name, on_input: Typed, placeholder: "name"),
+        ui::checkbox(s.ok, on_change: Checked),
+    ])
+}
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Inc => { s with n: s.n + 1 },
+        Dec => { s with n: s.n - 1 },
+        Typed(t) => { s with name: t },
+        Checked(b) => { s with ok: b },
+    }
+}
+
+fn main() {
+    let s = State { n: 0, name: "", ok: false }
+    let tree = view(s)
+    print(ui::html(tree))
+    print(ui::message(tree, '{"p": "0.1.1", "e": "click", "v": ""}'))
+    print(ui::message(tree, '{"p": "0.1.0", "e": "click", "v": ""}'))
+    print(ui::message(tree, '{"p": "0.2", "e": "input", "v": "Ada <3"}'))
+    print(ui::message(tree, '{"p": "0.3", "e": "change", "v": "true"}'))
+    print(ui::message(tree, '{"p": "0.0", "e": "click", "v": ""}'))       // text: no handler
+    print(ui::message(tree, '{"p": "0.9.9", "e": "click", "v": ""}'))     // no such element
+    print(ui::message(tree, 'not json'))
+
+    // what an Inc changes: only the text of the label
+    let s2 = update(s, Inc)
+    print(json::encode(ui::diff(tree, view(s2), "0")))
+    // typing changes the input's value attribute
+    let s3 = update(s2, Typed("Ada <3"))
+    print(json::encode(ui::diff(view(s2), view(s3), "0")))
+    // ticking the box
+    print(json::encode(ui::diff(view(s3), view(update(s3, Checked(true))), "0")))
+    // nothing changes: no patches
+    print(ui::diff(tree, view(s), "0"))
+}

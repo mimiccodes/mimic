@@ -109,6 +109,8 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 
 **How they behave:**
 * **Constructors.** A variant with fields, written without parentheses, is the function that builds it: `Typed` means `x => Typed(x)`, and `Moved` (two fields) means `(x, y) => Moved(x, y)`.
+* **Purity follows the functions passed in.** A function that calls a function parameter is as pure as the function given to it. `fn twice(f, x) { f(f(x)) }` called with a pure lambda runs in parallel like any pure call. Called with a function that prints, the call counts as printing.
+* **Functions kept in data are pure.** A function stored in a record, variant, list or map must have no side effects (error E0605), so code that takes it out may call it freely.
 * **Arity is checked.** Passing a function, lambda or constructor that takes the wrong number of arguments for a parameter's function type is a compile-time error.
 * **Capture.** Lambdas capture the variables they use, by value, when they are created. Values are immutable, so a closure always sees the value it was created with.
 * **No mutation.** A lambda may not modify a captured variable (error E0603).
@@ -363,7 +365,7 @@ label("x", size: 24)
 label(size: 9, text: "y")   // named arguments in any order
 ```
 
-* Positional arguments come first.
+* Named arguments take their parameters; positional arguments fill the remaining parameters in order, wherever they are written: `column(gap: 12, [a, b])` gives the list to the first free parameter.
 * Defaults must be constants: literals, operators on literals, arrays of literals, or unit variants.
 
 ## Lists of anything

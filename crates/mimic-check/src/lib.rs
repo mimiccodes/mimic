@@ -251,7 +251,7 @@ impl Program {
             let mut changed = false;
             body.walk_mut(&mut |e: &mut Expr| match &mut e.kind {
                 ExprKind::Path(path) => {
-                    if let Ok(Resolved::Variant(t, v)) = self.resolve(module, path) {
+                    if let Some(Resolved::Variant(t, v)) = self.lookup(module, path) {
                         let n = self.types[t].variants()[v].fields.len();
                         if n > 0 {
                             let params: Vec<String> = (0..n).map(|i| format!("{PARAM}{i}")).collect();
@@ -490,7 +490,13 @@ impl Program {
 
     /// Resolve `path` as seen from module `from`.
     pub fn resolve(&self, from: ModId, path: &[String]) -> Result<Resolved, ResolveError> {
-        self.resolve_depth(from, path, 0)
+        self.resolve_depth(from, path, 0, false)
+    }
+
+    /// `resolve` without the error details (no "did you mean" search): for
+    /// analyses that look names up often and expect many to be local variables.
+    pub fn lookup(&self, from: ModId, path: &[String]) -> Option<Resolved> {
+        self.resolve_depth(from, path, 0, true).ok()
     }
 
     /// Every name visible unqualified from `from` (for suggestions).
@@ -524,7 +530,7 @@ impl Program {
         v
     }
 
-    fn resolve_depth(&self, from: ModId, path: &[String], depth: usize) -> Result<Resolved, ResolveError> {
+    fn resolve_depth(&self, from: ModId, path: &[String], depth: usize, quiet: bool) -> Result<Resolved, ResolveError> {
         let plain = |code: &'static mimic_syntax::Code, msg: String| ResolveError { code, msg, suggestion: None, private: None, note: None };
         if depth > 16 {
             return Err(plain(&C::BAD_PATH, "`use` cycle detected".into()));
@@ -546,7 +552,7 @@ impl Program {
                     break;
                 }
                 if let Some(u) = self.mods[c].uses.get(first) {
-                    let r = self.resolve_depth(c, &u.path, depth + 1).map_err(|mut e| {
+                    let r = self.resolve_depth(c, &u.path, depth + 1, quiet).map_err(|mut e| {
                         e.msg = format!("in `use {}`: {}", u.path.join("::"), e.msg);
                         e.suggestion = None;
                         e
@@ -569,6 +575,9 @@ impl Program {
             cur = self.local(*pre, first);
         }
         let Some(mut cur) = cur else {
+            if quiet {
+                return Err(plain(&C::UNRESOLVED_NAME, String::new()));
+            }
             let names = self.visible_names(from);
             let suggestion = mimic_syntax::closest(first, names.iter().map(String::as_str)).map(|best| {
                 let mut fixed = path.to_vec();
@@ -592,6 +601,9 @@ impl Program {
                 continue;
             }
             let Some(next) = self.member(m, seg) else {
+                if quiet {
+                    return Err(plain(&C::UNRESOLVED_NAME, String::new()));
+                }
                 let names: Vec<String> =
                     self.member_names(m, true).into_iter().filter(|n| self.member(m, n).is_some_and(|r| self.accessible(from, r))).collect();
                 let suggestion = mimic_syntax::closest(seg, names.iter().map(String::as_str)).map(|best| {
@@ -664,10 +676,13 @@ impl Program {
 pub struct Options {
     /// Require `<root>::main::main` (binaries).
     pub require_main: bool,
+    /// Also check the bodies of standard-library functions (its own test
+    /// does; programs do not need to pay for it on every build).
+    pub check_std: bool,
 }
 
 pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
-    let mut diags = Vec::new();
+    let mut diags = data_function_errors(p);
     if opts.require_main {
         match p.entry() {
             None => {
@@ -712,6 +727,9 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                     {
                         diags.push(FileDiag { file: f.file, diag: e });
                     }
+                }
+                if !opts.check_std && p.mods[f.module].package == "std" {
+                    continue;
                 }
                 let mut c = Checker {
                     p,
@@ -1480,7 +1498,7 @@ mod tests {
         if !d.is_empty() {
             return d.into_iter().map(|d| d.diag.msg).collect();
         }
-        check(&p, &Options { require_main: true }).into_iter().map(|d| d.diag.msg).collect()
+        check(&p, &Options { require_main: true, check_std: false }).into_iter().map(|d| d.diag.msg).collect()
     }
 
     #[test]
@@ -1769,11 +1787,13 @@ impl Norm<'_> {
         let fname = path.join("::");
         let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
         let mut extra = Vec::new();
-        let (mut pos, mut seen_named) = (0, false);
+        // named arguments take their parameters first; positional ones then
+        // fill the remaining parameters in order, wherever they are written:
+        // `column(gap: 12, [a, b])` gives the list to the first free parameter
+        let mut positional = Vec::new();
         for a in std::mem::take(args) {
             match a.kind {
                 ExprKind::Named { name, value } => {
-                    seen_named = true;
                     match params.iter().position(|(n, _)| *n == name) {
                         Some(i) if slots[i].is_some() => self.err(Diag::new(&C::DUPLICATE_ARG, format!("argument `{name}` is given twice"), a.span)),
                         Some(i) => slots[i] = Some(*value),
@@ -1785,17 +1805,14 @@ impl Norm<'_> {
                         }
                     }
                 }
-                _ => {
-                    if seen_named {
-                        self.err(Diag::new(&C::POSITIONAL_AFTER_NAMED, "positional arguments must come before named ones", a.span));
-                    }
-                    if pos < slots.len() {
-                        slots[pos] = Some(a);
-                    } else {
-                        extra.push(a);
-                    }
-                    pos += 1;
-                }
+                _ => positional.push(a),
+            }
+        }
+        let mut free = (0..slots.len()).filter(|&i| slots[i].is_none()).collect::<Vec<_>>().into_iter();
+        for a in positional {
+            match free.next() {
+                Some(i) => slots[i] = Some(a),
+                None => extra.push(a),
             }
         }
         let mut out = Vec::new();
@@ -1828,6 +1845,196 @@ pub struct Purity {
     /// Never reaches an effect that must wait for pending futures (writes,
     /// environment changes, processes, C calls); printing is fine.
     pub calm: Vec<bool>,
+    /// For each function, the parameters it uses as functions (calls them, or
+    /// passes them on as functions). Its purity is "as pure as what is passed
+    /// there": every call checks those arguments.
+    pub fn_params: Vec<Vec<bool>>,
+}
+
+/// The parameter names of a function of the program (empty for externs).
+fn param_names(p: &Program, f: Option<FnId>) -> Vec<String> {
+    match f.map(|f| &p.fns[f].kind) {
+        Some(FnKind::User(d)) => d.params.iter().map(|q| q.name.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Which parameters each function uses as a function (see [`Purity::fn_params`]).
+fn fn_param_uses(p: &Program) -> Vec<Vec<bool>> {
+    let mut uses: Vec<Vec<bool>> = p.fns.iter().map(|f| vec![false; f.arity()]).collect();
+    loop {
+        let mut changed = false;
+        for (fid, f) in p.fns.iter().enumerate() {
+            let FnKind::User(d) = &f.kind else { continue };
+            let names: Vec<&str> = d.params.iter().map(|q| q.name.as_str()).collect();
+            let param = |e: &Expr| match &e.kind {
+                ExprKind::Path(path) if path.len() == 1 => names.iter().position(|n| *n == path[0]),
+                _ => None,
+            };
+            let mut found: Vec<usize> = Vec::new();
+            d.body.walk(&mut |e: &Expr| match &e.kind {
+                ExprKind::Call { callee, args } => {
+                    if let Some(i) = param(callee) {
+                        found.push(i);
+                    }
+                    if let ExprKind::Path(path) = &callee.kind
+                        && let Ok(Resolved::Fn(g)) = p.lookup(f.module, path).ok_or(())
+                    {
+                        for (j, a) in args.iter().enumerate() {
+                            let Some(i) = param(a) else { continue };
+                            let as_fn = match &p.fns[g].kind {
+                                FnKind::User(_) => uses[g].get(j).copied().unwrap_or(false),
+                                FnKind::Extern { decl, .. } => matches!(decl.params.get(j), Some((_, Type::Fn(..)))),
+                            };
+                            if as_fn {
+                                found.push(i);
+                            }
+                        }
+                    }
+                }
+                ExprKind::Prim { prim, args } => {
+                    for k in prim_fn_args(*prim) {
+                        if let Some(i) = args.get(*k).and_then(param) {
+                            found.push(i);
+                        }
+                    }
+                }
+                _ => {}
+            });
+            for i in found {
+                if !uses[fid][i] {
+                    uses[fid][i] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return uses;
+        }
+    }
+}
+
+/// E0605: functions kept inside records, variants, lists or maps must be pure,
+/// because code that takes them out treats calling them as free of effects.
+/// A parameter that ends up inside a value passes the duty to every caller.
+pub fn data_function_errors(p: &Program) -> Vec<FileDiag> {
+    let pu = Purity::analyze(p);
+    let mut must: Vec<Vec<bool>> = p.fns.iter().map(|f| vec![false; f.arity()]).collect();
+    let mut diags = loop {
+        let mut changed = false;
+        let mut found: Vec<FileDiag> = Vec::new();
+        for (fid, f) in p.fns.iter().enumerate() {
+            let FnKind::User(d) = &f.kind else { continue };
+            let params: Vec<String> = d.params.iter().map(|q| q.name.clone()).collect();
+            let fn_typed: Vec<bool> = d.params.iter().enumerate().map(|(i, q)| matches!(q.ty, Some(Type::Fn(..))) || pu.fn_params[fid][i]).collect();
+            let walker = pu.walk(p, f.module, &pu.fns, false, &params);
+            let mut duties: Vec<usize> = Vec::new();
+            // `e` is kept inside a value (or passed where it will be)
+            let kept = |e: &Expr, why: &dyn Fn() -> String, duties: &mut Vec<usize>, found: &mut Vec<FileDiag>| match &e.kind {
+                ExprKind::Lambda { body, .. } => {
+                    if !walker.expr(body) {
+                        found.push(FileDiag { file: f.file, diag: Diag::new(&C::IMPURE_IN_DATA, why(), e.span) });
+                    }
+                    // the parameters it calls inherit the duty
+                    body.walk(&mut |x: &Expr| {
+                        let callee_param = |c: &Expr| match &c.kind {
+                            ExprKind::Path(path) if path.len() == 1 => params.iter().position(|n| *n == path[0]),
+                            _ => None,
+                        };
+                        match &x.kind {
+                            ExprKind::Call { callee, args } => {
+                                if let Some(i) = callee_param(callee) {
+                                    duties.push(i);
+                                }
+                                if let ExprKind::Path(cp) = &callee.kind
+                                    && let Ok(Resolved::Fn(g)) = p.lookup(f.module, cp).ok_or(())
+                                {
+                                    for (j, a) in args.iter().enumerate() {
+                                        if pu.fn_params[g].get(j).copied().unwrap_or(false)
+                                            && let Some(i) = callee_param(a)
+                                        {
+                                            duties.push(i);
+                                        }
+                                    }
+                                }
+                            }
+                            ExprKind::Prim { prim, args } => {
+                                for k in prim_fn_args(*prim) {
+                                    if let Some(i) = args.get(*k).and_then(callee_param) {
+                                        duties.push(i);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                }
+                ExprKind::Path(path) if path.len() == 1 && params.contains(&path[0]) => {
+                    let i = params.iter().position(|n| *n == path[0]).unwrap();
+                    if fn_typed[i] {
+                        duties.push(i);
+                    }
+                }
+                ExprKind::Path(path) => {
+                    if let Ok(Resolved::Fn(g)) = p.lookup(f.module, path).ok_or(())
+                        && !pu.fns[g]
+                        && !p.fns[g].is_extern()
+                    {
+                        found.push(FileDiag { file: f.file, diag: Diag::new(&C::IMPURE_IN_DATA, why(), e.span) });
+                    }
+                }
+                _ => {}
+            };
+            let stored = || "this function has side effects, so it cannot be kept inside a value".to_string();
+            d.body.walk(&mut |e: &Expr| match &e.kind {
+                ExprKind::Call { callee, args } => {
+                    let ExprKind::Path(path) = &callee.kind else { return };
+                    match p.lookup(f.module, path).ok_or(()) {
+                        Ok(Resolved::Variant(..)) => args.iter().for_each(|a| kept(a, &stored, &mut duties, &mut found)),
+                        Ok(Resolved::Fn(g)) if matches!(p.fns[g].kind, FnKind::User(_)) => {
+                            for (j, a) in args.iter().enumerate() {
+                                if must[g].get(j).copied().unwrap_or(false) {
+                                    let FnKind::User(gd) = &p.fns[g].kind else { unreachable!() };
+                                    let pname = gd.params[j].name.clone();
+                                    let gname = p.fn_path(g).join("::").trim_start_matches("std::prelude::").to_string();
+                                    let why = move || format!("argument `{pname}` of `{gname}` is kept inside a value, so it must not have side effects");
+                                    kept(a, &why, &mut duties, &mut found);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ExprKind::Array(xs) | ExprKind::Tuple(xs) => xs.iter().for_each(|a| kept(a, &stored, &mut duties, &mut found)),
+                ExprKind::Map(kvs) => kvs.iter().for_each(|(_, v)| kept(v, &stored, &mut duties, &mut found)),
+                ExprKind::Record { fields, .. } | ExprKind::With { fields, .. } => fields.iter().for_each(|(_, v, _)| kept(v, &stored, &mut duties, &mut found)),
+                _ => {}
+            });
+            for i in duties {
+                if !must[fid][i] {
+                    must[fid][i] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break found;
+        }
+    };
+    // one error per place
+    diags.sort_by_key(|d| (d.file, d.diag.span.start));
+    diags.dedup_by_key(|d| (d.file, d.diag.span.start));
+    diags
+}
+
+/// The arguments of a primitive that are functions (`xs ¨ f`, `gather(f)`, …).
+fn prim_fn_args(prim: Prim) -> &'static [usize] {
+    match prim {
+        Prim::Each | Prim::Gather | Prim::Trail => &[1],
+        Prim::Evolve => &[2],
+        Prim::Settle => &[1, 2],
+        _ => &[],
+    }
 }
 
 impl Purity {
@@ -1837,14 +2044,19 @@ impl Purity {
         // `extern "mimic-io"` ones (files, environment, stdin) do
         // externs (C functions and runtime intrinsics) are what their block
         // declares: `extern "C" pure { … }`; C defaults to `sync`
-        let pure = Self::fixpoint(p, false, |decl| !decl.effects);
-        let overlap = Self::fixpoint(p, false, |decl| !decl.effects || decl.overlap);
-        let calm = Self::fixpoint(p, true, |decl| !decl.sync);
-        Purity { fns: pure, overlap, calm }
+        let fn_params = fn_param_uses(p);
+        let pure = Self::fixpoint(p, &fn_params, false, |decl| !decl.effects);
+        let overlap = Self::fixpoint(p, &fn_params, false, |decl| !decl.effects || decl.overlap);
+        let calm = Self::fixpoint(p, &fn_params, true, |decl| !decl.sync);
+        Purity { fns: pure, overlap, calm, fn_params }
+    }
+
+    fn walk<'a>(&'a self, p: &'a Program, module: ModId, set: &'a [bool], print_ok: bool, params: &'a [String]) -> PurityWalk<'a> {
+        PurityWalk { p, module, pure: set, print_ok, params, fn_params: &self.fn_params }
     }
 
     /// Functions that only use the externs `ok` allows (optimistic fixpoint).
-    fn fixpoint(p: &Program, print_ok: bool, ok: impl Fn(&ExternFn) -> bool) -> Vec<bool> {
+    fn fixpoint(p: &Program, fn_params: &[Vec<bool>], print_ok: bool, ok: impl Fn(&ExternFn) -> bool) -> Vec<bool> {
         let mut pure: Vec<bool> = p
             .fns
             .iter()
@@ -1860,7 +2072,8 @@ impl Purity {
                     continue;
                 }
                 if let FnKind::User(d) = &f.kind {
-                    let ok = PurityWalk { p, module: f.module, pure: &pure, print_ok }.block(&d.body);
+                    let params = param_names(p, Some(fid));
+                    let ok = PurityWalk { p, module: f.module, pure: &pure, print_ok, params: &params, fn_params }.block(&d.body);
                     if !ok {
                         pure[fid] = false;
                         changed = true;
@@ -1876,11 +2089,16 @@ impl Purity {
 
     /// `let x = f(…)` that may start now and finish later: `f` is a function of
     /// the program with effects, all of which may overlap (an implicit future).
-    pub fn future_call(&self, p: &Program, module: ModId, value: &Expr) -> Option<FnId> {
+    pub fn future_call(&self, p: &Program, module: ModId, cur: Option<FnId>, value: &Expr) -> Option<FnId> {
         let ExprKind::Call { callee, args } = &value.kind else { return None };
         let ExprKind::Path(path) = &callee.kind else { return None };
-        let Ok(Resolved::Fn(f)) = p.resolve(module, path) else { return None };
-        let args_ok = args.iter().all(|a| PurityWalk { p, module, pure: &self.fns, print_ok: false }.expr(a));
+        let Ok(Resolved::Fn(f)) = p.lookup(module, path).ok_or(()) else { return None };
+        let params = param_names(p, cur);
+        // the arguments are evaluated now; functions among them run later, inside
+        let w = self.walk(p, module, &self.fns, false, &params);
+        let wo = self.walk(p, module, &self.overlap, false, &params);
+        let uses = self.fn_params.get(f).cloned().unwrap_or_default();
+        let args_ok = args.iter().enumerate().all(|(j, a)| if uses.get(j).copied().unwrap_or(false) { wo.fn_operand(a) } else { w.expr(a) });
         (matches!(p.fns[f].kind, FnKind::User(_)) && !self.fns[f] && self.overlap[f] && args_ok).then_some(f)
     }
 
@@ -1888,8 +2106,9 @@ impl Purity {
     /// changes nothing they might read (printing is fine; writing files,
     /// changing the environment or running programs is not). A `return`
     /// inside it awaits the pending futures itself, where it actually leaves.
-    pub fn stmt_may_overlap(&self, p: &Program, module: ModId, s: &Stmt) -> bool {
-        let w = PurityWalk { p, module, pure: &self.calm, print_ok: true };
+    pub fn stmt_may_overlap(&self, p: &Program, module: ModId, cur: Option<FnId>, s: &Stmt) -> bool {
+        let params = param_names(p, cur);
+        let w = self.walk(p, module, &self.calm, true, &params);
         match s {
             Stmt::Return(e, _) => e.as_ref().is_none_or(|e| w.expr(e)),
             Stmt::LetElse { value, els, .. } => w.expr(value) && w.block(els),
@@ -1899,27 +2118,23 @@ impl Purity {
     }
 
     /// The same, for an expression (a block's final value).
-    pub fn expr_may_overlap(&self, p: &Program, module: ModId, e: &Expr) -> bool {
+    pub fn expr_may_overlap(&self, p: &Program, module: ModId, cur: Option<FnId>, e: &Expr) -> bool {
         let s = Stmt::Expr(e.clone());
-        self.stmt_may_overlap(p, module, &s)
+        self.stmt_may_overlap(p, module, cur, &s)
     }
 
     /// May calls of a function operand overlap (pure, or overlapping effects)?
-    pub fn operand_overlaps(&self, p: &Program, module: ModId, e: &Expr) -> bool {
-        match &e.kind {
-            ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.overlap[f]),
-            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.overlap, print_ok: false }.expr(body),
-            _ => false,
-        }
+    /// (Inside function `cur`, whose function parameters count as pure here:
+    /// a closure over them checks their real purity when it is made.)
+    pub fn operand_overlaps(&self, p: &Program, module: ModId, cur: Option<FnId>, e: &Expr) -> bool {
+        let params = param_names(p, cur);
+        self.walk(p, module, &self.overlap, false, &params).fn_operand(e)
     }
 
     /// Is a function operand (path or lambda, as passed to `¨`) pure?
-    pub fn operand_is_pure(&self, p: &Program, module: ModId, e: &Expr) -> bool {
-        match &e.kind {
-            ExprKind::Path(path) => matches!(p.resolve(module, path), Ok(Resolved::Fn(f)) if self.fns[f]),
-            ExprKind::Lambda { body, .. } => PurityWalk { p, module, pure: &self.fns, print_ok: false }.expr(body),
-            _ => false,
-        }
+    pub fn operand_is_pure(&self, p: &Program, module: ModId, cur: Option<FnId>, e: &Expr) -> bool {
+        let params = param_names(p, cur);
+        self.walk(p, module, &self.fns, false, &params).fn_operand(e)
     }
 }
 
@@ -1929,6 +2144,10 @@ struct PurityWalk<'a> {
     pure: &'a [bool],
     /// `print` allowed (the "calm" analysis)
     print_ok: bool,
+    /// the enclosing function's parameters: calling one is checked where that
+    /// function is called (see [`Purity::fn_params`])
+    params: &'a [String],
+    fn_params: &'a [Vec<bool>],
 }
 
 impl PurityWalk<'_> {
@@ -1938,7 +2157,9 @@ impl PurityWalk<'_> {
         match &a.kind {
             ExprKind::Lambda { body, .. } => self.expr(body),
             ExprKind::OpRef(_) => true,
-            ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
+            // a parameter of the enclosing function: checked where that is called
+            ExprKind::Path(path) if path.len() == 1 && self.params.contains(&path[0]) => true,
+            ExprKind::Path(path) => matches!(self.p.lookup(self.module, path).ok_or(()), Ok(Resolved::Fn(f)) if self.pure[f]),
             _ => false,
         }
     }
@@ -1956,7 +2177,12 @@ impl PurityWalk<'_> {
 
     fn expr(&self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => true,
+            // a named function used as a value carries its effects with it
+            ExprKind::Path(path) => match self.p.lookup(self.module, path).ok_or(()) {
+                Ok(Resolved::Fn(f)) if !(path.len() == 1 && self.params.contains(&path[0])) => self.pure[f] || self.p.fns[f].is_extern(),
+                _ => true,
+            },
             ExprKind::OpRef(_) | ExprKind::TypeArg(_) => true,
             ExprKind::Arms { .. } => false, // lifted after parsing
             ExprKind::Map(kvs) => kvs.iter().all(|(k, v)| self.expr(k) && self.expr(v)),
@@ -1966,7 +2192,7 @@ impl PurityWalk<'_> {
                     && match &callee.kind {
                         ExprKind::Lambda { body, .. } => self.expr(body),
                         ExprKind::OpRef(_) => true,
-                        ExprKind::Path(path) => match self.p.resolve(self.module, path) {
+                        ExprKind::Path(path) => match self.p.lookup(self.module, path).ok_or(()) {
                             // a runtime intrinsic that calls a function it is given
                             // (`serve(port, handle)`) has that function's effects too
                             Ok(Resolved::Fn(f)) if matches!(&self.p.fns[f].kind, FnKind::Extern { decl, .. } if decl.intrinsic) => {
@@ -1974,9 +2200,17 @@ impl PurityWalk<'_> {
                                 self.pure[f]
                                     && decl.params.iter().zip(args).all(|((_, t), a)| !matches!(t, Type::Fn(..)) || self.fn_operand(a))
                             }
-                            Ok(Resolved::Fn(f)) => self.pure[f],
+                            // a function of the program: its own effects, and those of
+                            // the functions passed to the parameters it calls
+                            Ok(Resolved::Fn(f)) => {
+                                self.pure[f]
+                                    && args.iter().enumerate().all(|(j, a)| !self.fn_params[f].get(j).copied().unwrap_or(false) || self.fn_operand(a))
+                            }
                             Ok(Resolved::Variant(..)) => true,
-                            _ => false,
+                            // a function value: a parameter (checked where the enclosing
+                            // function is called), a value taken out of data (always
+                            // pure, E0605) or a local bound to one (checked where bound)
+                            _ => true,
                         },
                         _ => false,
                     }
@@ -1984,38 +2218,11 @@ impl PurityWalk<'_> {
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
-            ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
-                // which arguments are functions: those must be known-pure functions
-                let fn_args: &[usize] = match prim {
-                    Prim::Gather | Prim::Trail => &[1],
-                    Prim::Evolve => &[2],
-                    _ => &[1, 2],
-                };
-                args.iter().enumerate().all(|(i, a)| {
-                    if !fn_args.contains(&i) {
-                        return self.expr(a);
-                    }
-                    match &a.kind {
-                        ExprKind::Lambda { body, .. } => self.expr(body),
-                        ExprKind::OpRef(_) => true,
-                        ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
-                        _ => false, // a function value from elsewhere: unknown
-                    }
-                })
-            }
             ExprKind::Prim { prim, args } => {
+                // which arguments are functions: those must be acceptable operands
+                let fn_args = prim_fn_args(*prim);
                 (*prim != Prim::Print || self.print_ok)
-                    && if *prim == Prim::Each {
-                        self.expr(&args[0])
-                            && match &args[1].kind {
-                                ExprKind::Lambda { body, .. } => self.expr(body),
-                                ExprKind::OpRef(_) => true,
-                                ExprKind::Path(path) => matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if self.pure[f]),
-                                _ => false,
-                            }
-                    } else {
-                        args.iter().all(|a| self.expr(a))
-                    }
+                    && args.iter().enumerate().all(|(i, a)| if fn_args.contains(&i) { self.fn_operand(a) } else { self.expr(a) })
             }
             ExprKind::Lambda { body, .. } => self.expr(body),
             ExprKind::If { cond, then, els } => self.expr(cond) && self.block(then) && els.as_ref().is_none_or(|e| self.expr(e)),

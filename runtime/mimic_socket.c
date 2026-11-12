@@ -65,6 +65,8 @@ mim_val *mim_std_tls_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return 
 mim_val *mim_std_tls_receive_bytes(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
 mim_val *mim_std_tls_close(mim_val *s) { (void)s; return NULL; }
 mim_val *mim_std_tls_self_signed(mim_val *h) { (void)h; return no_net(); }
+mim_val *mim_std_ui_serve_app(mim_val *p, mim_val *a, mim_val *b, mim_val *n) { (void)p; (void)a; (void)b; (void)n; return no_net(); }
+mim_val *mim_std_ui_client_script(void) { return mim_str(MIM_UI_JS, (int64_t)strlen(MIM_UI_JS)); }
 mim_val *mim_std_http_serve_tls(mim_val *p, mim_val *h, mim_val *i) { (void)p; (void)h; (void)i; return no_net(); }
 mim_val *mim_std_http_serve_tls_requests(mim_val *p, mim_val *h, mim_val *i, mim_val *n) { (void)p; (void)h; (void)i; (void)n; return no_net(); }
 mim_val *mim_std_ws_serve_tls(mim_val *p, mim_val *h, mim_val *i) { (void)p; (void)h; (void)i; return no_net(); }
@@ -1549,6 +1551,8 @@ static const char *reason(int64_t s) {
 }
 
 /* one request on a connection: parse, call the handler, answer, close */
+static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off);
+
 static void serve_one(mconn *c, mim_val *handler) {
     sock_timeout(c->fd, 30);
     sbuf b = {0};
@@ -1558,6 +1562,11 @@ static void serve_one(mconn *c, mim_val *handler) {
         conn_close(c);
         return;
     }
+    http_after_head(c, handler, b, off);
+}
+
+/* answer one HTTP request whose head is in b (b is freed) */
+static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     const char *line_end = strstr(b.p, "\r\n");
     const char *sp1 = memchr(b.p, ' ', (size_t)(line_end - b.p));
     const char *sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(line_end - sp1 - 1)) : NULL;
@@ -1668,14 +1677,21 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
 static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) { return serve_loop_with(port, handler, limit, serve_one, NULL); }
 
 /* accept `limit` connections (0 = forever) and run `one` on each */
+static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, conn_fn one, void *identity, int parallel);
+
 static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one, void *identity) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("serve: the handler must be a function");
+    return serve_loop_ex(port, handler, limit, one, identity, MIM_THREADS && FN_DESC(handler)->pure);
+}
+
+/* accept connections and run `one` on each (a task each when `parallel`);
+ * `limit` > 0 stops after that many */
+static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, conn_fn one, void *identity, int parallel) {
     mim_val *lr = mim_std_tcp_listen(port);
     if (lr->desc != &mim_desc_Ok) return lr;
     mim_val *l = ((mim_val **)lr->data)[0];
     int lfd = (int)geti(((mim_val **)l->data)[0], 0);
     mim_release(lr);
-    int parallel = MIM_THREADS && FN_DESC(handler)->pure;
     int64_t served = 0;
 #if MIM_GREEN
     int green = parallel && green_on();
@@ -2094,6 +2110,8 @@ mim_val *mim_std_ws_close(mim_val *sock) {
 }
 
 /* one WebSocket connection on a server: handshake, the handler, closing */
+static void ws_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off);
+
 static void ws_serve_one(mconn *c, mim_val *handler) {
     sock_timeout(c->fd, 30);
     sbuf b = {0};
@@ -2103,6 +2121,11 @@ static void ws_serve_one(mconn *c, mim_val *handler) {
         conn_close(c);
         return;
     }
+    ws_after_head(c, handler, b, off);
+}
+
+/* the WebSocket handshake and session for a request whose head is in b */
+static void ws_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     const char *first_end = strstr(b.p, "\r\n");
     int64_t clen;
     int chunked;
@@ -2599,5 +2622,47 @@ mim_val *mim_std_ws_serve_tls_connections(mim_val *port, mim_val *handler, mim_v
     if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_tls_connections: the handler must be a function");
     return serve_loop_with(port, handler, count_of(count), ws_serve_one, identity_of(identity, "ws::serve_tls_connections"));
 }
+
+/* ==== ui: a page and its WebSocket session on one port ================== */
+
+/* does the request head ask for a WebSocket? */
+static int wants_websocket(const char *head, size_t n) {
+    for (size_t i = 0; i + 18 <= n; i++)
+        if ((i == 0 || head[i - 1] == '\n') && ieq(head + i, "sec-websocket-key:", 18)) return 1;
+    return 0;
+}
+
+/* `pair` holds (page handler, session handler) */
+static void app_serve_one(mconn *c, mim_val *pair) {
+    sock_timeout(c->fd, 30);
+    sbuf b = {0};
+    int64_t off = read_head(c, &b);
+    if (off < 0) {
+        free(b.p);
+        conn_close(c);
+        return;
+    }
+    mim_val **h = (mim_val **)pair->data;
+    if (wants_websocket(b.p, (size_t)off)) ws_after_head(c, h[1], b, off);
+    else http_after_head(c, h[0], b, off);
+}
+
+/* serve HTTP requests with `page` and WebSocket connections with `session`
+ * on one port; `count` > 0 stops after that many connections (page loads
+ * and sessions; for tests), 0 serves forever */
+mim_val *mim_std_ui_serve_app(mim_val *port, mim_val *page, mim_val *session, mim_val *count) {
+    if (!page || page->dtype != MIM_FN || !session || session->dtype != MIM_FN) mim_panic("ui: the handlers must be functions");
+    mim_retain(page);
+    mim_retain(session);
+    mim_val *two[2] = {page, session};
+    mim_val *pair = obj_owned(&mim_desc_tuple, 2, two);
+    int parallel = MIM_THREADS && FN_DESC(page)->pure && FN_DESC(session)->pure;
+    mim_val *r = serve_loop_ex(port, pair, geti(count, 0), app_serve_one, NULL, parallel);
+    mim_release(pair);
+    return r;
+}
+
+/* the browser side of ui::run */
+mim_val *mim_std_ui_client_script(void) { return mim_str(MIM_UI_JS, (int64_t)strlen(MIM_UI_JS)); }
 
 #endif

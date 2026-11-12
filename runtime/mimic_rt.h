@@ -91,6 +91,7 @@ mim_val *mim_concat(int64_t n, mim_val **parts);
 int64_t mim_str_eq(mim_val *a, mim_val *b);
 mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields);
 mim_val *mim_closure(const mim_fn_desc *d, int64_t nenv, mim_val **env);
+mim_val *mim_closure_checked(const mim_fn_desc *pure, const mim_fn_desc *effects, int64_t nenv, mim_val **env);
 mim_val *mim_call(mim_val *f, int32_t argc, mim_val **args);
 mim_val *mim_each_fn(mim_val *xs, mim_val *f);
 int64_t mim_obj_tag(mim_val *o);

@@ -372,6 +372,16 @@ Return the new value from the lambda instead (`¨` collects the results).";
 the variables they use by value. What is not supported yet is described in
 the message (for example passing a Mimic function to C as a callback).";
 
+    IMPURE_IN_DATA = "E0605" "effectful-function-in-data" "a function with side effects stored in a value"
+"Functions kept inside records, variants, lists or maps must not have side
+effects (printing, files, networking, …). Code that later takes them out may
+run in parallel, so their effects could happen at any time and in any order.
+
+    ui::input(s.draft, on_input: t => { print(t); Typed(t) })   // error
+    ui::input(s.draft, on_input: Typed)                         // ok
+
+Do the effect in the code that handles the message instead.";
+
     // ---- E07xx calls and arguments ----------------------------------------------
     ARG_COUNT = "E0701" "argument-count" "a call with the wrong number of arguments"
 "The function, variant or primitive takes a different number of arguments.
@@ -389,10 +399,11 @@ the message (for example passing a Mimic function to C as a callback).";
 "Each parameter receives exactly one value, either by position or by name.";
 
     POSITIONAL_AFTER_NAMED = "E0704" "positional-after-named" "a positional argument after a named one"
-"Positional arguments come first, named ones after:
+"No longer reported. Named arguments take their parameters, and positional
+arguments fill the remaining parameters in order, wherever they are written:
 
-    f(1, b: 2)      // ok
-    f(a: 1, 2)      // error";
+    f(1, b: 2)      // a = 1, b = 2
+    f(b: 2, 1)      // the same";
 
     MISSING_ARG = "E0705" "missing-argument" "a required argument that was not given"
 "Every parameter without a default value needs an argument.";

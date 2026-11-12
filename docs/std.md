@@ -394,3 +394,45 @@ How UDP behaves:
 * **Packets, not streams.** Each send is one packet, at most about 64 KB. Packets can be lost, duplicated or arrive out of order. UDP never tells you, so use `receive_within` and retry when an answer matters.
 * **IPv4 only, for now.** Broadcast addresses are allowed.
 * **Tasks.** UDP calls may overlap, like WebSockets. A function that only uses UDP can run as a task (`let s = serve_udp(sock)`), and on the event loop a waiting `receive` parks only its task.
+
+## Interfaces: the `ui` module
+
+A screen is a value of type `ui::Node[Msg]`, built by `view(state)`. Events become messages, `update(state, message)` makes the next state, and the browser shows the result. The design is in [ui.md](ui.md), and tutorial chapter 20 walks through an app.
+
+```mimic
+fn view(s: State) -> ui::Node[Msg] {
+    ui::column(gap: 12, [
+        ui::text("Count: {s.count}", size: 24),
+        ui::row([ui::button("-", on_click: Dec), ui::button("+", on_click: Inc)]),
+    ])
+}
+ui::run(State { count: 0 }, view, update)               // http://localhost:8080/
+```
+
+| Element | Settings (named, all optional) |
+|---|---|
+| `ui::column(children)`, `ui::row(children)` | `gap`, `padding`, `align`, `background`, `grow` |
+| `ui::grid(children)` | `columns`, `gap` |
+| `ui::text(content)` | `size`, `weight`, `color`, `strike` |
+| `ui::button(label, on_click: message)` | |
+| `ui::input(value, on_input: fn(str) -> Msg)` | `placeholder` |
+| `ui::checkbox(checked, on_change: fn(bool) -> Msg)` | |
+| `ui::form(children, on_submit: message)`, `ui::submit(label)` | `gap` (Enter in an input submits) |
+| `ui::link(label, url)`, `ui::image(url)` | `width`, `height`, `alt` (image) |
+| `ui::spacer()`, `ui::divider()` | |
+
+| Function | Result |
+|---|---|
+| `ui::run(init, view, update)` | Serve the interface (`port: 8080`, `title: "Mimic"` by default) until the program is stopped |
+| `ui::run_for(init, view, update, n)` | The same, stopping after `n` connections (for tests) |
+| `ui::html(node)` | The screen as HTML |
+| `ui::diff(a, b, "0")` | The changes (`[ui::Patch]`) that turn screen `a` into screen `b` |
+| `ui::message(node, event)` | The message a browser event (JSON) stands for, if any |
+
+How it works:
+* **Each browser tab is a task with its own state.** The first page is complete HTML. After that, events travel to the program over a WebSocket, and only the changed parts travel back.
+* **`view` and `update` are pure.** Lists of children built with `¨` are built in parallel, and so is the comparison of the old and new screens. Different tabs run in parallel too.
+* **Functions inside a screen must be pure** (`on_input: Typed` or `t => Typed(trim(t))`). Printing or other effects there is error E0605. Do effects in `update`'s caller, or wait for the jobs described in ui.md.
+* **Built-in theme:** readable defaults with light and dark modes.
+* **Not yet:** jobs (`ui::Step`), timers and subscriptions, keyed lists, other targets (WebAssembly, native windows).
+

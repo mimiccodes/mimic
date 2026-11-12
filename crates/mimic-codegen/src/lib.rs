@@ -199,6 +199,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         net_ensure: None,
         cur_fn: None,
         cur_mod: 0,
+        cur_fid: None,
         cur_spec: None,
         cur_ret: Ty::Unit,
         ret_what: String::new(),
@@ -354,6 +355,8 @@ struct Cg<'ctx, 'p> {
     // current function
     cur_fn: Option<FunctionValue<'ctx>>,
     cur_mod: ModId,
+    /// the function being compiled (its parameters count in purity questions)
+    cur_fid: Option<usize>,
     cur_spec: Option<Rc<Spec>>,
     cur_ret: Ty,
     ret_what: String,
@@ -708,6 +711,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_rt_init" => void.fn_type(&[i32t, p], false),
             "mim_rt_ensure" => void.fn_type(&[], false),
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
             "mim_await" => ptr.fn_type(&[p], false),
@@ -859,6 +863,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let path = self.p.fn_path(k.0).join("::");
         self.cur_fn = Some(fv);
         self.cur_mod = self.p.fns[k.0].module;
+        self.cur_fid = Some(k.0);
         self.cur_spec = Some(spec.clone());
         self.cur_ret = spec.ret;
         self.ret_what = format!("return value of `{path}`");
@@ -1352,7 +1357,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.futures.push(Vec::new());
         for (i, s) in b.stmts.iter().enumerate() {
             if !pending.is_empty() {
-                if self.purity.stmt_may_overlap(self.p, self.cur_mod, s) {
+                if self.purity.stmt_may_overlap(self.p, self.cur_mod, self.cur_fid, s) {
                     self.await_used(&mut pending, &stmt_names(s))?;
                 } else {
                     self.await_all(&mut pending)?; // an ordered effect, or leaving the block
@@ -1378,7 +1383,7 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         if !pending.is_empty() && !self.terminated() {
             match &b.tail {
-                Some(e) if self.purity.expr_may_overlap(self.p, self.cur_mod, e) => {
+                Some(e) if self.purity.expr_may_overlap(self.p, self.cur_mod, self.cur_fid, e) => {
                     let mut names = Vec::new();
                     expr_names(e, &mut names);
                     self.await_used(&mut pending, &names)?
@@ -1410,7 +1415,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Start `let name = f(args)` as an implicit future when `f` qualifies.
     fn start_future(&mut self, s: &Stmt, name: &str, value: &Expr) -> R<Option<Pending<'ctx>>> {
-        if self.purity.future_call(self.p, self.cur_mod, value).is_none() {
+        if self.purity.future_call(self.p, self.cur_mod, self.cur_fid, value).is_none() {
             return Ok(None);
         }
         let Some(k) = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(value)).cloned()) else { return Ok(None) };
@@ -1662,6 +1667,20 @@ impl<'ctx> Cg<'ctx, '_> {
         self.call_rt_ptr("mim_closure", &[desc.into(), i64t.const_int(n as u64, false).into(), arr.into()])
     }
 
+    /// `mim_closure_checked(pure, effects, n, env)`: the same, pure when the
+    /// function values in `env` are.
+    fn make_closure_checked(&mut self, pure: PointerValue<'ctx>, effects: PointerValue<'ctx>, env: &[V<'ctx>]) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let n = env.len();
+        let arr_ty = self.ptr.array_type(n as u32);
+        let arr = self.entry_alloca_ty(arr_ty.into(), "env")?;
+        for (i, v) in env.iter().enumerate() {
+            let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+            self.b.build_store(slot, self.basic(*v)).s()?;
+        }
+        self.call_rt_ptr("mim_closure_checked", &[pure.into(), effects.into(), i64t.const_int(n as u64, false).into(), arr.into()])
+    }
+
     /// A lambda as a value: a closure over the variables it uses.
     fn closure_value(&mut self, e: &Expr) -> R<V<'ctx>> {
         let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
@@ -1709,8 +1728,10 @@ impl<'ctx> Cg<'ctx, '_> {
             Ok(())
         })?;
         // `¨` runs in parallel when the function is pure or its effects may overlap
-        let pure = self.purity.operand_overlaps(self.p, self.cur_mod, e);
+        let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, e);
         let desc = self.fn_desc("lambda", code, params.len(), pure);
+        // pure only if the functions it captures are: checked when it is made
+        let effects_desc = if pure && !caps.is_empty() { Some(self.fn_desc("lambda", code, params.len(), false)) } else { None };
         let mut env = Vec::new();
         for (name, _) in &caps {
             let l = self.lookup(name).ok_or("internal error: captured variable")?;
@@ -1718,7 +1739,10 @@ impl<'ctx> Cg<'ctx, '_> {
             let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
             env.push(self.boxed(self.val_of(bv, lt, false))?);
         }
-        let r = self.make_closure(desc, &env)?;
+        let r = match effects_desc {
+            Some(other) => self.make_closure_checked(desc, other, &env)?,
+            None => self.make_closure(desc, &env)?,
+        };
         for v in env {
             self.drop_tmp(v)?;
         }
@@ -2893,7 +2917,7 @@ impl<'ctx> Cg<'ctx, '_> {
                             self.thunk(&k, kind)?
                         }
                     };
-                    let pure = self.purity.operand_overlaps(self.p, self.cur_mod, &args[1]);
+                    let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
                     self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;

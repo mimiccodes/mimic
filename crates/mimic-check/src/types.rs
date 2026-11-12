@@ -535,6 +535,10 @@ pub fn default_roots(p: &Program, library: bool) -> Vec<Key> {
     }
     for (fid, f) in p.fns.iter().enumerate() {
         let FnKind::User(d) = &f.kind else { continue };
+        // the standard library is checked where programs reach it, not as a whole
+        if p.mods[f.module].package == "std" && p.root_package != "std" {
+            continue;
+        }
         let tys: Option<Vec<Ty>> = d.params.iter().map(|prm| prm.ty.as_ref().and_then(|t| ann_in(p, f.module, t))).collect();
         if let Some(tys) = tys
             && !tys.is_empty()

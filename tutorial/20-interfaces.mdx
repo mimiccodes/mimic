@@ -1,0 +1,141 @@
+---
+title: Interfaces
+description: Build a browser interface with view(state) and update(state, message) — no HTML, no JavaScript, no loops.
+order: 20
+---
+
+# Interfaces
+
+In Mimic a user interface is a value. You write two pure functions:
+* **`view(state)`** describes the screen for a state.
+* **`update(state, message)`** says how a message changes the state. A message is a click, a key press, or text typed into a box.
+
+`ui::run` shows the interface in the browser. It keeps each tab's state, and after every message it sends only what changed. You never write HTML or JavaScript. You never change the screen yourself, and you never write `async`.
+
+## A counter
+
+```mimic
+module main
+
+type Msg = Inc | Dec
+
+fn update(n: i64, m: Msg) -> i64 {
+    match m {
+        Inc => n + 1,
+        Dec => n - 1,
+    }
+}
+
+fn view(n: i64) -> ui::Node[Msg] {
+    ui::column(gap: 12, [
+        ui::text("Count: {n}", size: 24),
+        ui::row([ui::button("-", on_click: Dec), ui::button("+", on_click: Inc)]),
+    ])
+}
+
+fn main() {
+    print(ui::run(0, view, update))      // open http://localhost:8080/
+}
+```
+
+```sh
+mimic run counter.mim
+```
+
+How it reads:
+* **The type of a screen.** `ui::Node[Msg]` is a screen whose buttons and boxes send `Msg` values.
+* **Elements are functions.** Each takes its children as a list, and its settings (`gap`, `size`, …) as named arguments.
+* **Event handlers name messages.** `on_click: Inc` means "when clicked, send `Inc`". `update` gets the message and returns the next state, then `view` runs again.
+
+## Screens are values
+
+Because a screen is just a value, you can look at it without a browser. `ui::html` shows the HTML. `ui::message` tells which message a browser event stands for. `ui::diff` lists what changed between two screens:
+
+```mimic run
+module main
+
+type Msg = Inc | Dec
+
+fn view(n: i64) -> ui::Node[Msg] {
+    ui::row([ui::text("{n}"), ui::button("+", on_click: Inc)])
+}
+
+fn main() {
+    print(ui::html(view(1)))
+    print(ui::message(view(1), '{"p": "0.1", "e": "click", "v": ""}'))
+    print(json::encode(ui::diff(view(1), view(2), "0")))
+}
+```
+
+```output
+<div data-p="0" style="display:flex;flex-direction:row;gap:8px;align-items:center"><span data-p="0.0">1</span><button data-p="0.1" type="button" data-e="click">+</button></div>
+Some(Inc)
+[{"op":"children","p":"0.0","html":"2","attrs":[]}]
+```
+
+Going from 1 to 2 changes only the text of one `span`, and that is all the browser receives.
+
+## A to-do list
+
+Text boxes send what was typed. `on_input: Typed` uses the constructor `Typed` as a function, so typing "milk" sends `Typed("milk")`. A `ui::form` sends its message when Enter is pressed in one of its boxes:
+
+```mimic
+module main
+
+// A to-do list in the browser: `mimic run examples/todo/todo.mim`, then open
+// http://localhost:8080/. Every tab has its own list.
+
+type Todo = { text: str, done: bool }
+type State = { todos: [Todo], draft: str }
+type Msg = Typed(str) | Add | Toggle(i64, bool) | Remove(i64) | ClearDone
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Typed(t) => { s with draft: t },
+        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { text: trim(s.draft), done: false }), draft: "" } },
+        Toggle(i, on) => { s with todos[i].done: on },
+        Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
+        ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    let left = (s.todos ¨ (t => if t.done { 0 } else { 1 })) ▷ +/
+    ui::column(gap: 16, [
+        ui::text("To do", size: 32, weight: "bold"),
+        ui::form(on_submit: Add, [
+            ui::input(s.draft, on_input: Typed, placeholder: "What needs doing?"),
+            ui::submit("Add"),
+        ]),
+        ui::column(gap: 6, ⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))),
+        ui::row([
+            ui::text("{left} left", color: "#888"),
+            ui::spacer(),
+            ui::button("Clear done", on_click: ClearDone),
+        ]),
+    ])
+}
+
+fn item(i: i64, t: Todo) -> ui::Node[Msg] {
+    ui::row([
+        ui::checkbox(t.done, on_change: on => Toggle(i, on)),
+        ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
+        ui::spacer(),
+        ui::button("×", on_click: Remove(i)),
+    ])
+}
+
+fn main() {
+    print(ui::run(State { todos: [Todo { text: "Try Mimic", done: true }], draft: "" }, view, update, title: "To do"))
+}
+```
+
+Things to notice:
+* **No loops.** The list of rows is `⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))`, built in parallel like any other `¨`.
+* **Nested updates.** `{ s with todos[i].done: on }` changes one field of one element ([chapter 5](05-records-unions-match.mdx)).
+* **One state per tab.** Open the page in two tabs and each has its own list. Each tab is a task on the event loop, so thousands of tabs are cheap.
+* **Functions inside a screen must be pure.** `on_input: t => { print(t); Typed(t) }` is error E0605, because the screen may be rendered at any time and in parallel.
+
+The full list of elements and settings is in the [standard library reference](../docs/std.md#interfaces-the-ui-module).
+
+Back to the [index](index.mdx).

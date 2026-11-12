@@ -1,0 +1,48 @@
+module main
+
+// A to-do list in the browser: `mimic run examples/todo/todo.mim`, then open
+// http://localhost:8080/. Every tab has its own list.
+
+type Todo = { text: str, done: bool }
+type State = { todos: [Todo], draft: str }
+type Msg = Typed(str) | Add | Toggle(i64, bool) | Remove(i64) | ClearDone
+
+fn update(s: State, m: Msg) -> State {
+    match m {
+        Typed(t) => { s with draft: t },
+        Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { text: trim(s.draft), done: false }), draft: "" } },
+        Toggle(i, on) => { s with todos[i].done: on },
+        Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
+        ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
+    }
+}
+
+fn view(s: State) -> ui::Node[Msg] {
+    let left = (s.todos ¨ (t => if t.done { 0 } else { 1 })) ▷ +/
+    ui::column(gap: 16, [
+        ui::text("To do", size: 32, weight: "bold"),
+        ui::form(on_submit: Add, [
+            ui::input(s.draft, on_input: Typed, placeholder: "What needs doing?"),
+            ui::submit("Add"),
+        ]),
+        ui::column(gap: 6, ⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))),
+        ui::row([
+            ui::text("{left} left", color: "#888"),
+            ui::spacer(),
+            ui::button("Clear done", on_click: ClearDone),
+        ]),
+    ])
+}
+
+fn item(i: i64, t: Todo) -> ui::Node[Msg] {
+    ui::row([
+        ui::checkbox(t.done, on_change: on => Toggle(i, on)),
+        ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
+        ui::spacer(),
+        ui::button("×", on_click: Remove(i)),
+    ])
+}
+
+fn main() {
+    print(ui::run(State { todos: [Todo { text: "Try Mimic", done: true }], draft: "" }, view, update, title: "To do"))
+}

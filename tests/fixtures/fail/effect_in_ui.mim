@@ -1,0 +1,7 @@
+// expect-error: E0605 argument `on_input` of `ui::input` is kept inside a value, so it must not have side effects
+module main
+type Msg = Typed(str)
+fn view(s: str) -> ui::Node[Msg] {
+    ui::input(s, on_input: t => { print(t); Typed(t) })
+}
+fn main() { print(ui::html(view(""))) }

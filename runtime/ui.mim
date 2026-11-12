@@ -1,0 +1,290 @@
+
+// Interfaces: a screen is a value. `view(state)` describes it, `update(state,
+// message)` makes the next state, and `ui::run(init, view, update)` shows it
+// in the browser. See docs/ui.md. (Appended to the prelude.)
+pub module ui {
+    // A piece of the screen. `M` is the program's message type.
+    pub type Node[M] = Elem(str, [Attr[M]], [Node[M]]) | Txt(str)
+
+    // A setting of an element: an HTML attribute, an event that becomes a
+    // message, or an event whose text (what was typed) becomes a message.
+    pub type Attr[M] = Prop(str, str) | On(str, M) | OnText(str, fn(str) -> M)
+
+    // An event from the browser: the element's path, the event and its value.
+    pub type Event = { p: str, e: str, v: str }
+
+    // A change for the browser to make (runtime/mimic_ui.c applies it).
+    pub type Patch = { op: str, p: str, html: str, attrs: [str] }
+
+    extern "mimic" concurrent {
+        fn serve_app(port: i64, page: fn(super::http::Request) -> super::http::Response, session: fn(super::ws::Socket), count: i64) -> Result[i64, str]
+    }
+
+    extern "mimic" {
+        fn client_script() -> str
+    }
+
+    // ---- layout -------------------------------------------------------------
+
+    // Children one below the other.
+    pub fn column[M](children: [Node[M]], gap: i64 = 0, padding: i64 = 0, align: str = "", background: str = "", grow: bool = false) -> Node[M] {
+        box_of(children, "column", gap, padding, align, background, grow)
+    }
+
+    // Children side by side, centred vertically.
+    pub fn row[M](children: [Node[M]], gap: i64 = 8, padding: i64 = 0, align: str = "center", background: str = "", grow: bool = false) -> Node[M] {
+        box_of(children, "row", gap, padding, align, background, grow)
+    }
+
+    // Children in a grid of `columns` equal columns.
+    pub fn grid[M](children: [Node[M]], columns: i64 = 2, gap: i64 = 8) -> Node[M] {
+        Elem("div", [Prop("style", css([("display", "grid"), ("grid-template-columns", "repeat({columns}, minmax(0, 1fr))"), ("gap", px(gap))]))], children)
+    }
+
+    // Empty space that pushes its neighbours apart.
+    pub fn spacer[M]() -> Node[M] { Elem("div", [Prop("style", "flex:1")], []) }
+
+    // A thin line.
+    pub fn divider[M]() -> Node[M] { Elem("hr", [], []) }
+
+    fn box_of[M](children: [Node[M]], direction: str, gap: i64, padding: i64, align: str, background: str, grow: bool) -> Node[M] {
+        let style = css([
+            ("display", "flex"),
+            ("flex-direction", direction),
+            ("gap", px(gap)),
+            ("padding", px(padding)),
+            ("align-items", align),
+            ("background", background),
+            ("flex", if grow { "1" } else { "" }),
+        ])
+        Elem("div", [Prop("style", style)], children)
+    }
+
+    // ---- content ------------------------------------------------------------
+
+    // Text. `size` in pixels (0: the default), `weight` such as "bold".
+    pub fn text[M](content: str, size: i64 = 0, weight: str = "", color: str = "", strike: bool = false) -> Node[M] {
+        let style = css([
+            ("font-size", px(size)),
+            ("font-weight", weight),
+            ("color", color),
+            ("text-decoration", if strike { "line-through" } else { "" }),
+        ])
+        Elem("span", props([("style", style)]), [Txt(content)])
+    }
+
+    // A link to another page.
+    pub fn link[M](label: str, url: str) -> Node[M] { Elem("a", [Prop("href", url)], [Txt(label)]) }
+
+    // An image; width and height in pixels (0: its natural size).
+    pub fn image[M](url: str, width: i64 = 0, height: i64 = 0, alt: str = "") -> Node[M] {
+        Elem("img", props([("src", url), ("alt", alt), ("style", css([("width", px(width)), ("height", px(height))]))]), [])
+    }
+
+    // ---- input --------------------------------------------------------------
+
+    // A button: clicking it sends `on_click`.
+    pub fn button[M](label: str, on_click: M) -> Node[M] { Elem("button", [Prop("type", "button"), On("click", on_click)], [Txt(label)]) }
+
+    // A text box showing `value`; every change sends `on_input(text)`.
+    pub fn input[M](value: str, on_input: fn(str) -> M, placeholder: str = "") -> Node[M] {
+        Elem("input", concat(props([("type", "text"), ("value", value), ("placeholder", placeholder)]), [OnText("input", on_input)]), [])
+    }
+
+    // A check box; clicking it sends `on_change(checked)`.
+    pub fn checkbox[M](checked: bool, on_change: fn(bool) -> M) -> Node[M] {
+        let base = [Prop("type", "checkbox"), OnText("change", v => on_change(v == "true"))]
+        Elem("input", if checked { push(base, Prop("checked", "")) } else { base }, [])
+    }
+
+    // A row of inputs that sends `on_submit` when Enter is pressed in one of
+    // them, or when its `submit` button is clicked.
+    pub fn form[M](children: [Node[M]], on_submit: M, gap: i64 = 8) -> Node[M] {
+        Elem("form", [Prop("style", css([("display", "flex"), ("gap", px(gap)), ("align-items", "center")])), On("submit", on_submit)], children)
+    }
+
+    // The button that submits its form.
+    pub fn submit[M](label: str) -> Node[M] { Elem("button", [Prop("type", "submit")], [Txt(label)]) }
+
+    // ---- running --------------------------------------------------------------
+
+    // Serve the interface at http://localhost:{port}/, each browser tab with its
+    // own state, until the program is stopped.
+    pub fn run[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, port: i64 = 8080, title: str = "Mimic") -> Result[i64, str] {
+        print("open http://localhost:{port}/")
+        serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update), 0)
+    }
+
+    // The same, stopping after `connections` connections (page loads and tabs).
+    pub fn run_for[S, M](init: S, view: fn(S) -> Node[M], update: fn(S, M) -> S, connections: i64, port: i64 = 8080, title: str = "Mimic") -> Result[i64, str] {
+        serve_app(port, req => page_for(req, view(init), title), sock => session(sock, init, view, update), connections)
+    }
+
+    fn page_for[M](req: super::http::Request, tree: Node[M], title: str) -> super::http::Response {
+        if req.path == "/" { page(tree, title) } else { super::http::not_found() }
+    }
+
+    // The whole page for a screen: HTML, the theme and the browser script.
+    pub fn page[M](tree: Node[M], title: str) -> super::http::Response {
+        let head = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{escape(title)}</title><style>{theme()}</style></head>"
+        let body = "<body>{html(tree)}<script>{client_script()}</script></body></html>"
+        super::http::Response { status: 200, headers: ["content-type": "text/html; charset=utf-8"], body: head + body }
+    }
+
+    // One browser tab: wait for events, update, and send what changed.
+    fn session[S, M](sock: super::ws::Socket, state: S, view: fn(S) -> Node[M], update: fn(S, M) -> S) {
+        handle_events(sock, state, view(state), view, update)
+    }
+
+    fn handle_events[S, M](sock: super::ws::Socket, state: S, tree: Node[M], view: fn(S) -> Node[M], update: fn(S, M) -> S) {
+        match super::ws::receive(sock) {
+            Ok(super::ws::Text(t)) => {
+                match message(tree, t) {
+                    Some(m) => {
+                        let next = update(state, m)
+                        let next_tree = view(next)
+                        super::ws::send(sock, super::json::encode(diff(tree, next_tree, "0")))
+                        handle_events(sock, next, next_tree, view, update)
+                    }
+                    None => handle_events(sock, state, tree, view, update),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---- HTML -------------------------------------------------------------------
+
+    // A screen as HTML (its elements carry their paths, for the browser script).
+    pub fn html[M](n: Node[M]) -> str { render(n, "0") }
+
+    fn render[M](n: Node[M], path: str) -> str {
+        match n {
+            Txt(t) => escape(t),
+            Elem(tag, attrs, kids) => {
+                let open = "<{tag} data-p=\"{path}\"{attrs_html(attrs)}>"
+                if tag == "input" or tag == "img" or tag == "hr" { open } else { open + kids_html(kids, path) + "</{tag}>" }
+            }
+        }
+    }
+
+    fn kids_html[M](kids: [Node[M]], path: str) -> str { join(⍳ ≢ kids ¨ (i => render(kids[i], "{path}.{i}")), "") }
+
+    fn attrs_html[M](attrs: [Attr[M]]) -> str {
+        let flat = flat_attrs(attrs)
+        join(⍳ (≢ flat div 2) ¨ (i => " {flat[2 * i]}=\"{escape(flat[2 * i + 1])}\""), "")
+    }
+
+    // [name, value, name, value, …]: the attributes, and data-e listing the
+    // events the element wants
+    fn flat_attrs[M](attrs: [Attr[M]]) -> [str] {
+        let ps = attrs ⌿ (attrs ¨ (a => match a { Prop(_, _) => true, _ => false }))
+        let names = attrs ⌿ (attrs ¨ (a => match a { Prop(_, _) => false, _ => true })) ¨ event_name
+        let pairs = ps ¨ (a => match a { Prop(k, v) => [k v], _ => [] })
+        let all = flatten(pairs)
+        if ≢ names == 0 { all } else { concat(all, ["data-e" join(names, " ")]) }
+    }
+
+    // one list from a list of lists (joined in parallel)
+    fn flatten[T](xss: [[T]]) -> [T] {
+        if ≢ xss == 0 { [] } else { xss ▷ gather((x, y) => concat(x, y)) }
+    }
+
+    fn event_name[M](a: Attr[M]) -> str {
+        match a {
+            On(e, _) => e,
+            OnText(e, _) => e,
+            Prop(k, _) => k,
+        }
+    }
+
+    // attributes with an empty value are left out
+    fn props[M](pairs: [(str, str)]) -> [Attr[M]] { pairs ⌿ (pairs ¨ (p => p.1 != "")) ¨ (p => Prop(p.0, p.1)) }
+
+    fn css(pairs: [(str, str)]) -> str { join(pairs ⌿ (pairs ¨ (p => p.1 != "")) ¨ (p => "{p.0}:{p.1}"), ";") }
+
+    fn px(n: i64) -> str { if n == 0 { "" } else { "{n}px" } }
+
+    pub fn escape(t: str) -> str { replace(replace(replace(replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;") }
+
+    fn theme() -> str {
+        ':root{color-scheme:light dark}body{margin:0;padding:24px;font:16px/1.45 system-ui,-apple-system,sans-serif;color:#1d1d1f;background:#fafafa}button{font:inherit;padding:6px 14px;border-radius:8px;border:1px solid #c9c9cf;background:#fff;color:inherit;cursor:pointer}button:hover{background:#f0f0f3}input[type=text]{font:inherit;padding:6px 10px;border-radius:8px;border:1px solid #c9c9cf;background:#fff;color:inherit;min-width:12em}a{color:#2f6fdf}hr{border:none;border-top:1px solid #ddd;width:100%}@media(prefers-color-scheme:dark){body{color:#eee;background:#151517}button,input[type=text]{background:#232327;border-color:#3a3a40}button:hover{background:#2c2c31}hr{border-top-color:#333}}'
+    }
+
+    // ---- what changed -------------------------------------------------------------
+
+    // The patches that turn screen `a` into screen `b` (both at `path`).
+    pub fn diff[M](a: Node[M], b: Node[M], path: str) -> [Patch] {
+        match (a, b) {
+            (Elem(t1, a1, k1), Elem(t2, a2, k2)) if t1 == t2 => {
+                let f2 = flat_attrs(a2)
+                let mine = if same(flat_attrs(a1), f2) { [] } else { [Patch { op: "attrs", p: path, html: "", attrs: f2 }] }
+                concat(mine, kids_diff(k1, k2, path))
+            }
+            (Txt(x), Txt(y)) if x == y => [],
+            _ => [Patch { op: "replace", p: path, html: render(b, path), attrs: [] }],
+        }
+    }
+
+    fn kids_diff[M](k1: [Node[M]], k2: [Node[M]], path: str) -> [Patch] {
+        // (`and` evaluates both sides: compare the texts only when the lengths match)
+        let same_shape = if ≢ k1 != ≢ k2 { false } else { ((⍳ ≢ k1 ¨ (i => if text_differs(k1[i], k2[i]) { 1 } else { 0 })) ▷ +/) == 0 }
+        if same_shape {
+            flatten(⍳ ≢ k1 ¨ (i => diff(k1[i], k2[i], "{path}.{i}")))
+        } else {
+            [Patch { op: "children", p: path, html: kids_html(k2, path), attrs: [] }]
+        }
+    }
+
+    // two lists of text, equal as a whole (`==` on lists is elementwise)
+    fn same(a: [str], b: [str]) -> bool {
+        if ≢ a != ≢ b { false } else { ((⍳ ≢ a ¨ (i => if a[i] == b[i] { 0 } else { 1 })) ▷ +/) == 0 }
+    }
+
+    fn text_differs[M](a: Node[M], b: Node[M]) -> bool {
+        match (a, b) {
+            (Txt(x), Txt(y)) => x != y,
+            (Elem(_, _, _), Elem(_, _, _)) => false,
+            _ => true,
+        }
+    }
+
+    // ---- events -------------------------------------------------------------------
+
+    // The message an event (JSON from the browser script) stands for, if any.
+    pub fn message[M](tree: Node[M], event: str) -> Option[M] {
+        match super::json::decode[Event](event) {
+            Ok(ev) => {
+                let path = (split(ev.p, ".") ↓ 1) ¨ (x => match parse_int(x) { Some(k) => k, None => -1 })
+                match node_at(tree, path) {
+                    Some(Elem(_, attrs, _)) => handler(attrs, ev),
+                    _ => None,
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn node_at[M](n: Node[M], path: [i64]) -> Option[Node[M]] {
+        if ≢ path == 0 {
+            Some(n)
+        } else {
+            match n {
+                Elem(_, _, kids) => if path[0] >= 0 and path[0] < ≢ kids { node_at(kids[path[0]], path ↓ 1) } else { None },
+                Txt(_) => None,
+            }
+        }
+    }
+
+    fn handler[M](attrs: [Attr[M]], ev: Event) -> Option[M] {
+        if ≢ attrs == 0 {
+            None
+        } else {
+            match attrs[0] {
+                On(e, m) if e == ev.e => Some(m),
+                OnText(e, f) if e == ev.e => Some(f(ev.v)),
+                _ => handler(attrs ↓ 1, ev),
+            }
+        }
+    }
+}

@@ -18,6 +18,7 @@ pub const RUNTIME_NET_C: &str = include_str!("../../../runtime/mimic_net.c");
 pub const RUNTIME_STD_C: &str = include_str!("../../../runtime/mimic_std.c");
 pub const RUNTIME_SCHED_C: &str = include_str!("../../../runtime/mimic_sched.c");
 pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/mimic_io.c");
+pub const RUNTIME_UI_C: &str = include_str!("../../../runtime/mimic_ui.c");
 pub const RUNTIME_SOCKET_C: &str = include_str!("../../../runtime/mimic_socket.c");
 pub const RUNTIME_JSON_C: &str = include_str!("../../../runtime/mimic_json.c");
 
@@ -72,7 +73,7 @@ impl Profile {
 }
 
 /// The standard prelude: compiled into every program, visible everywhere.
-pub const PRELUDE: &str = "pub module prelude
+pub const PRELUDE: &str = concat!("pub module prelude
 
 // Optional values: `let x = find(…) else { return … }` unwraps Some.
 pub type Option[T] = Some(T) | None
@@ -414,7 +415,7 @@ pub module http {
     }
 }
 
-";
+", include_str!("../../../runtime/ui.mim"));
 
 fn prelude_file() -> SourceFile {
     let ast = parse_file(PRELUDE).expect("the prelude parses");
@@ -554,7 +555,7 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
     if !ndiags.is_empty() {
         return Err(Report::from_program(&program, ndiags));
     }
-    let diags = mimic_check::check(&program, &Options { require_main: input.is_bin() });
+    let diags = mimic_check::check(&program, &Options { require_main: input.is_bin(), check_std: std::env::var_os("MIMIC_CHECK_STD").is_some() });
     if !diags.is_empty() {
         return Err(Report::from_program(&program, diags));
     }
@@ -592,7 +593,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -610,6 +611,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_sched.c"), RUNTIME_SCHED_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
+    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_ui.c"), RUNTIME_UI_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_json.c"), RUNTIME_JSON_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
@@ -1075,4 +1077,24 @@ pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
     let job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !release };
     run_tool(toolchain::link(&tc, &target, &job), "linking the net")?;
     Ok(exe)
+}
+
+#[cfg(test)]
+mod std_tests {
+    use super::*;
+
+    /// Programs skip checking the standard library's own function bodies;
+    /// this checks all of them (names, types of every annotated function).
+    #[test]
+    fn the_standard_library_checks() {
+        let (p, diags) = Program::build(vec![prelude_file()], "std");
+        assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.diag.msg).collect::<Vec<_>>());
+        let mut p = p;
+        let n = mimic_check::normalize(&mut p);
+        assert!(n.is_empty(), "{:?}", n.iter().map(|d| &d.diag.msg).collect::<Vec<_>>());
+        let d = mimic_check::check(&p, &Options { require_main: false, check_std: true });
+        assert!(d.is_empty(), "{:?}", d.iter().map(|d| (&d.diag.msg, d.diag.span.line)).collect::<Vec<_>>());
+        let t = mimic_check::types::check_types(&p, true);
+        assert!(t.is_empty(), "{:?}", t.iter().map(|d| (&d.diag.msg, d.diag.span.line)).collect::<Vec<_>>());
+    }
 }

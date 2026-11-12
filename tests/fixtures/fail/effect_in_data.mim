@@ -1,0 +1,7 @@
+// expect-error: E0605 this function has side effects, so it cannot be kept inside a value
+module main
+type Handler = Run(fn(i64) -> i64)
+fn main() {
+    let h = Run(x => { print(x); x })
+    print(1)
+}
