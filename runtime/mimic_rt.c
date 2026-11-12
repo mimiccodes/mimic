@@ -337,33 +337,46 @@ static size_t elsize(int dt) {
 typedef struct { int64_t n; int64_t nodes; int64_t itrs; char pad[104]; } padded_count;
 static padded_count g_live_slots[MAX_SLOTS];
 static int g_next_slot = 0;
-static _Thread_local int t_slot = -1;
-static _Thread_local mim_val *t_free = NULL;
-static _Thread_local int t_free_len = 0;
-static _Thread_local mim_val *t_free_mid = NULL;
-static _Thread_local int t_free_mid_len = 0;
+/* Everything the allocator keeps per thread, in one place: one thread-local
+ * lookup per allocation (each lookup is a call on some systems). Blocks are
+ * kept in free lists by size class: payloads up to 16, 64 and 256 bytes. */
+#define SIZE_CLASSES 3
+static const size_t class_bytes[SIZE_CLASSES] = {SMALL_BYTES, MID_BYTES, 256};
 
-static padded_count *live_slot(void) {
-    if (t_slot < 0) {
+typedef struct {
+    mim_val *free[SIZE_CLASSES];
+    int free_len[SIZE_CLASSES];
+    padded_count *live;        /* this thread's live-value counter */
+} heap_state;
+
+static _Thread_local heap_state t_heap;
+
+static padded_count *live_of(heap_state *h) {
+    if (!h->live) {
         int s = __atomic_fetch_add(&g_next_slot, 1, __ATOMIC_RELAXED);
-        t_slot = s < MAX_SLOTS ? s : MAX_SLOTS - 1;
+        h->live = &g_live_slots[s < MAX_SLOTS ? s : MAX_SLOTS - 1];
     }
-    return &g_live_slots[t_slot];
+    return h->live;
+}
+
+static padded_count *live_slot(void) { return live_of(&t_heap); }
+
+/* The size class of a payload, or SIZE_CLASSES when it is bigger. */
+static inline int size_class(size_t bytes) {
+    return bytes <= SMALL_BYTES ? 0 : bytes <= MID_BYTES ? 1 : bytes <= 256 ? 2 : SIZE_CLASSES;
 }
 
 static mim_val *alloc(int dtype, int rank, int64_t len) {
     size_t bytes = (size_t)len * elsize(dtype) + 1; /* +1: char vectors stay NUL-terminated for FFI */
+    heap_state *h = &t_heap;
+    int c = size_class(bytes);
     mim_val *v;
-    if (bytes <= SMALL_BYTES && t_free) {
-        v = t_free;
-        t_free = *(mim_val **)v;
-        t_free_len--;
-    } else if (bytes > SMALL_BYTES && bytes <= MID_BYTES && t_free_mid) {
-        v = t_free_mid;
-        t_free_mid = *(mim_val **)v;
-        t_free_mid_len--;
+    if (c < SIZE_CLASSES && h->free[c]) {
+        v = h->free[c];
+        h->free[c] = *(mim_val **)v;
+        h->free_len[c]--;
     } else {
-        v = (mim_val *)malloc(sizeof(mim_val) + (bytes <= SMALL_BYTES ? SMALL_BYTES : bytes <= MID_BYTES ? MID_BYTES : bytes));
+        v = (mim_val *)malloc(sizeof(mim_val) + (c < SIZE_CLASSES ? class_bytes[c] : bytes));
         if (!v) mim_panic("out of memory");
     }
     v->rc = 1;
@@ -373,7 +386,8 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
     v->data = v->inl;
     v->desc = NULL;
     ((char *)v->data)[bytes - 1] = 0;
-    __atomic_store_n(&live_slot()->n, live_slot()->n + 1, __ATOMIC_RELAXED);
+    padded_count *lc = live_of(h);
+    __atomic_store_n(&lc->n, lc->n + 1, __ATOMIC_RELAXED);
     return v;
 }
 
@@ -383,21 +397,20 @@ static void map_dealloc_meta(mim_val *m);
 
 static void dealloc(mim_val *v) {
     if (IS_HANDLES(v)) { /* release children */
-        mim_val **h = (mim_val **)v->data;
-        for (int64_t i = 0; i < v->len; i++) mim_release(h[i]);
+        mim_val **hs = (mim_val **)v->data;
+        for (int64_t i = 0; i < v->len; i++) mim_release(hs[i]);
     }
     if (v->dtype == MIM_MAP) map_dealloc_meta(v);
     else if (v->rank >= 2) free((void *)v->desc); /* the shape of a matrix */
     size_t bytes = (size_t)v->len * elsize(v->dtype) + 1;
-    __atomic_store_n(&live_slot()->n, live_slot()->n - 1, __ATOMIC_RELAXED);
-    if (bytes <= SMALL_BYTES && t_free_len < FREE_LIST_CAP) {
-        *(mim_val **)v = t_free;
-        t_free = v;
-        t_free_len++;
-    } else if (bytes > SMALL_BYTES && bytes <= MID_BYTES && t_free_mid_len < FREE_LIST_CAP) {
-        *(mim_val **)v = t_free_mid;
-        t_free_mid = v;
-        t_free_mid_len++;
+    heap_state *h = &t_heap;
+    padded_count *lc = live_of(h);
+    __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
+    int c = size_class(bytes);
+    if (c < SIZE_CLASSES && h->free_len[c] < FREE_LIST_CAP) {
+        *(mim_val **)v = h->free[c];
+        h->free[c] = v;
+        h->free_len[c]++;
     } else {
         free(v);
     }
@@ -405,18 +418,15 @@ static void dealloc(mim_val *v) {
 
 /* Give this thread's cached blocks back to malloc (before the thread ends). */
 static void free_list_drain(void) {
-    while (t_free) {
-        mim_val *v = t_free;
-        t_free = *(mim_val **)v;
-        free(v);
+    heap_state *h = &t_heap;
+    for (int c = 0; c < SIZE_CLASSES; c++) {
+        while (h->free[c]) {
+            mim_val *v = h->free[c];
+            h->free[c] = *(mim_val **)v;
+            free(v);
+        }
+        h->free_len[c] = 0;
     }
-    t_free_len = 0;
-    while (t_free_mid) {
-        mim_val *v = t_free_mid;
-        t_free_mid = *(mim_val **)v;
-        free(v);
-    }
-    t_free_mid_len = 0;
 }
 
 /* A fresh vector for a fused kernel's output. */

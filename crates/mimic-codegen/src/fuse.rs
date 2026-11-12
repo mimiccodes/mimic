@@ -512,11 +512,126 @@ impl<'ctx> Cg<'ctx, '_> {
         let n = self.plan_len(&plan)?;
         let out = self.call_rt_ptr("mim_alloc_vec", &[self.i32c(dtype_of(el)), n.into()])?;
         let data = self.data_of(out)?;
-        let k = self.emit_kernel(&root, &plan, Mode::Map(el))?;
-        let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
-        self.par_for(n, k, ctx)?;
+        let mode = Mode::Map(el);
+        self.small_or_kernel(&root, &plan, n, mode, data, |cg| {
+            let k = cg.emit_kernel(&root, &plan, mode)?;
+            let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
+            cg.par_for(n, k, ctx)?;
+            Ok(None)
+        })?;
         self.release_plan(&plan)?;
         Ok(out)
+    }
+
+    /// Small loops (up to SMALL_LOOP elements) run inline in the calling
+    /// function: no kernel, no context, nothing between the iterations, so
+    /// LLVM can unroll them and keep values in registers. Larger ones run
+    /// `kernel`. A known length picks one; an unknown one branches.
+    /// Returns the reduction's result (None for a map).
+    fn small_or_kernel(
+        &mut self,
+        root: &Node,
+        plan: &Plan<'ctx>,
+        n: IntValue<'ctx>,
+        mode: Mode,
+        out: BasicValueEnum<'ctx>,
+        kernel: impl FnOnce(&mut Self) -> R<Option<V<'ctx>>>,
+    ) -> R<Option<V<'ctx>>> {
+        const SMALL_LOOP: u64 = 64;
+        match n.get_sign_extended_constant() {
+            Some(c) if c >= 0 && (c as u64) <= SMALL_LOOP => return self.inline_loop(root, plan, n, mode, out),
+            Some(_) => return kernel(self),
+            None => {}
+        }
+        let i64t = self.ctx.i64_type();
+        let f = self.cur_fn.unwrap();
+        let small = self.b.build_int_compare(IntPredicate::ULE, n, i64t.const_int(SMALL_LOOP, false), "").s()?;
+        let a = self.ctx.append_basic_block(f, "small");
+        let k = self.ctx.append_basic_block(f, "large");
+        let j = self.ctx.append_basic_block(f, "fused_done");
+        self.b.build_conditional_branch(small, a, k).s()?;
+        self.b.position_at_end(a);
+        let va = self.inline_loop(root, plan, n, mode, out)?;
+        let a_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(j).s()?;
+        self.b.position_at_end(k);
+        let vk = kernel(self)?;
+        let k_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(j).s()?;
+        self.b.position_at_end(j);
+        Ok(match (va, vk) {
+            (Some(x), Some(y)) => {
+                let bx = self.basic(x);
+                let phi = self.b.build_phi(bx.get_type(), "red").s()?;
+                phi.add_incoming(&[(&bx, a_end), (&self.basic(y), k_end)]);
+                let r = phi.as_basic_value();
+                Some(if r.is_float_value() { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) })
+            }
+            _ => None,
+        })
+    }
+
+    /// The loop itself, in the current function, over `0..n`.
+    fn inline_loop(&mut self, root: &Node, plan: &Plan<'ctx>, n: IntValue<'ctx>, mode: Mode, out: BasicValueEnum<'ctx>) -> R<Option<V<'ctx>>> {
+        let i64t = self.ctx.i64_type();
+        let f = self.cur_fn.unwrap();
+        let float = match mode {
+            Mode::Reduce(_, fl) => fl,
+            _ => false,
+        };
+        let acc_ty: BasicTypeEnum = if float { self.ctx.f64_type().into() } else { i64t.into() };
+        let pre = self.b.get_insert_block().unwrap();
+        let body = self.ctx.append_basic_block(f, "sm_body");
+        let done = self.ctx.append_basic_block(f, "sm_done");
+        let none = self.b.build_int_compare(IntPredicate::SLE, n, i64t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(none, done, body).s()?;
+        self.b.position_at_end(body);
+        let iphi = self.b.build_phi(i64t, "si").s()?;
+        let aphi = self.b.build_phi(acc_ty, "sacc").s()?;
+        let i = iphi.as_basic_value().into_int_value();
+        let slots = plan.slots.clone();
+        let v = self.eval_node(root, i, &slots)?;
+        let acc = aphi.as_basic_value();
+        let next: BasicValueEnum = match mode {
+            Mode::Map(el) => {
+                let base = out.into_pointer_value();
+                match el {
+                    El::F64 => {
+                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
+                        self.b.build_store(p, self.to_f64(v)?).s()?;
+                    }
+                    El::Bool => {
+                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
+                        let t = self.truth(v)?;
+                        self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+                    }
+                    _ => {
+                        let p = unsafe { self.b.build_in_bounds_gep(i64t, base, &[i], "").s()? };
+                        self.b.build_store(p, self.to_i64(v)?).s()?;
+                    }
+                }
+                acc
+            }
+            Mode::Reduce(prim, _) => self.combine(prim, float, acc, v)?,
+            Mode::Scan(..) => return Err("internal compiler error: inline scan".into()),
+        };
+        let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+        let more = self.b.build_int_compare(IntPredicate::SLT, i1, n, "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_conditional_branch(more, body, done).s()?;
+        let ident = self.identity(mode, float);
+        iphi.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        aphi.add_incoming(&[(&ident, pre), (&next, latch)]);
+        self.b.position_at_end(done);
+        let r = self.b.build_phi(acc_ty, "sred").s()?;
+        r.add_incoming(&[(&ident, pre), (&next, latch)]);
+        Ok(match mode {
+            Mode::Reduce(..) => {
+                let r = r.as_basic_value();
+                Some(if float { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) })
+            }
+            _ => None,
+        })
     }
 
     /// A reduction (`+/ ×/ ⌈/ ⌊/ ≢`) over a fusible expression: no array is built.
@@ -535,46 +650,51 @@ impl<'ctx> Cg<'ctx, '_> {
             let z = self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?;
             self.panic_if(z, "maximum/minimum of an empty array")?;
         }
-        // one partial result per fixed-size chunk, combined in chunk order
-        let grain = self.grain()?;
-        let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
-        let nc = self.b.build_int_add(n, g1, "").s()?;
-        let nc = self.b.build_int_signed_div(nc, grain, "").s()?;
-        let bytes = self.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
-        let bytes = self.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
-        let (partials, heap) = self.partials_buf(nc, bytes)?;
-        let k = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
-        let ctx = self.pack_ctx(&plan, &[partials.into(), grain.into()])?;
-        self.par_for(n, k, ctx)?;
+        let mode = Mode::Reduce(prim, float);
+        let unit = self.ctx.i64_type().const_zero().into();
+        let r = self.small_or_kernel(&root, &plan, n, mode, unit, |cg| {
+            // one partial result per fixed-size chunk, combined in chunk order
+            let grain = cg.grain()?;
+            let g1 = cg.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
+            let nc = cg.b.build_int_add(n, g1, "").s()?;
+            let nc = cg.b.build_int_signed_div(nc, grain, "").s()?;
+            let bytes = cg.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
+            let bytes = cg.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
+            let (partials, heap) = cg.partials_buf(nc, bytes)?;
+            let k = cg.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
+            let ctx = cg.pack_ctx(&plan, &[partials.into(), grain.into()])?;
+            cg.par_for(n, k, ctx)?;
+            // combine the partials in order
+            let f = cg.cur_fn.unwrap();
+            let pre = cg.b.get_insert_block().unwrap();
+            let body = cg.ctx.append_basic_block(f, "comb");
+            let done = cg.ctx.append_basic_block(f, "comb_done");
+            let ident = cg.identity(Mode::Reduce(prim, float), float);
+            let none = cg.b.build_int_compare(IntPredicate::EQ, nc, i64t.const_zero(), "").s()?;
+            cg.b.build_conditional_branch(none, done, body).s()?;
+            cg.b.position_at_end(body);
+            let kphi = cg.b.build_phi(i64t, "k").s()?;
+            let aphi = cg.b.build_phi(acc_ty, "a").s()?;
+            let kk = kphi.as_basic_value().into_int_value();
+            let p = unsafe { cg.b.build_in_bounds_gep(acc_ty, partials, &[kk], "").s()? };
+            let part = cg.b.build_load(acc_ty, p, "").s()?;
+            let pv = if float { V::F(part.into_float_value()) } else { V::I(part.into_int_value()) };
+            let next = cg.combine(prim, float, aphi.as_basic_value(), pv)?;
+            let k1 = cg.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
+            let more = cg.b.build_int_compare(IntPredicate::SLT, k1, nc, "").s()?;
+            let latch = cg.b.get_insert_block().unwrap();
+            cg.b.build_conditional_branch(more, body, done).s()?;
+            kphi.add_incoming(&[(&i64t.const_zero(), pre), (&k1, latch)]);
+            aphi.add_incoming(&[(&ident, pre), (&next, latch)]);
+            cg.b.position_at_end(done);
+            let res = cg.b.build_phi(acc_ty, "red").s()?;
+            res.add_incoming(&[(&ident, pre), (&next, latch)]);
+            cg.free_partials(partials, heap)?;
+            let r = res.as_basic_value();
+            Ok(Some(if float { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) }))
+        })?;
         self.release_plan(&plan)?;
-        // combine the partials in order
-        let f = self.cur_fn.unwrap();
-        let pre = self.b.get_insert_block().unwrap();
-        let body = self.ctx.append_basic_block(f, "comb");
-        let done = self.ctx.append_basic_block(f, "comb_done");
-        let ident = self.identity(Mode::Reduce(prim, float), float);
-        let none = self.b.build_int_compare(IntPredicate::EQ, nc, i64t.const_zero(), "").s()?;
-        self.b.build_conditional_branch(none, done, body).s()?;
-        self.b.position_at_end(body);
-        let kphi = self.b.build_phi(i64t, "k").s()?;
-        let aphi = self.b.build_phi(acc_ty, "a").s()?;
-        let kk = kphi.as_basic_value().into_int_value();
-        let p = unsafe { self.b.build_in_bounds_gep(acc_ty, partials, &[kk], "").s()? };
-        let part = self.b.build_load(acc_ty, p, "").s()?;
-        let pv = if float { V::F(part.into_float_value()) } else { V::I(part.into_int_value()) };
-        let next = self.combine(prim, float, aphi.as_basic_value(), pv)?;
-        let k1 = self.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
-        let more = self.b.build_int_compare(IntPredicate::SLT, k1, nc, "").s()?;
-        let latch = self.b.get_insert_block().unwrap();
-        self.b.build_conditional_branch(more, body, done).s()?;
-        kphi.add_incoming(&[(&i64t.const_zero(), pre), (&k1, latch)]);
-        aphi.add_incoming(&[(&ident, pre), (&next, latch)]);
-        self.b.position_at_end(done);
-        let res = self.b.build_phi(acc_ty, "red").s()?;
-        res.add_incoming(&[(&ident, pre), (&next, latch)]);
-        self.free_partials(partials, heap)?;
-        let r = res.as_basic_value();
-        Ok(if float { V::F(r.into_float_value()) } else { V::I(r.into_int_value()) })
+        Ok(r.ok_or("internal compiler error: reduction without a result")?)
     }
 
     /// `xs ▷ trail(+)` (or × max min) over a fusible expression: one kernel

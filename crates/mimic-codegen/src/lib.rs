@@ -809,6 +809,15 @@ impl<'ctx> Cg<'ctx, '_> {
             ft = self.repr(s.ret).fn_type(&ps, false);
         }
         let f = self.module.add_function(&name, ft, Some(Linkage::Internal));
+        // a vector parameter always points at a live header (rc, dtype, rank,
+        // len, data): LLVM may read it early, so header checks leave loops
+        for (i, t) in s.params.iter().enumerate() {
+            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool)) {
+                let attr = |name: &str, v: u64| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), v);
+                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("nonnull", 0));
+                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", 32));
+            }
+        }
         self.fns.insert((k.clone(), kind), f);
         self.queue.push((k.clone(), kind));
         Ok(f)
@@ -3168,9 +3177,18 @@ impl<'ctx> Cg<'ctx, '_> {
                         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
                         let bp = self.basic(b).into_pointer_value();
                         let dp = self.b.build_struct_gep(hdr, bp, 4, "").s()?;
-                        let data = self.b.build_load(self.ptr, dp, "").s()?.into_pointer_value();
+                        // fields only change through `with`, which consumes the
+                        // record and returns it as a new value: within one use of
+                        // this pointer the loads may be hoisted and shared
+                        let invariant = self.ctx.get_kind_id("invariant.load");
+                        let empty = self.ctx.metadata_node(&[]);
+                        let data = self.b.build_load(self.ptr, dp, "").s()?;
+                        inkwell::values::BasicValue::as_instruction_value(&data).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                        let data = data.into_pointer_value();
                         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
-                        let fv = self.b.build_load(self.ptr, fp, "").s()?.into_pointer_value();
+                        let fv = self.b.build_load(self.ptr, fp, "").s()?;
+                        inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                        let fv = fv.into_pointer_value();
                         if let V::P(_, true) = b {
                             self.call_rt("mim_retain", &[fv.into()])?;
                             V::P(fv, true)
