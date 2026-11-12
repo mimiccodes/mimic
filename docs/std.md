@@ -280,7 +280,7 @@ Details:
 * **Where it runs.** On Apple systems and Linux, on arm64 and x86-64. Elsewhere (Windows, WebAssembly, other CPUs) tasks are threads or deferred calls, as before.
 * **Switching it off.** Set the environment variable `MIMIC_NO_EVENT_LOOP=1` to run each connection on its own thread instead.
 * **Calls that still block their thread for a moment:** looking up a host name, the TLS handshake on Linux, file I/O, `os::run` and `io::read_line`. Other tasks on the same thread wait meanwhile. Tasks on other threads keep running.
-* **No socket timeouts inside tasks yet.** A request made from a connection task waits as long as the other side takes.
+* **Timeouts still apply.** A task's socket wait ends at the same timeout a thread's would: 60 seconds for an HTTP response, 30 seconds for a request a server is reading.
 * **Futures started outside a task**, from `main` for example, still get a thread each. That is cheap, because there are few of them.
 
 ### `ws`: WebSockets

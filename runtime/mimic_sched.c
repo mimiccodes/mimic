@@ -159,7 +159,6 @@ struct mim_co {
     co_sched *home;
     co_park_fn park; /* set while switching out to wait */
     void *park_arg;
-    int wait_fd;     /* the descriptor the poller watches for this coroutine */
     int32_t native_depth;
     int in_parallel;
     int finished;
@@ -298,15 +297,23 @@ static void *sched_main(void *p) {
 
 /* ---- the poller: sockets and timers ------------------------------------- */
 
-typedef struct {
-    int64_t at; /* monotonic nanoseconds */
+/* One wait of a parked coroutine: for a descriptor, for a deadline, or for
+ * whichever comes first. It lives on the waiting coroutine's stack; the
+ * poller and the timer heap drop every reference to it (under g_wait_lock)
+ * before the coroutine is woken. */
+typedef struct co_wait {
     mim_co *co;
-} co_timer;
+    int64_t at;   /* deadline (monotonic ns), or 0 */
+    int64_t heap; /* position in the timer heap, or -1 */
+    int fd, write;
+    int dupfd;    /* the descriptor the poller watches, or -1 */
+    int timed_out;
+} co_wait;
 
 static int g_poll = -1;
 static int g_wake[2] = {-1, -1};
-static pthread_mutex_t g_timer_lock = PTHREAD_MUTEX_INITIALIZER;
-static co_timer *g_timers; /* a binary min-heap on `at` */
+static pthread_mutex_t g_wait_lock = PTHREAD_MUTEX_INITIALIZER;
+static co_wait **g_timers; /* a binary min-heap on `at` */
 static int64_t g_ntimers, g_timers_cap;
 
 static int64_t mono_ns(void) {
@@ -315,32 +322,51 @@ static int64_t mono_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
-static void timer_push(co_timer t) {
-    if (g_ntimers == g_timers_cap) {
-        g_timers_cap = g_timers_cap ? g_timers_cap * 2 : 64;
-        g_timers = (co_timer *)realloc(g_timers, sizeof(co_timer) * (size_t)g_timers_cap);
-    }
-    int64_t i = g_ntimers++;
-    while (i > 0 && g_timers[(i - 1) / 2].at > t.at) {
-        g_timers[i] = g_timers[(i - 1) / 2];
-        i = (i - 1) / 2;
-    }
-    g_timers[i] = t;
+static void heap_set(int64_t i, co_wait *w) {
+    g_timers[i] = w;
+    w->heap = i;
 }
 
-static co_timer timer_pop(void) {
-    co_timer top = g_timers[0], last = g_timers[--g_ntimers];
-    int64_t i = 0;
+static void heap_up(int64_t i) {
+    co_wait *w = g_timers[i];
+    while (i > 0 && g_timers[(i - 1) / 2]->at > w->at) {
+        heap_set(i, g_timers[(i - 1) / 2]);
+        i = (i - 1) / 2;
+    }
+    heap_set(i, w);
+}
+
+static void heap_down(int64_t i) {
+    co_wait *w = g_timers[i];
     for (;;) {
         int64_t c = 2 * i + 1;
         if (c >= g_ntimers) break;
-        if (c + 1 < g_ntimers && g_timers[c + 1].at < g_timers[c].at) c++;
-        if (g_timers[c].at >= last.at) break;
-        g_timers[i] = g_timers[c];
+        if (c + 1 < g_ntimers && g_timers[c + 1]->at < g_timers[c]->at) c++;
+        if (g_timers[c]->at >= w->at) break;
+        heap_set(i, g_timers[c]);
         i = c;
     }
-    if (g_ntimers) g_timers[i] = last;
-    return top;
+    heap_set(i, w);
+}
+
+static void timer_push(co_wait *w) {
+    if (g_ntimers == g_timers_cap) {
+        g_timers_cap = g_timers_cap ? g_timers_cap * 2 : 64;
+        g_timers = (co_wait **)realloc(g_timers, sizeof(co_wait *) * (size_t)g_timers_cap);
+    }
+    g_timers[g_ntimers] = w;
+    w->heap = g_ntimers++;
+    heap_up(w->heap);
+}
+
+static void timer_remove(co_wait *w) {
+    int64_t i = w->heap;
+    w->heap = -1;
+    co_wait *last = g_timers[--g_ntimers];
+    if (i == g_ntimers) return;
+    heap_set(i, last);
+    heap_up(i);
+    heap_down(last->heap);
 }
 
 static void poller_wake(void) {
@@ -349,18 +375,33 @@ static void poller_wake(void) {
     (void)r;
 }
 
-/* fire the timers that are due; the time until the next one, or -1 */
+/* stop watching w's descriptor (under g_wait_lock) */
+static void fd_unwatch(co_wait *w) {
+    if (w->dupfd < 0) return;
+#ifndef __APPLE__
+    epoll_ctl(g_poll, EPOLL_CTL_DEL, w->dupfd, NULL);
+#endif
+    close(w->dupfd); /* a kqueue forgets a closed descriptor by itself */
+    w->dupfd = -1;
+}
+
+/* wake the waits whose deadline has passed; the time until the next one, or -1 */
 static int64_t timers_due(void) {
     mim_co *due = NULL;
     int64_t wait = -1, now = mono_ns();
-    pthread_mutex_lock(&g_timer_lock);
-    while (g_ntimers && g_timers[0].at <= now) {
-        mim_co *co = timer_pop().co;
-        co->next = due;
-        due = co;
+    pthread_mutex_lock(&g_wait_lock);
+    while (g_ntimers && g_timers[0]->at <= now) {
+        co_wait *w = g_timers[0];
+        timer_remove(w);
+        if (w->fd >= 0) {
+            w->timed_out = 1;
+            fd_unwatch(w);
+        }
+        w->co->next = due;
+        due = w->co;
     }
-    if (g_ntimers) wait = g_timers[0].at - now;
-    pthread_mutex_unlock(&g_timer_lock);
+    if (g_ntimers) wait = g_timers[0]->at - now;
+    pthread_mutex_unlock(&g_wait_lock);
     while (due) {
         mim_co *n = due->next;
         co_ready(due);
@@ -369,12 +410,12 @@ static int64_t timers_due(void) {
     return wait;
 }
 
-static void fd_fired(mim_co *co) {
-#ifndef __APPLE__
-    epoll_ctl(g_poll, EPOLL_CTL_DEL, co->wait_fd, NULL);
-#endif
-    close(co->wait_fd); /* a kqueue forgets a closed descriptor by itself */
-    co->wait_fd = -1;
+static void fd_fired(co_wait *w) {
+    pthread_mutex_lock(&g_wait_lock);
+    mim_co *co = w->co;
+    if (w->heap >= 0) timer_remove(w);
+    fd_unwatch(w);
+    pthread_mutex_unlock(&g_wait_lock);
     co_ready(co);
 }
 
@@ -397,7 +438,7 @@ static void *poller_main(void *p) {
                 while (read(g_wake[0], buf, sizeof buf) > 0) {
                 }
             } else {
-                fd_fired((mim_co *)ev[i].udata);
+                fd_fired((co_wait *)ev[i].udata);
             }
         }
 #else
@@ -410,7 +451,7 @@ static void *poller_main(void *p) {
                 while (read(g_wake[0], buf, sizeof buf) > 0) {
                 }
             } else {
-                fd_fired((mim_co *)ev[i].data.ptr);
+                fd_fired((co_wait *)ev[i].data.ptr);
             }
         }
 #endif
@@ -483,7 +524,6 @@ static mim_co *co_spawn(void (*fn)(void *), void *arg, int detached) {
     co->fn = fn;
     co->arg = arg;
     co->detached = detached;
-    co->wait_fd = -1;
     co->stack = stack_get();
     co->sp = co_first_frame(co->stack + CO_STACK, co);
     pthread_mutex_init(&co->m, NULL);
@@ -519,54 +559,54 @@ static void co_join(mim_co *co) {
     free(co);
 }
 
-typedef struct {
-    int fd, write;
-} fd_wait;
-
-static void fd_park(mim_co *co, void *arg) {
-    fd_wait *w = (fd_wait *)arg;
-    /* each wait watches its own duplicate of the descriptor, so a reader and
-     * a writer of one socket can wait at the same time */
-    int d = fcntl(w->fd, F_DUPFD_CLOEXEC, 0); /* never inherited by os::run */
-    if (d < 0) {
-        co_ready(co);
-        return;
+static void wait_park(mim_co *co, void *arg) {
+    co_wait *w = (co_wait *)arg;
+    w->co = co;
+    int ready = 0, first = 0;
+    pthread_mutex_lock(&g_wait_lock);
+    if (w->at) {
+        timer_push(w);
+        first = w->heap == 0;
     }
-    co->wait_fd = d;
+    if (w->fd >= 0) {
+        /* each wait watches its own duplicate of the descriptor, so a reader
+         * and a writer of one socket can wait at the same time */
+        int d = fcntl(w->fd, F_DUPFD_CLOEXEC, 0); /* never inherited by os::run */
+        int ok = d >= 0;
+        if (ok) {
 #ifdef __APPLE__
-    struct kevent kev;
-    EV_SET(&kev, d, w->write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, co);
-    if (kevent(g_poll, &kev, 1, NULL, 0, NULL) != 0) {
+            struct kevent kev;
+            EV_SET(&kev, d, w->write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, w);
+            ok = kevent(g_poll, &kev, 1, NULL, 0, NULL) == 0;
 #else
-    struct epoll_event e = {0};
-    e.events = (w->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
-    e.data.ptr = co;
-    if (epoll_ctl(g_poll, EPOLL_CTL_ADD, d, &e) != 0) {
+            struct epoll_event e = {0};
+            e.events = (w->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
+            e.data.ptr = w;
+            ok = epoll_ctl(g_poll, EPOLL_CTL_ADD, d, &e) == 0;
 #endif
-        close(d);
-        co->wait_fd = -1;
-        co_ready(co);
+            if (ok) w->dupfd = d;
+            else close(d);
+        }
+        if (!ok) { /* let the caller's next call report the error */
+            if (w->heap >= 0) timer_remove(w);
+            ready = 1;
+        }
     }
-}
-
-/* park until fd can be read (or written) */
-static void co_wait_fd(int fd, int write) {
-    fd_wait w = {fd, write};
-    co_park(fd_park, &w);
-}
-
-static void timer_park(mim_co *co, void *arg) {
-    co_timer t = {*(int64_t *)arg, co};
-    pthread_mutex_lock(&g_timer_lock);
-    timer_push(t);
-    int first = g_timers[0].co == co;
-    pthread_mutex_unlock(&g_timer_lock);
+    pthread_mutex_unlock(&g_wait_lock);
     if (first) poller_wake();
+    if (ready) co_ready(co);
+}
+
+/* park until fd can be read (or written); 0 when timeout_ns (if > 0) passed first */
+static int co_wait_fd(int fd, int write, int64_t timeout_ns) {
+    co_wait w = {NULL, timeout_ns > 0 ? mono_ns() + timeout_ns : 0, -1, fd, write, -1, 0};
+    co_park(wait_park, &w);
+    return !w.timed_out;
 }
 
 static void co_sleep(int64_t ns) {
-    int64_t at = mono_ns() + ns;
-    co_park(timer_park, &at);
+    co_wait w = {NULL, mono_ns() + ns, -1, -1, 0, -1, 0};
+    co_park(wait_park, &w);
 }
 
 /* a lock that a coroutine waits for without blocking its thread */
@@ -578,7 +618,16 @@ static void co_lock(pthread_mutex_t *m) {
     while (pthread_mutex_trylock(m) != 0) co_yield();
 }
 
-/* recv and send that park instead of blocking inside a coroutine */
+/* the socket's receive or send timeout (SO_RCVTIMEO / SO_SNDTIMEO) in ns */
+static int64_t sock_timeo(int fd, int which) {
+    struct timeval tv = {0, 0};
+    socklen_t len = sizeof tv;
+    if (getsockopt(fd, SOL_SOCKET, which, &tv, &len) != 0) return 0;
+    return (int64_t)tv.tv_sec * 1000000000 + (int64_t)tv.tv_usec * 1000;
+}
+
+/* recv and send that park instead of blocking inside a coroutine; the
+ * socket's own timeouts still apply */
 static ssize_t mrecv(int fd, void *buf, size_t n) {
     if (!t_co) return recv(fd, buf, n, 0);
     for (;;) {
@@ -586,7 +635,10 @@ static ssize_t mrecv(int fd, void *buf, size_t n) {
         if (r >= 0) return r;
         if (errno == EINTR) continue;
         if (errno != EAGAIN && errno != EWOULDBLOCK) return r;
-        co_wait_fd(fd, 0);
+        if (!co_wait_fd(fd, 0, sock_timeo(fd, SO_RCVTIMEO))) {
+            errno = EAGAIN; /* as a blocking socket reports its timeout */
+            return -1;
+        }
     }
 }
 
@@ -597,13 +649,16 @@ static ssize_t msend(int fd, const void *buf, size_t n, int flags) {
         if (r >= 0) return r;
         if (errno == EINTR) continue;
         if (errno != EAGAIN && errno != EWOULDBLOCK) return r;
-        co_wait_fd(fd, 1);
+        if (!co_wait_fd(fd, 1, sock_timeo(fd, SO_SNDTIMEO))) {
+            errno = EAGAIN;
+            return -1;
+        }
     }
 }
 
 /* before a call that would block until fd is ready (accept) */
 static void mim_wait_readable(int fd) {
-    if (t_co) co_wait_fd(fd, 0);
+    if (t_co) co_wait_fd(fd, 0, 0);
 }
 
 #else /* no event loop: threads and blocking calls */

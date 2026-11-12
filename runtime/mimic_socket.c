@@ -92,7 +92,7 @@ static int connect_co(int fd, const struct sockaddr *addr, socklen_t len) {
         fcntl(fd, F_SETFL, fl | O_NONBLOCK);
         int rc = connect(fd, addr, len);
         if (rc != 0 && errno == EINPROGRESS) {
-            co_wait_fd(fd, 1);
+            co_wait_fd(fd, 1, 0);
             int e = 0;
             socklen_t el = sizeof e;
             getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el);
@@ -512,7 +512,13 @@ static void *tls_open(int fd, const char *host, char *err, size_t errn) {
 static ssize_t tls_read(void *t, void *buf, size_t n) {
 #if MIM_GREEN
     /* nothing decrypted yet: wait on the event loop rather than in SSL_read */
-    if (t_co && os.pending && os.get_fd && os.pending(t) == 0) co_wait_fd(os.get_fd(t), 0);
+    if (t_co && os.pending && os.get_fd && os.pending(t) == 0) {
+        int fd = os.get_fd(t);
+        if (!co_wait_fd(fd, 0, sock_timeo(fd, SO_RCVTIMEO))) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
 #endif
     int r = os.read(t, buf, (int)(n > 1 << 30 ? 1 << 30 : n));
     if (r > 0) return r;
