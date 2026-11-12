@@ -259,6 +259,7 @@ http::serve(8080, handle)                                     // runs until the 
 | `http::request(method, url, headers, body)` | Any method, with `[str: str]` headers and a body |
 | `http::serve(port, handler)` | An HTTP/1.1 server; `handler` is a `fn(http::Request) -> http::Response` |
 | `http::serve_requests(port, handler, n)` | The same, stopping after `n` requests; `Ok(n)` |
+| `http::serve_tls(port, handler, identity)`, `http::serve_tls_requests(port, handler, identity, n)` | The same over HTTPS, with a `tls::Identity` (see [`tls`](#tls-encryption)) |
 | `http::Request` | `{ method, path, query, headers, body }`: header names are lower case, `query` is the part after `?` |
 | `http::Response` | `{ status, headers, body }` |
 | `http::ok(body)`, `http::respond(status, body)`, `http::not_found()` | Responses (text/plain unless the headers say otherwise) |
@@ -268,7 +269,7 @@ How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
 * **The server runs a pure or overlapping handler in parallel**, one task per connection on the event loop (see [the event loop](#the-event-loop)). A handler that prints or writes files handles one request at a time, in order.
 * **One request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
-* **`https://` uses the operating system's TLS**, loaded when first needed: the Security framework on Apple platforms, OpenSSL 3 (`libssl.so.3`) on Linux. Certificates and host names are checked against the system's trusted certificates, so an expired, self-signed or wrong-host certificate is an `Err` ("TLS with example.com failed: …"). Statically linked Linux programs cannot load OpenSSL, so there `https://` returns an `Err` that says so. Serving HTTPS is not supported yet.
+* **`https://` uses the operating system's TLS**, loaded when first needed: the Security framework on Apple platforms, OpenSSL 3 (`libssl.so.3`) on Linux. Certificates and host names are checked against the system's trusted certificates, so an expired, self-signed or wrong-host certificate is an `Err` ("TLS with example.com failed: …"). Statically linked Linux programs cannot load OpenSSL, so there `https://` returns an `Err` that says so. Serving HTTPS: see [`tls`](#tls-encryption).
 * **Redirects are followed** (301, 302, 303, 307, 308), up to 10. A 303, or a 301/302 after a non-GET, continues as a GET; 307 and 308 keep the method and body.
 * **WebAssembly has no sockets**, so there every network function returns `Err`.
 
@@ -281,7 +282,7 @@ You never write `async` or `await`, and nothing changes in your code. The differ
 Details:
 * **Where it runs.** On Apple systems and Linux, on arm64 and x86-64. Elsewhere (Windows, WebAssembly, other CPUs) tasks are threads or deferred calls, as before.
 * **Switching it off.** Set the environment variable `MIMIC_NO_EVENT_LOOP=1` to run each connection on its own thread instead.
-* **Calls that still block their thread for a moment:** looking up a host name, the TLS handshake on Linux, file I/O, `os::run` and `io::read_line`. Other tasks on the same thread wait meanwhile. Tasks on other threads keep running.
+* **Calls that still block their thread for a moment:** looking up a host name, TLS handshakes on Linux, file I/O, `os::run` and `io::read_line`. Other tasks on the same thread wait meanwhile. Tasks on other threads keep running.
 * **Timeouts still apply.** A task's socket wait ends at the same timeout a thread's would: 60 seconds for an HTTP response, 30 seconds for a request a server is reading.
 * **Futures started outside a task**, from `main` for example, still get a thread each. That is cheap, because there are few of them.
 
@@ -310,6 +311,7 @@ ws::close(sock)
 | `ws::close(socket)` | Close (with the closing handshake) |
 | `ws::serve(port, handler)` | Call `handler(socket)` for each connection; the socket closes when it returns |
 | `ws::serve_connections(port, handler, n)` | The same, stopping after `n` connections |
+| `ws::serve_tls(port, handler, identity)`, `ws::serve_tls_connections(port, handler, identity, n)` | The same over TLS (`wss://`) |
 
 How WebSockets behave:
 * **Protocol.** RFC 6455: fragmented messages are joined, pings are answered automatically, and messages may be up to 64 MB.
@@ -330,6 +332,41 @@ How WebSockets behave:
 | `tcp::close(socket)` | Close a socket or listener |
 
 TCP calls happen in program order.
+
+### `tls`: encryption
+
+```mimic
+// a server: a certificate and its key, as PEM text
+let cert = fs::read("cert.pem") else { return }
+let key = fs::read("key.pem") else { return }
+let id = tls::identity(cert, key) else { return }
+http::serve_tls(8443, handle, id)                      // https://…:8443
+ws::serve_tls(8444, chat, id)                          // wss://…:8444
+
+// encrypted TCP, for protocols of your own
+let s = tls::connect("example.com", 443) else { return }
+tls::send(s, "…")
+let reply = tls::receive(s, 4096)
+```
+
+| Function / type | Result |
+|---|---|
+| `tls::identity(cert, key)` | `Result[tls::Identity, str]`: a server's certificate (chain) and private key, both PEM text |
+| `tls::self_signed(host)` | `Result[(str, str), str]`: a new certificate and key (PEM) for `host`, for development |
+| `tls::connect(host, port)` | `Result[tls::Stream, str]`: an encrypted connection, checked against the system's trusted certificates |
+| `tls::connect_trusting(host, port, cert)` | The same, but trusting exactly the certificate(s) in `cert` (PEM) instead |
+| `tls::accept(listener, identity)` | `Result[tls::Stream, str]`: the next connection on a `tcp::Listener`, encrypted |
+| `tls::send(stream, text)`, `tls::send_bytes(stream, data)` | `Result[i64, str]` |
+| `tls::receive(stream, limit)`, `tls::receive_bytes(stream, limit)` | `Result[str, str]` / `Result[[u8], str]`: up to `limit` bytes; `""` when the other side closed |
+| `tls::close(stream)` | Close it |
+
+How TLS behaves:
+* **The system's own TLS.** Mimic uses the Security framework on Apple systems and OpenSSL 3 on Linux, loaded when first used, as for `https://`. Statically linked Linux programs cannot load OpenSSL, so there these functions return `Err`.
+* **Certificates are PEM text**, the usual `-----BEGIN CERTIFICATE-----` files. Read them with `fs::read`, or take them from the environment. Keys may be PKCS#8 (`BEGIN PRIVATE KEY`), EC or RSA, unencrypted. An identity is loaded once and shared by every connection.
+* **Clients check certificates.** `tls::connect`, `http::fetch` and `ws::connect` accept only certificates your system trusts, and only for the host name you asked for. `tls::connect_trusting` replaces the system's list with the certificate you give, which is how you talk to your own servers during development.
+* **`tls::self_signed(host)`** makes a P-256 key and a certificate valid for 90 days, for `host` (and for 127.0.0.1 and ::1 when `host` is `"localhost"`). Browsers warn about it. Use a certificate from a certificate authority, such as Let's Encrypt, in production.
+* **Apple's limits.** On Apple systems Mimic speaks TLS 1.2, and certificates must follow Apple's rules. For example, Apple rejects server certificates that are valid for more than 825 days.
+* **On the event loop**, handshakes and reads park only their task on Apple systems. On Linux the handshake blocks its thread briefly.
 
 ### `udp`
 

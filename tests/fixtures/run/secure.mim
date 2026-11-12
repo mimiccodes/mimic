@@ -1,0 +1,83 @@
+module main
+
+// TLS servers: HTTPS with a self-signed certificate, and an encrypted echo
+// server on a plain TCP listener. (WASI has no sockets: see secure.wasi.out.)
+
+fn handle(req: http::Request) -> http::Response { http::ok("secret {req.path}") }
+
+fn https_server(port: i64, id: tls::Identity) -> Result[i64, str] { http::serve_tls_requests(port, handle, id, 2) }
+
+// answer one TLS connection: upper-case what arrives
+fn echo_once(l: tcp::Listener, id: tls::Identity) -> str {
+    match tls::accept(l, id) {
+        Ok(s) => {
+            let got = tls::receive(s, 100) else { return "nothing" }
+            tls::send(s, upper(got))
+            tls::close(s)
+            got
+        }
+        Err(e) => e,
+    }
+}
+
+fn status(r: Result[tls::Stream, str]) -> str {
+    match r {
+        Ok(_) => "connected",
+        Err(e) => "refused",
+    }
+}
+
+fn last(xs: [str]) -> str { xs[≢ xs - 1] }
+
+fn main() {
+    let pair = match tls::self_signed("localhost") {
+        Ok(p) => p,
+        Err(e) => {
+            print("no TLS: {e}")
+            return
+        }
+    }
+    let (cert, key) = pair
+    print(starts_with(cert, "-----BEGIN CERTIFICATE-----"))
+    let id = tls::identity(cert, key) else { return }
+    print(tls::identity(cert, "not a key"))
+
+    let port = 30000 + os::pid() % 20000
+    let s = https_server(port, id)
+    time::sleep(100ms)
+    // nobody trusts a self-signed certificate by default
+    print(is_err(http::fetch("https://localhost:{port}/")))
+    // a client that trusts this one certificate
+    let c = tls::connect_trusting("localhost", port, cert)
+    print(status(c))
+    let st = c else { return }
+    tls::send(st, "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    let reply = tls::receive(st, 4096) else { return }
+    print(lines(reply)[0])
+    print(last(lines(reply)))
+    tls::close(st)
+    print(s)
+
+    // TLS over a TCP listener of your own
+    let l = tcp::listen(0) else { return }
+    let e = echo_once(l, id)
+    let sock = tls::connect_trusting("127.0.0.1", l.port, cert) else { return }
+    print(tls::send(sock, "ping"))
+    print(tls::receive(sock, 100))
+    tls::close(sock)
+    print(e)
+    // a certificate only counts for the names it was made for
+    let made = tls::self_signed("other.test") else { return }
+    let other = tls::identity(made.0, made.1) else { return }
+    let l2 = tcp::listen(0) else { return }
+    let e2 = echo_once(l2, other)
+    print(status(tls::connect_trusting("localhost", l2.port, made.0)))
+    tcp::close(l2)
+}
+
+fn is_err(r: Result[http::Response, str]) -> bool {
+    match r {
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}

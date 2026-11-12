@@ -116,6 +116,57 @@ fn show(r: Result[http::Response, str]) -> str {
 Ok(3)
 ```
 
+## Serving HTTPS
+
+An HTTPS server needs a **certificate** and its **private key**, usually two PEM files from a certificate authority. Load them once with `tls::identity`, then serve with `http::serve_tls`:
+
+```mimic
+let cert = fs::read("cert.pem") else { return }
+let key = fs::read("key.pem") else { return }
+let id = tls::identity(cert, key) else { return }
+print(http::serve_tls(8443, handle, id))        // https://your-host:8443/
+```
+
+For development, `tls::self_signed("localhost")` makes a certificate and key for you. No client trusts it by default, which is the point of certificates. `tls::connect_trusting` makes a client that trusts exactly the certificate you give it:
+
+```mimic run
+module main
+
+fn handle(req: http::Request) -> http::Response { http::ok("secret {req.path}") }
+
+fn server(port: i64, id: tls::Identity) -> Result[i64, str] { http::serve_tls_requests(port, handle, id, 2) }
+
+fn main() {
+    let made = tls::self_signed("localhost") else { return }
+    let id = tls::identity(made.0, made.1) else { return }
+    let port = 30000 + os::pid() % 20000
+    let s = server(port, id)
+    time::sleep(100ms)
+    print(http::fetch("https://localhost:{port}/") ▷ is_ok)   // not trusted
+    let conn = tls::connect_trusting("localhost", port, made.0) else { return }
+    tls::send(conn, "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    let reply = tls::receive(conn, 4096) else { return }
+    print(lines(reply)[0])
+    tls::close(conn)
+    print(s)
+}
+
+fn is_ok(r: Result[http::Response, str]) -> bool {
+    match r {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+```
+
+```output
+false
+HTTP/1.1 200 OK
+Ok(2)
+```
+
+`ws::serve_tls` does the same for WebSockets (`wss://`). `tls::connect` and `tls::accept` give you encrypted TCP streams for protocols of your own.
+
 ## WebSockets
 
 A WebSocket stays open, and both sides can send messages at any time. A WebSocket server is a function called once per connection. When it returns, the connection closes:

@@ -316,6 +316,8 @@ pub module ws {
         // handler's effects may overlap); the socket closes when it returns
         fn serve(port: i64, handler: fn(Socket)) -> Result[i64, str]
         fn serve_connections(port: i64, handler: fn(Socket), count: i64) -> Result[i64, str]
+        fn serve_tls(port: i64, handler: fn(Socket), identity: tls::Identity) -> Result[i64, str]
+        fn serve_tls_connections(port: i64, handler: fn(Socket), identity: tls::Identity, count: i64) -> Result[i64, str]
     }
 }
 
@@ -335,6 +337,29 @@ pub module tcp {
         fn send_bytes(socket: Socket, data: [u8]) -> Result[i64, str]
         fn receive_bytes(socket: Socket, limit: i64) -> Result[[u8], str]
         fn close(socket: any)
+    }
+}
+
+// TLS: `tls::identity(cert_pem, key_pem)` for servers (`http::serve_tls`,
+// `ws::serve_tls`, `tls::accept`), and encrypted TCP streams with
+// `tls::connect(host, port)`.
+pub module tls {
+    // A certificate (chain) and its private key, loaded once.
+    pub type Identity = { id: i64 }
+    // An encrypted connection.
+    pub type Stream = { id: i64 }
+
+    pub extern \"mimic\" concurrent {
+        fn self_signed(host: str) -> Result[(str, str), str]
+        fn identity(cert: str, key: str) -> Result[Identity, str]
+        fn connect(host: str, port: i64) -> Result[Stream, str]
+        fn connect_trusting(host: str, port: i64, cert: str) -> Result[Stream, str]
+        fn accept(listener: tcp::Listener, identity: Identity) -> Result[Stream, str]
+        fn send(stream: Stream, text: str) -> Result[i64, str]
+        fn send_bytes(stream: Stream, data: [u8]) -> Result[i64, str]
+        fn receive(stream: Stream, limit: i64) -> Result[str, str]
+        fn receive_bytes(stream: Stream, limit: i64) -> Result[[u8], str]
+        fn close(stream: Stream)
     }
 }
 
@@ -371,6 +396,8 @@ pub module http {
         fn request(method: str, url: str, headers: [str: str], body: str) -> Result[Response, str]
         fn serve(port: i64, handler: fn(Request) -> Response) -> Result[i64, str]
         fn serve_requests(port: i64, handler: fn(Request) -> Response, count: i64) -> Result[i64, str]
+        fn serve_tls(port: i64, handler: fn(Request) -> Response, identity: tls::Identity) -> Result[i64, str]
+        fn serve_tls_requests(port: i64, handler: fn(Request) -> Response, identity: tls::Identity, count: i64) -> Result[i64, str]
     }
 
     pub fn respond(status: i64, body: str) -> Response {

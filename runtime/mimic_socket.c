@@ -55,6 +55,20 @@ mim_val *mim_std_udp_send_bytes(mim_val *s, mim_val *h, mim_val *p, mim_val *b) 
 mim_val *mim_std_udp_receive(mim_val *s) { (void)s; return no_net(); }
 mim_val *mim_std_udp_receive_within(mim_val *s, mim_val *d) { (void)s; (void)d; return no_net(); }
 mim_val *mim_std_udp_close(mim_val *s) { (void)s; return NULL; }
+mim_val *mim_std_tls_identity(mim_val *c, mim_val *k) { (void)c; (void)k; return no_net(); }
+mim_val *mim_std_tls_connect(mim_val *h, mim_val *p) { (void)h; (void)p; return no_net(); }
+mim_val *mim_std_tls_connect_trusting(mim_val *h, mim_val *p, mim_val *c) { (void)h; (void)p; (void)c; return no_net(); }
+mim_val *mim_std_tls_accept(mim_val *l, mim_val *i) { (void)l; (void)i; return no_net(); }
+mim_val *mim_std_tls_send(mim_val *s, mim_val *t) { (void)s; (void)t; return no_net(); }
+mim_val *mim_std_tls_send_bytes(mim_val *s, mim_val *b) { (void)s; (void)b; return no_net(); }
+mim_val *mim_std_tls_receive(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
+mim_val *mim_std_tls_receive_bytes(mim_val *s, mim_val *n) { (void)s; (void)n; return no_net(); }
+mim_val *mim_std_tls_close(mim_val *s) { (void)s; return NULL; }
+mim_val *mim_std_tls_self_signed(mim_val *h) { (void)h; return no_net(); }
+mim_val *mim_std_http_serve_tls(mim_val *p, mim_val *h, mim_val *i) { (void)p; (void)h; (void)i; return no_net(); }
+mim_val *mim_std_http_serve_tls_requests(mim_val *p, mim_val *h, mim_val *i, mim_val *n) { (void)p; (void)h; (void)i; (void)n; return no_net(); }
+mim_val *mim_std_ws_serve_tls(mim_val *p, mim_val *h, mim_val *i) { (void)p; (void)h; (void)i; return no_net(); }
+mim_val *mim_std_ws_serve_tls_connections(mim_val *p, mim_val *h, mim_val *i, mim_val *n) { (void)p; (void)h; (void)i; (void)n; return no_net(); }
 mim_val *mim_std_http_request(mim_val *m, mim_val *u, mim_val *h, mim_val *b) { (void)m; (void)u; (void)h; (void)b; return no_net(); }
 mim_val *mim_std_http_fetch(mim_val *u) { (void)u; return no_net(); }
 mim_val *mim_std_http_serve(mim_val *p, mim_val *h) { (void)p; (void)h; return no_net(); }
@@ -284,6 +298,80 @@ static int conn_send_all(mconn *c, const char *p, size_t n) {
     return send_all(c->fd, p, n);
 }
 
+static void tls_close(void *t);
+
+static void conn_close(mconn *c) {
+    if (c->tls) tls_close(c->tls);
+    c->tls = NULL;
+    close(c->fd);
+}
+
+/* ---- DER and PEM: just enough to write keys and certificates ---------- */
+
+/* random bytes from the operating system */
+__attribute__((unused)) static void arc4random_buf_or_urandom(void *p, size_t n) {
+#if defined(__APPLE__)
+    arc4random_buf(p, n);
+#else
+    size_t got = 0;
+    while (got < n) {
+        size_t k = n - got > 256 ? 256 : n - got;
+        if (getentropy((char *)p + got, k) != 0) break;
+        got += k;
+    }
+#endif
+}
+
+typedef struct {
+    uint8_t *p;
+    size_t n, cap;
+} dbuf;
+
+__attribute__((unused)) static void db_put(dbuf *b, const void *p, size_t n) {
+    if (b->n + n > b->cap) {
+        b->cap = (b->n + n) * 2 + 64;
+        b->p = (uint8_t *)realloc(b->p, b->cap);
+    }
+    memcpy(b->p + b->n, p, n);
+    b->n += n;
+}
+
+__attribute__((unused)) static void db_tlv(dbuf *b, uint8_t tag, const uint8_t *p, size_t n) {
+    uint8_t h[6];
+    size_t k = 0;
+    h[k++] = tag;
+    if (n < 128) h[k++] = (uint8_t)n;
+    else if (n < 256) { h[k++] = 0x81; h[k++] = (uint8_t)n; }
+    else if (n < 65536) { h[k++] = 0x82; h[k++] = (uint8_t)(n >> 8); h[k++] = (uint8_t)n; }
+    else { h[k++] = 0x83; h[k++] = (uint8_t)(n >> 16); h[k++] = (uint8_t)(n >> 8); h[k++] = (uint8_t)n; }
+    db_put(b, h, k);
+    db_put(b, p, n);
+}
+
+__attribute__((unused)) static char *pem_wrap(const char *label, const uint8_t *der, size_t n, size_t *outn) {
+    static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t cap = n * 2 + 128;
+    char *o = (char *)malloc(cap);
+    size_t k = (size_t)snprintf(o, cap, "-----BEGIN %s-----\n", label);
+    int col = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)der[i] << 16 | (i + 1 < n ? (uint32_t)der[i + 1] << 8 : 0) | (i + 2 < n ? der[i + 2] : 0);
+        o[k++] = tab[v >> 18 & 63];
+        o[k++] = tab[v >> 12 & 63];
+        o[k++] = i + 1 < n ? tab[v >> 6 & 63] : '=';
+        o[k++] = i + 2 < n ? tab[v & 63] : '=';
+        if ((col += 4) == 64) {
+            o[k++] = '\n';
+            col = 0;
+        }
+    }
+    if (col) o[k++] = '\n';
+    k += (size_t)snprintf(o + k, cap - k, "-----END %s-----\n", label);
+    *outn = k;
+    return o;
+}
+
+
 /* TLS with the operating system's own library, loaded on first use (no
  * link-time dependency): Apple's Security framework, or OpenSSL 3 on Linux.
  * Certificates and host names are checked against the system's trust store. */
@@ -375,8 +463,299 @@ static const char *st_error(OSStatus e) {
     }
 }
 
-/* a TLS session over a connected socket, or NULL with a message */
-static void *tls_open(int fd, const char *host, char *err, size_t errn) {
+/* certificates, keys and identities: more of the Security framework, for
+ * servers and for clients that trust one particular certificate */
+static struct {
+    int ready;
+    const void *(*data_create)(const void *alloc, const uint8_t *bytes, long len);
+    const void *(*array_create)(const void *alloc, const void **values, long n, const void *callbacks);
+    const void *array_callbacks;
+    long (*array_count)(const void *a);
+    const void *(*array_at)(const void *a, long i);
+    unsigned long (*type_id)(const void *cf);
+    unsigned long (*cert_type)(void);
+    unsigned long (*key_type)(void);
+    OSStatus (*import)(const void *data, const void *name, uint32_t *format, uint32_t *type, uint32_t flags, const void *params, const void *keychain, const void **out);
+    const void *(*identity_create)(const void *alloc, const void *cert, const void *key);
+    OSStatus (*set_cert)(void *ctx, const void *certs);
+    OSStatus (*set_option)(void *ctx, int option, uint8_t value);
+    OSStatus (*copy_trust)(void *ctx, const void **trust);
+    OSStatus (*set_anchors)(const void *trust, const void *anchors);
+    OSStatus (*anchors_only)(const void *trust, uint8_t only);
+    uint8_t (*evaluate)(const void *trust, const void **error);
+} sx;
+
+static int sx_load(void) {
+    if (!tls_load()) return 0;
+    pthread_mutex_lock(&st_lock);
+    if (!sx.ready) {
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_LOCAL);
+        void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY | RTLD_LOCAL);
+        if (sec && cf) {
+            *(void **)&sx.data_create = dlsym(cf, "CFDataCreate");
+            *(void **)&sx.array_create = dlsym(cf, "CFArrayCreate");
+            sx.array_callbacks = dlsym(cf, "kCFTypeArrayCallBacks");
+            *(void **)&sx.array_count = dlsym(cf, "CFArrayGetCount");
+            *(void **)&sx.array_at = dlsym(cf, "CFArrayGetValueAtIndex");
+            *(void **)&sx.type_id = dlsym(cf, "CFGetTypeID");
+            *(void **)&sx.cert_type = dlsym(sec, "SecCertificateGetTypeID");
+            *(void **)&sx.key_type = dlsym(sec, "SecKeyGetTypeID");
+            *(void **)&sx.import = dlsym(sec, "SecItemImport");
+            *(void **)&sx.identity_create = dlsym(sec, "SecIdentityCreate");
+            *(void **)&sx.set_cert = dlsym(sec, "SSLSetCertificate");
+            *(void **)&sx.set_option = dlsym(sec, "SSLSetSessionOption");
+            *(void **)&sx.copy_trust = dlsym(sec, "SSLCopyPeerTrust");
+            *(void **)&sx.set_anchors = dlsym(sec, "SecTrustSetAnchorCertificates");
+            *(void **)&sx.anchors_only = dlsym(sec, "SecTrustSetAnchorCertificatesOnly");
+            *(void **)&sx.evaluate = dlsym(sec, "SecTrustEvaluateWithError");
+        }
+        sx.ready = sx.data_create && sx.array_create && sx.array_callbacks && sx.array_count && sx.array_at && sx.type_id && sx.cert_type &&
+                           sx.key_type && sx.import && sx.identity_create && sx.set_cert && sx.set_option && sx.copy_trust && sx.set_anchors &&
+                           sx.anchors_only && sx.evaluate
+                       ? 1
+                       : -1;
+    }
+    pthread_mutex_unlock(&st_lock);
+    return sx.ready == 1;
+}
+
+/* the certificates (want_key = 0) or the first private key (1) in PEM text,
+ * as a CFArray; NULL when there are none */
+static const void *sx_import(const char *pem, size_t n, int want_key) {
+    const void *data = sx.data_create(NULL, (const uint8_t *)pem, (long)n);
+    if (!data) return NULL;
+    uint32_t format = 0, type = 0; /* unknown: let the framework tell */
+    const void *items = NULL;
+    OSStatus rc = sx.import(data, NULL, &format, &type, 0, NULL, NULL, &items);
+    st.release(data);
+    if (rc != 0 || !items) return NULL;
+    long count = sx.array_count(items), k = 0;
+    const void **keep = (const void **)malloc(sizeof(void *) * (size_t)(count ? count : 1));
+    unsigned long want = want_key ? sx.key_type() : sx.cert_type();
+    for (long i = 0; i < count; i++) {
+        const void *it = sx.array_at(items, i);
+        if (sx.type_id(it) == want) keep[k++] = it;
+    }
+    const void *out = k ? sx.array_create(NULL, keep, want_key ? 1 : k, sx.array_callbacks) : NULL;
+    free(keep);
+    st.release(items);
+    return out;
+}
+
+/* The Security framework imports keys only in the older formats ("RSA
+ * PRIVATE KEY", "EC PRIVATE KEY"); today's tools write PKCS#8 ("PRIVATE
+ * KEY"). This unwraps PKCS#8 into the older form: an RSA key as it is, an
+ * EC key with its curve put back inside (PKCS#8 keeps it outside). */
+
+
+/* one DER element at p[*i]: its tag, and its contents [*start, *start+*len) */
+static int der_next(const uint8_t *p, size_t n, size_t *i, uint8_t *tag, size_t *start, size_t *len) {
+    if (*i + 2 > n) return 0;
+    *tag = p[*i];
+    size_t l = p[*i + 1], j = *i + 2;
+    if (l & 0x80) {
+        size_t k = l & 0x7f;
+        if (k == 0 || k > 3 || j + k > n) return 0;
+        l = 0;
+        for (size_t m = 0; m < k; m++) l = l << 8 | p[j + m];
+        j += k;
+    }
+    if (j + l > n) return 0;
+    *start = j;
+    *len = l;
+    *i = j + l;
+    return 1;
+}
+
+static int b64v(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* the DER inside the first PEM block labelled `label` (malloc'd), or NULL */
+static uint8_t *pem_block(const char *pem, size_t n, const char *label, size_t *outn) {
+    char begin[64], end[64];
+    snprintf(begin, sizeof begin, "-----BEGIN %s-----", label);
+    snprintf(end, sizeof end, "-----END %s-----", label);
+    const char *b = NULL;
+    for (size_t i = 0; i + strlen(begin) <= n; i++)
+        if (memcmp(pem + i, begin, strlen(begin)) == 0) {
+            b = pem + i + strlen(begin);
+            break;
+        }
+    if (!b) return NULL;
+    uint8_t *out = (uint8_t *)malloc(n);
+    size_t k = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (const char *q = b; q < pem + n; q++) {
+        if (*q == '-') {
+            if ((size_t)(pem + n - q) >= strlen(end) && memcmp(q, end, strlen(end)) == 0) {
+                *outn = k;
+                return out;
+            }
+            break;
+        }
+        int v = b64v((unsigned char)*q);
+        if (v < 0) continue;
+        acc = acc << 6 | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[k++] = (uint8_t)(acc >> bits);
+        }
+    }
+    free(out);
+    return NULL;
+}
+
+
+/* PKCS#8 → "RSA PRIVATE KEY" / "EC PRIVATE KEY" PEM (malloc'd), or NULL */
+static char *pkcs8_unwrap(const char *pem, size_t n, size_t *outn) {
+    static const uint8_t rsa_oid[] = {0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01};
+    static const uint8_t ec_oid[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
+    size_t dn;
+    uint8_t *d = pem_block(pem, n, "PRIVATE KEY", &dn);
+    if (!d) return NULL;
+    char *out = NULL;
+    size_t i = 0, st, ln, a, an, ai, ks, kl;
+    uint8_t tag;
+    /* PrivateKeyInfo ::= SEQUENCE { version, AlgorithmIdentifier, OCTET STRING } */
+    if (der_next(d, dn, &i, &tag, &st, &ln) && tag == 0x30) {
+        size_t j = st, e = st + ln;
+        int ok = der_next(d, e, &j, &tag, &a, &an) && tag == 0x02;     /* version */
+        ok = ok && der_next(d, e, &j, &tag, &a, &an) && tag == 0x30;  /* algorithm */
+        ok = ok && der_next(d, e, &j, &tag, &ks, &kl) && tag == 0x04; /* the key */
+        size_t oid, oidn = 0, curve = 0, curven = 0;
+        if (ok) {
+            ai = a;
+            ok = der_next(d, a + an, &ai, &tag, &oid, &oidn) && tag == 0x06;
+            if (ok && ai < a + an && der_next(d, a + an, &ai, &tag, &curve, &curven) && tag != 0x06) curven = 0;
+        }
+        if (ok && oidn == sizeof rsa_oid && memcmp(d + oid, rsa_oid, oidn) == 0) {
+            out = pem_wrap("RSA PRIVATE KEY", d + ks, kl, outn);
+        } else if (ok && curven && oidn == sizeof ec_oid && memcmp(d + oid, ec_oid, oidn) == 0) {
+            /* ECPrivateKey ::= SEQUENCE { version, OCTET STRING, [0] curve OPTIONAL, [1] public key OPTIONAL } */
+            size_t q = ks, es, el;
+            if (der_next(d, ks + kl, &q, &tag, &es, &el) && tag == 0x30) {
+                dbuf body = {0}, curve_el = {0}, seq = {0};
+                size_t r = es, cs, cl, start;
+                int have_curve = 0;
+                while (start = r, r < es + el && der_next(d, es + el, &r, &tag, &cs, &cl)) {
+                    if (tag == 0xa0) have_curve = 1;
+                    if (tag == 0xa1 && !have_curve) { /* the curve goes before the public key */
+                        db_tlv(&curve_el, 0x06, d + curve, curven);
+                        db_tlv(&body, 0xa0, curve_el.p, curve_el.n);
+                        have_curve = 1;
+                    }
+                    db_put(&body, d + start, r - start);
+                }
+                if (!have_curve) {
+                    db_tlv(&curve_el, 0x06, d + curve, curven);
+                    db_tlv(&body, 0xa0, curve_el.p, curve_el.n);
+                }
+                db_tlv(&seq, 0x30, body.p, body.n);
+                out = pem_wrap("EC PRIVATE KEY", seq.p, seq.n, outn);
+                free(body.p);
+                free(curve_el.p);
+                free(seq.p);
+            }
+        }
+    }
+    free(d);
+    return out;
+}
+
+/* a server identity (certificate chain + key) for SSLSetCertificate */
+static void *tls_identity_load(const char *cert, size_t cn, const char *key, size_t kn, char *err, size_t errn) {
+    if (!sx_load()) {
+        snprintf(err, errn, "TLS servers are not available: the Security framework could not be loaded");
+        return NULL;
+    }
+    const void *certs = sx_import(cert, cn, 0);
+    if (!certs) {
+        snprintf(err, errn, "tls::identity: no certificate found in the certificate text (expected PEM)");
+        return NULL;
+    }
+    const void *keys = sx_import(key, kn, 1);
+    if (!keys) { /* PKCS#8: unwrap it into a form the framework imports */
+        size_t un;
+        char *u = pkcs8_unwrap(key, kn, &un);
+        if (u) {
+            keys = sx_import(u, un, 1);
+            free(u);
+        }
+    }
+    if (!keys) {
+        st.release(certs);
+        snprintf(err, errn, "tls::identity: no private key found in the key text (expected PEM)");
+        return NULL;
+    }
+    const void *id = sx.identity_create(NULL, sx.array_at(certs, 0), sx.array_at(keys, 0));
+    st.release(keys);
+    if (!id) {
+        st.release(certs);
+        snprintf(err, errn, "tls::identity: the key does not belong to the certificate");
+        return NULL;
+    }
+    long n = sx.array_count(certs);
+    const void **chain = (const void **)malloc(sizeof(void *) * (size_t)n);
+    chain[0] = id;
+    for (long i = 1; i < n; i++) chain[i] = sx.array_at(certs, i);
+    const void *arr = sx.array_create(NULL, chain, n, sx.array_callbacks);
+    free(chain);
+    st.release(id);
+    st.release(certs);
+    return (void *)arr;
+}
+
+/* the certificates a client trusts instead of the system's */
+static void *tls_trust_load(const char *pem, size_t n, char *err, size_t errn) {
+    if (!sx_load()) {
+        snprintf(err, errn, "TLS is not available: the Security framework could not be loaded");
+        return NULL;
+    }
+    const void *certs = sx_import(pem, n, 0);
+    if (!certs) snprintf(err, errn, "no certificate found in the trusted certificate text (expected PEM)");
+    return (void *)certs;
+}
+
+static void tls_trust_free(void *t) {
+    if (t) st.release(t);
+}
+
+static void tls_handshake_error(OSStatus rc, const char *host, char *err, size_t errn) {
+    const char *why = st_error(rc);
+    if (why) snprintf(err, errn, "TLS with %s failed: %s", host, why);
+    else snprintf(err, errn, "TLS with %s failed (Security framework error %d)", host, (int)rc);
+}
+
+/* the server side of a TLS session on an accepted socket */
+static void *tls_accept_on(int fd, void *identity, char *err, size_t errn) {
+    void *ctx = st.create(NULL, 0 /* server */, 0 /* stream */);
+    if (!ctx) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    st.set_io(ctx, st_read_cb, st_write_cb);
+    st.set_conn(ctx, (const void *)(intptr_t)fd);
+    sx.set_cert(ctx, identity);
+    OSStatus rc = st.handshake(ctx);
+    if (rc != 0) {
+        tls_handshake_error(rc, "the client", err, errn);
+        st.release(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+/* a TLS session over a connected socket, or NULL with a message; `trust`
+ * (from tls_trust_load) replaces the system's trusted certificates */
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn) {
     if (!tls_load()) {
         snprintf(err, errn, "TLS is not available: the Security framework could not be loaded");
         return NULL;
@@ -389,18 +768,34 @@ static void *tls_open(int fd, const char *host, char *err, size_t errn) {
     st.set_io(ctx, st_read_cb, st_write_cb);
     st.set_conn(ctx, (const void *)(intptr_t)fd);
     st.set_peer(ctx, host, strlen(host));
+    if (trust) sx.set_option(ctx, 0 /* kSSLSessionOptionBreakOnServerAuth */, 1);
     OSStatus rc;
     while ((rc = st.handshake(ctx)) == -9841 /* errSSLPeerAuthCompleted */) {
+        if (!trust) continue;
+        const void *t = NULL;
+        int ok = sx.copy_trust(ctx, &t) == 0 && t;
+        if (ok) {
+            sx.set_anchors(t, trust);
+            sx.anchors_only(t, 1);
+            ok = sx.evaluate(t, NULL);
+        }
+        if (t) st.release(t);
+        if (!ok) {
+            snprintf(err, errn, "TLS with %s failed: the server's certificate is not the trusted one (or not for this host name)", host);
+            st.close(ctx);
+            st.release(ctx);
+            return NULL;
+        }
     }
     if (rc != 0) {
-        const char *why = st_error(rc);
-        if (why) snprintf(err, errn, "TLS with %s failed: %s", host, why);
-        else snprintf(err, errn, "TLS with %s failed (Security framework error %d)", host, (int)rc);
+        tls_handshake_error(rc, host, err, errn);
         st.release(ctx);
         return NULL;
     }
     return ctx;
 }
+
+static void *tls_open(int fd, const char *host, char *err, size_t errn) { return tls_open_trusting(fd, host, NULL, err, errn); }
 
 static ssize_t tls_read(void *t, void *buf, size_t n) {
     size_t got = 0;
@@ -449,6 +844,23 @@ static struct {
     const char *(*verify_string)(long);
     int (*pending)(const void *); /* optional: for the event loop */
     int (*get_fd)(const void *);
+    /* servers and trusted certificates (optional) */
+    void *(*server_method)(void);
+    void *(*bio_mem)(const void *, int);
+    int (*bio_free)(void *);
+    void *(*read_x509)(void *, void *, void *, void *);
+    void *(*read_key)(void *, void *, void *, void *);
+    void (*x509_free)(void *);
+    void (*pkey_free)(void *);
+    int (*use_cert)(void *, void *);
+    int (*use_key)(void *, void *);
+    int (*check_key)(const void *);
+    long (*ctx_ctrl)(void *, int, long, void *);
+    void *(*cert_store)(const void *);
+    int (*store_add)(void *, void *);
+    void (*ctx_free)(void *);
+    int (*accept)(void *);
+    int (*get_error)(const void *, int);
 } os;
 static pthread_mutex_t os_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -474,6 +886,24 @@ static int tls_load(void) {
             *(void **)&os.verify_result = dlsym(ssl, "SSL_get_verify_result");
             *(void **)&os.pending = dlsym(ssl, "SSL_pending");
             *(void **)&os.get_fd = dlsym(ssl, "SSL_get_fd");
+            *(void **)&os.server_method = dlsym(ssl, "TLS_server_method");
+            *(void **)&os.use_cert = dlsym(ssl, "SSL_CTX_use_certificate");
+            *(void **)&os.use_key = dlsym(ssl, "SSL_CTX_use_PrivateKey");
+            *(void **)&os.check_key = dlsym(ssl, "SSL_CTX_check_private_key");
+            *(void **)&os.ctx_ctrl = dlsym(ssl, "SSL_CTX_ctrl");
+            *(void **)&os.cert_store = dlsym(ssl, "SSL_CTX_get_cert_store");
+            *(void **)&os.ctx_free = dlsym(ssl, "SSL_CTX_free");
+            *(void **)&os.accept = dlsym(ssl, "SSL_accept");
+            *(void **)&os.get_error = dlsym(ssl, "SSL_get_error");
+            if (crypto) {
+                *(void **)&os.bio_mem = dlsym(crypto, "BIO_new_mem_buf");
+                *(void **)&os.bio_free = dlsym(crypto, "BIO_free");
+                *(void **)&os.read_x509 = dlsym(crypto, "PEM_read_bio_X509");
+                *(void **)&os.read_key = dlsym(crypto, "PEM_read_bio_PrivateKey");
+                *(void **)&os.x509_free = dlsym(crypto, "X509_free");
+                *(void **)&os.pkey_free = dlsym(crypto, "EVP_PKEY_free");
+                *(void **)&os.store_add = dlsym(crypto, "X509_STORE_add_cert");
+            }
             if (crypto) *(void **)&os.verify_string = dlsym(crypto, "X509_verify_cert_error_string");
         }
         int ok = os.method && os.ctx_new && os.default_paths && os.set_verify && os.ssl_new && os.set_fd && os.ctrl && os.set1_host &&
@@ -492,12 +922,107 @@ static int tls_load(void) {
     return os.ready == 1;
 }
 
-static void *tls_open(int fd, const char *host, char *err, size_t errn) {
+static int os_extra(void) {
+    return os.server_method && os.bio_mem && os.bio_free && os.read_x509 && os.read_key && os.x509_free && os.pkey_free && os.use_cert &&
+           os.use_key && os.check_key && os.ctx_ctrl && os.cert_store && os.store_add && os.ctx_free && os.accept;
+}
+
+/* a server identity: an SSL_CTX with the certificate chain and key */
+static void *tls_identity_load(const char *cert, size_t cn, const char *key, size_t kn, char *err, size_t errn) {
+    if (!tls_load() || !os_extra()) {
+        snprintf(err, errn, "TLS servers are not available: install OpenSSL 3 (libssl.so.3); static builds cannot load it");
+        return NULL;
+    }
+    void *ctx = os.ctx_new(os.server_method());
+    if (!ctx) {
+        snprintf(err, errn, "TLS: cannot create a server context");
+        return NULL;
+    }
+    void *bio = os.bio_mem(cert, (int)cn);
+    void *x = bio ? os.read_x509(bio, NULL, NULL, NULL) : NULL;
+    int ok = x && os.use_cert(ctx, x) == 1;
+    if (x) os.x509_free(x);
+    if (ok) /* the rest of the chain: the context owns them */
+        while ((x = os.read_x509(bio, NULL, NULL, NULL)) != NULL) os.ctx_ctrl(ctx, 14 /* SSL_CTRL_EXTRA_CHAIN_CERT */, 0, x);
+    if (bio) os.bio_free(bio);
+    if (!ok) {
+        os.ctx_free(ctx);
+        snprintf(err, errn, "tls::identity: no certificate found in the certificate text (expected PEM)");
+        return NULL;
+    }
+    bio = os.bio_mem(key, (int)kn);
+    void *k = bio ? os.read_key(bio, NULL, NULL, NULL) : NULL;
+    if (bio) os.bio_free(bio);
+    ok = k && os.use_key(ctx, k) == 1;
+    if (k) os.pkey_free(k);
+    if (!ok) {
+        os.ctx_free(ctx);
+        snprintf(err, errn, "tls::identity: no private key found in the key text (expected PEM)");
+        return NULL;
+    }
+    if (os.check_key(ctx) != 1) {
+        os.ctx_free(ctx);
+        snprintf(err, errn, "tls::identity: the key does not belong to the certificate");
+        return NULL;
+    }
+    return ctx;
+}
+
+/* a client context that trusts only the given certificates */
+static void *tls_trust_load(const char *pem, size_t n, char *err, size_t errn) {
+    if (!tls_load() || !os_extra()) {
+        snprintf(err, errn, "TLS is not available: install OpenSSL 3 (libssl.so.3); static builds cannot load it");
+        return NULL;
+    }
+    void *ctx = os.ctx_new(os.method());
+    void *bio = ctx ? os.bio_mem(pem, (int)n) : NULL;
+    int count = 0;
+    void *x;
+    while (bio && (x = os.read_x509(bio, NULL, NULL, NULL)) != NULL) {
+        os.store_add(os.cert_store(ctx), x);
+        os.x509_free(x);
+        count++;
+    }
+    if (bio) os.bio_free(bio);
+    if (!count) {
+        if (ctx) os.ctx_free(ctx);
+        snprintf(err, errn, "no certificate found in the trusted certificate text (expected PEM)");
+        return NULL;
+    }
+    os.set_verify(ctx, 1 /* SSL_VERIFY_PEER */, NULL);
+    return ctx;
+}
+
+static void tls_trust_free(void *t) {
+    if (t) os.ctx_free(t);
+}
+
+/* the server side of a TLS session on an accepted socket (the handshake
+ * blocks this thread) */
+static void *tls_accept_on(int fd, void *identity, char *err, size_t errn) {
+    void *ssl = os.ssl_new(identity);
+    if (!ssl) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    os.set_fd(ssl, fd);
+    if (os.accept(ssl) != 1) {
+        snprintf(err, errn, "TLS with the client failed");
+        os.free(ssl);
+        return NULL;
+    }
+    return ssl;
+}
+
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn);
+static void *tls_open(int fd, const char *host, char *err, size_t errn) { return tls_open_trusting(fd, host, NULL, err, errn); }
+
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn) {
     if (!tls_load()) {
         snprintf(err, errn, "TLS is not available: install OpenSSL 3 (libssl.so.3); static builds cannot load it");
         return NULL;
     }
-    void *ssl = os.ssl_new(os.ctx);
+    void *ssl = os.ssl_new(trust ? trust : os.ctx);
     if (!ssl) {
         snprintf(err, errn, "TLS: cannot create a session");
         return NULL;
@@ -554,9 +1079,200 @@ static void *tls_open(int fd, const char *host, char *err, size_t errn) {
     snprintf(err, errn, "TLS is not available on this platform yet");
     return NULL;
 }
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn) {
+    (void)trust;
+    return tls_open(fd, host, err, errn);
+}
+static void *tls_identity_load(const char *c, size_t cn, const char *k, size_t kn, char *err, size_t errn) {
+    (void)c; (void)cn; (void)k; (void)kn;
+    snprintf(err, errn, "TLS is not available on this platform yet");
+    return NULL;
+}
+static void *tls_trust_load(const char *p, size_t n, char *err, size_t errn) {
+    (void)p; (void)n;
+    snprintf(err, errn, "TLS is not available on this platform yet");
+    return NULL;
+}
+static void tls_trust_free(void *t) { (void)t; }
+static void *tls_accept_on(int fd, void *id, char *err, size_t errn) {
+    (void)fd; (void)id;
+    snprintf(err, errn, "TLS is not available on this platform yet");
+    return NULL;
+}
 static ssize_t tls_read(void *t, void *buf, size_t n) { (void)t; (void)buf; (void)n; return -1; }
 static int tls_write_all(void *t, const char *p, size_t n) { (void)t; (void)p; (void)n; return -1; }
 static void tls_close(void *t) { (void)t; }
+
+#endif
+
+/* ---- P-256 keys, for tls::self_signed ------------------------------------
+ * ec_keygen makes a key (public point 04|X|Y, private scalar) and ec_sign
+ * makes a DER ECDSA signature over SHA-256 of a message. */
+
+#if defined(__APPLE__)
+
+static struct {
+    int ready;
+    const void *(*dict_create)(const void *alloc, const void **keys, const void **values, long n, const void *kcb, const void *vcb);
+    const void *kcb, *vcb;
+    const void *(*number_create)(const void *alloc, long type, const void *value);
+    const uint8_t *(*data_ptr)(const void *d);
+    long (*data_len)(const void *d);
+    const void *(*random_key)(const void *attrs, const void **error);
+    const void *(*export_key)(const void *key, const void **error);
+    const void *(*sign)(const void *key, const void *alg, const void *data, const void **error);
+    const void *const *attr_type, *const *attr_bits, *const *type_ec, *const *alg_sha256;
+} sk;
+
+static int sk_load(void) {
+    if (!sx_load()) return 0;
+    pthread_mutex_lock(&st_lock);
+    if (!sk.ready) {
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_LOCAL);
+        void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY | RTLD_LOCAL);
+        if (sec && cf) {
+            *(void **)&sk.dict_create = dlsym(cf, "CFDictionaryCreate");
+            sk.kcb = dlsym(cf, "kCFTypeDictionaryKeyCallBacks");
+            sk.vcb = dlsym(cf, "kCFTypeDictionaryValueCallBacks");
+            *(void **)&sk.number_create = dlsym(cf, "CFNumberCreate");
+            *(void **)&sk.data_ptr = dlsym(cf, "CFDataGetBytePtr");
+            *(void **)&sk.data_len = dlsym(cf, "CFDataGetLength");
+            *(void **)&sk.random_key = dlsym(sec, "SecKeyCreateRandomKey");
+            *(void **)&sk.export_key = dlsym(sec, "SecKeyCopyExternalRepresentation");
+            *(void **)&sk.sign = dlsym(sec, "SecKeyCreateSignature");
+            sk.attr_type = (const void *const *)dlsym(sec, "kSecAttrKeyType");
+            sk.attr_bits = (const void *const *)dlsym(sec, "kSecAttrKeySizeInBits");
+            sk.type_ec = (const void *const *)dlsym(sec, "kSecAttrKeyTypeECSECPrimeRandom");
+            sk.alg_sha256 = (const void *const *)dlsym(sec, "kSecKeyAlgorithmECDSASignatureMessageX962SHA256");
+        }
+        sk.ready = sk.dict_create && sk.kcb && sk.vcb && sk.number_create && sk.data_ptr && sk.data_len && sk.random_key && sk.export_key &&
+                           sk.sign && sk.attr_type && sk.attr_bits && sk.type_ec && sk.alg_sha256
+                       ? 1
+                       : -1;
+    }
+    pthread_mutex_unlock(&st_lock);
+    return sk.ready == 1;
+}
+
+static void *ec_keygen(uint8_t pub[65], uint8_t priv[32], char *err, size_t errn) {
+    if (!sk_load()) {
+        snprintf(err, errn, "tls::self_signed: the Security framework could not be loaded");
+        return NULL;
+    }
+    int32_t bits = 256;
+    const void *num = sk.number_create(NULL, 3 /* kCFNumberSInt32Type */, &bits);
+    const void *keys[2] = {*sk.attr_type, *sk.attr_bits}, *vals[2] = {*sk.type_ec, num};
+    const void *attrs = sk.dict_create(NULL, keys, vals, 2, sk.kcb, sk.vcb);
+    const void *key = sk.random_key(attrs, NULL);
+    st.release(attrs);
+    st.release(num);
+    const void *ext = key ? sk.export_key(key, NULL) : NULL;
+    if (!ext || sk.data_len(ext) != 97) {
+        if (ext) st.release(ext);
+        if (key) st.release(key);
+        snprintf(err, errn, "tls::self_signed: cannot make a key");
+        return NULL;
+    }
+    memcpy(pub, sk.data_ptr(ext), 65);
+    memcpy(priv, sk.data_ptr(ext) + 65, 32);
+    st.release(ext);
+    return (void *)key;
+}
+
+static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
+    const void *data = sx.data_create(NULL, msg, (long)n);
+    const void *s = sk.sign(key, *sk.alg_sha256, data, NULL);
+    st.release(data);
+    if (!s) return 0;
+    db_put(sig, sk.data_ptr(s), (size_t)sk.data_len(s));
+    st.release(s);
+    return 1;
+}
+
+static void ec_free(void *key) { st.release(key); }
+
+#elif defined(__linux__)
+
+static struct {
+    int ready;
+    void *(*keygen)(void *libctx, const char *propq, const char *type, ...);
+    int (*get_octets)(const void *pkey, const char *name, unsigned char *buf, size_t max, size_t *len);
+    int (*get_bn)(const void *pkey, const char *name, void **bn);
+    int (*bn_bin)(const void *bn, unsigned char *to, int len);
+    void (*bn_free)(void *bn);
+    void *(*md_new)(void);
+    void (*md_free)(void *ctx);
+    const void *(*sha256)(void);
+    int (*sign_init)(void *ctx, void **pctx, const void *md, void *engine, void *pkey);
+    int (*sign)(void *ctx, unsigned char *sig, size_t *siglen, const unsigned char *tbs, size_t n);
+    void (*pkey_free)(void *pkey);
+} ek;
+
+static int ek_load(void) {
+    pthread_mutex_lock(&os_lock);
+    if (!ek.ready) {
+        void *c = dlopen("libcrypto.so.3", RTLD_LAZY | RTLD_GLOBAL);
+        if (c) {
+            *(void **)&ek.keygen = dlsym(c, "EVP_PKEY_Q_keygen");
+            *(void **)&ek.get_octets = dlsym(c, "EVP_PKEY_get_octet_string_param");
+            *(void **)&ek.get_bn = dlsym(c, "EVP_PKEY_get_bn_param");
+            *(void **)&ek.bn_bin = dlsym(c, "BN_bn2binpad");
+            *(void **)&ek.bn_free = dlsym(c, "BN_clear_free");
+            *(void **)&ek.md_new = dlsym(c, "EVP_MD_CTX_new");
+            *(void **)&ek.md_free = dlsym(c, "EVP_MD_CTX_free");
+            *(void **)&ek.sha256 = dlsym(c, "EVP_sha256");
+            *(void **)&ek.sign_init = dlsym(c, "EVP_DigestSignInit");
+            *(void **)&ek.sign = dlsym(c, "EVP_DigestSign");
+            *(void **)&ek.pkey_free = dlsym(c, "EVP_PKEY_free");
+        }
+        ek.ready = ek.keygen && ek.get_octets && ek.get_bn && ek.bn_bin && ek.bn_free && ek.md_new && ek.md_free && ek.sha256 &&
+                           ek.sign_init && ek.sign && ek.pkey_free
+                       ? 1
+                       : -1;
+    }
+    pthread_mutex_unlock(&os_lock);
+    return ek.ready == 1;
+}
+
+static void *ec_keygen(uint8_t pub[65], uint8_t priv[32], char *err, size_t errn) {
+    if (!ek_load()) {
+        snprintf(err, errn, "tls::self_signed: install OpenSSL 3 (libcrypto.so.3); static builds cannot load it");
+        return NULL;
+    }
+    void *pk = ek.keygen(NULL, NULL, "EC", "P-256");
+    size_t len = 0;
+    void *bn = NULL;
+    if (!pk || ek.get_octets(pk, "pub", pub, 65, &len) != 1 || len != 65 || ek.get_bn(pk, "priv", &bn) != 1 || ek.bn_bin(bn, priv, 32) != 32) {
+        if (bn) ek.bn_free(bn);
+        if (pk) ek.pkey_free(pk);
+        snprintf(err, errn, "tls::self_signed: cannot make a key");
+        return NULL;
+    }
+    ek.bn_free(bn);
+    return pk;
+}
+
+static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
+    void *ctx = ek.md_new();
+    unsigned char buf[160];
+    size_t len = sizeof buf;
+    int ok = ctx && ek.sign_init(ctx, NULL, ek.sha256(), NULL, key) == 1 && ek.sign(ctx, buf, &len, msg, n) == 1;
+    if (ctx) ek.md_free(ctx);
+    if (ok) db_put(sig, buf, len);
+    return ok;
+}
+
+static void ec_free(void *key) { ek.pkey_free(key); }
+
+#else
+
+static void *ec_keygen(uint8_t pub[65], uint8_t priv[32], char *err, size_t errn) {
+    (void)pub; (void)priv;
+    snprintf(err, errn, "TLS is not available on this platform yet");
+    return NULL;
+}
+static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) { (void)key; (void)msg; (void)n; (void)sig; return 0; }
+static void ec_free(void *key) { (void)key; }
 
 #endif
 
@@ -833,14 +1549,13 @@ static const char *reason(int64_t s) {
 }
 
 /* one request on a connection: parse, call the handler, answer, close */
-static void serve_one(int fd, mim_val *handler) {
-    sock_timeout(fd, 30);
-    mconn conn = {fd, NULL};
+static void serve_one(mconn *c, mim_val *handler) {
+    sock_timeout(c->fd, 30);
     sbuf b = {0};
-    int64_t off = read_head(&conn, &b);
+    int64_t off = read_head(c, &b);
     if (off < 0) {
         free(b.p);
-        close(fd);
+        conn_close(c);
         return;
     }
     const char *line_end = strstr(b.p, "\r\n");
@@ -848,16 +1563,16 @@ static void serve_one(int fd, mim_val *handler) {
     const char *sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(line_end - sp1 - 1)) : NULL;
     if (!sp1 || !sp2) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        send_all(fd, bad, strlen(bad));
+        conn_send_all(c, bad, strlen(bad));
         free(b.p);
-        close(fd);
+        conn_close(c);
         return;
     }
     const char *target = sp1 + 1, *q = memchr(target, '?', (size_t)(sp2 - target));
     int64_t clen;
     int chunked;
     mim_val *hm = parse_headers(line_end + 2, b.p + off - 2, &clen, &chunked);
-    mim_val *bodyv = read_body(&conn, &b, off, clen < 0 && !chunked ? 0 : clen, chunked, 0);
+    mim_val *bodyv = read_body(c, &b, off, clen < 0 && !chunked ? 0 : clen, chunked, 0);
     mim_val *fields[5] = {
         mim_str(b.p, (int64_t)(sp1 - b.p)),
         mim_str(target, (int64_t)((q ? q : sp2) - target)),
@@ -896,24 +1611,40 @@ static void serve_one(int fd, mim_val *handler) {
     snprintf(line, sizeof line, "Content-Length: %lld\r\nConnection: close\r\n\r\n", (long long)blen);
     sb_put(&out, line, strlen(line));
     if (blen) sb_put(&out, (const char *)rb->data, (size_t)blen);
-    send_all(fd, out.p, out.n);
+    conn_send_all(c, out.p, out.n);
     free(out.p);
     mim_release(resp);
-    shutdown(fd, SHUT_WR);
-    close(fd);
+    if (!c->tls) shutdown(c->fd, SHUT_WR);
+    conn_close(c);
 }
 
-typedef void (*conn_fn)(int fd, mim_val *handler);
+typedef void (*conn_fn)(mconn *c, mim_val *handler);
 
 typedef struct {
     int fd;
     mim_val *handler;
     conn_fn one;
+    void *identity; /* a TLS server identity, or NULL */
 } conn_job;
+
+/* serve one accepted connection: the TLS handshake first, if any */
+static void conn_run(int fd, mim_val *handler, conn_fn one, void *identity) {
+    mconn c = {fd, NULL};
+    if (identity) {
+        sock_timeout(fd, 30);
+        char err[256];
+        c.tls = tls_accept_on(fd, identity, err, sizeof err);
+        if (!c.tls) { /* not a TLS client, or it gave up */
+            close(fd);
+            return;
+        }
+    }
+    one(&c, handler);
+}
 
 static void *conn_main(void *p) {
     conn_job *j = (conn_job *)p;
-    j->one(j->fd, j->handler);
+    conn_run(j->fd, j->handler, j->one, j->identity);
     mim_release(j->handler);
     free(j);
     free_list_drain(); /* this thread ends now */
@@ -923,7 +1654,7 @@ static void *conn_main(void *p) {
 #if MIM_GREEN
 static void conn_co_main(void *p) {
     conn_job *j = (conn_job *)p;
-    j->one(j->fd, j->handler);
+    conn_run(j->fd, j->handler, j->one, j->identity);
     mim_release(j->handler);
     free(j);
 }
@@ -932,12 +1663,12 @@ static void conn_co_main(void *p) {
 /* accept `limit` connections (0 = forever); handlers whose effects may
  * overlap get a task each (a coroutine on the event loop, else a thread),
  * others run one at a time in order */
-static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one);
+static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one, void *identity);
 
-static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) { return serve_loop_with(port, handler, limit, serve_one); }
+static mim_val *serve_loop(mim_val *port, mim_val *handler, int64_t limit) { return serve_loop_with(port, handler, limit, serve_one, NULL); }
 
 /* accept `limit` connections (0 = forever) and run `one` on each */
-static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one) {
+static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, conn_fn one, void *identity) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("serve: the handler must be a function");
     mim_val *lr = mim_std_tcp_listen(port);
     if (lr->desc != &mim_desc_Ok) return lr;
@@ -966,6 +1697,7 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
             j->fd = fd;
             j->handler = handler;
             j->one = one;
+            j->identity = identity;
             mim_retain(handler);
 #if MIM_GREEN
             if (green) {
@@ -988,7 +1720,7 @@ static mim_val *serve_loop_with(mim_val *port, mim_val *handler, int64_t limit, 
             }
             pthread_attr_destroy(&a);
         } else {
-            one(fd, handler);
+            conn_run(fd, handler, one, identity);
         }
         served++;
     }
@@ -1362,14 +2094,13 @@ mim_val *mim_std_ws_close(mim_val *sock) {
 }
 
 /* one WebSocket connection on a server: handshake, the handler, closing */
-static void ws_serve_one(int fd, mim_val *handler) {
-    sock_timeout(fd, 30);
-    mconn c = {fd, NULL};
+static void ws_serve_one(mconn *c, mim_val *handler) {
+    sock_timeout(c->fd, 30);
     sbuf b = {0};
-    int64_t off = read_head(&c, &b);
+    int64_t off = read_head(c, &b);
     if (off < 0) {
         free(b.p);
-        close(fd);
+        conn_close(c);
         return;
     }
     const char *first_end = strstr(b.p, "\r\n");
@@ -1381,10 +2112,10 @@ static void ws_serve_one(int fd, mim_val *handler) {
     mim_release(k);
     if (at < 0) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 27\r\nConnection: close\r\n\r\nexpected a WebSocket client";
-        send_all(fd, bad, strlen(bad));
+        conn_send_all(c, bad, strlen(bad));
         mim_release(hm);
         free(b.p);
-        close(fd);
+        conn_close(c);
         return;
     }
     mim_val *key = ((mim_val **)hm->data)[2 * at + 1];
@@ -1392,13 +2123,13 @@ static void ws_serve_one(int fd, mim_val *handler) {
     ws_accept_of((const char *)key->data, (size_t)key->len, acc);
     mim_release(hm);
     snprintf(resp, sizeof resp, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
-    if (send_all(fd, resp, strlen(resp)) != 0) {
+    if (conn_send_all(c, resp, strlen(resp)) != 0) {
         free(b.p);
-        close(fd);
+        conn_close(c);
         return;
     }
-    sock_timeout(fd, 0);
-    ws_conn *w = ws_new(fd, NULL, 0, b.p + off, b.n - (size_t)off);
+    sock_timeout(c->fd, 0);
+    ws_conn *w = ws_new(c->fd, c->tls, 0, b.p + off, b.n - (size_t)off);
     free(b.p);
     mim_val *sock = ws_socket_of(w);
     mim_val *r = mim_call(handler, 1, &sock);
@@ -1409,12 +2140,12 @@ static void ws_serve_one(int fd, mim_val *handler) {
 
 mim_val *mim_std_ws_serve(mim_val *port, mim_val *handler) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve: the handler must be a function");
-    return serve_loop_with(port, handler, 0, ws_serve_one);
+    return serve_loop_with(port, handler, 0, ws_serve_one, NULL);
 }
 
 mim_val *mim_std_ws_serve_connections(mim_val *port, mim_val *handler, mim_val *count) {
     if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_connections: the handler must be a function");
-    return serve_loop_with(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1, ws_serve_one);
+    return serve_loop_with(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1, ws_serve_one, NULL);
 }
 
 /* ==== UDP ================================================================
@@ -1521,6 +2252,352 @@ mim_val *mim_std_udp_receive_within(mim_val *s, mim_val *timeout) {
 mim_val *mim_std_udp_close(mim_val *s) {
     close(udp_fd(s, "udp::close"));
     return NULL;
+}
+
+/* ==== TLS over TCP, and TLS servers =====================================
+ * Identities (a certificate chain and its key) and streams live in tables;
+ * the Mimic values only hold their index. Identities are kept for the whole
+ * run (a server uses one for all its connections). */
+
+extern const mim_desc mim_desc_tls_Identity, mim_desc_tls_Stream;
+
+static void **tls_ids;
+static int64_t tls_ids_n, tls_ids_cap;
+static mconn **tls_streams;
+static int64_t tls_streams_n, tls_streams_cap;
+static pthread_mutex_t tls_tab_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t tab_add(void ***tab, int64_t *n, int64_t *cap, void *x) {
+    pthread_mutex_lock(&tls_tab_lock);
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 16;
+        *tab = (void **)realloc(*tab, sizeof(void *) * (size_t)*cap);
+    }
+    int64_t id = (*n)++;
+    (*tab)[id] = x;
+    pthread_mutex_unlock(&tls_tab_lock);
+    return id;
+}
+
+static void *identity_of(mim_val *v, const char *what) {
+    int64_t id = geti(field_of(v, &mim_desc_tls_Identity, 0, what), 0);
+    pthread_mutex_lock(&tls_tab_lock);
+    void *x = id >= 0 && id < tls_ids_n ? tls_ids[id] : NULL;
+    pthread_mutex_unlock(&tls_tab_lock);
+    if (!x) mim_panic("not a TLS identity");
+    return x;
+}
+
+static mconn *stream_of(mim_val *v, const char *what) {
+    int64_t id = geti(field_of(v, &mim_desc_tls_Stream, 0, what), 0);
+    pthread_mutex_lock(&tls_tab_lock);
+    mconn *c = id >= 0 && id < tls_streams_n ? tls_streams[id] : NULL;
+    pthread_mutex_unlock(&tls_tab_lock);
+    return c;
+}
+
+static mim_val *text_arg(mim_val *t, const char *what) {
+    if (!t || t->dtype != MIM_CHAR || t->rank != 1) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s: expected text (str)", what);
+        mim_panic(buf);
+    }
+    return t;
+}
+
+/* a server identity from a PEM certificate (chain) and its PEM private key */
+mim_val *mim_std_tls_identity(mim_val *cert, mim_val *key) {
+    text_arg(cert, "tls::identity");
+    text_arg(key, "tls::identity");
+    char err[512];
+    void *x = tls_identity_load((const char *)cert->data, (size_t)cert->len, (const char *)key->data, (size_t)key->len, err, sizeof err);
+    if (!x) return err_of(err);
+    mim_val *f = mim_int(tab_add(&tls_ids, &tls_ids_n, &tls_ids_cap, x));
+    return ok_of(obj_owned(&mim_desc_tls_Identity, 1, &f));
+}
+
+static mim_val *stream_val(int fd, void *tls) {
+    mconn *c = (mconn *)malloc(sizeof(mconn));
+    c->fd = fd;
+    c->tls = tls;
+    mim_val *f = mim_int(tab_add((void ***)&tls_streams, &tls_streams_n, &tls_streams_cap, c));
+    return ok_of(obj_owned(&mim_desc_tls_Stream, 1, &f));
+}
+
+static mim_val *tls_dial(mim_val *host, mim_val *port, mim_val *pem, const char *what) {
+    const char *h = io_path(host, what);
+    char err[512];
+    void *trust = NULL;
+    if (pem) {
+        text_arg(pem, what);
+        trust = tls_trust_load((const char *)pem->data, (size_t)pem->len, err, sizeof err);
+        if (!trust) return err_of(err);
+    }
+    int fd = dial(h, geti(port, 0), err, sizeof err);
+    if (fd < 0) {
+        tls_trust_free(trust);
+        return err_of(err);
+    }
+    sock_timeout(fd, 30);
+    void *t = tls_open_trusting(fd, h, trust, err, sizeof err);
+    tls_trust_free(trust);
+    if (!t) {
+        close(fd);
+        return err_of(err);
+    }
+    sock_timeout(fd, 0);
+    return stream_val(fd, t);
+}
+
+mim_val *mim_std_tls_connect(mim_val *host, mim_val *port) { return tls_dial(host, port, NULL, "tls::connect"); }
+
+mim_val *mim_std_tls_connect_trusting(mim_val *host, mim_val *port, mim_val *cert) { return tls_dial(host, port, cert, "tls::connect_trusting"); }
+
+/* accept one connection on a tcp::Listener and do the server handshake */
+mim_val *mim_std_tls_accept(mim_val *l, mim_val *identity) {
+    void *id = identity_of(identity, "tls::accept");
+    int lfd = fd_of(l, "tls::accept");
+    int fd;
+    mim_wait_readable(lfd);
+    while ((fd = accept(lfd, NULL, NULL)) < 0 && errno == EINTR) {
+    }
+    if (fd < 0) return err_errno("cannot accept", NULL);
+    sock_setup(fd);
+    sock_timeout(fd, 30);
+    char err[512];
+    void *t = tls_accept_on(fd, id, err, sizeof err);
+    if (!t) {
+        close(fd);
+        return err_of(err);
+    }
+    sock_timeout(fd, 0);
+    return stream_val(fd, t);
+}
+
+static mim_val *stream_closed(void) { return err_of("the TLS stream is closed"); }
+
+mim_val *mim_std_tls_send(mim_val *s, mim_val *text) {
+    mconn *c = stream_of(s, "tls::send");
+    text_arg(text, "tls::send");
+    if (!c) return stream_closed();
+    if (conn_send_all(c, (const char *)text->data, (size_t)text->len) != 0) return err_errno("cannot send", NULL);
+    return ok_of(mim_int(text->len));
+}
+
+mim_val *mim_std_tls_send_bytes(mim_val *s, mim_val *b) {
+    mconn *c = stream_of(s, "tls::send_bytes");
+    if (!b || b->rank != 1 || (b->dtype != MIM_U8 && b->len != 0)) mim_panic("tls::send_bytes: expected bytes ([u8])");
+    if (!c) return stream_closed();
+    if (conn_send_all(c, (const char *)b->data, (size_t)b->len) != 0) return err_errno("cannot send", NULL);
+    return ok_of(mim_int(b->len));
+}
+
+/* up to `limit` bytes; "" when the other side has closed */
+mim_val *mim_std_tls_receive(mim_val *s, mim_val *limit) {
+    mconn *c = stream_of(s, "tls::receive");
+    if (!c) return stream_closed();
+    int64_t n = geti(limit, 0);
+    if (n <= 0) n = 65536;
+    char *buf = (char *)malloc((size_t)n);
+    ssize_t r;
+    while ((r = conn_recv(c, buf, (size_t)n)) < 0 && errno == EINTR) {
+    }
+    if (r < 0) {
+        free(buf);
+        return err_errno("cannot receive", NULL);
+    }
+    mim_val *v = mim_str(buf, (int64_t)r);
+    free(buf);
+    return ok_of(v);
+}
+
+mim_val *mim_std_tls_receive_bytes(mim_val *s, mim_val *limit) {
+    mim_val *r = mim_std_tls_receive(s, limit);
+    if (r->desc != &mim_desc_Ok) return r;
+    mim_val *t = ((mim_val **)r->data)[0];
+    mim_val *b = alloc(MIM_U8, 1, t->len);
+    if (t->len) memcpy(b->data, t->data, (size_t)t->len);
+    mim_release(r);
+    return ok_of(b);
+}
+
+mim_val *mim_std_tls_close(mim_val *s) {
+    int64_t id = geti(field_of(s, &mim_desc_tls_Stream, 0, "tls::close"), 0);
+    pthread_mutex_lock(&tls_tab_lock);
+    mconn *c = id >= 0 && id < tls_streams_n ? tls_streams[id] : NULL;
+    if (c) tls_streams[id] = NULL;
+    pthread_mutex_unlock(&tls_tab_lock);
+    if (c) {
+        conn_close(c);
+        free(c);
+    }
+    return NULL;
+}
+
+/* ---- tls::self_signed: a certificate for development ------------------ */
+
+static void db_wrap(dbuf *out, uint8_t tag, dbuf *in) {
+    db_tlv(out, tag, in->p, in->n);
+    free(in->p);
+    in->p = NULL;
+    in->n = in->cap = 0;
+}
+
+static void db_time(dbuf *b, time_t t) {
+    struct tm g;
+    gmtime_r(&t, &g);
+    char buf[20];
+    if (g.tm_year + 1900 < 2050) {
+        strftime(buf, sizeof buf, "%y%m%d%H%M%SZ", &g);
+        db_tlv(b, 0x17, (const uint8_t *)buf, strlen(buf)); /* UTCTime */
+    } else {
+        strftime(buf, sizeof buf, "%Y%m%d%H%M%SZ", &g);
+        db_tlv(b, 0x18, (const uint8_t *)buf, strlen(buf)); /* GeneralizedTime */
+    }
+}
+
+static void db_name(dbuf *b, const char *cn) {
+    static const uint8_t oid_cn[] = {0x55, 0x04, 0x03};
+    dbuf atv = {0}, set = {0}, seq = {0};
+    db_tlv(&atv, 0x06, oid_cn, sizeof oid_cn);
+    db_tlv(&atv, 0x0c, (const uint8_t *)cn, strlen(cn)); /* UTF8String */
+    db_wrap(&set, 0x30, &atv);
+    db_wrap(&seq, 0x31, &set);
+    db_wrap(b, 0x30, &seq);
+}
+
+static void db_ext(dbuf *exts, const uint8_t *oid, size_t oidn, int critical, dbuf *value) {
+    dbuf e = {0};
+    db_tlv(&e, 0x06, oid, oidn);
+    if (critical) db_put(&e, "\x01\x01\xff", 3);
+    db_wrap(&e, 0x04, value);
+    db_wrap(exts, 0x30, &e);
+}
+
+/* (certificate, key) as PEM: a fresh P-256 key and a certificate for `host`
+ * signed by itself, valid for 90 days. Clients trust it only when told to
+ * (tls::connect_trusting); browsers will warn. */
+mim_val *mim_std_tls_self_signed(mim_val *hostv) {
+    static const uint8_t oid_ecdsa_sha256[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02};
+    static const uint8_t oid_ec_key[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
+    static const uint8_t oid_p256[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07};
+    static const uint8_t oid_san[] = {0x55, 0x1d, 0x11}, oid_basic[] = {0x55, 0x1d, 0x13}, oid_ku[] = {0x55, 0x1d, 0x0f},
+                         oid_eku[] = {0x55, 0x1d, 0x25}, oid_server_auth[] = {0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01};
+    const char *host = io_path(text_arg(hostv, "tls::self_signed"), "tls::self_signed");
+    if (!*host) return err_of("tls::self_signed: the host name is empty");
+    uint8_t pub[65], priv[32];
+    char err[256];
+    void *key = ec_keygen(pub, priv, err, sizeof err);
+    if (!key) return err_of(err);
+
+    dbuf tbs = {0}, t = {0}, u = {0};
+    db_put(&tbs, "\xa0\x03\x02\x01\x02", 5); /* version 3 */
+    uint8_t serial[16];
+    arc4random_buf_or_urandom(serial, sizeof serial);
+    serial[0] = (uint8_t)((serial[0] & 0x7f) | 0x01);
+    db_tlv(&tbs, 0x02, serial, sizeof serial);
+    db_tlv(&t, 0x06, oid_ecdsa_sha256, sizeof oid_ecdsa_sha256);
+    db_wrap(&tbs, 0x30, &t);
+    db_name(&tbs, host); /* issuer */
+    time_t now = time(NULL);
+    db_time(&t, now - 3600);
+    db_time(&t, now + (time_t)90 * 86400);
+    db_wrap(&tbs, 0x30, &t);
+    db_name(&tbs, host); /* subject */
+    db_tlv(&u, 0x06, oid_ec_key, sizeof oid_ec_key);
+    db_tlv(&u, 0x06, oid_p256, sizeof oid_p256);
+    db_wrap(&t, 0x30, &u);
+    uint8_t bits[66];
+    bits[0] = 0;
+    memcpy(bits + 1, pub, 65);
+    db_tlv(&t, 0x03, bits, sizeof bits);
+    db_wrap(&tbs, 0x30, &t);
+
+    /* extensions: the names it is for, not a CA, for TLS servers */
+    dbuf exts = {0}, names = {0}, v = {0};
+    unsigned char ip[16];
+    if (inet_pton(AF_INET, host, ip) == 1) db_tlv(&names, 0x87, ip, 4);
+    else if (inet_pton(AF_INET6, host, ip) == 1) db_tlv(&names, 0x87, ip, 16);
+    else db_tlv(&names, 0x82, (const uint8_t *)host, strlen(host));
+    if (strcmp(host, "localhost") == 0) {
+        db_tlv(&names, 0x87, (const uint8_t *)"\x7f\x00\x00\x01", 4);
+        db_tlv(&names, 0x87, (const uint8_t *)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01", 16);
+    }
+    db_wrap(&v, 0x30, &names);
+    db_ext(&exts, oid_san, sizeof oid_san, 0, &v);
+    db_put(&v, "\x30\x00", 2);
+    db_ext(&exts, oid_basic, sizeof oid_basic, 1, &v);
+    db_put(&v, "\x03\x02\x07\x80", 4); /* digitalSignature */
+    db_ext(&exts, oid_ku, sizeof oid_ku, 1, &v);
+    db_tlv(&u, 0x06, oid_server_auth, sizeof oid_server_auth);
+    db_wrap(&v, 0x30, &u);
+    db_ext(&exts, oid_eku, sizeof oid_eku, 0, &v);
+    db_wrap(&t, 0x30, &exts);
+    db_wrap(&tbs, 0xa3, &t);
+    dbuf tbs_seq = {0};
+    db_wrap(&tbs_seq, 0x30, &tbs);
+
+    dbuf sig = {0}, cert = {0}, out = {0};
+    if (!ec_sign(key, tbs_seq.p, tbs_seq.n, &sig)) {
+        ec_free(key);
+        free(tbs_seq.p);
+        return err_of("tls::self_signed: cannot sign the certificate");
+    }
+    ec_free(key);
+    db_put(&cert, tbs_seq.p, tbs_seq.n);
+    free(tbs_seq.p);
+    db_tlv(&t, 0x06, oid_ecdsa_sha256, sizeof oid_ecdsa_sha256);
+    db_wrap(&cert, 0x30, &t);
+    db_put(&t, "\0", 1);
+    db_put(&t, sig.p, sig.n);
+    free(sig.p);
+    db_wrap(&cert, 0x03, &t);
+    db_wrap(&out, 0x30, &cert);
+    size_t cn, kn;
+    char *cert_pem = pem_wrap("CERTIFICATE", out.p, out.n, &cn);
+    free(out.p);
+    out.p = NULL;
+    out.n = out.cap = 0;
+
+    /* the key: SEC1 "EC PRIVATE KEY" with its curve and public key */
+    dbuf k = {0};
+    db_put(&k, "\x02\x01\x01", 3);
+    db_tlv(&k, 0x04, priv, 32);
+    db_tlv(&u, 0x06, oid_p256, sizeof oid_p256);
+    db_wrap(&k, 0xa0, &u);
+    db_tlv(&u, 0x03, bits, sizeof bits);
+    db_wrap(&k, 0xa1, &u);
+    db_wrap(&out, 0x30, &k);
+    memset(priv, 0, sizeof priv);
+    char *key_pem = pem_wrap("EC PRIVATE KEY", out.p, out.n, &kn);
+    memset(out.p, 0, out.n);
+    free(out.p);
+
+    mim_val *pair[2] = {mim_str(cert_pem, (int64_t)cn), mim_str(key_pem, (int64_t)kn)};
+    free(cert_pem);
+    memset(key_pem, 0, kn);
+    free(key_pem);
+    return ok_of(obj_owned(&mim_desc_tuple, 2, pair));
+}
+
+static int64_t count_of(mim_val *n) { return geti(n, 0) > 0 ? geti(n, 0) : 1; }
+
+mim_val *mim_std_http_serve_tls(mim_val *port, mim_val *handler, mim_val *identity) {
+    return serve_loop_with(port, handler, 0, serve_one, identity_of(identity, "http::serve_tls"));
+}
+
+mim_val *mim_std_http_serve_tls_requests(mim_val *port, mim_val *handler, mim_val *identity, mim_val *count) {
+    return serve_loop_with(port, handler, count_of(count), serve_one, identity_of(identity, "http::serve_tls_requests"));
+}
+
+mim_val *mim_std_ws_serve_tls(mim_val *port, mim_val *handler, mim_val *identity) {
+    if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_tls: the handler must be a function");
+    return serve_loop_with(port, handler, 0, ws_serve_one, identity_of(identity, "ws::serve_tls"));
+}
+
+mim_val *mim_std_ws_serve_tls_connections(mim_val *port, mim_val *handler, mim_val *identity, mim_val *count) {
+    if (!handler || handler->dtype != MIM_FN) mim_panic("ws::serve_tls_connections: the handler must be a function");
+    return serve_loop_with(port, handler, count_of(count), ws_serve_one, identity_of(identity, "ws::serve_tls_connections"));
 }
 
 #endif
