@@ -912,15 +912,35 @@ impl Walk<'_, '_> {
                             {
                                 let p = self.inf.p;
                                 let m = p.fns[f].module;
-                                let env: Vec<(String, Ty)> = decl
-                                    .type_params
+                                let explicit: Vec<Ty> = args
                                     .iter()
-                                    .zip(args.iter().filter_map(|a| match &a.kind {
+                                    .filter_map(|a| match &a.kind {
                                         ExprKind::TypeArg(t) => Some(ann_in(p, self.module, t).unwrap_or(Ty::Dyn)),
                                         _ => None,
-                                    }))
-                                    .map(|(n, t)| (n.clone(), t))
+                                    })
                                     .collect();
+                                let mut env: Vec<(String, Ty)> = Vec::new();
+                                if explicit.is_empty() {
+                                    // `chan::send(tx, v)`: bound from the arguments, like any generic call
+                                    let mut conflict = None;
+                                    let vals = args.iter().zip(&argt).filter(|(a, _)| !matches!(a.kind, ExprKind::TypeArg(_)));
+                                    for ((_, pt), (_, at)) in decl.params.iter().zip(vals) {
+                                        unify(p, m, pt, *at, &decl.type_params, &mut env, &mut conflict);
+                                    }
+                                    if let Some(msg) = conflict {
+                                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("in a call of `{}`: {msg}", path.join("::")), e.span));
+                                    }
+                                } else {
+                                    env = decl.type_params.iter().cloned().zip(explicit).collect();
+                                }
+                                // the arguments must fit the parameters (with T bound)
+                                let vals: Vec<(&Expr, Ty)> =
+                                    args.iter().zip(argt.iter().copied()).filter(|(a, _)| !matches!(a.kind, ExprKind::TypeArg(_))).collect();
+                                for ((pname, pt), (a, at)) in decl.params.iter().zip(vals) {
+                                    if let Err(msg) = coerce_env(p, m, Some(pt), at, &env) {
+                                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("argument `{pname}` of `{}`: {msg}", path.join("::")), a.span));
+                                    }
+                                }
                                 return match &decl.ret {
                                     Some(rt) => ann_env(p, m, rt, &env).unwrap_or(Ty::Dyn),
                                     None => Ty::Unit,

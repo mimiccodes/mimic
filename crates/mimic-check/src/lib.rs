@@ -1188,7 +1188,9 @@ impl Checker<'_> {
                                     FnKind::Extern { decl, .. } => decl.type_params.len(),
                                     _ => 0,
                                 };
-                                if targs != want_t {
+                                // type arguments may be left out when the arguments fix them
+                                // (`chan::send(tx, v)`); `chan::new[str]()` must give them
+                                if targs != want_t && !(targs == 0 && func.arity() > 0) {
                                     self.err(Diag::new(
                                         &C::TYPE_ARGS,
                                         if want_t == 0 {
@@ -1331,6 +1333,15 @@ impl Checker<'_> {
                 }
                 if !catch_all {
                     catch_all = arrays_exhaustive(arms);
+                }
+                // nested coverage: `Some(A(…))`, `Some(B)` and `None` cover an Option[AB]
+                if !catch_all && let Some(t) = union {
+                    let tops: Vec<&Pattern> = arms.iter().filter(|a| a.guard.is_none()).map(|a| strip_as(&a.pat)).collect();
+                    for v in 0..self.p.types[t].variants().len() {
+                        if !covered.contains(&v) && variant_covered(self.p, self.module, t, v, &tops) {
+                            covered.push(v);
+                        }
+                    }
                 }
                 if !catch_all {
                     match union {
@@ -1476,6 +1487,75 @@ mod tests {
         let e = errors(&[("app", "src/main.mim", "module main\nfn start() { 1 }\n")]);
         assert!(e[0].contains("entry point"));
     }
+}
+
+fn strip_as(p: &Pattern) -> &Pattern {
+    match p {
+        Pattern::As(inner, _, _) => strip_as(inner),
+        p => p,
+    }
+}
+
+fn irrefutable(p: &Pattern) -> bool {
+    match strip_as(p) {
+        Pattern::Wild(_) | Pattern::Bind(..) => true,
+        Pattern::Tuple(ps, _) => ps.iter().all(irrefutable),
+        Pattern::Record { fields, .. } => fields.iter().all(|(_, f)| irrefutable(f)),
+        Pattern::Or(alts, _) => alts.iter().any(irrefutable),
+        _ => false,
+    }
+}
+
+/// Do these patterns (for one value) cover every possible value? Exact for
+/// unions nested through single-field variants; conservative otherwise.
+fn pats_cover(p: &Program, module: ModId, pats: &[&Pattern], depth: usize) -> bool {
+    if pats.iter().any(|q| irrefutable(q)) {
+        return true;
+    }
+    if depth > 8 {
+        return false;
+    }
+    // alternatives count as their parts
+    let flat: Vec<&Pattern> = pats
+        .iter()
+        .flat_map(|q| match strip_as(q) {
+            Pattern::Or(alts, _) => alts.iter().map(strip_as).collect::<Vec<_>>(),
+            q => vec![q],
+        })
+        .collect();
+    let Some(t) = flat.iter().find_map(|q| match q {
+        Pattern::Variant { path, .. } => match p.resolve(module, path) {
+            Ok(Resolved::Variant(t, _)) => Some(t),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return false;
+    };
+    (0..p.types[t].variants().len()).all(|v| variant_covered(p, module, t, v, &flat))
+}
+
+/// Is variant `v` of union `t` covered by these (top-level) patterns?
+fn variant_covered(p: &Program, module: ModId, t: TypeId, v: usize, pats: &[&Pattern]) -> bool {
+    let subs: Vec<&Vec<Pattern>> = pats
+        .iter()
+        .filter_map(|q| match strip_as(q) {
+            Pattern::Variant { path, args, .. } if matches!(p.resolve(module, path), Ok(Resolved::Variant(t2, v2)) if t2 == t && v2 == v) => Some(args),
+            _ => None,
+        })
+        .collect();
+    if subs.is_empty() {
+        return false;
+    }
+    if subs.iter().any(|args| args.iter().all(irrefutable)) {
+        return true;
+    }
+    // one field: its patterns must cover that field's values
+    if p.types[t].variants()[v].fields.len() == 1 {
+        let firsts: Vec<&Pattern> = subs.iter().filter_map(|a| a.first()).collect();
+        return pats_cover(p, module, &firsts, 1);
+    }
+    false
 }
 
 /// Do the unguarded array patterns of these arms cover every length?

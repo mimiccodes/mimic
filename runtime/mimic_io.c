@@ -718,13 +718,50 @@ typedef struct mim_future {
     pthread_t th;
 #endif
     int started;
+    int done;                /* without threads: has the deferred call run? */
+    struct mim_future *next; /* without threads: the queue of deferred calls */
 } mim_future;
+
+/* Without threads (WASI) a future is deferred: it runs when awaited, or
+ * earlier when a channel receive would otherwise wait for it. Overlapping
+ * effects may move like that; anything that changes state awaits first. */
+static mim_future *lazy_head, *lazy_tail;
+
+static void future_main_now(mim_future *fu);
+
+static void lazy_unlink(mim_future *fu) {
+    mim_future **p = &lazy_head;
+    mim_future *prev = NULL;
+    while (*p && *p != fu) {
+        prev = *p;
+        p = &(*p)->next;
+    }
+    if (*p) {
+        *p = fu->next;
+        if (lazy_tail == fu) lazy_tail = prev;
+    }
+    fu->next = NULL;
+}
+
+/* run the oldest deferred call; false when there is none */
+static int lazy_run_one(void) {
+    mim_future *fu = lazy_head;
+    if (!fu) return 0;
+    lazy_unlink(fu);
+    future_main_now(fu);
+    return 1;
+}
 
 static void *future_main(void *p) {
     mim_future *fu = (mim_future *)p;
     fu->result = mim_call(fu->f, fu->n, fu->args);
+    fu->done = 1;
     if (fu->started) free_list_drain(); /* this thread ends now */
     return NULL;
+}
+
+static void future_main_now(mim_future *fu) {
+    if (!fu->done) future_main(fu);
 }
 
 /* start f(args…); retains f and the arguments */
@@ -747,7 +784,11 @@ void *mim_spawn(mim_val *f, int32_t n, mim_val **args) {
     if (pthread_create(&fu->th, &a, future_main, fu) != 0) fu->started = 0;
     pthread_attr_destroy(&a);
 #endif
-    if (!fu->started) future_main(fu); /* no threads (WASI) or none left: run it now */
+    if (!fu->started) { /* no threads (WASI) or none left: defer it */
+        if (lazy_tail) lazy_tail->next = fu;
+        else lazy_head = fu;
+        lazy_tail = fu;
+    }
     return fu;
 }
 
@@ -757,6 +798,10 @@ mim_val *mim_await(void *h) {
 #if MIM_THREADS && !defined(_WIN32)
     if (fu->started) pthread_join(fu->th, NULL);
 #endif
+    if (!fu->started && !fu->done) {
+        lazy_unlink(fu);
+        future_main_now(fu);
+    }
     mim_val *r = fu->result;
     mim_release(fu->f);
     for (int32_t i = 0; i < fu->n; i++) mim_release(fu->args[i]);
@@ -1057,4 +1102,140 @@ mim_val *mim_std_fs_write_bytes(mim_val *path, mim_val *b) {
     mim_val *r = mim_std_fs_write(path, t);
     mim_release(t);
     return r;
+}
+
+/* ---- chan: channels between tasks ----------------------------------------
+ * An unbounded queue: `send` never waits, `receive` waits for a value or for
+ * the channel to be closed and drained. Values are immutable and reference
+ * counted atomically, so handing one to another thread is safe. */
+
+extern const mim_desc mim_desc_tuple, mim_desc_chan_Sender, mim_desc_chan_Receiver;
+
+typedef struct {
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_mutex_t m;
+    pthread_cond_t c;
+#endif
+    mim_val **q;
+    int64_t head, n, cap;
+    int closed;
+} chan_t;
+
+static chan_t **ch_tab;
+static int64_t ch_n, ch_cap;
+#if MIM_THREADS && !defined(_WIN32)
+static pthread_mutex_t ch_tab_lock = PTHREAD_MUTEX_INITIALIZER;
+#define CH_LOCK(x) pthread_mutex_lock(x)
+#define CH_UNLOCK(x) pthread_mutex_unlock(x)
+#else
+#define CH_LOCK(x) ((void)0)
+#define CH_UNLOCK(x) ((void)0)
+#endif
+
+static chan_t *chan_of(mim_val *end, const char *what) {
+    if (!end || end->dtype != MIM_OBJ || (end->desc != &mim_desc_chan_Sender && end->desc != &mim_desc_chan_Receiver)) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s: expected a channel end", what);
+        mim_panic(buf);
+    }
+    int64_t id = geti(((mim_val **)end->data)[0], 0);
+    CH_LOCK(&ch_tab_lock);
+    chan_t *c = id >= 0 && id < ch_n ? ch_tab[id] : NULL;
+    CH_UNLOCK(&ch_tab_lock);
+    if (!c) mim_panic("not a channel");
+    return c;
+}
+
+/* (Sender, Receiver) of a new channel; the schema argument (T) is unused */
+mim_val *mim_std_chan_new(mim_val *schema) {
+    (void)schema;
+    chan_t *c = (chan_t *)calloc(1, sizeof(chan_t));
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_mutex_init(&c->m, NULL);
+    pthread_cond_init(&c->c, NULL);
+#endif
+    CH_LOCK(&ch_tab_lock);
+    if (ch_n == ch_cap) {
+        ch_cap = ch_cap ? ch_cap * 2 : 16;
+        ch_tab = (chan_t **)realloc(ch_tab, sizeof(chan_t *) * (size_t)ch_cap);
+    }
+    int64_t id = ch_n++;
+    ch_tab[id] = c;
+    CH_UNLOCK(&ch_tab_lock);
+    mim_val *a = mim_int(id), *b = mim_int(id);
+    mim_val *ends[2] = {obj_owned(&mim_desc_chan_Sender, 1, &a), obj_owned(&mim_desc_chan_Receiver, 1, &b)};
+    return obj_owned(&mim_desc_tuple, 2, ends);
+}
+
+/* true when sent; false when the channel is closed */
+mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
+    chan_t *c = chan_of(tx, "chan::send");
+    need(v, "chan::send");
+    CH_LOCK(&c->m);
+    if (c->closed) {
+        CH_UNLOCK(&c->m);
+        return mim_bool(0);
+    }
+    if (c->n == c->cap) {
+        int64_t cap = c->cap ? c->cap * 2 : 16;
+        mim_val **q = (mim_val **)malloc(sizeof(mim_val *) * (size_t)cap);
+        for (int64_t k = 0; k < c->n; k++) q[k] = c->q[(c->head + k) % c->cap];
+        free(c->q);
+        c->q = q;
+        c->head = 0;
+        c->cap = cap;
+    }
+    mim_retain(v);
+    c->q[(c->head + c->n) % c->cap] = v;
+    c->n++;
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_cond_signal(&c->c);
+#endif
+    CH_UNLOCK(&c->m);
+    return mim_bool(1);
+}
+
+static mim_val *chan_take(chan_t *c) {
+    mim_val *v = c->q[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->n--;
+    return v; /* the queue's reference moves to the caller */
+}
+
+/* Some(next value), waiting for one; None once closed and drained */
+mim_val *mim_std_chan_receive(mim_val *rx) {
+    chan_t *c = chan_of(rx, "chan::receive");
+    CH_LOCK(&c->m);
+#if MIM_THREADS && !defined(_WIN32)
+    while (c->n == 0 && !c->closed) pthread_cond_wait(&c->c, &c->m);
+#else
+    /* without threads: let deferred tasks run until there is something */
+    while (c->n == 0 && !c->closed && lazy_run_one()) {
+    }
+    if (c->n == 0 && !c->closed) mim_panic("chan::receive: the channel is empty and no task is left that could send to it");
+#endif
+    mim_val *v = c->n ? chan_take(c) : NULL;
+    CH_UNLOCK(&c->m);
+    return v ? some_of(v) : none_val();
+}
+
+/* Some(value) if one is waiting, else None (never waits) */
+mim_val *mim_std_chan_try_receive(mim_val *rx) {
+    chan_t *c = chan_of(rx, "chan::try_receive");
+    CH_LOCK(&c->m);
+    mim_val *v = c->n ? chan_take(c) : NULL;
+    CH_UNLOCK(&c->m);
+    return v ? some_of(v) : none_val();
+}
+
+/* no more values: receivers get the rest, then None */
+mim_val *mim_std_chan_close(mim_val *tx) {
+    chan_t *c = chan_of(tx, "chan::close");
+    CH_LOCK(&c->m);
+    c->closed = 1;
+#if MIM_THREADS && !defined(_WIN32)
+    pthread_cond_broadcast(&c->c);
+#endif
+    CH_UNLOCK(&c->m);
+    return NULL;
 }

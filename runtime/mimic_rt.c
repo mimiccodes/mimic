@@ -1806,7 +1806,6 @@ static void each_range(void *vc, int64_t lo, int64_t hi) {
         mim_val *e = scalar_at(c->xs, i);
         mim_val *r = c->f(e);
         mim_release(e);
-        need(r, "¨ (each) function result");
         c->out[i] = r;
     }
 }
@@ -1822,6 +1821,15 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     each_ctx c = {xs, f, tmp};
     if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
     else each_range(&c, 0, n);
+    /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
+    int64_t units = 0;
+    for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
+    if (units) {
+        for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+        free(tmp);
+        if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
+        return NULL;
+    }
     mim_val *r = mim_array_lit(n, tmp);
     for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
     free(tmp);
@@ -1841,7 +1849,6 @@ static void each_fn_range(void *vc, int64_t lo, int64_t hi) {
         mim_val *e = scalar_at(c->xs, i);
         mim_val *r = mim_call(c->f, 1, &e);
         mim_release(e);
-        need(r, "¨ (each) function result");
         c->out[i] = r;
     }
 }
@@ -1856,6 +1863,15 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
     each_fn_ctx c = {xs, f, tmp};
     if (f->dtype == MIM_FN && FN_DESC(f)->pure) parallel_for_grain(n, fine_grain(n), each_fn_range, &c);
     else each_fn_range(&c, 0, n);
+    /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
+    int64_t units = 0;
+    for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
+    if (units) {
+        for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+        free(tmp);
+        if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
+        return NULL;
+    }
     mim_val *r = mim_array_lit(n, tmp);
     for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
     free(tmp);

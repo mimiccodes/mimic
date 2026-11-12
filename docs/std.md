@@ -84,6 +84,35 @@ Failures come back as values, never as crashes. Error messages name the operatio
 | `fs::rename(from, to)`, `fs::remove(path)` | `Result[bool, str]`; `remove` also removes empty directories | sync |
 | `fs::make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists | sync |
 
+### `chan`: channels between tasks (concurrent)
+
+```mimic
+let (tx, rx) = chan::new[str]()            // a channel of str
+let worker = consume(rx)                   // a task: an implicit future
+chan::send(tx, "job 1")                    // never waits
+chan::close(tx)                            // no more values
+fn consume(rx: chan::Receiver[str]) -> i64 {
+    match chan::receive(rx) {              // waits; None once closed and drained
+        Some(job) => 1 + consume(rx),
+        None => 0,
+    }
+}
+```
+
+| Function | Result |
+|---|---|
+| `chan::new[T]()` | `(chan::Sender[T], chan::Receiver[T])` |
+| `chan::send(tx, value)` | `bool`: `false` when the channel is closed |
+| `chan::receive(rx)` | `Option[T]`: waits for a value; `None` once closed and empty |
+| `chan::try_receive(rx)` | `Option[T]` without waiting |
+| `chan::close(tx)` | No more values; receivers get what is left, then `None` |
+
+How channels behave:
+* **Unbounded and safe to share.** Channels are unbounded queues, and values can be handed between threads safely because they are immutable.
+* **Ends are ordinary values.** A `Sender` or `Receiver` can be stored in a list, sent through another channel or captured by a closure.
+* **Tasks.** A task is any `let` of a function whose effects may overlap, which channel operations are, and `ws::serve`/`http::serve` handlers run as tasks too.
+* **Without threads (WebAssembly),** tasks are deferred. A `receive` that would wait first runs deferred tasks, so producer/consumer code still works.
+
 ### `bytes`: binary data (pure)
 
 `[u8]` is an array of bytes: one byte per element, so it is compact, and each element reads as an `i64`. Arithmetic on bytes gives `i64` results instead of silently wrapping at 256. Storing a value outside 0 … 255 into a `[u8]` stops the program. `push`, `concat`, `↑`, `↓`, `⌽` and indexing keep bytes as bytes.
@@ -270,7 +299,7 @@ How WebSockets behave:
 * **Protocol.** RFC 6455: fragmented messages are joined, pings are answered automatically, and messages may be up to 64 MB.
 * **Sending.** Sends on one socket from different threads never interleave.
 * **Connections run in parallel** when the handler's effects may overlap, the same rule as `http::serve`.
-* **No shared state yet.** Connections cannot share state with each other, so a chat room that broadcasts to every connection is not possible until channels arrive.
+* **Connections talk through channels** (`chan`): see the chat room in tutorial chapter 19.
 
 ### `tcp`
 

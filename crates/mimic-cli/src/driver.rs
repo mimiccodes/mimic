@@ -279,6 +279,23 @@ pub module json {
     }
 }
 
+// Channels between tasks: `let (tx, rx) = chan::new[str]()`. `send` never
+// waits; `receive` waits for a value, or returns None once the channel is
+// closed and empty. Tasks are implicit futures (`let t = worker(rx)`) and
+// server handlers.
+pub module chan {
+    pub type Sender[T] = { id: i64 }
+    pub type Receiver[T] = { id: i64 }
+
+    pub extern \"mimic\" concurrent {
+        fn new[T]() -> (Sender[T], Receiver[T])
+        fn send[T](tx: Sender[T], value: T) -> bool
+        fn receive[T](rx: Receiver[T]) -> Option[T]
+        fn try_receive[T](rx: Receiver[T]) -> Option[T]
+        fn close[T](tx: Sender[T])
+    }
+}
+
 // WebSockets: `ws::connect(url)` (ws:// and wss://), `ws::serve(port, handler)`.
 // Sends on one socket are never interleaved; pings are answered for you.
 pub module ws {

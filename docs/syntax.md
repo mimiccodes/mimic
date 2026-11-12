@@ -311,7 +311,8 @@ The compiler works out which kind every function has, transitively, like purity.
 
 * **A `let` starts work early.** When `let x = f(…)` calls a function whose effects all overlap, it starts at once on its own thread. The program goes on, and waits only when the value is needed.
 * **When the program waits.** It waits right before the first statement that uses `x`, before any synchronizing effect, at every `return`, and at the end of the block. The arguments are evaluated first, in order. Printing does not wait, so a program can print while its own server, running as a future, keeps answering.
-* **`¨` runs overlapping functions in parallel**, just as it does pure ones. Results stay in order.
+* **`¨` runs overlapping functions in parallel**, just as it does pure ones. Results stay in order. A function that returns nothing (it is run only for its effects) makes `xs ¨ f` return nothing too.
+* **Tasks talk through channels** (`chan::new[T]()`, `chan::send`, `chan::receive`). A long-running `let t = worker(rx)` is a task, and Mimic has no other kind of shared state between tasks.
 
 ```mimic
 let a = fetch_page(url1)        // both start now

@@ -1,0 +1,10 @@
+// expect-error: E0501 missing `Some`
+module main
+type E = A | B(i64)
+fn f(x: Option[E]) -> i64 {
+    match x {
+        Some(A) => 1,
+        None => 0,
+    }
+}
+fn main() { print(f(None)) }

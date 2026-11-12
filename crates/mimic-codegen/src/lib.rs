@@ -213,6 +213,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         opt_level: settings.opt_level,
     };
     // every standard-library type descriptor, for the runtime (see desc())
+    cg.desc(usize::MAX, None);
     for (t, td) in p.types.iter().enumerate() {
         if p.mods[td.module].package == "std" {
             if td.is_record() {
@@ -1873,10 +1874,11 @@ impl<'ctx> Cg<'ctx, '_> {
             let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
             let (tn, vn) = (self.global_cstr("tuple"), self.global_cstr(""));
             let val = st.const_named_struct(&[tn.into(), vn.into(), i32t.const_zero().into(), i32t.const_zero().into(), self.ptr.const_null().into()]);
-            let g = self.module.add_global(st, None, "tuple_desc");
+            // exported (weak) so the runtime can build tuples: mim_desc_tuple
+            let g = self.module.add_global(st, None, "mim_desc_tuple");
             g.set_initializer(&val);
             g.set_constant(true);
-            g.set_linkage(Linkage::Private);
+            g.set_linkage(Linkage::WeakODR);
             let p = self.gaddr(g);
             self.descs.insert((t, variant), p);
             return p;

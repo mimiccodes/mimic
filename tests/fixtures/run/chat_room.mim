@@ -1,0 +1,111 @@
+module main
+
+// (WASI has no sockets: chat_room.wasi.out has its output.)
+
+// A chat room: one hub task owns the list of clients; every WebSocket
+// connection talks to it through channels.
+type Event = Join(i64, chan::Sender[str]) | Leave(i64) | Say(str)
+
+fn hub(events: chan::Receiver[Event], clients: [(i64, chan::Sender[str])]) -> i64 {
+    match chan::receive(events) {
+        Some(Join(id, out)) => {
+            let now = push(clients, (id, out))
+            broadcast(now, "{≢ now} online")
+            hub(events, now)
+        }
+        Some(Leave(id)) => {
+            let gone = clients ⌿ (clients ¨ (c => c.0 == id))
+            gone ¨ (c => chan::close(c.1))
+            hub(events, clients ⌿ (clients ¨ (c => c.0 != id)))
+        }
+        Some(Say(text)) => {
+            broadcast(clients, text)
+            hub(events, clients)
+        }
+        None => ≢ clients
+    }
+}
+
+fn broadcast(clients: [(i64, chan::Sender[str])], text: str) -> [bool] {
+    clients ¨ (c => chan::send(c.1, text))
+}
+
+// one connection: join, then read from the client and write to it at once
+fn session(sock: ws::Socket, events: chan::Sender[Event]) {
+    let (out_tx, out_rx) = chan::new[str]()
+    chan::send(events, Join(sock.id, out_tx))
+    let reading = forward(sock, events)            // a task of its own
+    pump(out_rx, sock)
+}
+
+fn forward(sock: ws::Socket, events: chan::Sender[Event]) -> i64 {
+    match ws::receive(sock) {
+        Ok(ws::Text(t)) => {
+            chan::send(events, Say(t))
+            1 + forward(sock, events)
+        }
+        _ => {
+            chan::send(events, Leave(sock.id))
+            0
+        }
+    }
+}
+
+fn pump(rx: chan::Receiver[str], sock: ws::Socket) -> i64 {
+    match chan::receive(rx) {
+        Some(m) => {
+            ws::send(sock, m)
+            1 + pump(rx, sock)
+        }
+        None => 0
+    }
+}
+
+fn server(port: i64, events: chan::Sender[Event]) -> Result[i64, str] {
+    let served = ws::serve_connections(port, s => session(s, events), 2)
+    chan::close(events)                            // the room closes with the server
+    served
+}
+
+fn connect_when_up(url: str, tries: i64) -> Result[ws::Socket, str] {
+    match ws::connect(url) {
+        Ok(s) => Ok(s),
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); connect_when_up(url, tries - 1) },
+    }
+}
+
+fn text_of(r: Result[ws::Message, str]) -> str {
+    match r {
+        Ok(ws::Text(t)) => t,
+        Ok(other) => string(other),
+        Err(e) => "error: {e}",
+    }
+}
+
+fn main() {
+    let port = 30000 + os::pid() % 20000
+    let (ev_tx, ev_rx) = chan::new[Event]()
+    let room = hub(ev_rx, [])
+    let s = server(port, ev_tx)
+    let ada = match connect_when_up("ws://127.0.0.1:{port}/", 100) {
+        Ok(x) => x,
+        Err(e) => {
+            print("no WebSocket: {e}")
+            return
+        }
+    }
+    print("ada sees: " + text_of(ws::receive(ada)))
+    let bob = ws::connect("ws://127.0.0.1:{port}/") else { return }
+    print("ada sees: " + text_of(ws::receive(ada)))
+    print("bob sees: " + text_of(ws::receive(bob)))
+    ws::send(ada, "hello from ada")
+    print("ada sees: " + text_of(ws::receive(ada)))
+    print("bob sees: " + text_of(ws::receive(bob)))
+    ws::send(bob, "hi ada")
+    print("ada sees: " + text_of(ws::receive(ada)))
+    print("bob sees: " + text_of(ws::receive(bob)))
+    ws::close(ada)
+    ws::close(bob)
+    print(s)
+    print(room)
+}

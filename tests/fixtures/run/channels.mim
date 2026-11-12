@@ -1,0 +1,42 @@
+module main
+
+// Channels: a worker task (an implicit future) fed through one channel,
+// answering through another; close, try_receive.
+
+// a worker task: squares numbers until the channel closes, then reports
+fn worker(jobs: chan::Receiver[i64], results: chan::Sender[i64]) -> i64 {
+    match chan::receive(jobs) {
+        Some(n) => {
+            chan::send(results, n * n)
+            1 + worker(jobs, results)
+        }
+        None => {
+            chan::close(results)
+            0
+        }
+    }
+}
+
+fn collect(rx: chan::Receiver[i64], acc: [i64]) -> [i64] {
+    match chan::receive(rx) {
+        Some(x) => collect(rx, push(acc, x)),
+        None => acc,
+    }
+}
+
+fn main() {
+    let (jobs_tx, jobs_rx) = chan::new[i64]()
+    let (res_tx, res_rx) = chan::new[i64]()
+    let done = worker(jobs_rx, res_tx)              // runs in the background
+    print(chan::send(jobs_tx, 3))
+    chan::send(jobs_tx, 4)
+    chan::send(jobs_tx, 5)
+    chan::close(jobs_tx)
+    print(chan::send(jobs_tx, 6))                   // closed: false
+    print(collect(res_rx, []))
+    print(done)
+    let (tx, rx) = chan::new[str]()
+    print(chan::try_receive(rx))
+    chan::send(tx, "hi")
+    print(chan::try_receive(rx))
+}
