@@ -176,6 +176,77 @@ static int jstring(jparser *p, char **out, size_t *len) {
     return 0;
 }
 
+/* A number (p->s[p->i] is '-' or a digit). Integers of up to 18 digits and
+ * decimals that are exact in a double (up to 15 digits, a small exponent:
+ * one correctly rounded division or multiplication) skip strtod. */
+static void jnum(jparser *p, int *is_int, int64_t *inum, double *num) {
+    static const double p10[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+                                 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+    size_t st = p->i;
+    int neg = 0, simple = 1;
+    if (p->s[p->i] == '-') {
+        neg = 1;
+        p->i++;
+    }
+    uint64_t m = 0;
+    int digits = 0, frac = 0;
+    *is_int = 1;
+    while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') {
+        if (digits < 18) m = m * 10 + (uint64_t)(p->s[p->i] - '0');
+        else simple = 0;
+        if (m || digits) digits++;
+        p->i++;
+    }
+    if (p->i < p->n && p->s[p->i] == '.') {
+        *is_int = 0;
+        p->i++;
+        while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') {
+            if (digits < 18) {
+                m = m * 10 + (uint64_t)(p->s[p->i] - '0');
+                frac++;
+                if (m) digits++;
+            } else {
+                simple = 0;
+            }
+            p->i++;
+        }
+    }
+    int ex = 0;
+    if (p->i < p->n && (p->s[p->i] == 'e' || p->s[p->i] == 'E')) {
+        *is_int = 0;
+        p->i++;
+        int eneg = 0;
+        if (p->i < p->n && (p->s[p->i] == '+' || p->s[p->i] == '-')) eneg = p->s[p->i++] == '-';
+        while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') {
+            if (ex < 10000) ex = ex * 10 + (p->s[p->i] - '0');
+            p->i++;
+        }
+        if (eneg) ex = -ex;
+    }
+    int e10 = ex - frac;
+    if (simple && *is_int) {
+        *inum = neg ? -(int64_t)m : (int64_t)m;
+        *num = neg && m == 0 ? -0.0 : (double)*inum; /* exact below 2^53; else strtod's below */
+        if (m < (1ULL << 53)) return;
+    } else if (simple && m < (1ULL << 53) && e10 >= -22 && e10 <= 22) {
+        double x = (double)m;
+        x = e10 < 0 ? x / p10[-e10] : x * p10[e10];
+        *num = neg ? -x : x;
+        return;
+    }
+    char tmp[64];
+    size_t len = p->i - st < sizeof tmp - 1 ? p->i - st : sizeof tmp - 1;
+    memcpy(tmp, p->s + st, len);
+    tmp[len] = 0;
+    *num = strtod(tmp, NULL);
+    if (*is_int) {
+        errno = 0;
+        long long v = strtoll(tmp, NULL, 10);
+        *is_int = errno == 0;
+        *inum = v;
+    }
+}
+
 static jnode *jvalue(jparser *p, int depth) {
     if (depth > 512) {
         jfail(p, "nested too deeply");
@@ -253,33 +324,8 @@ static jnode *jvalue(jparser *p, int depth) {
     if (p->n - p->i >= 5 && memcmp(p->s + p->i, "false", 5) == 0) { p->i += 5; j->type = J_FALSE; return j; }
     if (p->n - p->i >= 4 && memcmp(p->s + p->i, "null", 4) == 0) { p->i += 4; j->type = J_NULL; return j; }
     if (c == '-' || (c >= '0' && c <= '9')) {
-        size_t st = p->i;
-        int is_int = 1;
-        if (p->s[p->i] == '-') p->i++;
-        while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++;
-        if (p->i < p->n && p->s[p->i] == '.') {
-            is_int = 0;
-            p->i++;
-            while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++;
-        }
-        if (p->i < p->n && (p->s[p->i] == 'e' || p->s[p->i] == 'E')) {
-            is_int = 0;
-            p->i++;
-            if (p->i < p->n && (p->s[p->i] == '+' || p->s[p->i] == '-')) p->i++;
-            while (p->i < p->n && p->s[p->i] >= '0' && p->s[p->i] <= '9') p->i++;
-        }
-        char tmp[64];
-        size_t len = p->i - st < sizeof tmp - 1 ? p->i - st : sizeof tmp - 1;
-        memcpy(tmp, p->s + st, len);
-        tmp[len] = 0;
         j->type = J_NUM;
-        j->num = strtod(tmp, NULL);
-        if (is_int) {
-            errno = 0;
-            long long v = strtoll(tmp, NULL, 10);
-            j->is_int = errno == 0;
-            j->inum = v;
-        }
+        jnum(p, &j->is_int, &j->inum, &j->num);
         return j;
     }
     free(j);
@@ -503,6 +549,244 @@ static mim_val *to_typed(const jnode *j, const mim_schema *s, const char *where,
 #undef WANT
 }
 
+/* ---- text → typed values in one pass (decode) ---------------------------- *
+ * Follows the schema while it reads, building no tree. Any problem gives
+ * NULL: decode then runs the tree path above, which explains it. */
+
+/* A string's text without escapes: points into the input. */
+static int jraw_string(jparser *p, const char **s, size_t *n) {
+    size_t k = p->i + 1;
+    while (k < p->n) {
+        unsigned char c = (unsigned char)p->s[k];
+        if (c == '"') {
+            *s = p->s + p->i + 1;
+            *n = k - p->i - 1;
+            p->i = k + 1;
+            return 1;
+        }
+        if (c == '\\' || c < 0x20) return 0;
+        k++;
+    }
+    return 0;
+}
+
+static mim_val *jdec_str(jparser *p) {
+    const char *s;
+    size_t n;
+    if (jraw_string(p, &s, &n)) return mim_str(s, (int64_t)n);
+    char *t;
+    if (!jstring(p, &t, &n)) return NULL;
+    mim_val *v = mim_str(t, (int64_t)n);
+    free(t);
+    return v;
+}
+
+static int jlit(jparser *p, const char *w, size_t n) {
+    if (p->n - p->i >= n && memcmp(p->s + p->i, w, n) == 0) {
+        p->i += n;
+        return 1;
+    }
+    return 0;
+}
+
+/* A record or tuple of decoded fields, taking them over. */
+static mim_val *obj_take(const mim_desc *d, int64_t n, mim_val **f) {
+    mim_val *v = alloc(MIM_OBJ, 0, n);
+    v->desc = d;
+    if (n) memcpy(v->data, f, sizeof(mim_val *) * (size_t)n);
+    return v;
+}
+
+static mim_val *jdec(jparser *p, const mim_schema *s, int depth);
+
+/* `[ … ]` into a C array of values; -1 on failure (released) */
+static int64_t jdec_items(jparser *p, const mim_schema *item, int depth, mim_val ***out) {
+    p->i++;
+    int64_t n = 0, cap = 16;
+    mim_val **xs = (mim_val **)malloc(sizeof(mim_val *) * (size_t)cap);
+    jws(p);
+    if (p->i < p->n && p->s[p->i] == ']') {
+        p->i++;
+        *out = xs;
+        return 0;
+    }
+    for (;;) {
+        mim_val *v = jdec(p, item, depth + 1);
+        if (!v) break;
+        if (n == cap) {
+            cap *= 2;
+            xs = (mim_val **)realloc(xs, sizeof(mim_val *) * (size_t)cap);
+        }
+        xs[n++] = v;
+        jws(p);
+        if (p->i < p->n && p->s[p->i] == ',') {
+            p->i++;
+            continue;
+        }
+        if (p->i < p->n && p->s[p->i] == ']') {
+            p->i++;
+            *out = xs;
+            return n;
+        }
+        break;
+    }
+    for (int64_t k = 0; k < n; k++) mim_release(xs[k]);
+    free(xs);
+    return -1;
+}
+
+static mim_val *jdec(jparser *p, const mim_schema *s, int depth) {
+    if (depth > 512) return NULL;
+    jws(p);
+    if (p->i >= p->n) return NULL;
+    char c = p->s[p->i];
+    switch (s->kind) {
+    case 0: {
+        jnode *j = jvalue(p, depth);
+        if (!j) return NULL;
+        mim_val *v = to_plain(j);
+        jfree(j);
+        return v;
+    }
+    case 1:
+    case 2: {
+        if (c != '-' && (c < '0' || c > '9')) return NULL;
+        int is_int;
+        int64_t inum = 0;
+        double num;
+        jnum(p, &is_int, &inum, &num);
+        if (s->kind == 2) return mim_float(num);
+        if (is_int) return mim_int(inum);
+        if (num != (double)(int64_t)num) return NULL;
+        return mim_int((int64_t)num);
+    }
+    case 3:
+        if (jlit(p, "true", 4)) return mim_bool(1);
+        if (jlit(p, "false", 5)) return mim_bool(0);
+        return NULL;
+    case 4: return c == '"' ? jdec_str(p) : NULL;
+    case 5: {
+        if (c != '[') return NULL;
+        mim_val **xs;
+        int64_t n = jdec_items(p, s->items[0], depth, &xs);
+        if (n < 0) return NULL;
+        mim_val *l = n ? list_take(n, xs) : alloc(s->items[0]->kind == 1 ? MIM_I64 : s->items[0]->kind == 2 ? MIM_F64 : MIM_BOXED, 1, 0);
+        free(xs);
+        return l;
+    }
+    case 7: {
+        if (c != '{') return NULL;
+        p->i++;
+        const mim_desc *d = s->desc;
+        mim_val *small[16];
+        mim_val **f = s->n <= 16 ? small : (mim_val **)malloc(sizeof(mim_val *) * (size_t)s->n);
+        for (int32_t q = 0; q < s->n; q++) f[q] = NULL;
+        int ok = 0;
+        jws(p);
+        if (p->i < p->n && p->s[p->i] == '}') {
+            p->i++;
+            ok = 1;
+        } else {
+            for (;;) {
+                jws(p);
+                if (p->i >= p->n || p->s[p->i] != '"') break;
+                const char *key;
+                size_t kl;
+                char *owned = NULL;
+                if (!jraw_string(p, &key, &kl)) {
+                    if (!jstring(p, &owned, &kl)) break;
+                    key = owned;
+                }
+                int32_t q = 0;
+                while (q < s->n && !(strlen(d->fields[q]) == kl && memcmp(d->fields[q], key, kl) == 0)) q++;
+                free(owned);
+                jws(p);
+                if (p->i >= p->n || p->s[p->i] != ':') break;
+                p->i++;
+                if (q < s->n) {
+                    mim_val *v = jdec(p, s->items[q], depth + 1);
+                    if (!v) break;
+                    if (f[q]) mim_release(f[q]); /* a repeated key: the last one counts */
+                    f[q] = v;
+                } else {
+                    jnode *skip = jvalue(p, depth + 1); /* not a field: ignored */
+                    if (!skip) break;
+                    jfree(skip);
+                }
+                jws(p);
+                if (p->i < p->n && p->s[p->i] == ',') {
+                    p->i++;
+                    continue;
+                }
+                if (p->i < p->n && p->s[p->i] == '}') {
+                    p->i++;
+                    ok = 1;
+                }
+                break;
+            }
+        }
+        for (int32_t q = 0; ok && q < s->n; q++) {
+            if (f[q]) continue;
+            if (s->items[q]->kind == 8) f[q] = none_val(); /* a missing optional field */
+            else ok = 0;
+        }
+        mim_val *r = NULL;
+        if (ok) {
+            r = obj_take(d, s->n, f);
+        } else {
+            for (int32_t q = 0; q < s->n; q++)
+                if (f[q]) mim_release(f[q]);
+        }
+        if (f != small) free(f);
+        return r;
+    }
+    case 8: {
+        if (jlit(p, "null", 4)) return none_val();
+        mim_val *v = jdec(p, s->items[0], depth);
+        return v ? some_of(v) : NULL;
+    }
+    case 9: {
+        if (c != '[') return NULL;
+        mim_val **xs = NULL;
+        p->i++;
+        int64_t n = 0;
+        int ok = 0;
+        xs = (mim_val **)calloc((size_t)(s->n ? s->n : 1), sizeof(mim_val *));
+        jws(p);
+        if (s->n == 0) {
+            if (p->i < p->n && p->s[p->i] == ']') {
+                p->i++;
+                ok = 1;
+            }
+        } else {
+            for (;;) {
+                if (n == s->n) break;
+                mim_val *v = jdec(p, s->items[n], depth + 1);
+                if (!v) break;
+                xs[n++] = v;
+                jws(p);
+                if (p->i < p->n && p->s[p->i] == ',') {
+                    p->i++;
+                    continue;
+                }
+                if (p->i < p->n && p->s[p->i] == ']' && n == s->n) {
+                    p->i++;
+                    ok = 1;
+                }
+                break;
+            }
+        }
+        mim_val *r = NULL;
+        if (ok) r = obj_take(s->desc, s->n, xs);
+        else
+            for (int64_t k = 0; k < n; k++) mim_release(xs[k]);
+        free(xs);
+        return r;
+    }
+    default: return NULL;
+    }
+}
+
 mim_val *mim_std_json_parse(mim_val *text) {
     char err[256];
     jnode *j = jparse_all(text, err, sizeof err);
@@ -514,6 +798,16 @@ mim_val *mim_std_json_parse(mim_val *text) {
 
 mim_val *mim_std_json_decode(mim_val *schema, mim_val *text) {
     char err[320];
+    if (text && text->dtype == MIM_CHAR && text->rank == 1) {
+        jparser fp = {(const char *)text->data, 0, (size_t)text->len, {0}};
+        mim_val *v = jdec(&fp, (const mim_schema *)(const void *)schema, 0);
+        if (v) {
+            jws(&fp);
+            if (fp.i == fp.n) return ok_of(v);
+            mim_release(v);
+        }
+    }
+    /* something is wrong: the tree path says what */
     jnode *j = jparse_all(text, err, sizeof err);
     if (!j) return err_of(err);
     mim_val *v = to_typed(j, (const mim_schema *)(const void *)schema, "", err, sizeof err);
@@ -525,25 +819,64 @@ mim_val *mim_std_json_decode(mim_val *schema, mim_val *text) {
 
 static void jenc_str(sbuf *b, const char *s, size_t n) {
     sb_put(b, "\"", 1);
+    size_t run = 0; /* bytes copied as they are, in one piece */
     for (size_t k = 0; k < n; k++) {
         unsigned char c = (unsigned char)s[k];
+        if (c >= 0x20 && c != '"' && c != '\\') continue;
+        sb_put(b, s + run, k - run);
+        run = k + 1;
         switch (c) {
         case '"': sb_put(b, "\\\"", 2); break;
         case '\\': sb_put(b, "\\\\", 2); break;
         case '\n': sb_put(b, "\\n", 2); break;
         case '\r': sb_put(b, "\\r", 2); break;
         case '\t': sb_put(b, "\\t", 2); break;
-        default:
-            if (c < 0x20) {
-                char u[8];
-                snprintf(u, sizeof u, "\\u%04x", c);
-                sb_put(b, u, 6);
-            } else {
-                sb_put(b, (const char *)&c, 1);
-            }
+        default: {
+            char u[8];
+            snprintf(u, sizeof u, "\\u%04x", c);
+            sb_put(b, u, 6);
+        }
         }
     }
+    sb_put(b, s + run, n - run);
     sb_put(b, "\"", 1);
+}
+
+/* x (finite, |x| in [1e-4, 1e15) or 0) as a decimal of at most 6 places
+ * that reads back exactly, with the fewest places: what %.15g/%.17g would
+ * write. 0 when there is none. */
+static size_t fmt_short_decimal(char *out, double x) {
+    static const double p10[] = {1, 10, 100, 1000, 10000, 100000, 1000000};
+    double ax = x < 0 ? -x : x;
+    if (ax >= 1e15 || (ax != 0 && ax < 1e-4)) return 0;
+    for (int k = 0; k <= 6; k++) {
+        double m = ax * p10[k];
+        if (m >= 9007199254740992.0) return 0;
+        int64_t mi = (int64_t)(m + 0.5);
+        if ((double)mi / p10[k] != ax) continue;
+        char dig[24];
+        size_t nd = fmt_i64(dig, mi), o = 0;
+        if (signbit(x)) out[o++] = '-';
+        if (k == 0) {
+            memcpy(out + o, dig, nd);
+            o += nd;
+            memcpy(out + o, ".0", 2);
+            return o + 2;
+        }
+        if (nd <= (size_t)k) { /* 0.0…digits */
+            out[o++] = '0';
+            out[o++] = '.';
+            for (size_t z = nd; z < (size_t)k; z++) out[o++] = '0';
+            memcpy(out + o, dig, nd);
+            return o + nd;
+        }
+        memcpy(out + o, dig, nd - (size_t)k);
+        o += nd - (size_t)k;
+        out[o++] = '.';
+        memcpy(out + o, dig + nd - (size_t)k, (size_t)k);
+        return o + (size_t)k;
+    }
+    return 0;
 }
 
 static void jenc_num(sbuf *b, double x) {
@@ -552,6 +885,11 @@ static void jenc_num(sbuf *b, double x) {
         return;
     }
     char tmp[40];
+    size_t fast = fmt_short_decimal(tmp, x);
+    if (fast) {
+        sb_put(b, tmp, fast);
+        return;
+    }
     for (int prec = 15; prec <= 17; prec++) { /* the shortest text that reads back exactly */
         snprintf(tmp, sizeof tmp, "%.*g", prec, x);
         if (strtod(tmp, NULL) == x) break;
@@ -573,7 +911,15 @@ static void jenc_elems(sbuf *b, const mim_val *v, int64_t from, int64_t n, int i
     for (int64_t k = 0; k < n; k++) {
         if (k) sb_put(b, ",", 1);
         jnl(b, indent, depth + 1);
-        mim_val *e = scalar_at(v, from + k);
+        int64_t i = from + k;
+        switch (v->dtype) { /* elements in place: no boxing */
+        case MIM_BOXED: jenc(b, ((mim_val *const *)v->data)[i], indent, depth + 1); continue;
+        case MIM_I64: sb_i64(b, geti(v, i)); continue;
+        case MIM_F64: jenc_num(b, getf(v, i)); continue;
+        case MIM_BOOL: sb_str(b, geti(v, i) ? "true" : "false"); continue;
+        default: break;
+        }
+        mim_val *e = scalar_at(v, i);
         jenc(b, e, indent, depth + 1);
         mim_release(e);
     }
@@ -700,9 +1046,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
     if (v->rank == 0) {
         switch (v->dtype) {
         case MIM_I64: {
-            char tmp[32];
-            snprintf(tmp, sizeof tmp, "%lld", (long long)geti(v, 0));
-            sb_str(b, tmp);
+            sb_i64(b, geti(v, 0));
             return;
         }
         case MIM_F64: jenc_num(b, getf(v, 0)); return;

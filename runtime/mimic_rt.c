@@ -1465,11 +1465,31 @@ static void sb_put(sbuf *b, const char *s, size_t n) {
 }
 static void sb_str(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }
 
+/* Decimal digits of an integer (what printf's %lld writes, without printf). */
+static size_t fmt_i64(char *out, int64_t x) {
+    char tmp[24];
+    size_t n = 0;
+    uint64_t u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+    do {
+        tmp[n++] = (char)('0' + u % 10);
+        u /= 10;
+    } while (u);
+    size_t o = 0;
+    if (x < 0) out[o++] = '-';
+    while (n) out[o++] = tmp[--n];
+    return o;
+}
+
+static void sb_i64(sbuf *b, int64_t x) {
+    char buf[24];
+    sb_put(b, buf, fmt_i64(buf, x));
+}
+
 static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     char buf[64];
     switch (v->dtype) {
     case MIM_I64:
-    case MIM_U8: snprintf(buf, sizeof buf, "%lld", (long long)geti(v, i)); sb_str(b, buf); break;
+    case MIM_U8: (void)buf; sb_i64(b, geti(v, i)); break;
     case MIM_BOOL: sb_str(b, geti(v, i) ? "true" : "false"); break;
     case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
@@ -1595,6 +1615,12 @@ mim_val *mim_format(mim_val *v) {
     mim_val *r = mim_str(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     return r;
+}
+
+/* An integer as text (interpolation of an unboxed i64). */
+mim_val *mim_format_i64(int64_t x) {
+    char buf[24];
+    return mim_str(buf, (int64_t)fmt_i64(buf, x));
 }
 
 /* Concatenate `n` strings (interpolation). */

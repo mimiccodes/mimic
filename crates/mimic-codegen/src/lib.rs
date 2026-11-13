@@ -1288,6 +1288,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
+            "mim_format_i64" => ptr.fn_type(&[i64t], false),
             "mim_fj_enter" => self.ctx.i32_type().fn_type(&[], false),
             "mim_fj_leave" => void.fn_type(&[], false),
             "mim_fj_fork" => void.fn_type(&[p, p, p], false),
@@ -4459,13 +4460,16 @@ impl<'ctx> Cg<'ctx, '_> {
                             let V::P(x, _) = self.call_rt_ptr("mim_lit_str", &[self.gaddr(g).into(), p.into(), i64t.const_int(t.len() as u64, false).into()])? else { unreachable!() };
                             V::P(x, false)
                         }
-                        InterpPart::Expr(x) => {
-                            let v = self.expr(x)?;
-                            let v = self.boxed(v)?;
-                            let s = self.call_rt_ptr("mim_format", &[self.basic(v).into()])?;
-                            self.drop_tmp(v)?;
-                            s
-                        }
+                        InterpPart::Expr(x) => match self.expr(x)? {
+                            // an integer: straight to text
+                            V::I(i) => self.call_rt_ptr("mim_format_i64", &[i.into()])?,
+                            v => {
+                                let v = self.boxed(v)?;
+                                let s = self.call_rt_ptr("mim_format", &[self.basic(v).into()])?;
+                                self.drop_tmp(v)?;
+                                s
+                            }
+                        },
                     };
                     let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
                     self.b.build_store(slot, self.basic(s)).s()?;

@@ -32,7 +32,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 6 | `prefix-sum` (100M) | scan | `trail` |
 | 7 | `sort` (10M ints) | branches, memory | array primitive |
 | 8 | `tree` (build and fold a depth-22 tree) | allocation, sharing | `arms`, nets, reference-count elision |
-| 9 | `json` (parse 100 MB) | strings, unions | records, `match`, strings |
+| 9 | `json` (encode and decode 300,000 records, 21 MB) | strings, numbers, records | `json::encode`, `json::decode[T]` |
 | 10 | `http` (hello-world requests/s) | I/O, concurrency | concurrent I/O, event loop |
 | 11 | `ui` (frame time, 10k-row list) | diffing, rendering | `view`, `each` |
 
@@ -92,6 +92,41 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### json: encode and decode (1.10× C)
+
+Build 300,000 records `{id, name, score, tags}`, encode them to one JSON
+text (21 MB), decode it back into typed records, check them. C uses a
+hand-written encoder and parser for this one shape (snprintf/strtod), Rust
+serde + serde_json, Go encoding/json. Apple M3 Pro, 2026-11-13.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| json | 1.238 s | 0.59× | 1.77× | **1.10×** | **0.79×** |
+
+From 2.9× C (3.1 s of CPU) to 1.10×:
+
+* `json::decode[T]` reads the text straight into typed values, following
+  T's schema: no intermediate tree, no copied keys, strings without
+  escapes taken from the text in one piece. On any error it re-reads the
+  text the old way, so the messages are unchanged;
+* integers are formatted and parsed without printf/strtoll, and decimals
+  that are exact in a double (`0.5`, `123.456`) without printf/strtod;
+* lists are encoded element by element in place (no boxing), strings in runs;
+* `"item-{i}"` with an integer formats it straight to text.
+
+serde_json is still faster (0.59×): it writes into one buffer with no
+reference counts at all. All cores: only building the records runs in
+parallel; encoding and decoding one text are sequential.
+
+### Link-time optimisation (F4): no gain
+
+Linking the runtime into each program as LLVM bitcode (full LTO, so
+runtime functions can be inlined) changed nothing measurable: fib,
+nbody, sum_of_squares, prefix_sum and tree all stayed within noise
+(±5%). The hot runtime paths (allocation, release, tag reads) are already
+generated inline by the compiler. Builds stay as they are: a cached
+runtime object, linked as is.
 
 ### Fork-join (F6): independent calls on all cores
 

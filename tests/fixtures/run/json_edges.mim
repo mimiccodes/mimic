@@ -1,0 +1,21 @@
+module main
+
+// json fast paths: numbers, escapes, unknown and repeated keys, errors
+
+type P = { x: f64, n: i64, s: str, tags: [str], opt: Option[i64] }
+
+fn main() {
+    print(json::encode([0.1 123.456 0.00001 1e15 999999999999999.0 0.30000000000000004 2.5e-4 1234567890.123456]))
+    print(json::encode([0.0, -0.0, -1.5, -0.001, 100.0]))
+    print(json::encode([0, -7, 9223372036854775807, -9223372036854775807]))
+    print(json::encode(["tab\there", "quote\"", "back\\slash", "plain", "é"]))
+    print(json::decode[[f64]]("[0.1, -0, -2.5e3, 1E2, 12345678901234567890, 0.30000000000000004, 3]"))
+    print(json::decode[[i64]]("[-9223372036854775807, 4.0, 18]"))
+    print(json::decode[[i64]]("[1.5]"))
+    print(json::decode[P]('{"x": 1, "extra": {"a": [1, {"b": null}]}, "n": 2, "s": "aé\nb", "tags": [], "n": 3}'))
+    print(json::decode[P]('{"x": 1, "n": 2, "s": "s", "tags": ["t"], "opt": 5}'))
+    print(json::decode[P]('{"x": 1, "n": 2, "s": "s", "tags": [1]}'))
+    print(json::decode[[str]]('["a", "b"] x'))
+    print(json::decode[(i64, bool)]("[1, true]"))
+    print(json::decode[(i64, bool)]("[1, true, 2]"))
+}

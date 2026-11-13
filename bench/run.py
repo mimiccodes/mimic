@@ -3,6 +3,8 @@
 
 Every folder here holds one benchmark in Mimic, C, Rust and Go (main.mim,
 main.c, main.rs, main.go) and the output they must all print (expected.txt).
+A Rust version that needs crates is a cargo project in rust/ instead of
+main.rs (built --offline: the crates must be in the local cargo cache).
 This builds each version the fastest way for its language, checks its output,
 then times a warm-up run and 5 measured runs, on one core and on all cores,
 and writes results.md with each time as a ratio to C.
@@ -47,6 +49,14 @@ def build(lang: str, src: Path, name: str) -> Path | None:
         return Path(json.loads(r.stdout)["artifacts"][0]["path"])
     if lang == "c":
         run([mimic_exe(), "cc", "-O3", "-mcpu=native", str(src), "-o", str(exe)])
+    elif lang == "rust" and src.is_dir():
+        # a cargo project (crates such as serde_json, from the local cache)
+        if not shutil.which("cargo"):
+            return None
+        target = OUT / f"{name}-rust-cargo"
+        run(["cargo", "build", "--release", "--offline", "--quiet"], cwd=src, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
+        meta = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=src).stdout)
+        return target / "release" / meta["packages"][0]["targets"][0]["name"]
     elif lang == "rust":
         if not shutil.which("rustc"):
             return None
@@ -88,6 +98,8 @@ def main() -> int:
         times = {}
         for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("go", "main.go"), ("mimic", "main.mim")]:
             src = b / file
+            if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
+                src = b / "rust"
             if not src.exists():
                 continue
             exe = build(lang, src, b.name)

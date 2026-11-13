@@ -1,0 +1,25 @@
+module main
+
+// JSON: encode 300,000 records to text, decode the text back into typed
+// records, check them
+
+type Item = { id: i64, name: str, score: f64, tags: [str] }
+
+fn item(i: i64) -> Item {
+    Item { id: i, name: "item-{i}", score: i * 0.5, tags: ["red", "tag-{i % 100}"] }
+}
+
+fn chars(it: Item) -> i64 {
+    len(it.name) + (it.tags ¨ (t => len(t)) ▷ +/)
+}
+
+fn good(it: Item) -> i64 {
+    if it.score == it.id * 0.5 { 1 } else { 0 }
+}
+
+fn main() {
+    let items = ⍳ 300000 ¨ item
+    let text = json::encode(items)
+    let back = json::decode[[Item]](text) else { return }
+    print("{len(back)} {back ¨ (it => it.id) ▷ +/} {back ¨ chars ▷ +/} {back ¨ good ▷ +/}")
+}

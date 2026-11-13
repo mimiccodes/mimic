@@ -1,0 +1,14 @@
+[0.1,123.456,1e-05,1e+15,999999999999999.0,0.30000000000000004,0.00025,1234567890.123456]
+[0.0,-0.0,-1.5,-0.001,100.0]
+[0,-7,9223372036854775807,-9223372036854775807]
+["tab\there","quote\"","back\\slash","plain","é"]
+Ok([0.1 -0.0 -2500.0 100.0 1.23456789012346e+19 0.3 3.0])
+Ok([-9223372036854775807 4 18])
+Err("json: expected an integer at [0], found a number")
+Ok(P { x: 1.0, n: 3, s: "aé
+b", tags: [], opt: None })
+Ok(P { x: 1.0, n: 2, s: "s", tags: ["t"], opt: Some(5) })
+Err("json: expected a string at tags[0], found a number")
+Err("invalid JSON at line 1, column 12: unexpected text after the value")
+Ok((1, true))
+Err("json: expected an array of 2 at the top, found an array")

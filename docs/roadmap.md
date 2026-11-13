@@ -81,7 +81,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (static lengths) | Lists of known length (≤ 8) in registers, shaped and flat records, `evolve` compiled as a loop, short loops unrolled; inline allocator; storage follows the static type. nbody 8.6× → 1.09× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F6 (fork-join) | Independent calls to pure recursive functions run in parallel (`f(a) + f(b)`, constructors, runs of `let`s): fork, sequential and ordinary versions of each function, a work-stealing pool, parallel freeing of large values; small blocks carved from per-thread chunks ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F2 (part) | Fusion through `⌽`, `↑` and `↓`: index remaps inside the fused loop, no intermediate arrays | ✅ |
-| F | Performance (RC elision and reuse, fusion through `⌿`, LTO, SIMD, scheduling, GPU) | |
+| F (json) | `json` benchmark (C, serde, Go): direct typed decoding, fast number formatting and parsing; 2.9× → 1.10× C. LTO with the runtime measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (RC elision and reuse, fusion through `⌿`, SIMD, scheduling, GPU; http and ui benchmarks) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 

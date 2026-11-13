@@ -27,11 +27,22 @@ static int64_t int_arg(mim_val *v, const char *fn) {
     return geti(v, 0);
 }
 
-/* a list (vector of handles) from owned handles, which it takes over */
+/* A list from owned values, which it takes over (no retain/release pairs):
+ * numbers become a numeric vector, as in an array literal. */
 static mim_val *list_take(int64_t n, mim_val **xs) {
-    mim_val *r = mim_array_lit(n, xs);
-    for (int64_t i = 0; i < n; i++) mim_release(xs[i]);
-    return r;
+    int boxed = 0, dt = -1;
+    for (int64_t k = 0; k < n; k++) {
+        if (xs[k]->rank != 0 || IS_HANDLES(xs[k])) boxed = 1;
+        else dt = dt == -1 ? xs[k]->dtype : join_dtype(dt, xs[k]->dtype);
+    }
+    if (!boxed) {
+        mim_val *l = mim_array_lit(n, xs);
+        for (int64_t k = 0; k < n; k++) mim_release(xs[k]);
+        return l;
+    }
+    mim_val *v = alloc(MIM_BOXED, 1, n);
+    memcpy(v->data, xs, sizeof(mim_val *) * (size_t)n);
+    return v;
 }
 
 /* ==== strings ============================================================== */
