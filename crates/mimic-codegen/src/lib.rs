@@ -3912,6 +3912,32 @@ impl<'ctx> Cg<'ctx, '_> {
         self.as_ty(fv, ty, "element")
     }
 
+    /// Element `i` of a list of handles (lent): checked to be such a list
+    /// and in bounds, else the runtime stops the program with the reason.
+    fn index_handle(&mut self, arr: V<'ctx>, i: IntValue<'ctx>) -> R<V<'ctx>> {
+        let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
+        let vt = self.val_ty();
+        let p = self.basic(arr).into_pointer_value();
+        let kind = self.b.build_load(i64t, self.b.build_struct_gep(vt, p, 1, "").s()?, "kind").s()?.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(vt, p, 3, "").s()?, "len").s()?.into_int_value();
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want = if little { (1u64 << 32) | 4 } else { (4u64 << 32) | 1 }; // MIM_BOXED, rank 1
+        let ok_k = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        let ok_i = self.b.build_int_compare(IntPredicate::ULT, i, len, "").s()?;
+        let go = self.b.build_and(ok_k, ok_i, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let fast = self.ctx.append_basic_block(f, "idx_fast");
+        let bad = self.ctx.append_basic_block(f, "idx_bad");
+        self.b.build_conditional_branch(go, fast, bad).s()?;
+        self.b.position_at_end(bad);
+        self.call_rt("mim_index_fail", &[p.into(), i.into()])?;
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(fast);
+        let data = unsafe { self.b.build_in_bounds_gep(vt, p, &[i32t.const_int(1, false)], "data").s()? };
+        let ep = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i], "").s()? };
+        Ok(V::P(self.b.build_load(self.ptr, ep, "elem").s()?.into_pointer_value(), false))
+    }
+
     /// An expression's value, in the form its type asks for: a list of known
     /// length in registers (V::A), any other list as a pointer.
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
@@ -3943,6 +3969,18 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = self.ty_of(e);
         // kernel fusion: whole array expressions become one loop
         match &e.kind {
+            // `≢ xs` of a list: its length, from the header (or known)
+            ExprKind::Prim { prim: Prim::Len, args } if matches!(self.ty_of(&args[0]), Ty::Arr(..)) && !self.is_fae(&args[0]) && !self.keep_fusible(Prim::Len, &args[0]) => {
+                let v = self.expr(&args[0])?;
+                if let V::A(a, _) = v {
+                    return self.as_ty(V::I(i64t.const_int(a.get_type().len() as u64, false)), ty, "length");
+                }
+                let v = self.boxed(v)?;
+                let p = self.basic(v).into_pointer_value();
+                let n = self.b.build_load(i64t, self.b.build_struct_gep(self.val_ty(), p, 3, "").s()?, "len").s()?.into_int_value();
+                self.drop_tmp(v)?;
+                return self.as_ty(V::I(n), ty, "length");
+            }
             // `+/ (xs ⌿ mask)`: filtered and summed in one pass
             ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Len), args } if self.keep_fusible(*p, &args[0]) => {
                 let r = self.fused_reduce_keep(*p, &args[0])?;
@@ -4000,6 +4038,20 @@ impl<'ctx> Cg<'ctx, '_> {
                     elems.push(self.expr(x)?);
                 }
                 self.fixed_from(el, &elems)
+            }
+            // a list of records, strings or tuples: built here, each element
+            // moved in (a temporary) or retained (one held elsewhere)
+            ExprKind::Array(xs) if !xs.is_empty() && matches!(ty, Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _)) && self.heap_ok() => {
+                let i32t = self.ctx.i32_type();
+                let V::P(r, _) = self.alloc_vec(4, i64t.const_int(xs.len() as u64, false))? else { unreachable!() }; // MIM_BOXED
+                let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), r, &[i32t.const_int(1, false)], "data").s()? };
+                for (i, x) in xs.iter().enumerate() {
+                    let v = self.expr(x)?;
+                    let v = self.own(self.boxed(v)?)?;
+                    let slot = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
+                    self.b.build_store(slot, self.basic(v)).s()?;
+                }
+                Ok(V::P(r, true))
             }
             ExprKind::Array(xs) => {
                 let n = xs.len() as u32;
@@ -4340,6 +4392,20 @@ impl<'ctx> Cg<'ctx, '_> {
                 let r = self.index_fast(b, i, fuse::num_el(self.ty_of(base)).unwrap(), ty)?;
                 self.drop_tmp(b)?;
                 Ok(r)
+            }
+            // an element of a list of records, strings or tuples: one bounds
+            // check and a load (lent while the list is; else a reference)
+            ExprKind::Index { base, index }
+                if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
+            {
+                let b = self.expr(base)?;
+                let b = self.boxed(b)?;
+                let i = self.expr(index)?;
+                let i = self.to_i64(i)?;
+                let e = self.index_handle(b, i)?;
+                let e = if matches!(b, V::P(_, true)) { self.own(e)? } else { e };
+                self.drop_tmp(b)?;
+                self.as_ty(e, ty, "element")
             }
             ExprKind::Index { base, index } => {
                 let b = self.expr(base)?;

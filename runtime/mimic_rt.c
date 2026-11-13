@@ -405,6 +405,28 @@ static inline void fj_relax(void) {
 #endif
 }
 
+/* Waiting for work, politely: spin a little (a new task is taken at
+ * once), then give the core away (other threads, other programs), then
+ * sleep in short naps. `misses` counts the checks that found nothing. */
+static void fj_idle(int misses) {
+    if (misses < 64) {
+        fj_relax();
+    } else if (misses < 2048) {
+#if MIM_THREADS && defined(_WIN32)
+        SwitchToThread();
+#elif MIM_THREADS
+        sched_yield();
+#endif
+    } else {
+#if MIM_THREADS && defined(_WIN32)
+        Sleep(0);
+#elif MIM_THREADS
+        struct timespec ts = {0, 20000}; /* 20 µs */
+        nanosleep(&ts, NULL);
+#endif
+    }
+}
+
 static inline void fj_lock(fj_deque *q) {
     while (__atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE)) fj_relax();
 }
@@ -469,14 +491,16 @@ void mim_fj_join(mim_fj_task *t) {
     }
     /* stolen: help with other work until it is done (not too deep: each
      * task helped with runs on top of this stack) */
+    int misses = 0;
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != 2) {
         mim_fj_task *o = (q && t_fj_nest < 8) ? fj_steal(q) : NULL;
         if (o) {
             t_fj_nest++;
             fj_run(o);
             t_fj_nest--;
+            misses = 0;
         } else {
-            fj_relax();
+            fj_idle(misses++);
         }
     }
 }
@@ -488,10 +512,15 @@ static void fj_worker(void *ctx, int64_t lo, int64_t hi) {
     (void)hi;
     fj_deque *self = &g_fjq[lo + 1];
     t_fj_q = self;
+    int misses = 0;
     while (!__atomic_load_n(&g_fj_done, __ATOMIC_ACQUIRE)) {
         mim_fj_task *t = fj_steal(self);
-        if (t) fj_run(t);
-        else fj_relax();
+        if (t) {
+            fj_run(t);
+            misses = 0;
+        } else {
+            fj_idle(misses++);
+        }
     }
     t_fj_q = NULL;
 }
@@ -1796,6 +1825,12 @@ mim_val *mim_obj_get_named(mim_val *o, const char *name) {
     if (d->fields)
         for (int32_t i = 0; i < d->nfields; i++)
             if (strcmp(d->fields[i], name) == 0) return mim_obj_get(o, i);
+    /* a tuple's fields are its positions: `t.0`, `t.1` */
+    if (d->variant && !d->variant[0] && name[0] >= '0' && name[0] <= '9') {
+        char *end;
+        long k = strtol(name, &end, 10);
+        if (!*end && k < o->len) return mim_obj_get(o, k);
+    }
     char buf[160];
     snprintf(buf, sizeof buf, "`%s` has no field `%s`", d->variant ? d->variant : d->type_name, name);
     mim_panic(buf);

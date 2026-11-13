@@ -1,0 +1,21 @@
+module main
+
+// tuple fields by position, also where the tuple's type is only known at
+// run time (the state of evolve); ≢ and indexing on lists of records
+
+type Item = { name: str, n: i64 }
+
+fn step(s: ([Item], i64, str)) -> ([Item], i64, str) {
+    (s.0, s.1 + len(s.0), "{s.2}+")
+}
+
+fn main() {
+    let items = [Item { name: "a", n: 1 }, Item { name: "b", n: 2 }]
+    let end = (items, 0, "") ▷ evolve(3, step)
+    print(end.1)
+    print(end.2)
+    print(≢ end.0)
+    print(end.0[1].name)
+    print(items[0].n + items[1].n)
+    print(["x", "y", "z"][2])
+}

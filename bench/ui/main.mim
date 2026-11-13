@@ -1,0 +1,39 @@
+module main
+
+// ui: a list of 10,000 rows; each of 20 frames ticks one row: the screen
+// is built again (view) and compared with the last one (diff), as ui::run
+// does for every message
+
+type Todo = { id: i64, title: str, done: bool }
+type Msg = Toggle(i64)
+
+fn row(t: Todo) -> ui::Node[Msg] {
+    ui::keyed("{t.id}", ui::row(gap: 8, [
+        ui::checkbox(t.done, on_change: (b => Toggle(t.id))),
+        ui::text(t.title, strike: t.done),
+        ui::button("×", on_click: Toggle(t.id)),
+    ]))
+}
+
+fn view(todos: [Todo]) -> ui::Node[Msg] {
+    ui::column(gap: 4, [ui::text("Todos", size: 24), ui::column(todos ¨ row)])
+}
+
+fn tick(todos: [Todo], k: i64) -> [Todo] {
+    todos ¨ (t => if t.id == k { { t with done: not t.done } } else { t })
+}
+
+// (todos, last screen, frame number, patches so far)
+fn frame(s: ([Todo], ui::Node[Msg], i64, i64)) -> ([Todo], ui::Node[Msg], i64, i64) {
+    let todos = tick(s.0, s.2 * 97 % 10000)
+    let screen = view(todos)
+    let patches = ui::diff(s.1, screen, "0")
+    (todos, screen, s.2 + 1, s.3 + len(patches))
+}
+
+fn main() {
+    let todos = ⍳ 10000 ¨ (i => Todo { id: i, title: "task number {i}", done: false })
+    let first = view(todos)
+    let end = (todos, first, 0, 0) ▷ evolve(20, frame)
+    print(end.3)
+}

@@ -34,7 +34,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 8 | `tree` (build and fold a depth-22 tree) | allocation, sharing | `arms`, nets, reference-count elision |
 | 9 | `json` (encode and decode 300,000 records, 21 MB) | strings, numbers, records | `json::encode`, `json::decode[T]` |
 | 10 | `http` (hello-world server, 400,000 requests) | I/O, concurrency | `http::serve`, event loop, keep-alive |
-| 11 | `ui` (frame time, 10k-row list) | diffing, rendering | `view`, `each` |
+| 11 | `ui` (10k-row list, 20 frames of view + diff) | building and comparing screens | `view`, `ui::diff`, `¨` |
 | 12 | `records` (1M records updated 5 times) | records, immutability | `with`, `¨` |
 
 ## Building the suite, step by step
@@ -207,6 +207,26 @@ From 2.9× C (3.1 s of CPU) to 1.10×:
 serde_json is still faster (0.59×): it writes into one buffer with no
 reference counts at all. All cores: only building the records runs in
 parallel; encoding and decoding one text are sequential.
+
+### ui: a 10,000-row list, frame by frame
+
+`view` builds the screen of a 10,000-row todo list and `ui::diff`
+compares it with the previous one, as `ui::run` does for every message;
+each of 20 frames ticks one row. There is no C, Rust or Go counterpart
+(it measures Mimic's own ui module). Apple M3 Pro, 2026-11-13.
+
+| Benchmark | Mimic, 1 core | Mimic, all cores |
+|---|---|---|
+| ui (20 frames) | 3.483 s (174 ms a frame) | 0.786 s (39 ms a frame) |
+
+Measuring it first took 250 ms a frame on one core. General compiler
+work brought it to 174 ms: `≢` of a list reads its length; indexing a
+list of records, strings or tuples is a bounds check and a load; list
+literals of those are built in place with their elements moved in.
+What is left is the model itself: every frame builds all 10,000 rows
+again (about 15 values each) and frees the previous screen. Rows whose
+data did not change could be skipped altogether (a lazy node, as in Elm),
+which is a change to the ui module's design.
 
 ### Non-atomic reference counts: no gain
 

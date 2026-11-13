@@ -162,7 +162,7 @@ def main() -> int:
                 print(f" {times[lang]:.3f} s")
         rows.append((b.name, times))
 
-    c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else "—"
+    c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
     load = os.getloadavg()[0]
     cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip() or platform.processor()
     lines = [
@@ -176,7 +176,8 @@ def main() -> int:
         "|---|---|---|---|---|---|",
     ]
     for name, t in rows:
-        lines.append(f"| {name} | {t['c']:.3f} s | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'mimic-all')} |")
+        cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
+        lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'mimic-all')} |")
     (HERE / "results.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[6:]))
     return 0

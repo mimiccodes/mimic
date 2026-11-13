@@ -86,7 +86,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (records) | Numbers stored raw in records and variants; `with` inline (in place when unshared); `¨` lends elements and moves results; `records` benchmark (1.94 s → 0.93 s CPU; 27× C, reuse is next) ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F3 (reuse) | Reuse in place: moving locals (one use), consumed parameters (`{ p with … }`), `¨` handing elements over (`mim_each_own`); `¨` over numbers without boxes, over records fused; records 26.7× → 5.9× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (keep) | `+/ ×/ ≢` over `xs ⌿ mask` fused into one pass; non-atomic reference counts measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (lists of records stored flat, `⌿` with counts and outside reductions, scheduling, GPU; ui benchmark) | |
+| F (ui) | `ui` benchmark (10k rows, view + diff per frame: 250 → 174 ms on one core, 39 ms on all); inline `≢`, handle indexing and list literals; idle fork-join workers back off; 32-byte headers; inline `with` uniqueness check ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (lists of records stored flat, lazy ui rows, `⌿` with counts and outside reductions, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
