@@ -196,7 +196,7 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
             }
         }
         Type::App(n, targs, _) => {
-            if let (Ok(Resolved::Type(tid)), Ty::Obj(id)) = (p.resolve(module, &type_path(n)), got)
+            if let (Some(Resolved::Type(tid)), Ty::Obj(id)) = (p.lookup(module, &type_path(n)), got)
                 && obj_tid(id) == tid
             {
                 for (ta, ga) in targs.iter().zip(obj_args(id)) {
@@ -475,13 +475,15 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
         return Some(x);
     }
     match t {
-        Type::Named(n, _) => match p.resolve(module, &type_path(n)) {
+        // (quiet lookups: no "did you mean" search for names that may be
+        // type parameters or simply unknown here)
+        Type::Named(n, _) => match p.lookup(module, &type_path(n)) {
             // a generic type named without arguments: any instance
-            Ok(Resolved::Type(id)) => Some(obj(id, &vec![Ty::Dyn; p.types[id].decl.params.len()])),
+            Some(Resolved::Type(id)) => Some(obj(id, &vec![Ty::Dyn; p.types[id].decl.params.len()])),
             _ => None,
         },
-        Type::App(n, args, _) => match p.resolve(module, &type_path(n)) {
-            Ok(Resolved::Type(id)) => {
+        Type::App(n, args, _) => match p.lookup(module, &type_path(n)) {
+            Some(Resolved::Type(id)) => {
                 let want = p.types[id].decl.params.len();
                 let mut a: Vec<Ty> = args.iter().map(|x| ann_env(p, module, x, env).unwrap_or(Ty::Dyn)).collect();
                 a.resize(want, Ty::Dyn);
@@ -921,8 +923,8 @@ impl Walk<'_, '_> {
             let module = self.module;
             let got = match &a.kind {
                 ExprKind::Lambda { params, .. } => Some(params.len()),
-                ExprKind::Path(path) if path.len() > 1 || self.lookup(&path[0]).is_none() => match p.resolve(module, path) {
-                    Ok(Resolved::Fn(g)) => Some(p.fns[g].arity()),
+                ExprKind::Path(path) if path.len() > 1 || self.lookup(&path[0]).is_none() => match p.lookup(module, path) {
+                    Some(Resolved::Fn(g)) => Some(p.fns[g].arity()),
                     _ => None,
                 },
                 _ => None,
@@ -1067,10 +1069,10 @@ impl Walk<'_, '_> {
             }
             ExprKind::Path(path) => match self.lookup(&path[0]) {
                 Some((_, t)) if path.len() == 1 => t,
-                _ => match self.inf.p.resolve(self.module, path) {
+                _ => match self.inf.p.lookup(self.module, path) {
                     // `None`: the type arguments are not known yet
-                    Ok(Resolved::Variant(t, _)) => obj(t, &vec![Ty::Never; self.inf.p.types[t].decl.params.len()]),
-                    Ok(Resolved::Fn(f)) => {
+                    Some(Resolved::Variant(t, _)) => obj(t, &vec![Ty::Never; self.inf.p.types[t].decl.params.len()]),
+                    Some(Resolved::Fn(f)) => {
                         self.fn_value(f);
                         Ty::Dyn
                     }
@@ -1292,7 +1294,7 @@ impl Walk<'_, '_> {
             }
             ExprKind::Record { path, fields } => {
                 let p = self.inf.p;
-                let Ok(Resolved::Type(t)) = p.resolve(self.module, path) else { return Ty::Dyn };
+                let Some(Resolved::Type(t)) = p.lookup(self.module, path) else { return Ty::Dyn };
                 let td = &p.types[t];
                 let TypeKind::Record(decl) = &td.decl.kind else { return Ty::Dyn };
                 let vts: Vec<Ty> = fields.iter().map(|(_, v, _)| self.expr(v)).collect();
@@ -1406,8 +1408,8 @@ impl Walk<'_, '_> {
                     let r = match &args[1].kind {
                         ExprKind::Lambda { .. } => self.lambda(&args[1], vec![el]),
                         ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some() => Ty::Dyn,
-                        ExprKind::Path(path) => match self.inf.p.resolve(self.module, path) {
-                            Ok(Resolved::Fn(f)) => self.call_user(id(e), f, vec![el]),
+                        ExprKind::Path(path) => match self.inf.p.lookup(self.module, path) {
+                            Some(Resolved::Fn(f)) => self.call_user(id(e), f, vec![el]),
                             _ => Ty::Dyn,
                         },
                         _ => {
@@ -1603,7 +1605,7 @@ impl Walk<'_, '_> {
             }
             Pattern::Variant { path, args, .. } => {
                 let p = self.inf.p;
-                let Ok(Resolved::Variant(tid, v)) = p.resolve(self.module, path) else { return };
+                let Some(Resolved::Variant(tid, v)) = p.lookup(self.module, path) else { return };
                 let td = &p.types[tid];
                 if let Ty::Obj(st) = t
                     && obj_tid(st) != tid
@@ -1638,7 +1640,7 @@ impl Walk<'_, '_> {
             }
             Pattern::Record { path, fields, .. } => {
                 let p = self.inf.p;
-                let Ok(Resolved::Type(tid)) = p.resolve(self.module, path) else { return };
+                let Some(Resolved::Type(tid)) = p.lookup(self.module, path) else { return };
                 let td = &p.types[tid];
                 if let Ty::Obj(st) = t
                     && obj_tid(st) != tid

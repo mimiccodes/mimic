@@ -912,7 +912,18 @@ fn codegen_and_link(
     if target.arch.starts_with("bpf") && cpu.as_deref().is_none_or(|c| c == "generic") {
         cpu = Some("v4".into());
     }
-    let obj = mimic_codegen::compile(
+    // unchanged since the last build (sources, the C declarations they
+    // import, C sources, flags, target, this compiler): the program is there
+    let out = if is_exe { dir.join(format!("{name}{}", target.exe_suffix())) } else { dir.join(format!("lib{name}.a")) };
+    let stamp = dir.join(format!("{name}.stamp"));
+    let key = build_key(input, program, profile, target, &cpu, &features, &abi);
+    let header_ok = !profile.emit_header || dir.join(format!("{name}.h")).exists();
+    if !emit_ir && !emit_net && header_ok && out.exists() && obj.exists() && fs::read_to_string(&stamp).is_ok_and(|k| k == key) {
+        let kind = if is_exe { ArtifactKind::Executable } else { ArtifactKind::StaticLibrary };
+        return Ok(Artifact { path: out, kind, note: None });
+    }
+    let _ = fs::remove_file(&stamp);
+    let objs = mimic_codegen::compile(
         program,
         &mimic_codegen::Settings {
             triple: target.llvm.clone(),
@@ -928,11 +939,15 @@ fn codegen_and_link(
             fast_math: profile.fast_math,
             debug_info: !profile.release,
             tests: profile.tests,
+            // machine code in parts at once (native builds: linked here)
+            split: if target.name.is_none() { Some(mimic_toolchain::split_codegen) } else { None },
         },
         &obj,
         emit_ir.then_some(ir.as_path()),
         emit_net.then_some(net.as_path()),
     )?;
+    let obj = objs[0].clone();
+    let parts: Vec<PathBuf> = objs[1..].to_vec();
     if profile.emit_header {
         let h = dir.join(format!("{name}.h"));
         fs::write(&h, c_header(program, &name)).map_err(|e| format!("cannot write {}: {e}", h.display()))?;
@@ -951,6 +966,7 @@ fn codegen_and_link(
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
         let mut objects = vec![obj, rt];
+        objects.extend(parts);
         objects.extend(c_objects);
         let mut job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !profile.release };
         if let Input::Project(p) = input {
@@ -958,16 +974,66 @@ fn codegen_and_link(
             job.libs = p.manifest.ffi_link.clone();
         }
         run_tool(toolchain::link(&tc, target, &job), "linking")?;
+        let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })
     } else {
         // library: static archive of the program object + runtime
         let lib = dir.join(format!("lib{name}.a"));
         let _ = fs::remove_file(&lib);
         let mut members = vec![obj, rt];
+        members.extend(parts);
         members.extend(c_objects);
         toolchain::archive(&tc, target, &lib, &members)?;
+        let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
     }
+}
+
+/// What a build's output depends on, as one key: every source file, the C
+/// declarations imported from headers, the C sources compiled with it, the
+/// profile, the target and CPU, the project's link settings, and this
+/// compiler (its runtime is inside it).
+fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu: &Option<String>, features: &Option<String>, abi: &Option<String>) -> String {
+    let mut text = String::new();
+    for f in &p.files {
+        text.push_str(&f.path.to_string_lossy());
+        text.push('\0');
+        text.push_str(&f.src);
+        text.push('\0');
+    }
+    for f in &p.fns {
+        if let mimic_check::FnKind::Extern { decl, trusted } = &f.kind {
+            text.push_str(&format!("{decl:?}{trusted}\0"));
+        }
+    }
+    for c in &p.c_sources {
+        text.push_str(&c.to_string_lossy());
+        text.push_str(&fs::read_to_string(c).unwrap_or_default());
+    }
+    if let Input::Project(pr) = input {
+        text.push_str(&format!("{:?}{:?}", pr.manifest.ffi_link, pr.manifest.ffi_search));
+    }
+    let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
+    let compiler = exe.map(|m| format!("{}:{:?}", m.len(), m.modified().ok())).unwrap_or_default();
+    text.push_str(&format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+        profile.release,
+        profile.net,
+        profile.opt,
+        profile.leak_check,
+        profile.strict_math,
+        profile.fast_math,
+        profile.tests,
+        profile.emit_header,
+        target.name(),
+        target.llvm,
+        cpu,
+        features,
+        abi,
+        compiler,
+        env!("CARGO_PKG_VERSION")
+    ));
+    format!("{:016x}-{}", mimic_syntax::fnv1a(text.as_bytes()), text.len())
 }
 
 /// A C header declaring every `extern "C" fn` of the program.

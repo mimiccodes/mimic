@@ -79,6 +79,15 @@ mimic fmt --check           # change nothing; list what is not formatted (for CI
 
 `mimic fmt` writes primitives and operators as words by default, so `⍳ 4 ¨ square ▷ +/` becomes `iota 4 each square |> sum`; `--glyphs` turns them back. It indents by nesting (4 spaces) and tidies spaces and blank lines. Your comments and line breaks stay, and the formatted file is always the same program: glyphs and words are the same tokens.
 
+## Rebuilding
+
+`mimic build` and `mimic run` remember what a program was built from: its
+source files, the C headers it imports, the flags and the compiler. When
+none of that changed, they reuse the program they built last time instead
+of compiling it again, which takes a fraction of a second. A debug build
+(`mimic run`'s default) of a small program takes about a second; a
+release build optimises more and takes a few.
+
 ## Debugging
 
 Debug builds carry debug information (DWARF), so a debugger works with your

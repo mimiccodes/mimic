@@ -78,6 +78,9 @@ pub struct Settings {
     pub fast_math: bool,
     /// Debug information (DWARF): debug builds (dbg.rs).
     pub debug_info: bool,
+    /// Machine code for a large module in parts at once, one object per
+    /// part (the toolchain's split_codegen); `None`: one object.
+    pub split: Option<SplitFn>,
     /// A test build: a `main` that lists and runs the program's tests
     /// (`test "…" { }`; see mim_test_main) instead of `main::main`.
     pub tests: bool,
@@ -115,11 +118,17 @@ impl Kind {
     }
 }
 
+/// Write machine code for an optimised module (as `LLVMModuleRef`, with an
+/// `LLVMTargetMachineRef`) in parts, one object per path; how many it wrote.
+pub type SplitFn = fn(*mut std::ffi::c_void, *mut std::ffi::c_void, &[std::path::PathBuf]) -> Result<usize, String>;
+
 /// Compile the checked program to a native object file (and optionally
 /// textual LLVM IR and the generated interaction nets). Returns the file
 /// written: the object, or — for backends that only emit assembly, such as
 /// NVPTX — the assembly next to it (`.ptx` / `.s`).
-pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<std::path::PathBuf> {
+/// Returns the files written: the object (or assembly), then any further
+/// parts of it (see Settings::split).
+pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<Vec<std::path::PathBuf>> {
     Target::initialize_all(&InitializationConfig::default());
     let triple = match &settings.triple {
         Some(t) => TargetTriple::create(t),
@@ -328,15 +337,27 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if tstr.starts_with("nvptx") || tstr.starts_with("xcore") {
         let asm = obj.with_extension(if tstr.starts_with("nvptx") { "ptx" } else { "s" });
         tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
-        return Ok(asm);
+        return Ok(vec![asm]);
+    }
+    // a large module: machine code for its parts at once, on several threads
+    let defined = cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0).count();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    if let Some(split) = settings.split
+        && defined >= 64
+        && threads > 1
+    {
+        let stem = obj.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let paths: Vec<std::path::PathBuf> = (0..threads).map(|k| if k == 0 { obj.to_path_buf() } else { obj.with_file_name(format!("{stem}.part{k}.o")) }).collect();
+        let n = split(cg.module.as_mut_ptr() as *mut std::ffi::c_void, tm.as_mut_ptr() as *mut std::ffi::c_void, &paths)?;
+        return Ok(paths[..n.max(1)].to_vec());
     }
     match tm.write_to_file(&cg.module, FileType::Object, obj) {
-        Ok(()) => Ok(obj.to_path_buf()),
+        Ok(()) => Ok(vec![obj.to_path_buf()]),
         Err(_) => {
             let ext = if triple.as_str().to_string_lossy().starts_with("nvptx") { "ptx" } else { "s" };
             let asm = obj.with_extension(ext);
             tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
-            Ok(asm)
+            Ok(vec![asm])
         }
     }
 }

@@ -15,6 +15,19 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <vector>
+#include <thread>
+#include <string>
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Utils/SplitModule.h"
+#include "llvm-c/Core.h"
+#include "llvm-c/TargetMachine.h"
 
 LLD_HAS_DRIVER(elf)
 LLD_HAS_DRIVER(macho)
@@ -171,4 +184,60 @@ extern "C" int mimic_cpu_valid(const char *triple, const char *cpu) {
         return -1;
     std::unique_ptr<llvm::MCSubtargetInfo> sti(t->createMCSubtargetInfo(tt, "", ""));
     return sti && sti->isCPUStringValid(cpu) ? 1 : 0;
+}
+
+// Machine code for an optimised module in `n` parts at once (one object file
+// per part, in `paths`): the module is split (llvm::SplitModule), each part
+// written as bitcode, then read into a context of its own and compiled on a
+// thread of its own with a copy of the target machine. 0 on success.
+extern "C" int mimic_split_codegen(LLVMModuleRef mod, LLVMTargetMachineRef tmref, int n, const char **paths, char *err, size_t errlen) {
+    llvm::Module &M = *llvm::unwrap(mod);
+    llvm::TargetMachine *TM = reinterpret_cast<llvm::TargetMachine *>(tmref);
+    std::vector<llvm::SmallString<0>> parts;
+    llvm::SplitModule(M, (unsigned)n, [&](std::unique_ptr<llvm::Module> P) {
+        llvm::SmallString<0> bc;
+        llvm::raw_svector_ostream os(bc);
+        llvm::WriteBitcodeToFile(*P, os);
+        parts.push_back(std::move(bc));
+    }, /*PreserveLocals=*/false);
+    if ((int)parts.size() > n) {
+        std::snprintf(err, errlen, "split into %d parts, expected %d", (int)parts.size(), n);
+        return 1;
+    }
+    std::vector<std::string> errors(parts.size());
+    std::vector<std::thread> threads;
+    for (size_t k = 0; k < parts.size(); k++) {
+        threads.emplace_back([&, k]() {
+            llvm::LLVMContext C;
+            auto buf = llvm::MemoryBufferRef(llvm::StringRef(parts[k].data(), parts[k].size()), "part");
+            auto MOrErr = llvm::parseBitcodeFile(buf, C);
+            if (!MOrErr) {
+                errors[k] = llvm::toString(MOrErr.takeError());
+                return;
+            }
+            std::unique_ptr<llvm::TargetMachine> T(TM->getTarget().createTargetMachine(
+                TM->getTargetTriple(), TM->getTargetCPU(), TM->getTargetFeatureString(), TM->Options,
+                TM->getRelocationModel(), TM->getCodeModel(), TM->getOptLevel()));
+            std::error_code EC;
+            llvm::raw_fd_ostream out(paths[k], EC, llvm::sys::fs::OF_None);
+            if (EC) {
+                errors[k] = EC.message();
+                return;
+            }
+            llvm::legacy::PassManager PM;
+            if (T->addPassesToEmitFile(PM, out, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+                errors[k] = "the target cannot write object files";
+                return;
+            }
+            PM.run(**MOrErr);
+        });
+    }
+    for (auto &t : threads) t.join();
+    for (auto &e : errors)
+        if (!e.empty()) {
+            std::snprintf(err, errlen, "%s", e.c_str());
+            return 1;
+        }
+    // (fewer parts than asked: the rest are empty objects nobody links)
+    return -(int)parts.size();
 }

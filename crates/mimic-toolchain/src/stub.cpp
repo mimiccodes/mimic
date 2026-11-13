@@ -24,3 +24,4 @@ extern "C" void mimic_llvm_triple(const char *in, char *out, unsigned long outle
     out[i] = 0;
 }
 extern "C" int mimic_cpu_valid(const char *, const char *) { return -1; }
+extern "C" int mimic_split_codegen(void *, void *, int, const char **, char *, unsigned long) { return 1; }

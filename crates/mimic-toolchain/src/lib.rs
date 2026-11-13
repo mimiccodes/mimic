@@ -13,6 +13,7 @@ pub mod wasi;
 use std::ffi::{CString, c_char, c_int};
 
 unsafe extern "C" {
+    fn mimic_split_codegen(module: *mut std::ffi::c_void, tm: *mut std::ffi::c_void, n: c_int, paths: *const *const c_char, err: *mut c_char, errlen: usize) -> c_int;
     fn mimic_lld_main(argc: c_int, argv: *const *const c_char) -> c_int;
     fn mimic_write_archive(out: *const c_char, kind: c_int, n: c_int, members: *const *const c_char, err: *mut c_char, errlen: usize) -> c_int;
     fn mimic_list_cpus(
@@ -177,4 +178,19 @@ pub fn cpu_valid(triple: &str, cpu: &str) -> Option<bool> {
         -1 => None,
         v => Some(v == 1),
     }
+}
+
+/// Machine code for an optimised LLVM module in parts at once, one object
+/// file per path (see mimic_split_codegen in shim.cpp). Returns how many of
+/// the paths were written (a module may split into fewer parts).
+pub fn split_codegen(module: *mut std::ffi::c_void, tm: *mut std::ffi::c_void, paths: &[std::path::PathBuf]) -> Result<usize, String> {
+    let cs: Vec<std::ffi::CString> = paths.iter().map(|p| std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap()).collect();
+    let ptrs: Vec<*const c_char> = cs.iter().map(|c| c.as_ptr()).collect();
+    let mut err = vec![0 as c_char; 1024];
+    let r = unsafe { mimic_split_codegen(module, tm, paths.len() as c_int, ptrs.as_ptr(), err.as_mut_ptr(), err.len()) };
+    if r > 0 {
+        let msg = unsafe { std::ffi::CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
+        return Err(format!("parallel code generation: {msg}"));
+    }
+    Ok((-r) as usize)
 }
