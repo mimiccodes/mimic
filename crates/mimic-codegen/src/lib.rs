@@ -4680,7 +4680,26 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 let b = self.expr(base)?;
                 let cur = self.own(self.boxed(b)?)?;
-                let V::P(cur, _) = self.call_rt_ptr("mim_obj_unique", &[self.basic(cur).into()])? else { unreachable!() };
+                // the only reference (the common case after a move): used as
+                // it is, no call; else the runtime copies it
+                let V::P(p0, _) = cur else { unreachable!() };
+                let i64t = self.ctx.i64_type();
+                let rc = self.b.build_load(i64t, p0, "rc").s()?;
+                inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+                let one = self.b.build_int_compare(IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+                let fun = self.cur_fn.unwrap();
+                let pre = self.b.get_insert_block().unwrap();
+                let copy_bb = self.ctx.append_basic_block(fun, "with_copy");
+                let go_bb = self.ctx.append_basic_block(fun, "with_go");
+                self.b.build_conditional_branch(one, go_bb, copy_bb).s()?;
+                self.b.position_at_end(copy_bb);
+                let V::P(copied, _) = self.call_rt_ptr("mim_obj_unique", &[p0.into()])? else { unreachable!() };
+                let copy_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(go_bb).s()?;
+                self.b.position_at_end(go_bb);
+                let phi = self.b.build_phi(self.ptr, "rec").s()?;
+                phi.add_incoming(&[(&p0, pre), (&copied, copy_end)]);
+                let cur = phi.as_basic_value().into_pointer_value();
                 for (k, (n, x, _)) in fields.iter().enumerate() {
                     let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
                     let v = if path_base { early[k] } else { self.expr(x)? };
