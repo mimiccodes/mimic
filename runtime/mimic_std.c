@@ -839,3 +839,73 @@ MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
 
+
+/* ==== tests (`mimic test`) ================================================= */
+
+/* failed expectations in this run (the test is run in a process of its own) */
+static int64_t g_test_failures = 0;
+
+static void expect_report(mim_val *text, int64_t line) {
+    __atomic_fetch_add(&g_test_failures, 1, __ATOMIC_RELAXED);
+    fflush(stdout);
+    fprintf(stderr, "  line %lld: expect(%.*s)\n", (long long)line, text ? (int)text->len : 0, text ? (const char *)text->data : "");
+}
+
+static void expect_show(const char *label, mim_val *v) {
+    sbuf b = {0};
+    fmt_val(&b, v, 1);
+    fprintf(stderr, "    %s %.*s\n", label, (int)b.n, b.p ? b.p : "");
+    free(b.p);
+}
+
+/* expect(cond): the source text and line are added by the compiler */
+mim_val *mim_std_expect_true(mim_val *ok, mim_val *text, mim_val *line) {
+    if (!mim_truthy(ok)) expect_report(text, geti(line, 0));
+    return NULL;
+}
+
+/* expect(a OP b) for a comparison: both sides are shown when it fails */
+mim_val *mim_std_expect_cmp(mim_val *op, mim_val *a, mim_val *b, mim_val *text, mim_val *line) {
+    int o = (int)geti(op, 0), ok;
+    if (o == OP_EQ || o == OP_NE) {
+        ok = (int)mim_equal(a, b) == (o == OP_EQ);
+    } else {
+        mim_val *r = mim_binop(o, a, b);
+        ok = 1;
+        for (int64_t i = 0; i < (r->rank == 0 ? 1 : r->len); i++) ok &= geti(r, i) != 0; /* every element */
+        mim_release(r);
+    }
+    if (!ok) {
+        expect_report(text, geti(line, 0));
+        expect_show("left: ", a);
+        expect_show("right:", b);
+    }
+    return NULL;
+}
+
+/* main of a test build: `--list` names the tests, `--run k` runs test k
+ * (exit 1 when an expectation failed), anything else runs them all here */
+int32_t mim_test_main(int32_t n, const char *const *names, mim_val *(*const *fns)(void), int32_t leak_check) {
+    if (g_argc >= 2 && strcmp(g_argv[1], "--list") == 0) {
+        for (int32_t i = 0; i < n; i++) printf("%s\n", names[i]);
+        return mim_rt_shutdown(0);
+    }
+    if (g_argc >= 3 && strcmp(g_argv[1], "--run") == 0) {
+        int32_t k = atoi(g_argv[2]);
+        if (k < 0 || k >= n) mim_panic("no such test");
+        mim_release(fns[k]());
+        int32_t code = mim_rt_shutdown(leak_check);
+        return g_test_failures ? 1 : code;
+    }
+    int32_t failed = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int64_t before = g_test_failures;
+        mim_release(fns[i]());
+        int bad = g_test_failures != before;
+        failed += bad;
+        printf("%s %s\n", bad ? "✗" : "✓", names[i]);
+    }
+    printf("%d passed, %d failed\n", n - failed, failed);
+    int32_t code = mim_rt_shutdown(leak_check);
+    return failed ? 1 : code;
+}

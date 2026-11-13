@@ -811,3 +811,67 @@ fn http_keep_alive() {
     assert_eq!(got.matches("Connection: close").count(), 1, "{got}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `mimic test`: `test "…" { }` blocks (in any file, and src/test.mim) run
+/// each in a process of its own; failures show both sides of a comparison,
+/// a panic fails only its test, words filter by name, builds leave tests out.
+#[test]
+fn test_command() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "tt"]).status().unwrap().success());
+    let proj = dir.join("tt");
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\npub fn square(x: i64) -> i64 { x * x }\n\nfn main() { print(square(3)) }\n\n\
+         test \"square\" {\n    expect(square(3) == 9)\n    expect(⍳ 4 ¨ square ▷ +/ == 14)\n}\n\n\
+         test \"wrong\" {\n    let test = 2\n    expect(square(test) == 5)\n    expect([1 2] == [1 3])\n}\n\n\
+         test \"crash\" { print([1 2][5]) }\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src/test.mim"), "module test\n\ntest \"from test.mim\" { expect(main::square(4) == 16) }\n").unwrap();
+    let out = mimic().current_dir(&proj).arg("test").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    for want in [
+        "  ✓ square",
+        "  ✗ wrong",
+        "line 14: expect(square(test) == 5)",
+        "left:  4",
+        "right: 5",
+        "right: [1 3]",
+        "  ✗ crash",
+        "index 5 out of bounds",
+        "  ✓ test › from test.mim",
+        "2 passed, 2 failed",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    let only = mimic().current_dir(&proj).args(["test", "square"]).output().unwrap();
+    assert!(only.status.success() && String::from_utf8_lossy(&only.stdout).contains("1 passed, 0 failed"), "{}", String::from_utf8_lossy(&only.stdout));
+    let run = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "9\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mimic fmt`: words by default, glyphs on request, indentation and
+/// whitespace; `--check` changes nothing and reports.
+#[test]
+fn fmt_command() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-fmt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("f.mim");
+    std::fs::write(&f, "module main\n\nfn main() {\n  // sum of squares\nprint(⍳ 4 ¨ (x ⇒ x × x) ▷ +/)   \n\n\n}\n").unwrap();
+    let check = mimic().args(["fmt", "--check"]).arg(&f).output().unwrap();
+    assert_eq!(check.status.code(), Some(1));
+    assert!(std::fs::read_to_string(&f).unwrap().contains("⍳"), "--check changes nothing");
+    assert!(mimic().arg("fmt").arg(&f).status().unwrap().success());
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "module main\n\nfn main() {\n    // sum of squares\n    print(iota 4 each (x => x * x) |> sum)\n}\n");
+    assert!(mimic().args(["fmt", "--glyphs"]).arg(&f).status().unwrap().success());
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "module main\n\nfn main() {\n    // sum of squares\n    ⎕(⍳ 4 ¨ (x ⇒ x × x) ▷ +/)\n}\n");
+    let run = mimic().arg("run").arg(&f).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "14\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

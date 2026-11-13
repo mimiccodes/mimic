@@ -304,6 +304,22 @@ impl Parser {
         match self.peek().clone() {
             Tok::Type => Ok(Item::Type(self.type_decl(is_pub, start)?)),
             Tok::Fn => Ok(Item::Fn(self.fn_decl(is_pub, start)?)),
+            // `test "name" { … }`: a test (run by `mimic test`, never part of
+            // a build). `test` is a word only here: a variable may be called
+            // `test`. It becomes a function named `test name`, which no code
+            // can call (a name with a space).
+            Tok::Ident(w) if w == "test" && matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Str(_))) => {
+                if is_pub {
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, "a test is not `pub`: tests run only under `mimic test`", start));
+                }
+                self.next();
+                let Token { tok: Tok::Str(name), span, .. } = self.next() else { unreachable!() };
+                if name.trim().is_empty() {
+                    return Err(Diag::new(&C::UNEXPECTED_TOKEN, "a test needs a name: test \"what it checks\" { … }", span));
+                }
+                let body = self.block()?;
+                Ok(Item::Fn(FnDecl { name: format!("test {name}"), type_params: vec![], is_pub: false, params: vec![], ret: None, body, export_c: false, span: start }))
+            }
             Tok::Module => {
                 self.next();
                 let (name, _) = self.ident()?;

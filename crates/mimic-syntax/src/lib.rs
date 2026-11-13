@@ -7,6 +7,7 @@ pub mod ast;
 pub mod codes;
 pub mod config;
 pub mod desugar;
+pub mod format;
 pub mod glyphs;
 pub mod lexer;
 pub mod parser;

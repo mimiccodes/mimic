@@ -59,6 +59,8 @@ pub struct Profile {
     pub cpu: Option<String>,
     /// `--emit-header`: write `<name>.h` declaring the `extern "C" fn`s.
     pub emit_header: bool,
+    /// `mimic test`: a binary that runs the tests (with src/test.mim).
+    pub tests: bool,
 }
 
 impl Profile {
@@ -68,7 +70,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, tests: false }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -83,6 +85,13 @@ pub type Option[T] = Some(T) | None
 
 // Results of operations that can fail: `else` unwraps Ok.
 pub type Result[T, E] = Ok(T) | Err(E)
+
+// Tests: `expect(…)` in a `test \"…\" { }` block becomes one of these (the
+// compiler adds the expression's text and line; runtime/mimic_std.c).
+pub extern \"mimic\" ordered {
+    fn expect_true(ok: bool, text: str, line: i64)
+    fn expect_cmp(op: i64, a: any, b: any, text: str, line: i64)
+}
 
 // Strings, lists and maps: implemented in Mimic's runtime (runtime/mimic_std.c).
 pub extern \"mimic\" {
@@ -439,10 +448,47 @@ fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) 
         }
     };
     match parse_file(&src).and_then(|mut ast| mimic_syntax::desugar::lift_arms(&mut ast).map(|_| ast)) {
-        Ok(ast) => Some(SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() }),
+        Ok(mut ast) => {
+            expect_with_text(&mut ast.module.items, &src);
+            Some(SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() })
+        }
         Err(d) => {
             report.push_in(Some(path), &display, &src, d);
             None
+        }
+    }
+}
+
+/// In tests (`test "…" { }`, functions named `test …`): `expect(a == b)`
+/// becomes `expect_cmp(op, a, b, "a == b", line)` and `expect(c)` becomes
+/// `expect_true(c, "c", line)`, so a failure shows what was expected.
+fn expect_with_text(items: &mut [mimic_syntax::ast::Item], src: &str) {
+    use mimic_syntax::ast::{BinOp, Expr, ExprKind, Item};
+    for it in items {
+        match it {
+            Item::Module(m) => expect_with_text(&mut m.items, src),
+            Item::Fn(f) if f.name.starts_with("test ") => {
+                f.body.walk_mut(&mut |e: &mut Expr| {
+                    let ExprKind::Call { callee, args } = &mut e.kind else { return };
+                    if args.len() != 1 || !matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "expect") {
+                        return;
+                    }
+                    let arg = args.pop().unwrap();
+                    let text = src.get(arg.span.start..arg.span.end).unwrap_or("").trim().to_string();
+                    let span = e.span;
+                    let lit = |k: ExprKind| Expr { kind: k, span };
+                    let line = lit(ExprKind::Int(span.line as i64));
+                    let (name, new_args) = match arg.kind {
+                        ExprKind::Binary { op: op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs } => {
+                            ("expect_cmp", vec![lit(ExprKind::Int(op as i64)), *lhs, *rhs, lit(ExprKind::Str(text)), line])
+                        }
+                        kind => ("expect_true", vec![Expr { kind, span: arg.span }, lit(ExprKind::Str(text)), line]),
+                    };
+                    *callee = Box::new(lit(ExprKind::Path(vec![name.into()])));
+                    *args = new_args;
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -455,6 +501,11 @@ pub fn load(input: &Input) -> Result<Program, Report> {
 /// Like [`load`], for a target: C headers (`extern "C" include`) are read as
 /// that target sees them.
 pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
+    load_with(input, target, false)
+}
+
+/// `tests`: also src/test.mim (for `mimic test`).
+pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program, Report> {
     let mut report = Report::default();
     let mut files = Vec::new();
     let pkg = input.name();
@@ -475,7 +526,7 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
         Input::Project(p) => {
             for path in p.sources()? {
                 // test.mim is only compiled by `mimic test`
-                if path.file_name().is_some_and(|n| n == "test.mim") && path.parent() == Some(&p.root.join("src")) {
+                if !tests && path.file_name().is_some_and(|n| n == "test.mim") && path.parent() == Some(&p.root.join("src")) {
                     continue;
                 }
                 if let Some(sf) = read_parse(&path, display_path(Some(&p.root), &path), &pkg, &mut report) {
@@ -559,7 +610,7 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
     if !ndiags.is_empty() {
         return Err(Report::from_program(&program, ndiags));
     }
-    let diags = mimic_check::check(&program, &Options { require_main: input.is_bin(), check_std: std::env::var_os("MIMIC_CHECK_STD").is_some() });
+    let diags = mimic_check::check(&program, &Options { require_main: input.is_bin() && !tests, check_std: std::env::var_os("MIMIC_CHECK_STD").is_some() });
     if !diags.is_empty() {
         return Err(Report::from_program(&program, diags));
     }
@@ -790,8 +841,10 @@ fn import_headers(
 }
 
 pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, Report> {
-    let program = load_for(input, target)?;
-    if let Input::Project(p) = input {
+    let program = load_with(input, target, profile.tests)?;
+    if let Input::Project(p) = input
+        && !profile.tests
+    {
         crate::modfile::sync(p, &program)?;
     }
     codegen_and_link(input, &program, profile, target, emit_ir, emit_net).map_err(|e| Report::from_text(&C::BUILD, &e))
@@ -816,11 +869,12 @@ fn codegen_and_link(
     }
     let dir = out_dir(input, profile, target);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let name = input.name();
+    // a test build is a program of its own (also for a library)
+    let name = if profile.tests { format!("{}-tests", input.name()) } else { input.name() };
     let obj = dir.join(format!("{name}.o"));
     let ir = dir.join(format!("{name}.ll"));
     let net = dir.join(format!("{name}.mnet"));
-    let is_exe = input.is_bin();
+    let is_exe = input.is_bin() || profile.tests;
     // cross targets: the same CPU/features/ABI as Clang uses for the C side
     let (mut cpu, mut features, abi) = match &target.llvm {
         Some(t) => match toolchain::clang_defaults(t) {
@@ -867,6 +921,7 @@ fn codegen_and_link(
             features: features.clone(),
             abi: abi.clone(),
             strict_math: profile.strict_math,
+            tests: profile.tests,
         },
         &obj,
         emit_ir.then_some(ir.as_path()),

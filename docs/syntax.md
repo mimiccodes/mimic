@@ -20,6 +20,19 @@ Run `mimic glyphs` for the live table. To type glyphs on an ASCII keyboard, use 
 * **Libraries.** A library's public API is its `module lib`. The items in it are reachable as `libname::item`.
 * **Imports.** Dependencies declared in `mim.mim` are usable from every file without an import. `use a::b::c` and `use a::b as x` are optional conveniences. Wildcard imports do not exist.
 
+### Tests
+
+`test "name" { … }` declares a test, next to the code it tests or in `src/test.mim`. Inside one, `expect(condition)` checks a condition; when `expect(a == b)` (or `!=`, `<`, `<=`, `>`, `>=`) fails, both sides are shown, and the test goes on so that one run shows every failure. `mimic test` runs the tests; builds never include them. A test can use the private items of its module. `test` is a keyword only before a test's name, so a variable can still be called `test`.
+
+```mimic
+fn square(x: i64) -> i64 { x * x }
+
+test "square" {
+    expect(square(3) == 9)
+    expect(⍳ 4 ¨ square ▷ +/ == 14)
+}
+```
+
 ### Visibility and mutability
 
 * **Everything is private** except `fn main` inside `module main`. Mark items `pub` to export them.

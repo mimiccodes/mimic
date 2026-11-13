@@ -88,7 +88,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (keep) | `+/ ×/ ≢` over `xs ⌿ mask` fused into one pass; non-atomic reference counts measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (ui) | `ui` benchmark (10k rows, view + diff per frame: 250 → 174 ms on one core, 39 ms on all); inline `≢`, handle indexing and list literals; idle fork-join workers back off; 32-byte headers; inline `with` uniqueness check ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F | Performance (lists of records stored flat, lazy ui rows, `⌿` with counts and outside reductions, GPU) | |
-| G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
+| G1 | `test "name" { }` blocks and `expect` (failures show both sides), `mimic test` (a process per test, in parallel, filters); `mimic fmt` (words or `--glyphs`, indentation, `--check`; checked to keep every token) | ✅ |
+| G | Registry, incremental builds, DWARF, benchmark CI including Rust, CI hosts, `mimic doc` | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
 ## Later milestones

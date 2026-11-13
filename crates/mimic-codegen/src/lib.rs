@@ -67,6 +67,9 @@ pub struct Settings {
     /// CPU (`--strict-math`). Off by default: like C compilers, Mimic fuses
     /// them within an expression (faster; can differ in the last bits).
     pub strict_math: bool,
+    /// A test build: a `main` that lists and runs the program's tests
+    /// (`test "…" { }`; see mim_test_main) instead of `main::main`.
+    pub tests: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -161,9 +164,14 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     // dynamic version of every net-compiled function (the native table's fallback).
     let mut roots: Vec<Key> = Vec::new();
     if settings.emit_main
+        && !settings.tests
         && let Some(e) = p.entry()
     {
         roots.push((e, vec![]));
+    }
+    let tests = if settings.tests { types::tests(p) } else { Vec::new() };
+    for (f, _) in &tests {
+        roots.push((*f, vec![]));
     }
     let exports: Vec<usize> = if settings.export_pub {
         p.fns
@@ -259,10 +267,15 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
         cg.net_ensure = Some(f);
     }
-    let entry_fn = match (settings.emit_main, p.entry()) {
+    let entry_fn = match (settings.emit_main && !settings.tests, p.entry()) {
         (true, Some(e)) => Some(cg.request(&(e, vec![]), Kind::Plain)?),
         _ => None,
     };
+    // every test as `ptr f()`, for the test main
+    let mut test_fns = Vec::new();
+    for (f, name) in &tests {
+        test_fns.push((name.clone(), cg.thunk(&(*f, vec![]), Kind::Plain)?));
+    }
     for f in &exports {
         cg.export(*f)?;
     }
@@ -274,6 +287,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     cg.drain()?;
     if let Some(f) = entry_fn {
         cg.emit_main(f, settings.leak_check)?;
+    }
+    if settings.tests {
+        cg.emit_test_main(&test_fns, settings.leak_check)?;
     }
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
@@ -1903,6 +1919,39 @@ impl<'ctx> Cg<'ctx, '_> {
             self.call_rt("mim_release", &[r.into()])?;
         }
         let code = self.call_rt("mim_rt_shutdown", &[self.i32c(leak_check as i32)])?.unwrap();
+        self.b.build_return(Some(&code)).s()?;
+        Ok(())
+    }
+
+    /// `main` of a test build: the runtime's mim_test_main with every test's
+    /// name and function (it lists them, runs one, or runs all).
+    fn emit_test_main(&mut self, tests: &[(String, FunctionValue<'ctx>)], leak_check: bool) -> R<()> {
+        let i32t = self.ctx.i32_type();
+        let ty = i32t.fn_type(&[i32t.into(), self.ptr.into()], false);
+        let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+        let main = self.module.add_function(if wasm { "__main_argc_argv" } else { "main" }, ty, None);
+        let bb = self.ctx.append_basic_block(main, "entry");
+        self.b.position_at_end(bb);
+        self.call_rt("mim_rt_init", &[main.get_nth_param(0).unwrap().into(), main.get_nth_param(1).unwrap().into()])?;
+        let n = tests.len().max(1) as u32;
+        let names: Vec<PointerValue> = tests.iter().map(|(t, _)| self.global_cstr(t)).collect();
+        let fns: Vec<PointerValue> = tests.iter().map(|(_, f)| self.fn_addr(*f)).collect();
+        let arr = |cg: &Self, vals: Vec<PointerValue<'ctx>>, name: &str| {
+            let vals = if vals.is_empty() { vec![cg.ptr.const_null()] } else { vals };
+            let a = cg.ptr.const_array(&vals);
+            let g = cg.module.add_global(cg.ptr.array_type(n), None, name);
+            g.set_initializer(&a);
+            g.set_constant(true);
+            g.set_linkage(Linkage::Private);
+            cg.gaddr(g)
+        };
+        let (np, fp) = (arr(self, names, "test_names"), arr(self, fns, "test_fns"));
+        let f = self.module.get_function("mim_test_main").unwrap_or_else(|| {
+            let t = i32t.fn_type(&[i32t.into(), self.ptr.into(), self.ptr.into(), i32t.into()], false);
+            self.module.add_function("mim_test_main", t, Some(Linkage::External))
+        });
+        let code = self.b.build_call(f, &[i32t.const_int(tests.len() as u64, false).into(), np.into(), fp.into(), self.i32c(leak_check as i32)], "").s()?;
+        let code = code.try_as_basic_value().basic().unwrap();
         self.b.build_return(Some(&code)).s()?;
         Ok(())
     }

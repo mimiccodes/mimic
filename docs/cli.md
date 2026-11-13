@@ -12,6 +12,8 @@
 | `mimic build --web [file.mim]` | Write the web page: `<name>-web/index.html` and `app.wasm`, ready for any static web server. |
 | `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--cpu CPU] [--strict-math] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively; `--strict-math` turns off fused multiply-add (on by default, as in C compilers) for bit-identical float results on every CPU. |
 | `mimic check [file.mim] [--emit-json] [--fix]` | Parse, resolve and check everything without generating code. `--emit-json` prints the result as JSON for editors and agents; `--fix` applies the machine-applicable fixes. See [diagnostics.md](diagnostics.md). |
+| `mimic test [file.mim] [words…] [--release]` | Run the tests: every `test "name" { … }` block of the project (or file), plus `src/test.mim`. Each test runs in a process of its own, many at once; a failed `expect(a == b)` shows both sides, and a crash fails only its own test. Words keep the tests whose names contain one of them. Exit code 1 when a test fails. Tests are never part of a build. |
+| `mimic fmt [files…] [--glyphs] [--check]` | Format the project's `.mim` files (or the given ones): primitives and operators as words (`iota`, `each`, `\|>`, `!=`, `and`), or as glyphs with `--glyphs` (`⍳ ¨ ▷ ≠ ∧`); indentation of 4 spaces per level of nesting; no trailing spaces, at most one blank line in a row. Comments and line breaks stay as written, and the result always lexes to the same program. `--check` changes nothing, lists the files that are not formatted, and exits with 1 if there are any. |
 | `mimic explain [code] [--emit-json]` | Explain an error code (`mimic explain E0401`), or list them all. |
 | `mimic mod init` | Create `mod.mim`. |
 | `mimic mod update` | Regenerate `mod.mim`. |
@@ -61,8 +63,6 @@ LLVM generates the code for that triple. If `mimic` has a C library for the targ
 
 ## Planned commands
 
-* `mimic test`, which runs `src/test.mim`
-* `mimic fmt [--glyphs|--words]`
 * `mimic ffi bind`
 * `mimic doc`
 * a package registry for `mimic install <name>`

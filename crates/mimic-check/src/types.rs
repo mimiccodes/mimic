@@ -619,8 +619,29 @@ pub fn default_roots(p: &Program, library: bool) -> Vec<Key> {
         if library && f.is_pub && p.mods[f.module].package == p.root_package {
             roots.push((fid, vec![Ty::Dyn; d.params.len()]));
         }
+        // tests are checked like the rest of the program
+        if d.name.starts_with("test ") && p.mods[f.module].package == p.root_package {
+            roots.push((fid, vec![]));
+        }
     }
     roots
+}
+
+/// The program's tests (`test "…" { }`), in source order: function and
+/// shown name (`name`, or `module::path › name` outside `main`).
+pub fn tests(p: &Program) -> Vec<(FnId, String)> {
+    let mut out = Vec::new();
+    for (fid, f) in p.fns.iter().enumerate() {
+        let FnKind::User(d) = &f.kind else { continue };
+        if !d.name.starts_with("test ") || p.mods[f.module].package != p.root_package {
+            continue;
+        }
+        let name = &d.name[5..];
+        let path = p.mod_path(f.module);
+        let shown = if path.len() <= 1 || path.last().is_some_and(|m| m == "main") { name.to_string() } else { format!("{} › {name}", path[1..].join("::")) };
+        out.push((fid, shown));
+    }
+    out
 }
 
 struct Infer<'p> {

@@ -130,6 +130,27 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Run the tests (`test "…" { }` blocks, and src/test.mim) of the
+    /// current project or a file, each in a process of its own, in parallel
+    Test {
+        /// A .mim file to test instead of the current project; other words
+        /// keep only the tests whose names contain one of them
+        args: Vec<String>,
+        #[command(flatten)]
+        profile: ProfileArgs,
+    },
+    /// Format .mim files: words for primitives and operators (or glyphs),
+    /// indentation by nesting, tidy whitespace; comments and line breaks stay
+    Fmt {
+        /// Files to format (default: every .mim file of the current project)
+        files: Vec<PathBuf>,
+        /// Write primitives and operators as glyphs (⍳ ¨ ▷ ≠ ∧) instead of words
+        #[arg(long)]
+        glyphs: bool,
+        /// Change nothing: list the files that are not formatted (exit code 1 if any)
+        #[arg(long)]
+        check: bool,
+    },
     /// Compile the current project (or a single file)
     Build {
         file: Option<PathBuf>,
@@ -469,6 +490,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
         }
+        Cmd::Test { args, profile } => test_cmd(args, profile),
+        Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
         Cmd::Mod { cmd } => mod_cmd(cmd),
         Cmd::Install { source } => {
             status("Installing", &source);
@@ -512,6 +535,123 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// `mimic fmt`: format files in place (or, with --check, only report).
+fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, String> {
+    let files = if files.is_empty() {
+        let input = driver::input_from(None).map_err(|e| e.to_string())?;
+        match input {
+            Input::Project(p) => {
+                let mut fs = p.sources()?;
+                for extra in ["mim.mim", "build.mim"] {
+                    if p.root.join(extra).is_file() {
+                        fs.push(p.root.join(extra));
+                    }
+                }
+                fs
+            }
+            Input::File(f) => vec![f],
+        }
+    } else {
+        files
+    };
+    let (mut changed, mut failed) = (Vec::new(), 0);
+    for f in &files {
+        let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+        match mimic_syntax::format::format(&src, glyphs) {
+            Ok(text) if text != src => {
+                if !check {
+                    std::fs::write(f, &text).map_err(|e| format!("cannot write {}: {e}", f.display()))?;
+                }
+                changed.push(f.display().to_string());
+            }
+            Ok(_) => {}
+            Err(d) => {
+                failed += 1;
+                eprintln!("{}:{}:{}: {}", f.display(), d.span.line, d.span.col, d.msg);
+            }
+        }
+    }
+    if check {
+        for c in &changed {
+            println!("{c}");
+        }
+        status("Checked", format!("{} file(s): {} not formatted", files.len(), changed.len()));
+        return Ok(if changed.is_empty() && failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) });
+    }
+    status("Formatted", format!("{} of {} file(s) changed", changed.len(), files.len()));
+    Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// `mimic test`: build the test program, list its tests, run each in a
+/// process of its own (a crash fails only that test), in parallel; report
+/// in source order.
+fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String> {
+    let (files, filters): (Vec<String>, Vec<String>) = args.into_iter().partition(|a| a.ends_with(".mim"));
+    if files.len() > 1 {
+        return Err("give at most one .mim file".into());
+    }
+    let input = driver::input_from(files.first().map(std::path::Path::new)).map_err(|e| e.to_string())?;
+    let mut prof = profile_of(&input, profile, false);
+    prof.tests = true;
+    let a = driver::build(&input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
+    let out = std::process::Command::new(&a.path).arg("--list").output().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
+    let names: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
+    let chosen: Vec<(usize, String)> = names.into_iter().enumerate().filter(|(_, n)| filters.is_empty() || filters.iter().any(|f| n.contains(f.as_str()))).collect();
+    if chosen.is_empty() {
+        status("Testing", if filters.is_empty() { "no tests (write `test \"what it checks\" { expect(…) }`)" } else { "no test matches" });
+        return Ok(ExitCode::SUCCESS);
+    }
+    status("Testing", format!("{} test{}", chosen.len(), if chosen.len() == 1 { "" } else { "s" }));
+    let t0 = std::time::Instant::now();
+    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(chosen.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: std::sync::Mutex<Vec<Option<(bool, String, f64)>>> = std::sync::Mutex::new(vec![None; chosen.len()]);
+    std::thread::scope(|sc| {
+        for _ in 0..jobs {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= chosen.len() {
+                    break;
+                }
+                let k = chosen[i].0;
+                let t = std::time::Instant::now();
+                let mut c = std::process::Command::new(&a.path);
+                c.args(["--run", &k.to_string()]);
+                if std::env::var_os("MIMIC_THREADS").is_none() {
+                    c.env("MIMIC_THREADS", "2"); // tests share the cores
+                }
+                let r = match c.output() {
+                    Ok(o) => {
+                        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                        text.push_str(&String::from_utf8_lossy(&o.stderr));
+                        (o.status.success(), text, t.elapsed().as_secs_f64())
+                    }
+                    Err(e) => (false, format!("cannot run the test: {e}"), 0.0),
+                };
+                results.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    let results = results.into_inner().unwrap();
+    let mut failed = 0;
+    for ((_, name), r) in chosen.iter().zip(results) {
+        let (ok, text, secs) = r.unwrap_or((false, "not run".into(), 0.0));
+        if ok {
+            println!("  ✓ {name}{}", if secs >= 0.5 { format!(" ({secs:.1} s)") } else { String::new() });
+        } else {
+            failed += 1;
+            println!("  ✗ {name}");
+            for l in text.lines() {
+                println!("    {l}");
+            }
+        }
+    }
+    let passed = chosen.len() - failed;
+    let summary = format!("{passed} passed, {failed} failed ({:.2} s)", t0.elapsed().as_secs_f64());
+    println!("  {summary}");
+    Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
 /// Report a failed check/build/run: JSON (stdout, or stderr for `run`) or text.
