@@ -93,6 +93,32 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### tree: allocation-heavy code (0.96× C)
+
+Build and count binary trees: 64 trees of depth 16, then one of depth 22
+(8.4 million nodes). Apple M3 Pro, 2026-11-13.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| tree | 1.414 s | 1.13× | 1.28× | **0.96×** | **0.74×** |
+
+From 2.3× C to 0.96×:
+
+* a variant without fields (`Leaf`, `None`) is one shared value, never
+  allocated again (half the nodes of a tree are leaves);
+* records and variants are built inline, and fields that are already owned
+  move in without a retain/release pair;
+* `match` reads the tag and the fields in place;
+* each thread keeps up to 2^18 freed blocks per size class, so a freed
+  tree's nodes serve the next tree instead of going back to `malloc`;
+* a compiled `¨` whose function can recurse times its first element and
+  shares out the rest, even when there are only a few elements: the 64
+  small trees now build on all cores (0.41 s → 0.11 s).
+
+Still to do: the one big tree is built on one core (its two halves are
+independent: general fork-join, roadmap F6), and Mimic's nodes take 64
+bytes against C's 16 (memory 474 MB vs 136 MB).
+
 ### Single core within 10% of C on every benchmark
 
 Apple M3 Pro, 12 cores, 2026-11-13. Best of 5 runs; the ratio is to C.
