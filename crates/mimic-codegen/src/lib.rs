@@ -208,7 +208,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         cur_depth: None,
         lambdas: 0,
         heaps: Default::default(),
-        descs: HashMap::new(),
+        descs: Default::default(),
         lazies: Vec::new(),
         futures: Vec::new(),
         schemas: HashMap::new(),
@@ -284,6 +284,8 @@ enum V<'ctx> {
     /// A list of numbers (or truth values) of a length known statically: the
     /// elements themselves, in registers (`[n x double]`, …); see Ty::Arr.
     A(inkwell::values::ArrayValue<'ctx>, El),
+    /// A flat record (see Cg::flat): its fields themselves, in registers.
+    R(inkwell::values::StructValue<'ctx>, Ty),
 }
 
 struct Local<'ctx> {
@@ -370,7 +372,7 @@ struct Cg<'ctx, 'p> {
     cur_depth: Option<IntValue<'ctx>>,
     lambdas: usize,
     /// Runtime descriptors of record types / union variants.
-    descs: HashMap<(TypeId, Option<usize>), PointerValue<'ctx>>,
+    descs: std::cell::RefCell<HashMap<(TypeId, Option<usize>), PointerValue<'ctx>>>,
     /// `let` bindings of array expressions that are fused into their uses
     /// instead of being materialised (pointers into the Program's AST).
     lazies: Vec<(String, *const Expr)>,
@@ -555,9 +557,46 @@ impl<'ctx> Cg<'ctx, '_> {
             Ty::Bool => self.ctx.bool_type().into(),
             _ => match fixed(t) {
                 Some((el, n)) => self.el_ty(el).array_type(n).into(),
-                None => self.ptr.into(),
+                None => match self.flat(t) {
+                    Some(fs) => {
+                        let ts: Vec<BasicTypeEnum> = fs.iter().map(|f| self.repr(*f)).collect();
+                        self.ctx.struct_type(&ts, false).into()
+                    }
+                    None => self.ptr.into(),
+                },
             },
         }
+    }
+
+    /// A record kept in registers: one whose fields are all numbers, truth
+    /// values or lists of known length (a shaped record; at most 64 numbers in
+    /// all). Its field types, in declaration order.
+    fn flat(&self, t: Ty) -> Option<Vec<Ty>> {
+        let Ty::Obj(id) = t else { return None };
+        let tid = types::obj_tid(id);
+        let mimic_syntax::ast::TypeKind::Record(fs) = &self.p.types[tid].decl.kind else { return None };
+        if fs.is_empty() {
+            return None;
+        }
+        let mut n = 0;
+        let mut out = Vec::new();
+        for (_, ft, _) in fs {
+            let f = types::field_type(self.p, tid, t, ft);
+            match f {
+                Ty::I64 | Ty::F64 | Ty::Bool => n += 1,
+                _ => match fixed(f) {
+                    Some((_, k)) => n += k as usize,
+                    None => return None,
+                },
+            }
+            out.push(f);
+        }
+        (n <= 64).then_some(out)
+    }
+
+    /// Kept in registers: a list of known length or a flat record.
+    fn in_regs(&self, t: Ty) -> bool {
+        fixed(t).is_some() || self.flat(t).is_some()
     }
 
     /// The LLVM type of one element of a list kept in registers.
@@ -629,6 +668,7 @@ impl<'ctx> Cg<'ctx, '_> {
             V::I(i) | V::B(i) => i.into(),
             V::F(f) => f.into(),
             V::A(a, _) => a.into(),
+            V::R(r, _) => r.into(),
         }
     }
 
@@ -639,6 +679,7 @@ impl<'ctx> Cg<'ctx, '_> {
             Ty::Bool => V::B(bv.into_int_value()),
             _ => match fixed(t) {
                 Some((el, _)) => V::A(bv.into_array_value(), el),
+                None if self.flat(t).is_some() => V::R(bv.into_struct_value(), t),
                 None => V::P(bv.into_pointer_value(), owned),
             },
         }
@@ -899,6 +940,17 @@ impl<'ctx> Cg<'ctx, '_> {
     fn boxed(&self, v: V<'ctx>) -> R<V<'ctx>> {
         Ok(match v {
             V::P(..) => v,
+            // a flat record becomes a record on the heap
+            V::R(r, t) => {
+                let fs = self.flat(t).ok_or("internal compiler error: not a flat record")?;
+                let Ty::Obj(id) = t else { unreachable!() };
+                let mut vals = Vec::new();
+                for (k, ft) in fs.iter().enumerate() {
+                    let x = self.b.build_extract_value(r, k as u32, "").s()?;
+                    vals.push(self.boxed(self.val_of(x, *ft, false))?);
+                }
+                self.construct_boxed(types::obj_tid(id), vals)?
+            }
             // a list in registers becomes a vector on the heap
             V::A(a, el) => {
                 let n = a.get_type().len();
@@ -935,7 +987,7 @@ impl<'ctx> Cg<'ctx, '_> {
             V::F(f) => self.b.build_float_to_signed_int(f, self.ctx.i64_type(), "").s()?,
             V::P(p, _) => self.call_rt("mim_as_i64", &[p.into()])?.unwrap().into_int_value(),
             // a list where a number is expected: the runtime reports it
-            V::A(..) => return self.to_i64(self.boxed(v)?),
+            V::A(..) | V::R(..) => return self.to_i64(self.boxed(v)?),
         })
     }
 
@@ -945,7 +997,7 @@ impl<'ctx> Cg<'ctx, '_> {
             V::I(i) => self.b.build_signed_int_to_float(i, self.ctx.f64_type(), "").s()?,
             V::B(b) => self.b.build_unsigned_int_to_float(b, self.ctx.f64_type(), "").s()?,
             V::P(p, _) => self.call_rt("mim_as_f64", &[p.into()])?.unwrap().into_float_value(),
-            V::A(..) => return self.to_f64(self.boxed(v)?),
+            V::A(..) | V::R(..) => return self.to_f64(self.boxed(v)?),
         })
     }
 
@@ -960,7 +1012,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(v)?;
                 self.b.build_int_compare(IntPredicate::NE, t, self.ctx.i64_type().const_zero(), "").s()?
             }
-            V::A(..) => return self.truth(self.boxed(v)?),
+            V::A(..) | V::R(..) => return self.truth(self.boxed(v)?),
         })
     }
 
@@ -969,6 +1021,9 @@ impl<'ctx> Cg<'ctx, '_> {
     fn as_ty(&self, v: V<'ctx>, t: Ty, what: &str) -> R<V<'ctx>> {
         if let Some((el, n)) = fixed(t) {
             return self.as_fixed(v, el, n, what);
+        }
+        if let Some(fs) = self.flat(t) {
+            return self.as_flat(v, t, &fs, what);
         }
         match (t, v) {
             (Ty::I64, V::I(_)) | (Ty::F64, V::F(_)) | (Ty::Bool, V::B(_)) => Ok(v),
@@ -1029,6 +1084,46 @@ impl<'ctx> Cg<'ctx, '_> {
         // a shaped list field is a heap vector like any other: same facts
         self.assume_live(fv, if fixed(ty).is_some() { Ty::Arr(El::F64, 0) } else { ty })?;
         Ok(fv.into_pointer_value())
+    }
+
+    /// `v` as the flat record type `t` (fields `fs`): another flat record of
+    /// the same declared type converted field by field, or a record on the
+    /// heap read field by field (each checked as usual).
+    fn as_flat(&self, v: V<'ctx>, t: Ty, fs: &[Ty], what: &str) -> R<V<'ctx>> {
+        let st = self.repr(t).into_struct_type();
+        let mut out = st.get_undef();
+        match v {
+            V::R(_, u) if u == t => return Ok(v),
+            V::R(r, u) => {
+                let us = self.flat(u).ok_or("internal compiler error: not a flat record")?;
+                for (k, ft) in fs.iter().enumerate() {
+                    let x = self.b.build_extract_value(r, k as u32, "").s()?;
+                    let x = self.as_ty(self.val_of(x, us[k], false), *ft, what)?;
+                    out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                }
+            }
+            V::P(p, _) => {
+                let Ty::Obj(id) = t else { unreachable!() };
+                let w = self.cstring(what)?;
+                // a record of this type (else the runtime reports it)
+                let d = self.desc(types::obj_tid(id), None);
+                self.call_rt("mim_check_record", &[p.into(), d.into(), w.into()])?;
+                let i32t = self.ctx.i32_type();
+                let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
+                for (k, ft) in fs.iter().enumerate() {
+                    let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[self.ctx.i64_type().const_int(k as u64, false)], "").s()? };
+                    let fv = self.b.build_load(self.ptr, fp, "").s()?.into_pointer_value();
+                    let x = self.as_ty(V::P(fv, false), *ft, what)?;
+                    out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                }
+                self.drop_tmp(v)?;
+            }
+            other => {
+                let b = self.boxed(other)?;
+                return self.as_flat(b, t, fs, what);
+            }
+        }
+        Ok(V::R(out, t))
     }
 
     /// `v` as a list of `n` elements of `el` in registers: converted from
@@ -1130,6 +1225,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_alloc_vec" => ptr.fn_type(&[i32t, i64t], false),
             "mim_heap" => ptr.fn_type(&[], false),
             "mim_fixed_in" => ptr.fn_type(&[p, i32t, i64t, p], false),
+            "mim_check_record" => void.fn_type(&[p, p, p], false),
             "mim_vec_len" => self.ctx.i64_type().fn_type(&[p, i32t], false),
             "mim_route" => self.ctx.i64_type().fn_type(&[p, i64t, p, p, p], false),
             other => panic!("unknown runtime function {other}"),
@@ -1225,7 +1321,7 @@ impl<'ctx> Cg<'ctx, '_> {
         // a vector parameter always points at a live header (rc, dtype, rank,
         // len, data): LLVM may read it early, so header checks leave loops
         for (i, t) in s.params.iter().enumerate() {
-            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, 0) | Ty::Obj(_)) {
+            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, 0) | Ty::Obj(_)) && self.flat(*t).is_none() {
                 let attr = |name: &str, v: u64| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), v);
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("nonnull", 0));
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", self.live_bytes(*t)));
@@ -2109,6 +2205,61 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok((f, pts, rt))
     }
 
+    /// `x ▷ evolve(n, step)` as a loop: `step` (a lambda) compiled as a
+    /// typed function taking the state and its captured variables.
+    fn evolve_loop(&mut self, x: &Expr, n: &Expr, step: &Expr, st: Ty) -> R<V<'ctx>> {
+        let ExprKind::Lambda { params, body } = &step.kind else { return Err("internal compiler error: evolve step".into()) };
+        let i64t = self.ctx.i64_type();
+        let x0 = self.expr(x)?;
+        let x0 = self.as_ty(x0, st, "evolve state")?;
+        // the loop owns its state (each step's result replaces it)
+        let x0 = self.own(x0)?;
+        let nv = self.expr(n)?;
+        let nv = self.to_i64(nv)?;
+        let neg = self.b.build_int_compare(IntPredicate::SLT, nv, i64t.const_zero(), "").s()?;
+        self.panic_if(neg, "evolve: the number of steps cannot be negative")?;
+        let caps = self.captures(params, body);
+        let mut capv = Vec::new();
+        for (name, t) in &caps {
+            let l = self.lookup(name).ok_or("internal error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+            let v = self.as_ty(self.val_of(bv, lt, false), *t, name)?;
+            capv.push(v);
+        }
+        let (f, _, _) = self.lambda_fn_with(step, &caps)?;
+        let fun = self.cur_fn.unwrap();
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "evolve");
+        let body_bb = self.ctx.append_basic_block(fun, "evolve_step");
+        let done = self.ctx.append_basic_block(fun, "evolve_done");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let ip = self.b.build_phi(i64t, "i").s()?;
+        let xp = self.b.build_phi(self.repr(st), "x").s()?;
+        let i = ip.as_basic_value().into_int_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, nv, "").s()?;
+        self.b.build_conditional_branch(more, body_bb, done).s()?;
+        self.b.position_at_end(body_bb);
+        let cur = self.val_of(xp.as_basic_value(), st, true);
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
+        argv.extend(capv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().ok_or("evolve: step returns nothing")?;
+        let next = self.val_of(r, st, true);
+        let next = self.as_ty(next, st, "evolve state")?;
+        self.drop_tmp(cur)?;
+        let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(head).s()?;
+        ip.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
+        self.b.position_at_end(done);
+        for v in capv {
+            self.drop_tmp(v)?;
+        }
+        Ok(self.val_of(xp.as_basic_value(), st, true))
+    }
+
     /// The outer variables a lambda's body uses: captured by value.
     fn captures(&self, params: &[String], body: &Expr) -> Vec<(String, Ty)> {
         let mut seen: Vec<(String, Ty)> = Vec::new();
@@ -2384,8 +2535,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// The runtime descriptor (`mim_desc`) of a record type or union variant.
     /// `t == usize::MAX` is the shared tuple descriptor (prints as `(a, b)`).
-    fn desc(&mut self, t: TypeId, variant: Option<usize>) -> PointerValue<'ctx> {
-        if let Some(d) = self.descs.get(&(t, variant)) {
+    fn desc(&self, t: TypeId, variant: Option<usize>) -> PointerValue<'ctx> {
+        if let Some(d) = self.descs.borrow().get(&(t, variant)) {
             return *d;
         }
         if t == usize::MAX {
@@ -2399,7 +2550,7 @@ impl<'ctx> Cg<'ctx, '_> {
             g.set_constant(true);
             g.set_linkage(Linkage::WeakODR);
             let p = self.gaddr(g);
-            self.descs.insert((t, variant), p);
+            self.descs.borrow_mut().insert((t, variant), p);
             return p;
         }
         let td = &self.p.types[t];
@@ -2442,7 +2593,7 @@ impl<'ctx> Cg<'ctx, '_> {
         g.set_constant(true);
         g.set_linkage(if std_name.is_some() { Linkage::WeakODR } else { Linkage::Private });
         let p = self.gaddr(g);
-        self.descs.insert((t, variant), p);
+        self.descs.borrow_mut().insert((t, variant), p);
         p
     }
 
@@ -2504,6 +2655,25 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// Build a record or variant from field values (in field order).
+    /// A record of type `t` on the heap from boxed field values (in field
+    /// order; they are released here).
+    fn construct_boxed(&self, t: TypeId, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let n = vals.len() as u32;
+        let arr_ty = self.ptr.array_type(n.max(1));
+        let arr = self.entry_array(arr_ty)?;
+        for (i, b) in vals.iter().enumerate() {
+            let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
+            self.b.build_store(slot, self.basic(*b)).s()?;
+        }
+        let d = self.desc(t, None);
+        let r = self.call_rt_ptr("mim_obj", &[d.into(), i64t.const_int(n as u64, false).into(), arr.into()])?;
+        for b in vals {
+            self.drop_tmp(b)?;
+        }
+        Ok(r)
+    }
+
     fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
         // (tuples use t = usize::MAX)
         let i64t = self.ctx.i64_type();
@@ -2581,6 +2751,13 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Emit the tests of a pattern against `val`; on failure jump to `fail`.
     /// The builder is left in the success path.
+    /// The type a pattern reads a part as: patterns test and take apart
+    /// values on the heap, so parts kept in registers elsewhere stay there
+    /// (a binding converts its value itself).
+    fn pat_ty(&self, t: Ty) -> Ty {
+        if self.in_regs(t) { Ty::Dyn } else { t }
+    }
+
     fn pattern_test(&mut self, pat: &Pattern, val: V<'ctx>, fail: BasicBlock<'ctx>) -> R<()> {
         let f = self.cur_fn.unwrap();
         match pat {
@@ -2639,7 +2816,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let (i, ft) = self.record_field(t, name);
                     let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
-                    let fv = self.as_ty(fv, ft, "field")?;
+                    let fv = self.as_ty(fv, self.pat_ty(ft), "field")?;
                     self.sub_test(a, fv, fail)?;
                 }
                 Ok(())
@@ -2712,7 +2889,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         continue;
                     }
                     let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
-                    let fv = self.as_ty(fv, ftys[i], "field")?;
+                    let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     // release the field on both outcomes
                     let fail_k = self.ctx.append_basic_block(f, "pat_fail");
                     self.pattern_test(a, fv, fail_k)?;
@@ -2804,7 +2981,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let (i, ft) = self.record_field(t, name);
                     let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
-                    let fv = self.as_ty(fv, ft, "field")?;
+                    let fv = self.as_ty(fv, self.pat_ty(ft), "field")?;
                     self.pattern_bind(a, fv)?;
                     self.drop_tmp(fv)?;
                 }
@@ -2872,7 +3049,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         continue;
                     }
                     let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
-                    let fv = self.as_ty(fv, ftys[i], "field")?;
+                    let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     self.pattern_bind(a, fv)?;
                     self.drop_tmp(fv)?;
                 }
@@ -3097,6 +3274,7 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         match t {
             Ty::Arr(El::F64 | El::I64 | El::Bool, 0) => assume(p, self.live_bytes(t))?,
+            Ty::Obj(_) if self.flat(t).is_some() => {}
             Ty::Obj(id) => {
                 assume(p, self.live_bytes(t))?;
                 let td = &self.p.types[types::obj_tid(id)];
@@ -3329,9 +3507,9 @@ impl<'ctx> Cg<'ctx, '_> {
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
         let v = self.expr_raw(e)?;
         let ty = self.ty_of(e);
-        match (fixed(ty), v) {
-            (Some(_), V::P(..)) => self.as_ty(v, ty, "list"),
-            (None, V::A(..)) => self.boxed(v),
+        match (self.in_regs(ty), v) {
+            (true, V::P(..)) => self.as_ty(v, ty, "value"),
+            (false, V::A(..) | V::R(..)) => self.boxed(v),
             _ => Ok(v),
         }
     }
@@ -3660,6 +3838,14 @@ impl<'ctx> Cg<'ctx, '_> {
                 {
                     let (el, n) = fixed(self.ty_of(base)).unwrap();
                     let rb = self.expr(rec)?;
+                    if let V::R(..) = rb {
+                        // a flat record: the field is in registers already
+                        let fv = self.expr(base)?;
+                        let i = self.expr(index)?;
+                        let i = self.to_i64(i)?;
+                        let r = self.index_fixed(fv, i)?;
+                        return self.as_ty(r, ty, "element");
+                    }
                     let rb = self.boxed(rb)?;
                     let fv = self.field_ptr(rb, t, name, self.ty_of(base))?;
                     let i = self.expr(index)?;
@@ -3753,6 +3939,16 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(a)?;
                 self.drop_tmp(b)?;
                 self.as_ty(r, ty, "operator result")
+            }
+            // x ▷ evolve(n, s => …) whose step keeps the state's type: a loop
+            // here, calling the step as a typed function (the state stays in
+            // registers when its type allows; no boxing per step)
+            ExprKind::Prim { prim: Prim::Evolve, args }
+                if matches!(&args[2].kind, ExprKind::Lambda { params, .. } if params.len() == 1)
+                    && ty != Ty::Dyn
+                    && ty == self.ty_of(&args[0]) =>
+            {
+                self.evolve_loop(&args[0], &args[1], &args[2], ty)
             }
             // loop words: runtime loops over function values
             ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
@@ -3871,6 +4067,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     mimic_syntax::ast::TypeKind::Record(fs) => fs.iter().map(|(_, ft, _)| types::ann_in(self.p, self.p.types[t].module, ft).unwrap_or(Ty::Dyn)).collect(),
                     _ => vec![],
                 };
+                // a flat record's fields have their own (known-length) types
+                let ftys = self.flat(ty).unwrap_or(ftys);
                 // evaluate in source order, store in declaration order
                 let mut slots: Vec<Option<V>> = vec![None; order.len()];
                 for (n, x, _) in fields {
@@ -3879,10 +4077,27 @@ impl<'ctx> Cg<'ctx, '_> {
                     slots[i] = Some(self.into_slot(v, self.ty_of(x), ftys[i], &format!("field `{n}`"))?);
                 }
                 let vals: Vec<V> = slots.into_iter().map(|s| s.ok_or("missing field")).collect::<Result<_, _>>()?;
+                // a flat record: built in registers
+                if let Some(fs) = self.flat(ty) {
+                    let st = self.repr(ty).into_struct_type();
+                    let mut out = st.get_undef();
+                    for (k, (v, ft)) in vals.into_iter().zip(&fs).enumerate() {
+                        let x = self.as_ty(v, *ft, "field")?;
+                        out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                    }
+                    return Ok(V::R(out, ty));
+                }
                 self.construct(t, None, vals)
             }
             ExprKind::Field { base, name } => {
                 let b = self.expr(base)?;
+                if let V::R(r, rt) = b {
+                    let Ty::Obj(id) = rt else { unreachable!() };
+                    let k = self.p.types[types::obj_tid(id)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                    let fs = self.flat(rt).unwrap();
+                    let x = self.b.build_extract_value(r, k as u32, name).s()?;
+                    return self.as_ty(self.val_of(x, fs[k], false), ty, &format!("field `{name}`"));
+                }
                 let b = self.boxed(b)?;
                 let r = match self.ty_of(base) {
                     Ty::Tup(_) => {
@@ -3913,6 +4128,21 @@ impl<'ctx> Cg<'ctx, '_> {
                 };
                 self.drop_tmp(b)?;
                 self.as_ty(r, ty, &format!("field `{name}`"))
+            }
+            ExprKind::With { base, fields } if self.flat(ty).is_some() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) => {
+                let b = self.expr(base)?;
+                let fs = self.flat(ty).unwrap();
+                let Ty::Obj(id) = ty else { unreachable!() };
+                let tid = types::obj_tid(id);
+                let cur = self.as_ty(b, ty, "record")?;
+                let V::R(mut r, _) = cur else { return Err("internal compiler error: flat record".into()) };
+                for (n, x, _) in fields {
+                    let k = self.p.types[tid].field_index(n).ok_or("unknown field")?;
+                    let v = self.expr(x)?;
+                    let v = self.into_slot(v, self.ty_of(x), fs[k], &format!("field `{n}`"))?;
+                    r = self.b.build_insert_value(r, self.basic(v), k as u32, "").s()?.into_struct_value();
+                }
+                Ok(V::R(r, ty))
             }
             ExprKind::With { base, fields } => {
                 let Ty::Obj(t) = self.ty_of(base) else { return Err("`with` needs a record".into()) };
@@ -3971,7 +4201,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let sv = self.expr(scrut)?;
                 // patterns read lists through the runtime: a list in registers
                 // is boxed once (and released with the match)
-                let sv = if let V::A(..) = sv { self.boxed(sv)? } else { sv };
+                let sv = if let V::A(..) | V::R(..) = sv { self.boxed(sv)? } else { sv };
                 let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
                 let f = self.cur_fn.unwrap();
                 // keep an owned scrutinee in a scope so early `return`s release it

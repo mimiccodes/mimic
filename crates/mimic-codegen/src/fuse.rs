@@ -591,6 +591,35 @@ impl<'ctx> Cg<'ctx, '_> {
         })
     }
 
+    /// Ask LLVM to unroll the loop whose back edge is `br` completely
+    /// (`!llvm.loop !{self, !{"llvm.loop.unroll.full"}}`: a self-referential
+    /// node, built through LLVM's C API).
+    fn unroll_fully(&self, br: inkwell::values::InstructionValue<'ctx>) {
+        use inkwell::values::AsValueRef;
+        use std::ffi::c_void;
+        unsafe extern "C" {
+            fn LLVMMDStringInContext2(c: *mut c_void, s: *const std::ffi::c_char, n: usize) -> *mut c_void;
+            fn LLVMMDNodeInContext2(c: *mut c_void, mds: *mut *mut c_void, n: usize) -> *mut c_void;
+            fn LLVMTemporaryMDNode(c: *mut c_void, mds: *mut *mut c_void, n: usize) -> *mut c_void;
+            fn LLVMMetadataReplaceAllUsesWith(tmp: *mut c_void, md: *mut c_void);
+            fn LLVMMetadataAsValue(c: *mut c_void, md: *mut c_void) -> *mut c_void;
+            fn LLVMSetMetadata(v: *mut c_void, kind: u32, md: *mut c_void);
+        }
+        let c = self.ctx.raw() as *mut c_void;
+        let kind = self.ctx.get_kind_id("llvm.loop");
+        let name = "llvm.loop.unroll.full";
+        unsafe {
+            let s = LLVMMDStringInContext2(c, name.as_ptr() as *const _, name.len());
+            let mut ops = [s];
+            let full = LLVMMDNodeInContext2(c, ops.as_mut_ptr(), 1);
+            let tmp = LLVMTemporaryMDNode(c, std::ptr::null_mut(), 0);
+            let mut ops = [tmp, full];
+            let node = LLVMMDNodeInContext2(c, ops.as_mut_ptr(), 2);
+            LLVMMetadataReplaceAllUsesWith(tmp, node);
+            LLVMSetMetadata(br.as_value_ref() as *mut c_void, kind, LLVMMetadataAsValue(c, node));
+        }
+    }
+
     /// out[i] = v, for a map's output of element type `el`.
     fn store_elem(&mut self, out: BasicValueEnum<'ctx>, el: El, i: IntValue<'ctx>, v: V<'ctx>) -> R<()> {
         let i64t = self.ctx.i64_type();
@@ -645,7 +674,12 @@ impl<'ctx> Cg<'ctx, '_> {
         let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
         let more = self.b.build_int_compare(IntPredicate::SLT, i1, n, "").s()?;
         let latch = self.b.get_insert_block().unwrap();
-        self.b.build_conditional_branch(more, body, done).s()?;
+        let back = self.b.build_conditional_branch(more, body, done).s()?;
+        // a short loop of known length: LLVM writes it out once everything is
+        // inlined (indices become constants, element choices fold away)
+        if n.get_sign_extended_constant().is_some_and(|c| (0..=32).contains(&c)) {
+            self.unroll_fully(back);
+        }
         let ident = self.identity(mode, float);
         iphi.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
         aphi.add_incoming(&[(&ident, pre), (&next, latch)]);
@@ -768,7 +802,12 @@ impl<'ctx> Cg<'ctx, '_> {
         let k1n = self.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
         let more = self.b.build_int_compare(IntPredicate::SLT, k1n, nc, "").s()?;
         let latch = self.b.get_insert_block().unwrap();
-        self.b.build_conditional_branch(more, body, done).s()?;
+        let back = self.b.build_conditional_branch(more, body, done).s()?;
+        // a short loop of known length: LLVM writes it out once everything is
+        // inlined (indices become constants, element choices fold away)
+        if n.get_sign_extended_constant().is_some_and(|c| (0..=32).contains(&c)) {
+            self.unroll_fully(back);
+        }
         kphi.add_incoming(&[(&i64t.const_zero(), pre), (&k1n, latch)]);
         rphi.add_incoming(&[(&ident, pre), (&next, latch)]);
         self.b.position_at_end(done);

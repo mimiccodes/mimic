@@ -163,6 +163,32 @@ alan
 [3 5 4]
 ```
 
+## Small lists are free
+
+When the compiler can see how long a list of numbers is, it keeps short ones (up to 8 elements) in registers rather than on the heap. A literal like `[x y z]`, `⍳ 5`, or anything elementwise built from them counts. So does a record whose fields are such lists or plain numbers. Nothing in your program changes, and there is no special type to write. A point, a color or a 2×2 matrix as a list costs no more than separate variables would:
+
+```mimic run
+module main
+
+type Body = { pos: [f64], vel: [f64] }
+
+fn step(b: Body) -> Body {
+    { b with pos: b.pos + 0.5 * b.vel }
+}
+
+fn main() {
+    let b = Body { pos: [0.0 0.0 0.0], vel: [1.0 2.0 3.0] }
+    let done = b ▷ evolve(4, s => step(s))
+    print(done.pos)
+}
+```
+
+```output
+[2.0 4.0 6.0]
+```
+
+Here `step` works on six numbers in registers and the four steps allocate nothing. As soon as such a value meets code that takes a list of any length (printing it, storing it in a longer list, passing it to C), it becomes an ordinary list once, at that point.
+
 Arrays with more than one dimension are covered in the [arrays in depth](15-multidimensional-arrays.mdx) chapter.
 
 Next: [no loops](04-no-loops.mdx).

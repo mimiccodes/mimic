@@ -2416,6 +2416,15 @@ mim_val *mim_index(mim_val *xs, mim_val *i) {
 /* ==== pattern matching helpers ========================================== */
 
 /* Is `o` a record built from descriptor `d`? */
+/* A record of the type `d` describes, read field by field into registers
+ * by compiled code (codegen as_flat); anything else stops the program. */
+void mim_check_record(mim_val *o, const mim_desc *d, const char *what) {
+    if (o && o->dtype == MIM_OBJ && o->rank == 0 && o->desc == d) return;
+    char buf[200];
+    snprintf(buf, sizeof buf, "%s: expected a %s record, found %s", what, d && d->type_name ? d->type_name : "", o ? dtname(o) : "nothing");
+    mim_panic(buf);
+}
+
 int64_t mim_pat_is(mim_val *o, const mim_desc *d) { return o && o->dtype == MIM_OBJ && o->rank == 0 && o->desc == d; }
 
 /* Length of a vector (an array or string), or -1 for anything else. */
