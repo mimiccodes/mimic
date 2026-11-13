@@ -126,6 +126,8 @@ static int64_t g_grain = 16384;
 /* the same, for compiled kernels to read without a call */
 int64_t mim_grain = 16384;
 static int g_nthreads = 1;
+/* g_nthreads for compiled code (a scan on one thread makes one pass) */
+int64_t mim_threads = 1;
 static _Thread_local int t_in_parallel = 0;
 
 #if MIM_THREADS
@@ -521,6 +523,7 @@ void mim_rt_init(int32_t argc, char **argv) {
 #endif
     }
     if (g_nthreads > 256) g_nthreads = 256;
+    mim_threads = g_nthreads;
 #else
     (void)t;
     g_nthreads = 1;

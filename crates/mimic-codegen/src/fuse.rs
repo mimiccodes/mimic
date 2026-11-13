@@ -345,6 +345,8 @@ impl<'ctx> Cg<'ctx, '_> {
         let kinds: Vec<BasicTypeEnum<'ctx>> = plan.slots.iter().map(|v| v.get_type()).collect();
         let nslots = kinds.len();
         let root = root.clone();
+        // the length, when the program says it (⍳ 100000000): a known bound
+        let known_len = plan.lens.iter().find_map(|l| l.get_zero_extended_constant());
         self.in_new_fn(f, |cg| {
             let ctxp = f.get_nth_param(0).unwrap().into_pointer_value();
             let lo = f.get_nth_param(1).unwrap().into_int_value();
@@ -396,7 +398,17 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             let accphi = cg.b.build_phi(acc_ty, "acc").s()?;
             let i = iphi.as_basic_value().into_int_value();
-            let v = cg.eval_node(&root, i, &slots)?;
+            // a length the program states that fits in 32 bits: the index is
+            // computed with as a visibly small number, so LLVM can work in
+            // 32-bit lanes (twice as many per SIMD register), as C does
+            let iv = match known_len {
+                Some(n) if n <= u32::MAX as u64 => {
+                    let t = cg.b.build_int_truncate(i, cg.ctx.i32_type(), "").s()?;
+                    cg.b.build_int_z_extend(t, i64t, "i32").s()?
+                }
+                _ => i,
+            };
+            let v = cg.eval_node(&root, iv, &slots)?;
             let acc = accphi.as_basic_value();
             let next_acc: BasicValueEnum = match mode {
                 Mode::Map(el) => {
@@ -778,16 +790,30 @@ impl<'ctx> Cg<'ctx, '_> {
         let bytes = self.b.build_int_mul(nc, i64t.const_int(8, false), "").s()?;
         let bytes = self.b.build_int_add(bytes, i64t.const_int(8, false), "").s()?;
         let (parts, heap) = self.partials_buf(nc, bytes)?;
+        let f = self.cur_fn.unwrap();
+        // one chunk (one core, or a short list): it starts from nothing, so
+        // the first pass (each chunk's total) is skipped
+        let ident = self.identity(Mode::Reduce(prim, float), float);
+        let one = self.b.build_int_compare(IntPredicate::SLE, nc, i64t.const_int(1, false), "").s()?;
+        let th = self.threads()?;
+        let one_thread = self.b.build_int_compare(IntPredicate::SLE, th, i64t.const_int(1, false), "").s()?;
+        let one = self.b.build_or(one, one_thread, "").s()?;
+        let single = self.ctx.append_basic_block(f, "scan_one");
+        let multi = self.ctx.append_basic_block(f, "scan_many");
+        let scan = self.ctx.append_basic_block(f, "scan");
+        self.b.build_conditional_branch(one, single, multi).s()?;
+        self.b.position_at_end(single);
+        self.b.build_store(parts, ident).s()?;
+        self.b.build_unconditional_branch(scan).s()?;
+        self.b.position_at_end(multi);
         // 1: each chunk's own total
         let k1 = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
         let ctx1 = self.pack_ctx(&plan, &[parts.into(), grain.into()])?;
         self.par_for(n, k1, ctx1)?;
         // 2: totals → starting offsets (in place, in chunk order)
-        let f = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let body = self.ctx.append_basic_block(f, "offs");
         let done = self.ctx.append_basic_block(f, "offs_done");
-        let ident = self.identity(Mode::Reduce(prim, float), float);
         let none = self.b.build_int_compare(IntPredicate::EQ, nc, i64t.const_zero(), "").s()?;
         self.b.build_conditional_branch(none, done, body).s()?;
         self.b.position_at_end(body);
@@ -802,19 +828,18 @@ impl<'ctx> Cg<'ctx, '_> {
         let k1n = self.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
         let more = self.b.build_int_compare(IntPredicate::SLT, k1n, nc, "").s()?;
         let latch = self.b.get_insert_block().unwrap();
-        let back = self.b.build_conditional_branch(more, body, done).s()?;
-        // a short loop of known length: LLVM writes it out once everything is
-        // inlined (indices become constants, element choices fold away)
-        if n.get_sign_extended_constant().is_some_and(|c| (0..=32).contains(&c)) {
-            self.unroll_fully(back);
-        }
+        self.b.build_conditional_branch(more, body, done).s()?;
         kphi.add_incoming(&[(&i64t.const_zero(), pre), (&k1n, latch)]);
         rphi.add_incoming(&[(&ident, pre), (&next, latch)]);
         self.b.position_at_end(done);
-        // 3: the running results
+        self.b.build_unconditional_branch(scan).s()?;
+        self.b.position_at_end(scan);
+        // 3: the running results (one thread: the whole list is one chunk)
         let k2 = self.emit_kernel(&root, &plan, Mode::Scan(prim, el))?;
-        let ctx2 = self.pack_ctx(&plan, &[data, grain.into(), parts.into()])?;
-        self.par_for(n, k2, ctx2)?;
+        let sgrain = self.b.build_select(one, n, grain, "").s()?.into_int_value();
+        let sgrain = self.b.build_select(self.b.build_int_compare(IntPredicate::SGT, sgrain, i64t.const_zero(), "").s()?, sgrain, grain, "").s()?.into_int_value();
+        let ctx2 = self.pack_ctx(&plan, &[data, sgrain.into(), parts.into()])?;
+        self.scan_for(n, k2, ctx2, one)?;
         self.release_plan(&plan)?;
         self.free_partials(parts, heap)?;
         Ok(out)
@@ -830,6 +855,18 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// The runtime's chunk size (a global it sets once).
+    /// The runtime's thread count (a global it sets once).
+    fn threads(&mut self) -> R<IntValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let g = self.module.get_global("mim_threads").unwrap_or_else(|| {
+            let g = self.module.add_global(i64t, None, "mim_threads");
+            g.set_linkage(Linkage::External);
+            g
+        });
+        let p = self.gaddr(g);
+        Ok(self.b.build_load(i64t, p, "threads").s()?.into_int_value())
+    }
+
     fn grain(&mut self) -> R<IntValue<'ctx>> {
         let i64t = self.ctx.i64_type();
         let g = self.module.get_global("mim_grain").unwrap_or_else(|| {
@@ -878,6 +915,24 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Run kernel `k` over `0..n`: directly when it is one chunk (no thread
     /// pool, no locks), else through the runtime's parallel loop.
+    /// A scan's second pass: one direct call over everything when `one`
+    /// (one chunk), else the usual parallel loop.
+    fn scan_for(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>, one: IntValue<'ctx>) -> R<()> {
+        let f = self.cur_fn.unwrap();
+        let direct = self.ctx.append_basic_block(f, "scan_direct");
+        let split = self.ctx.append_basic_block(f, "scan_split");
+        let done = self.ctx.append_basic_block(f, "scan_done");
+        self.b.build_conditional_branch(one, direct, split).s()?;
+        self.b.position_at_end(direct);
+        self.b.build_call(k, &[ctx.into(), self.ctx.i64_type().const_zero().into(), n.into()], "").s()?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(split);
+        self.par_for(n, k, ctx)?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        Ok(())
+    }
+
     fn par_for(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>) -> R<()> {
         let grain = self.grain()?;
         let one = self.b.build_int_compare(IntPredicate::SLE, n, grain, "").s()?;
