@@ -87,3 +87,7 @@ tools/deps.sh          fetches and builds the native dependencies
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
 tests/nets             interaction-net programs (*.mnet + .out)
 ```
+
+## License
+
+Mimic is licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Harcorp Industries.
