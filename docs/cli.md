@@ -32,7 +32,7 @@
 
 ## Profiles
 
-* **`mimic build` produces the fastest binary by default** (the release profile). It uses `opt = 3`, the host CPU's full instruction set for both the program and the runtime, and interaction nets for parallelism. Pass `--debug` for a debug build.
+* **`mimic build` produces the fastest binary by default** (the release profile). It uses `opt = 3`, the host CPU's full instruction set for both the program and the runtime, and interaction nets for parallelism. Pass `--debug` for a debug build, which also carries debug information (DWARF) for debuggers such as lldb and gdb: breakpoints on `.mim` lines, stepping, numeric parameters and `let`s, backtraces with file and line.
 * **`mimic run` defaults to `--debug`**, for fast compiles and the leak check at exit. Pass `--release` to run the fast build.
 * **`--debug`** builds at `opt = 0`, includes debug info, and checks for leaks at exit.
 * **`--release`** builds at `opt = 3`.

@@ -45,6 +45,7 @@ mod owned;
 mod fuse;
 mod gpu;
 mod gpufn;
+mod dbg;
 mod simd;
 pub mod tonet;
 
@@ -75,6 +76,8 @@ pub struct Settings {
     /// zero's sign is ignored. Never "no NaN / no infinity": LLVM could then
     /// drop bounds checks on indices computed from floats.
     pub fast_math: bool,
+    /// Debug information (DWARF): debug builds (dbg.rs).
+    pub debug_info: bool,
     /// A test build: a `main` that lists and runs the program's tests
     /// (`test "…" { }`; see mim_test_main) instead of `main::main`.
     pub tests: bool,
@@ -214,7 +217,10 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     }
     let specs: HashMap<Key, Rc<Spec>> = tinfo.specs.into_iter().map(|(k, s)| (k, Rc::new(s))).collect();
 
+    let main_file = p.files.iter().find(|f| f.package == p.root_package).map(|f| f.path.clone()).unwrap_or_else(|| "main.mim".into());
+    let dbg = settings.debug_info.then(|| dbg::Dbg::new(&module, &ctx, &main_file, settings.opt_level >= 2));
     let mut cg = Cg {
+        dbg,
         ctx: &ctx,
         module,
         b: ctx.create_builder(),
@@ -304,6 +310,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     }
     if settings.tests {
         cg.emit_test_main(&test_fns, settings.leak_check)?;
+    }
+    if let Some(d) = &cg.dbg {
+        d.finalize();
     }
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
@@ -449,6 +458,8 @@ struct Cg<'ctx, 'p> {
     contract: bool,
     /// --fast-math (see Settings::fast_math)
     fast: bool,
+    /// Debug information being written (debug builds; dbg.rs).
+    dbg: Option<dbg::Dbg<'ctx>>,
     /// The program's `main`, when its last values need not be freed: the
     /// process ends right after it (release builds, no leak check). Freeing
     /// ten million records one by one only to exit costs more than making
@@ -1625,6 +1636,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.cur_kind = kind;
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
+        self.dbg_enter(fv, &path, Some(self.cur_mod), decl.span.line, false);
         self.scopes = vec![Vec::new()];
         self.fj_begin(fv, kind, decl)?;
         // parameters it consumes arrive owned (released at the end unless moved on)
@@ -1636,6 +1648,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let t = spec.params[i];
             let slot = self.entry_alloca(t, &prm.name)?;
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
+            self.dbg_var(&prm.name, slot, t, decl.span.line, Some(i as u32 + 1));
             let c = consumed.get(i).copied().unwrap_or(false);
             self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: c });
         }
@@ -1732,6 +1745,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.native_frame = false;
         self.cur_depth = None;
         self.fj_end();
+        self.dbg_leave();
         Ok(())
     }
 
@@ -1782,9 +1796,16 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_what = std::mem::take(&mut self.ret_what);
         let saved_futures = std::mem::take(&mut self.futures);
         let saved_kind = std::mem::replace(&mut self.cur_kind, Kind::Plain);
+        let saved_dbg = self.dbg_save();
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
+        // (made by the compiler: described in the file and at the line of
+        // the code it was made for)
+        let line = saved_dbg.as_ref().and_then(|(_, l)| l.map(|l| l.get_line())).unwrap_or(0);
+        let name = fv.get_name().to_string_lossy().into_owned();
+        self.dbg_enter(fv, &name, None, line, true);
         let r = f(self);
+        self.dbg_restore(saved_dbg);
         self.cur_fn = saved_fn;
         self.scopes = saved_scopes;
         self.native_frame = saved_native;
@@ -2026,6 +2047,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let main = self.module.add_function(if wasm { "__main_argc_argv" } else { "main" }, ty, None);
         let bb = self.ctx.append_basic_block(main, "entry");
         self.b.position_at_end(bb);
+        self.dbg_leave();
         let argc = main.get_nth_param(0).unwrap();
         let argv = main.get_nth_param(1).unwrap();
         self.call_rt("mim_rt_init", &[argc.into(), argv.into()])?;
@@ -2047,6 +2069,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let main = self.module.add_function(if wasm { "__main_argc_argv" } else { "main" }, ty, None);
         let bb = self.ctx.append_basic_block(main, "entry");
         self.b.position_at_end(bb);
+        self.dbg_leave();
         self.call_rt("mim_rt_init", &[main.get_nth_param(0).unwrap().into(), main.get_nth_param(1).unwrap().into()])?;
         let n = tests.len().max(1) as u32;
         let names: Vec<PointerValue> = tests.iter().map(|(t, _)| self.global_cstr(t)).collect();
@@ -2343,13 +2366,14 @@ impl<'ctx> Cg<'ctx, '_> {
             self.dead_block();
         }
         match s {
-            Stmt::Let { name, mutable, value, .. } => {
+            Stmt::Let { name, mutable, value, span, .. } => {
                 let v = self.expr(value)?;
                 let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);
                 let v = self.as_ty(v, t, &format!("`let {name}`"))?;
                 let v = self.own(v)?;
                 let slot = self.entry_alloca(t, name)?;
                 self.b.build_store(slot, self.basic(v)).s()?;
+                self.dbg_var(name, slot, t, span.line, None);
                 let owned = matches!(v, V::P(..));
                 let moves = std::mem::take(&mut self.let_moves);
                 self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: *mutable, moves });
@@ -4283,6 +4307,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// An expression's value, in the form its type asks for: a list of known
     /// length in registers (V::A), any other list as a pointer.
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
+        self.dbg_at(e.span);
         // computed ahead, in parallel with its siblings (forkjoin.rs)
         if let Some(v) = self.fj.pre.remove(&id(e)) {
             return Ok(v);

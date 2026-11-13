@@ -440,6 +440,29 @@ fn cpu_flag() {
     assert!(err.contains("unknown CPU `znver44`") && err.contains("did you mean `znver4`?"), "{err}");
 }
 
+/// Debug builds carry DWARF: the functions under their Mimic names, the
+/// source file, line tables; release builds carry none.
+#[test]
+fn debug_info() {
+    let dir = std::env::temp_dir().join(format!("mimic-dwarf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("dwarfy.mim");
+    std::fs::write(&f, "module main\n\nfn area(w: f64, h: f64) -> f64 {\n    let a = w * h\n    a\n}\n\nfn main() {\n    print(area(3.0, 4.0))\n}\n").unwrap();
+    let has = |release: bool| -> (bool, bool, bool) {
+        let out = mimic().arg("build").arg(&f).arg(if release { "--release" } else { "--debug" }).arg("--emit-json").output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        let exe = std::path::PathBuf::from(v["artifacts"][0]["path"].as_str().unwrap());
+        // (on macOS the DWARF stays in the object file next to the program)
+        let obj = exe.with_extension("o");
+        let bytes = std::fs::read(&obj).unwrap();
+        let find = |s: &str| bytes.windows(s.len()).any(|w| w == s.as_bytes());
+        (find("debug_line"), find("main::area"), find("dwarfy.mim"))
+    };
+    assert_eq!(has(false), (true, true, true));
+    assert_eq!(has(true), (false, false, false));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--fast-math` and `--strict-math`: every fixture of numbers gives its
 /// expected output either way (their float results are exact), and the two
 /// flags exclude each other.

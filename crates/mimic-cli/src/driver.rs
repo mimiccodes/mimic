@@ -926,6 +926,7 @@ fn codegen_and_link(
             abi: abi.clone(),
             strict_math: profile.strict_math,
             fast_math: profile.fast_math,
+            debug_info: !profile.release,
             tests: profile.tests,
         },
         &obj,
