@@ -1271,6 +1271,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_pat_at" | "mim_pat_rest" => ptr.fn_type(&[p, i64t], false),
             "mim_each" | "mim_each_own" => ptr.fn_type(&[p, p, i32t], false),
             "mim_each_raw" => ptr.fn_type(&[p, p, i32t, i32t], false),
+            "mim_each_memo" => ptr.fn_type(&[p, p, i32t, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -2662,6 +2663,15 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// A boxed-ABI wrapper around a typed lambda (for `¨`).
+    /// A list of screen parts (`[ui::Node[M]]`): what `xs ¨ row` makes in
+    /// a `view`.
+    fn screen_rows(&self, t: Ty) -> bool {
+        let Ty::Arr(El::Obj(id), _) = t else { return false };
+        let td = &self.p.types[types::obj_tid(id)];
+        let m = &self.p.mods[td.module];
+        td.name == "Node" && m.name == "ui" && m.package == "std"
+    }
+
     /// `ptr thunk(i64 bits)`: call `target` (parameter `pt`, i64 or f64,
     /// from the bits as they are; `depth`: a native body) and box its result.
     fn raw_thunk(&mut self, target: FunctionValue<'ctx>, pt: Ty, rt: Ty, depth: bool) -> R<FunctionValue<'ctx>> {
@@ -4586,6 +4596,8 @@ impl<'ctx> Cg<'ctx, '_> {
                             return self.as_ty(r, ty, "primitive result");
                         }
                     }
+                    // rows of a screen: kept from the last run (mim_each_memo)
+                    let memo = self.screen_rows(ty) && self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]);
                     let f = match &args[1].kind {
                         ExprKind::Lambda { .. } => self.lambda_thunk(&args[1])?,
                         _ => {
@@ -4606,6 +4618,15 @@ impl<'ctx> Cg<'ctx, '_> {
                         }
                     };
                     let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
+                    if memo {
+                        // this call site's kept rows (released at exit)
+                        let g = self.module.add_global(self.ptr, None, "screen_rows");
+                        g.set_linkage(Linkage::Internal);
+                        g.set_initializer(&self.ptr.const_null());
+                        let r = self.call_rt_ptr("mim_each_memo", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32), self.gaddr(g).into()])?;
+                        self.drop_tmp(a)?;
+                        return self.as_ty(r, ty, "primitive result");
+                    }
                     self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;

@@ -44,6 +44,9 @@ pub module ui {
     }
 
     extern "mimic" {
+        // the very same value, not merely an equal one (a row kept from the
+        // last screen: see mim_each_memo)
+        fn identical(a: any, b: any) -> bool
         fn in_browser() -> bool
         fn host() -> str
         fn esc() -> str
@@ -738,6 +741,10 @@ pub module ui {
 
     // The patches that turn screen `a` into screen `b` (both at `path`).
     pub fn diff[M](a: Node[M], b: Node[M], path: str) -> [Patch] {
+        if identical(a, b) { [] } else { changes(a, b, path) }
+    }
+
+    fn changes[M](a: Node[M], b: Node[M], path: str) -> [Patch] {
         match (a, b) {
             (Elem(t1, a1, k1), Elem(t2, a2, k2)) if t1 == t2 => {
                 let mine = if same_attrs(a1, a2) { [] } else { [Patch { op: "attrs", p: path, html: "", attrs: flat_attrs(a2), at: 0 }] }
@@ -774,7 +781,8 @@ pub module ui {
     fn whole_list[M](k2: [Node[M]], path: str) -> [Patch] { [Patch { op: "children", p: path, html: kids_html(k2, path), attrs: [], at: 0 }] }
 
     fn pairwise[M](k1: [Node[M]], k2: [Node[M]], path: str, n: i64) -> [Patch] {
-        flatten(⍳ n ¨ (i => diff(k1[i], k2[i], "{path}.{i}")))
+        // rows kept from the last screen are skipped before their path is made
+        flatten(⍳ n ¨ (i => if identical(k1[i], k2[i]) { [] } else { changes(k1[i], k2[i], "{path}.{i}") }))
     }
 
     // (`and` evaluates both sides: compare texts only when the lengths match)

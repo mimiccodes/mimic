@@ -1,0 +1,41 @@
+module main
+
+// rows of a screen built again only when their data changed (reuse):
+// the screens and the changes between them are those of building it all
+
+type Todo = { id: i64, title: str, done: bool }
+type Msg = Toggle(i64)
+
+fn row(t: Todo) -> ui::Node[Msg] {
+    ui::keyed("{t.id}", ui::row([ui::checkbox(t.done, on_change: (b => Toggle(t.id))), ui::text(t.title, strike: t.done)]))
+}
+
+fn view(todos: [Todo]) -> ui::Node[Msg] { ui::column(todos ¨ row) }
+
+// the same screen, every row built anew (a lambda that captures: no reuse)
+fn fresh(todos: [Todo], n: i64) -> ui::Node[Msg] { ui::column(todos ¨ (t => if n >= 0 { row(t) } else { row(t) })) }
+
+fn tick(todos: [Todo], k: i64) -> [Todo] {
+    todos ¨ (t => if t.id == k { { t with done: not t.done } } else { t })
+}
+
+fn show(ps: [ui::Patch]) { print(ps ¨ (p => "{p.op} {p.p} {p.at}")) }
+
+fn main() {
+    let a = ⍳ 5 ¨ (i => Todo { id: i, title: "t{i}", done: false })
+    let s1 = view(a)
+    let b = tick(a, 2)
+    let s2 = view(b)
+    show(ui::diff(s1, s2, "0"))
+    print(ui::html(s2) == ui::html(fresh(b, 0)))
+    let c = concat([Todo { id: 9, title: "new", done: false }], b)
+    let s3 = view(c)
+    show(ui::diff(s2, s3, "0"))
+    print(ui::html(s3) == ui::html(fresh(c, 0)))
+    let d = c ↓ 2
+    let s4 = view(d)
+    show(ui::diff(s3, s4, "0"))
+    print(ui::html(s4) == ui::html(fresh(d, 0)))
+    let e = [d[0], d[0]]
+    print(ui::html(view(e)) == ui::html(fresh(e, 0)))
+}

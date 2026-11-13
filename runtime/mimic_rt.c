@@ -1012,8 +1012,11 @@ char *mim_cstr_dup(mim_val *v) {
  * them): what they hold is alive at exit by design */
 static int64_t g_detached_running = 0;
 
+static void memo_release_all(void);
+
 int32_t mim_rt_shutdown(int32_t leak_check) {
     fflush(stdout);
+    memo_release_all(); /* rows kept for the next frame (mim_each_memo) */
     if (__atomic_load_n(&g_detached_running, __ATOMIC_ACQUIRE) > 0) leak_check = 0;
     int64_t live = 0;
     for (int i = 0; i < MAX_SLOTS; i++) live += __atomic_load_n(&g_live_slots[i].n, __ATOMIC_ACQUIRE);
@@ -2493,6 +2496,128 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     if (xs->rank >= 2) set_shape(r, xs->rank, SHAPE(xs)); /* ¨ keeps the shape */
     return r;
 }
+
+/* `xs ¨ f` where f builds part of a screen (a pure function of the
+ * element: the compiler decides): the results of the last run at this call
+ * site are kept, and an element that is the very same value as then gets
+ * its old result again instead of a new call. Values never change, and the
+ * kept elements stay alive (so their addresses cannot be reused by other
+ * values): the same address means the same value. Rows of a list whose
+ * data did not change are not built again, and ui::diff skips them. */
+typedef struct memo_tab {
+    int64_t cap; /* a power of two; 0 = empty */
+    mim_val **key, **val;
+    struct memo_tab *next_site; /* (unused) */
+} memo_tab;
+
+static inline uint64_t memo_hash(const void *p) {
+    uint64_t x = (uint64_t)(uintptr_t)p >> 4;
+    x *= 0x9E3779B97F4A7C15ULL;
+    return x ^ (x >> 29);
+}
+
+static mim_val *memo_find(const memo_tab *t, const mim_val *k) {
+    if (!t || !t->cap) return NULL;
+    uint64_t m = (uint64_t)t->cap - 1;
+    for (uint64_t i = memo_hash(k) & m;; i = (i + 1) & m) {
+        if (t->key[i] == k) return t->val[i];
+        if (!t->key[i]) return NULL;
+    }
+}
+
+static void memo_free(memo_tab *t) {
+    if (!t) return;
+    for (int64_t i = 0; i < t->cap; i++)
+        if (t->key[i]) {
+            mim_release(t->key[i]);
+            mim_release(t->val[i]);
+        }
+    free(t->key);
+    free(t->val);
+    free(t);
+}
+
+/* every call site's slot, to release what they keep at exit */
+static void **g_memo_sites[1024];
+static int32_t g_memo_nsites = 0, g_memo_lock = 0;
+
+static void memo_register(void **site) {
+    while (__atomic_exchange_n(&g_memo_lock, 1, __ATOMIC_ACQUIRE)) {
+    }
+    int known = 0;
+    for (int i = 0; i < g_memo_nsites; i++) known |= g_memo_sites[i] == site;
+    if (!known && g_memo_nsites < 1024) g_memo_sites[g_memo_nsites++] = site;
+    __atomic_store_n(&g_memo_lock, 0, __ATOMIC_RELEASE);
+}
+
+static void memo_release_all(void) {
+    for (int i = 0; i < g_memo_nsites; i++) memo_free((memo_tab *)__atomic_exchange_n(g_memo_sites[i], NULL, __ATOMIC_ACQ_REL));
+}
+
+typedef struct {
+    mim_val **in;
+    mim_fn1 f;
+    mim_val **out;
+    const memo_tab *old;
+} memo_ctx;
+
+static void memo_range(void *vc, int64_t lo, int64_t hi) {
+    memo_ctx *c = (memo_ctx *)vc;
+    for (int64_t i = lo; i < hi; i++) {
+        mim_val *r = memo_find(c->old, c->in[i]);
+        if (r) {
+            mim_retain(r);
+            c->out[i] = r;
+        } else {
+            c->out[i] = c->f(c->in[i]);
+        }
+    }
+}
+
+mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
+    need(xs, "¨ (each)");
+    if (xs->dtype != MIM_BOXED || xs->rank != 1 || xs->len == 0) return mim_each(xs, f, pure);
+    int64_t n = xs->len;
+    memo_register(site);
+    memo_tab *old = (memo_tab *)__atomic_exchange_n(site, NULL, __ATOMIC_ACQ_REL);
+    mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
+    memo_ctx c = {(mim_val **)xs->data, f, tmp, old};
+    if (pure) parallel_for_grain(n, fine_grain(n), memo_range, &c);
+    else memo_range(&c, 0, n);
+    for (int64_t i = 0; i < n; i++)
+        if (!tmp[i]) { /* a function run for its effects: nothing to keep */
+            memo_free(old);
+            for (int64_t k = 0; k < n; k++) mim_release(tmp[k]);
+            free(tmp);
+            mim_panic("¨ (each): a function that builds a screen returned nothing");
+        }
+    /* this run's elements and results, for the next run */
+    memo_tab *t = (memo_tab *)calloc(1, sizeof(memo_tab));
+    int64_t cap = 16;
+    while (cap < 2 * n) cap *= 2;
+    t->cap = cap;
+    t->key = (mim_val **)calloc((size_t)cap, sizeof(mim_val *));
+    t->val = (mim_val **)calloc((size_t)cap, sizeof(mim_val *));
+    for (int64_t i = 0; i < n; i++) {
+        mim_val *k = c.in[i];
+        uint64_t m = (uint64_t)cap - 1, j = memo_hash(k) & m;
+        while (t->key[j] && t->key[j] != k) j = (j + 1) & m;
+        if (t->key[j]) continue; /* the same element twice: once is enough */
+        mim_retain(k);
+        mim_retain(tmp[i]);
+        t->key[j] = k;
+        t->val[j] = tmp[i];
+    }
+    memo_free(old);
+    memo_free((memo_tab *)__atomic_exchange_n(site, t, __ATOMIC_ACQ_REL)); /* (another thread's, if any) */
+    mim_val *r = list_take(n, tmp);
+    free(tmp);
+    return r;
+}
+
+/* Are a and b the very same value (not merely equal)? ui::diff skips such
+ * subtrees: a row reused by mim_each_memo is unchanged. */
+mim_val *mim_std_ui_identical(mim_val *a, mim_val *b) { return mim_bool(a == b); }
 
 /* `xs ¨ f` over a vector of numbers (i64 or f64, as the compiler knows it
  * is): f takes each element's 8 bytes as they are, no box. */

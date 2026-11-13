@@ -217,16 +217,19 @@ each of 20 frames ticks one row. There is no C, Rust or Go counterpart
 
 | Benchmark | Mimic, 1 core | Mimic, all cores |
 |---|---|---|
-| ui (20 frames) | 3.483 s (174 ms a frame) | 0.786 s (39 ms a frame) |
+| ui (20 frames), every row built | 3.483 s (174 ms a frame) | 0.786 s (39 ms a frame) |
+| ui (20 frames), unchanged rows reused | **0.363 s** (including the first screen) | **0.226 s** |
 
 Measuring it first took 250 ms a frame on one core. General compiler
 work brought it to 174 ms: `≢` of a list reads its length; indexing a
 list of records, strings or tuples is a bounds check and a load; list
 literals of those are built in place with their elements moved in.
-What is left is the model itself: every frame builds all 10,000 rows
-again (about 15 values each) and frees the previous screen. Rows whose
-data did not change could be skipped altogether (a lazy node, as in Elm),
-which is a change to the ui module's design.
+Then rows whose data did not change are not built again (decided
+2026-11-13: automatic, nothing to write): `xs ¨ row` over a list of
+values, with a pure `row` capturing nothing, keeps the last run's rows by
+element (mim_each_memo), and an element that is the very same value gets
+its old row back; `ui::diff` skips identical parts before even making
+their paths. 3.48 s → 0.36 s for the 20 frames (about 10×).
 
 ### Non-atomic reference counts: no gain
 

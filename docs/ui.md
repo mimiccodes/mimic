@@ -111,6 +111,8 @@ Colours are `"#3366ff"` or names. Sizes are numbers (logical pixels). There is a
 
 `ui::keyed(key, node)` marks list items, so inserting at the top of a list does not rebuild every row. Without keys, items are matched by position, which is right for most lists.
 
+Rows are not built again when their data did not change (decided 2026-11-13: automatic, no `lazy` to write). In `xs ¨ row`, with a pure `row` that captures nothing, the runtime keeps the last screen's rows by element, and an element that is the very same value gets its old row; `ui::diff` skips identical parts at once. Immutability makes this safe: the same value cannot have changed.
+
 ## Language additions it needs
 
 * **Variant constructors as functions:** `on_input: Typed` instead of `on_input: t => Typed(t)`. This is useful everywhere, not just for interfaces.

@@ -135,6 +135,7 @@ Things to notice:
 * **No loops.** The list of rows is `⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))`, built in parallel like any other `¨`.
 * **Nested updates.** `{ s with todos[i].done: on }` changes one field of one element ([chapter 5](05-records-unions-match.mdx)).
 * **Keyed rows.** `ui::keyed("{t.id}", …)` gives each row an identity, so removing one row from a long list sends just that change.
+* **Rows that did not change are reused.** When the rows are made as `todos ¨ row` (a function of the row's own data), a row whose todo is the same value as on the last screen is not built again, and comparing the screens skips it. That keeps a 10 000-row list fast.
 * **One state per tab.** Open the page in two tabs and each has its own list. Each tab is a task on the event loop, so thousands of tabs are cheap.
 * **Functions inside a screen must be pure.** `on_input: t => { print(t); Typed(t) }` is error E0605, because the screen may be rendered at any time and in parallel.
 
