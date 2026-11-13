@@ -565,8 +565,21 @@ int64_t mim_equal(const mim_val *a, const mim_val *b) {
     if (a->dtype == MIM_OBJ && a->rank == 0) {
         if (b->dtype != MIM_OBJ || a->desc != b->desc || a->len != b->len) return 0;
         mim_val **x = (mim_val **)a->data, **y = (mim_val **)b->data;
-        for (int64_t i = 0; i < a->len; i++)
+        for (int64_t i = 0; i < a->len; i++) {
+            if (slot_raw(a, i)) { /* the same type: the same layout */
+                uint64_t p = ((const uint64_t *)a->data)[i], q = ((const uint64_t *)b->data)[i];
+                if ((a->desc->fbits >> i) & 1) {
+                    double u, w;
+                    memcpy(&u, &p, sizeof u);
+                    memcpy(&w, &q, sizeof w);
+                    if (u != w) return 0;
+                } else if (p != q) {
+                    return 0;
+                }
+                continue;
+            }
             if (!mim_equal(x[i], y[i])) return 0;
+        }
         return 1;
     }
     if (b->dtype == MIM_OBJ && b->rank == 0) return 0;

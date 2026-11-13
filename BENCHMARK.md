@@ -35,6 +35,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 9 | `json` (encode and decode 300,000 records, 21 MB) | strings, numbers, records | `json::encode`, `json::decode[T]` |
 | 10 | `http` (hello-world server, 400,000 requests) | I/O, concurrency | `http::serve`, event loop, keep-alive |
 | 11 | `ui` (frame time, 10k-row list) | diffing, rendering | `view`, `each` |
+| 12 | `records` (1M records updated 5 times) | records, immutability | `with`, `¨` |
 
 ## Building the suite, step by step
 
@@ -92,6 +93,35 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### records: the gap that is left (27× C)
+
+A million records `{id, name, x, v}` (a string and numbers), updated five
+times with `{ p with x: …, v: … }` over the whole list, then summed. C,
+Rust and Go update their arrays in place; Mimic's values are immutable,
+so each step builds a new list of new records. Apple M3 Pro, 2026-11-13.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| records | 0.045 s | 3.32× | 3.60× | 26.69× | 11.97× |
+
+The same program took 1.94 s of CPU before this step and 0.93 s after:
+
+* numbers in records and variants are stored in the object itself (8 raw
+  bytes), not as a separate boxed value per field: reading one is a load,
+  writing one a store, freeing a record no longer frees its numbers
+  (the program's own types on 64-bit targets; generic fields and the
+  standard library's types keep handles);
+* `{ r with … }` is compiled inline: the record is updated in place when
+  nothing else holds it, else copied once, and its fields are written
+  directly;
+* `xs ¨ f` over a list of records lends each element to `f` and moves the
+  results into the new list (no reference-count pairs).
+
+What is left is allocating a new record per element and step, and freeing
+the old one: the input list still holds each record when `step` runs, so
+`with` must copy. Reusing it in place needs functions to take arguments
+they consume as owned values (roadmap F3, next).
 
 ### http: a hello-world server (faster than hyper on one core)
 

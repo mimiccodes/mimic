@@ -1177,6 +1177,12 @@ impl<'ctx> Cg<'ctx, '_> {
                 let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
                 for (k, ft) in fs.iter().enumerate() {
                     let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[self.ctx.i64_type().const_int(k as u64, false)], "").s()? };
+                    if let Some(el) = self.raw_field(types::obj_tid(id), None, k) {
+                        let x = self.load_raw(fp, el)?;
+                        let x = self.as_ty(x, *ft, what)?;
+                        out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                        continue;
+                    }
                     let fv = self.b.build_load(self.ptr, fp, "").s()?.into_pointer_value();
                     let x = self.as_ty(V::P(fv, false), *ft, what)?;
                     out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
@@ -1282,6 +1288,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_get" => ptr.fn_type(&[p, i64t], false),
             "mim_obj_get_named" => ptr.fn_type(&[p, p], false),
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_obj_unique" => ptr.fn_type(&[p], false),
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
@@ -2654,9 +2661,11 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         if t == usize::MAX {
             let i32t = self.ctx.i32_type();
-            let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
+            let i64t = self.ctx.i64_type();
+            let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into(), i64t.into(), i64t.into(), i64t.into()], false);
             let (tn, vn) = (self.global_cstr("tuple"), self.global_cstr(""));
-            let val = st.const_named_struct(&[tn.into(), vn.into(), i32t.const_zero().into(), i32t.const_zero().into(), self.ptr.const_null().into()]);
+            let z = i64t.const_zero();
+            let val = st.const_named_struct(&[tn.into(), vn.into(), i32t.const_zero().into(), i32t.const_zero().into(), self.ptr.const_null().into(), z.into(), z.into(), z.into()]);
             // exported (weak) so the runtime can build tuples: mim_desc_tuple
             let g = self.module.add_global(st, None, "mim_desc_tuple");
             g.set_initializer(&val);
@@ -2688,8 +2697,28 @@ impl<'ctx> Cg<'ctx, '_> {
                 (self.ptr.const_null(), 0, names.len() as u64, self.gaddr(g))
             }
         };
-        let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into()], false);
-        let val = st.const_named_struct(&[tname.into(), vname.into(), i32t.const_int(tag, false).into(), i32t.const_int(n, false).into(), fields.into()]);
+        // numbers stored raw in the object (see raw_field)
+        let (mut raw, mut fb, mut bb) = (0u64, 0u64, 0u64);
+        for i in 0..n as usize {
+            match self.raw_field(t, variant, i) {
+                Some(El::F64) => (raw, fb) = (raw | 1 << i, fb | 1 << i),
+                Some(El::Bool) => (raw, bb) = (raw | 1 << i, bb | 1 << i),
+                Some(_) => raw |= 1 << i,
+                None => {}
+            }
+        }
+        let i64t = self.ctx.i64_type();
+        let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into(), self.ptr.into(), i64t.into(), i64t.into(), i64t.into()], false);
+        let val = st.const_named_struct(&[
+            tname.into(),
+            vname.into(),
+            i32t.const_int(tag, false).into(),
+            i32t.const_int(n, false).into(),
+            fields.into(),
+            i64t.const_int(raw, false).into(),
+            i64t.const_int(fb, false).into(),
+            i64t.const_int(bb, false).into(),
+        ]);
         // the standard library's types are known to the runtime by name
         // (`mim_desc_Ok`, `mim_desc_Response`), so intrinsics can build them
         // (`mim_desc_Ok` in the prelude, `mim_desc_json_Text` in a std module)
@@ -2836,6 +2865,11 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(self.b.build_struct_gep(vt, r, 5, "").s()?, d).s()?;
             let fields = unsafe { self.b.build_in_bounds_gep(vt, r, &[i32t.const_int(1, false)], "fields").s()? };
             for (i, v) in vals.into_iter().enumerate() {
+                if let Some(el) = self.raw_field(t, variant, i) {
+                    let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
+                    self.store_raw(fp, v, el)?;
+                    continue;
+                }
                 let b = self.boxed(v)?;
                 let b = self.own(b)?;
                 let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
@@ -2876,6 +2910,74 @@ impl<'ctx> Cg<'ctx, '_> {
     fn field_tys(&self, t: TypeId, v: usize) -> Vec<Ty> {
         let td = &self.p.types[t];
         td.variants()[v].fields.iter().map(|f| types::ann_in(self.p, td.module, f).unwrap_or(Ty::Dyn)).collect()
+    }
+
+    /// Is field `i` of a record (`variant` None) or variant stored as a raw
+    /// number (8 bytes, no box)? Fields declared `i64`, `f64` or `bool` in
+    /// the program's own types are (the standard library's types, which the
+    /// runtime builds too, keep handles; so do generic fields).
+    fn raw_field(&self, t: TypeId, variant: Option<usize>, i: usize) -> Option<El> {
+        // (a slot is pointer-sized: 64-bit targets only)
+        if t == usize::MAX || i >= 64 || self.size.get_bit_width() != 64 {
+            return None;
+        }
+        let td = &self.p.types[t];
+        if self.p.mods[td.module].package == "std" {
+            return None;
+        }
+        let ty = match variant {
+            Some(v) => *self.field_tys(t, v).get(i)?,
+            None => match &td.decl.kind {
+                mimic_syntax::ast::TypeKind::Record(fs) => types::ann_in(self.p, td.module, &fs.get(i)?.1)?,
+                _ => return None,
+            },
+        };
+        match ty {
+            Ty::I64 => Some(El::I64),
+            Ty::F64 => Some(El::F64),
+            Ty::Bool => Some(El::Bool),
+            _ => None,
+        }
+    }
+
+    /// The address of slot `i` of an object.
+    fn slot_ptr(&self, p: PointerValue<'ctx>, i: usize) -> R<PointerValue<'ctx>> {
+        let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+        let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
+        Ok(unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? })
+    }
+
+    /// A raw number field, read.
+    fn load_raw(&self, fp: PointerValue<'ctx>, el: El) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        Ok(match el {
+            El::F64 => V::F(self.b.build_load(self.ctx.f64_type(), fp, "").s()?.into_float_value()),
+            El::Bool => {
+                let x = self.b.build_load(i64t, fp, "").s()?.into_int_value();
+                V::B(self.b.build_int_compare(IntPredicate::NE, x, i64t.const_zero(), "").s()?)
+            }
+            _ => V::I(self.b.build_load(i64t, fp, "").s()?.into_int_value()),
+        })
+    }
+
+    /// A value stored as a raw number field.
+    fn store_raw(&self, fp: PointerValue<'ctx>, v: V<'ctx>, el: El) -> R<()> {
+        let i64t = self.ctx.i64_type();
+        match el {
+            El::F64 => {
+                let x = self.to_f64(v)?;
+                self.b.build_store(fp, x).s()?;
+            }
+            El::Bool => {
+                let x = self.truth(v)?;
+                self.b.build_store(fp, self.b.build_int_z_extend(x, i64t, "").s()?).s()?;
+            }
+            _ => {
+                let x = self.to_i64(v)?;
+                self.b.build_store(fp, x).s()?;
+            }
+        }
+        self.drop_tmp(v)
     }
 
     /// `kinds` and `texts` constant tables of a route pattern.
@@ -3054,7 +3156,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
                         continue;
                     }
-                    let fv = self.obj_field(b, i)?;
+                    let fv = self.obj_field(b, t, v, i)?;
                     let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     // release the field on both outcomes
                     let fail_k = self.ctx.append_basic_block(f, "pat_fail");
@@ -3112,11 +3214,12 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Field `i` of `b`, a record or variant whose type has been checked:
     /// read in place (fields follow the header), borrowed while `b` lives.
-    fn obj_field(&self, b: V<'ctx>, i: usize) -> R<V<'ctx>> {
-        let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+    fn obj_field(&self, b: V<'ctx>, t: TypeId, v: usize, i: usize) -> R<V<'ctx>> {
         let p = self.basic(b).into_pointer_value();
-        let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
-        let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
+        let fp = self.slot_ptr(p, i)?;
+        if let Some(el) = self.raw_field(t, Some(v), i) {
+            return self.load_raw(fp, el);
+        }
         Ok(V::P(self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value(), false))
     }
 
@@ -3274,7 +3377,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if matches!(a, Pattern::Wild(_) | Pattern::Lit(_)) {
                         continue;
                     }
-                    let fv = self.obj_field(b, i)?;
+                    let fv = self.obj_field(b, t, v, i)?;
                     let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     self.pattern_bind(a, fv)?;
                     self.drop_tmp(fv)?;
@@ -4386,6 +4489,15 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), i64t.const_int(i, false).into()])?
                     }
                     Ty::Obj(t) => {
+                        let tid = types::obj_tid(t);
+                        let k = self.p.types[tid].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                        if let Some(el) = self.raw_field(tid, None, k) {
+                            // a number stored in the record itself
+                            let fp = self.slot_ptr(self.basic(b).into_pointer_value(), k)?;
+                            let x = self.load_raw(fp, el)?;
+                            self.drop_tmp(b)?;
+                            return self.as_ty(x, ty, &format!("field `{name}`"));
+                        }
                         // (borrowed while the record is; an owned record passes it on)
                         let fv = self.field_ptr(b, t, name, ty)?;
                         if let Some((el, n)) = fixed(ty) {
@@ -4424,6 +4536,33 @@ impl<'ctx> Cg<'ctx, '_> {
                     r = self.b.build_insert_value(r, self.basic(v), k as u32, "").s()?.into_struct_value();
                 }
                 Ok(V::R(r, ty))
+            }
+            // a record on the heap: updated in place when nothing else holds
+            // it (else copied once), its fields written directly
+            ExprKind::With { base, fields }
+                if matches!(self.ty_of(base), Ty::Obj(_)) && self.heap_ok() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) =>
+            {
+                let Ty::Obj(t) = self.ty_of(base) else { unreachable!() };
+                let tid = types::obj_tid(t);
+                let b = self.expr(base)?;
+                let cur = self.own(self.boxed(b)?)?;
+                let V::P(cur, _) = self.call_rt_ptr("mim_obj_unique", &[self.basic(cur).into()])? else { unreachable!() };
+                for (n, x, _) in fields {
+                    let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
+                    let v = self.expr(x)?;
+                    let fp = self.slot_ptr(cur, i)?;
+                    if let Some(el) = self.raw_field(tid, None, i) {
+                        self.store_raw(fp, v, el)?;
+                        continue;
+                    }
+                    let (_, ft) = self.record_field(tid, n);
+                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
+                    let v = self.own(self.boxed(v)?)?;
+                    let old = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
+                    self.b.build_store(fp, self.basic(v)).s()?;
+                    self.release(old)?;
+                }
+                Ok(V::P(cur, true))
             }
             ExprKind::With { base, fields } => {
                 let Ty::Obj(t) = self.ty_of(base) else { return Err("`with` needs a record".into()) };

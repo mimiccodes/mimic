@@ -591,6 +591,7 @@ static int jlit(jparser *p, const char *w, size_t n) {
 
 /* A record or tuple of decoded fields, taking them over. */
 static mim_val *obj_take(const mim_desc *d, int64_t n, mim_val **f) {
+    if (d->raw) return obj_owned(d, n, f); /* numbers stored raw: converted */
     mim_val *v = alloc(MIM_OBJ, 0, n);
     v->desc = d;
     if (n) memcpy(v->data, f, sizeof(mim_val *) * (size_t)n);
@@ -945,6 +946,24 @@ static void jenc_shaped(sbuf *b, const mim_val *v, int axis, int64_t from, int i
     sb_put(b, "]", 1);
 }
 
+/* field k of a record, variant or tuple */
+static void jenc_field(sbuf *b, const mim_val *v, int64_t k, int indent, int depth) {
+    if (!slot_raw(v, k)) {
+        jenc(b, ((mim_val *const *)v->data)[k], indent, depth);
+        return;
+    }
+    uint64_t bits = ((const uint64_t *)v->data)[k];
+    if ((v->desc->fbits >> k) & 1) {
+        double x;
+        memcpy(&x, &bits, sizeof x);
+        jenc_num(b, x);
+    } else if ((v->desc->bbits >> k) & 1) {
+        sb_str(b, bits ? "true" : "false");
+    } else {
+        sb_i64(b, (int64_t)bits);
+    }
+}
+
 static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
     if (!v) {
         sb_str(b, "null");
@@ -997,7 +1016,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
                     jnl(b, indent, depth + 1);
                     jenc_str(b, d->fields[k], strlen(d->fields[k]));
                     sb_put(b, indent > 0 ? ": " : ":", indent > 0 ? 2 : 1);
-                    jenc(b, f[k], indent, depth + 1);
+                    jenc_field(b, v, k, indent, depth + 1);
                 }
                 if (v->len) jnl(b, indent, depth);
                 sb_put(b, "}", 1);
@@ -1008,7 +1027,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
                 for (int64_t k = 0; k < v->len; k++) {
                     if (k) sb_put(b, ",", 1);
                     jnl(b, indent, depth + 1);
-                    jenc(b, f[k], indent, depth + 1);
+                    jenc_field(b, v, k, indent, depth + 1);
                 }
                 if (v->len) jnl(b, indent, depth);
                 sb_put(b, "]", 1);
@@ -1025,13 +1044,13 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
             jenc_str(b, name, strlen(name));
             sb_put(b, indent > 0 ? ": " : ":", indent > 0 ? 2 : 1);
             if (v->len == 1) {
-                jenc(b, f[0], indent, depth + 1);
+                jenc_field(b, v, 0, indent, depth + 1);
             } else {
                 sb_put(b, "[", 1);
                 for (int64_t k = 0; k < v->len; k++) {
                     if (k) sb_put(b, ",", 1);
                     jnl(b, indent, depth + 2);
-                    jenc(b, f[k], indent, depth + 2);
+                    jenc_field(b, v, k, indent, depth + 2);
                 }
                 jnl(b, indent, depth + 1);
                 sb_put(b, "]", 1);

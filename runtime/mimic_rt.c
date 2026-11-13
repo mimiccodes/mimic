@@ -48,6 +48,9 @@ typedef struct {
     int32_t tag;         /* variant index */
     int32_t nfields;
     const char *const *fields; /* record field names (NULL for variants) */
+    /* fields stored as raw 8-byte numbers instead of handles (bit i: field
+     * i): i64, f64 (fbits) or bool (bbits, 0/1); the program's own types */
+    uint64_t raw, fbits, bbits;
 } mim_desc;
 
 /* FN: a function value — `len` captured handles plus a descriptor (stored in
@@ -817,7 +820,9 @@ static void release_all(mim_val **items, int64_t n) {
     while (top > 0) {
         mim_val *v = st[--top];
         mim_val **hs = (mim_val **)v->data;
+        uint64_t raw = v->dtype == MIM_OBJ && v->desc ? v->desc->raw : 0;
         for (int64_t i = 0; i < v->len; i++) {
+            if (i < 64 && (raw >> i) & 1) continue; /* a number, not a handle */
             mim_val *c = hs[i];
             if (!drop_ref(c)) continue;
             if (!holds_values(c->dtype)) {
@@ -1139,7 +1144,9 @@ static int join_dtype(int a, int b) {
 static void retain_children(mim_val *v) {
     if (!IS_HANDLES(v)) return;
     mim_val **h = (mim_val **)v->data;
-    for (int64_t i = 0; i < v->len; i++) mim_retain(h[i]);
+    uint64_t raw = v->dtype == MIM_OBJ && v->desc ? v->desc->raw : 0;
+    for (int64_t i = 0; i < v->len; i++)
+        if (!(i < 64 && (raw >> i) & 1)) mim_retain(h[i]);
 }
 
 /* ==== shapes (rank ≥ 2) ===================================================
@@ -1352,6 +1359,7 @@ mim_val *mim_std_concat(mim_val *xs, mim_val *ys);
 int64_t mim_str_cmp(mim_val *a, mim_val *b);
 int64_t mim_equal(const mim_val *a, const mim_val *b);
 static mim_val *scalar_at(const mim_val *xs, int64_t i);
+static mim_val *slot_get(const mim_val *o, int64_t i);
 
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
     need(a, "operator");
@@ -1527,14 +1535,15 @@ static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
     }
     if (v->dtype == MIM_OBJ) {
         const mim_desc *d = v->desc;
-        mim_val **h = (mim_val **)v->data;
         if (d->variant) {
             sb_str(b, d->variant);
             if (v->len) {
                 sb_str(b, "(");
                 for (int64_t i = 0; i < v->len; i++) {
                     if (i) sb_str(b, ", ");
-                    fmt_val(b, h[i], 1);
+                    mim_val *f = slot_get(v, i);
+                    fmt_val(b, f, 1);
+                    mim_release(f);
                 }
                 sb_str(b, ")");
             }
@@ -1545,7 +1554,9 @@ static void fmt_val(sbuf *b, const mim_val *v, int quoted) {
                 if (i) sb_str(b, ", ");
                 sb_str(b, d->fields[i]);
                 sb_str(b, ": ");
-                fmt_val(b, h[i], 1);
+                mim_val *f = slot_get(v, i);
+                fmt_val(b, f, 1);
+                mim_release(f);
             }
             sb_str(b, " }");
         }
@@ -1653,14 +1664,72 @@ int64_t mim_str_eq(mim_val *a, mim_val *b) {
 }
 
 /* A record or variant from `n` borrowed field values. */
+/* ---- raw number fields (mim_desc.raw) ---- */
+
+static inline int slot_raw(const mim_val *o, int64_t i) { return o->desc && i < 64 && ((o->desc->raw >> i) & 1); }
+
+/* field i of a record as a value (owned): a raw number is boxed */
+static mim_val *slot_get(const mim_val *o, int64_t i) {
+    if (!slot_raw(o, i)) {
+        mim_val *f = ((mim_val **)o->data)[i];
+        mim_retain(f);
+        return f;
+    }
+    uint64_t bits = ((const uint64_t *)o->data)[i];
+    if ((o->desc->fbits >> i) & 1) {
+        double x;
+        memcpy(&x, &bits, sizeof x);
+        return mim_float(x);
+    }
+    if ((o->desc->bbits >> i) & 1) return mim_bool(bits != 0);
+    return mim_int((int64_t)bits);
+}
+
+/* store v (borrowed) in the empty field i of a new record */
+static void slot_init(mim_val *o, int64_t i, mim_val *v) {
+    need(v, "record field");
+    if (!slot_raw(o, i)) {
+        mim_retain(v);
+        ((mim_val **)o->data)[i] = v;
+        return;
+    }
+    if (v->rank != 0 || v->dtype == MIM_CHAR || IS_HANDLES(v)) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "field `%s` holds a number, found %s", o->desc->fields ? o->desc->fields[i] : "?", dtname(v));
+        mim_panic(buf);
+    }
+    uint64_t bits;
+    if ((o->desc->fbits >> i) & 1) {
+        double x = v->dtype == MIM_F64 ? getf(v, 0) : (double)geti(v, 0);
+        memcpy(&bits, &x, sizeof bits);
+    } else if ((o->desc->bbits >> i) & 1) {
+        bits = v->dtype == MIM_F64 ? getf(v, 0) != 0 : geti(v, 0) != 0;
+    } else {
+        if (v->dtype == MIM_F64) {
+            double x = getf(v, 0);
+            if (x != (double)(int64_t)x) mim_panic("an integer field cannot hold a fraction");
+            bits = (uint64_t)(int64_t)x;
+        } else {
+            bits = (uint64_t)geti(v, 0);
+        }
+    }
+    ((uint64_t *)o->data)[i] = bits;
+}
+
+/* a copy of a record: raw fields copied, handles retained */
+static mim_val *obj_clone(const mim_val *o) {
+    mim_val *v = alloc(MIM_OBJ, 0, o->len);
+    v->desc = o->desc;
+    memcpy(v->data, o->data, sizeof(mim_val *) * (size_t)o->len);
+    for (int64_t i = 0; i < o->len; i++)
+        if (!slot_raw(o, i)) mim_retain(((mim_val **)v->data)[i]);
+    return v;
+}
+
 mim_val *mim_obj(const mim_desc *d, int64_t n, mim_val **fields) {
     mim_val *v = alloc(MIM_OBJ, 0, n);
     v->desc = d;
-    for (int64_t i = 0; i < n; i++) {
-        need(fields[i], "record field");
-        mim_retain(fields[i]);
-        ((mim_val **)v->data)[i] = fields[i];
-    }
+    for (int64_t i = 0; i < n; i++) slot_init(v, i, fields[i]);
     return v;
 }
 
@@ -1718,9 +1787,7 @@ int64_t mim_obj_tag(mim_val *o) { return obj_check(o, "match")->desc->tag; }
 mim_val *mim_obj_get(mim_val *o, int64_t i) {
     obj_check(o, "field access");
     if (i < 0 || i >= o->len) mim_panic("field index out of range");
-    mim_val *f = ((mim_val **)o->data)[i];
-    mim_retain(f);
-    return f;
+    return slot_get(o, i);
 }
 
 /* Field by name, when the record type is only known at run time (owned). */
@@ -1819,6 +1886,16 @@ int64_t mim_route(mim_val *str, int64_t n, const int64_t *kinds, const char *con
 
 /* `{ o with field_i: v }`. CONSUMES `o` (borrows `v`): when the caller held
  * the only reference the record is updated in place, otherwise it is copied. */
+/* A record to update in place (owned): itself when nothing else holds it,
+ * else a copy (the original released). For compiled `{ r with … }`. */
+mim_val *mim_obj_unique(mim_val *o) {
+    obj_check(o, "record update");
+    if (__atomic_load_n(&o->rc, __ATOMIC_ACQUIRE) == 1) return o;
+    mim_val *r = obj_clone(o);
+    mim_release(o);
+    return r;
+}
+
 mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v) {
     obj_check(o, "record update");
     need(v, "record update");
@@ -1827,10 +1904,14 @@ mim_val *mim_obj_with(mim_val *o, int64_t i, mim_val *v) {
     if (__atomic_load_n(&o->rc, __ATOMIC_ACQUIRE) == 1) {
         r = o;
     } else {
-        r = mim_obj(o->desc, o->len, (mim_val **)o->data);
+        r = obj_clone(o);
         mim_release(o);
     }
     mim_val **h = (mim_val **)r->data;
+    if (slot_raw(r, i)) {
+        slot_init(r, i, v); /* overwrites the number */
+        return r;
+    }
     mim_retain(v);
     mim_release(h[i]);
     h[i] = v;
@@ -2313,8 +2394,8 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
 
 static mim_val *scalar_at(const mim_val *xs, int64_t i) {
     switch (xs->dtype) {
-    case MIM_BOXED:
-    case MIM_OBJ: {
+    case MIM_OBJ: return slot_get(xs, i);
+    case MIM_BOXED: {
         mim_val *e = ((mim_val **)xs->data)[i];
         mim_retain(e);
         return e;
@@ -2338,6 +2419,11 @@ typedef struct {
 
 static void each_range(void *vc, int64_t lo, int64_t hi) {
     each_ctx *c = (each_ctx *)vc;
+    if (c->xs->dtype == MIM_BOXED) { /* handles: lent to f as they are */
+        mim_val **h = (mim_val **)c->xs->data;
+        for (int64_t i = lo; i < hi; i++) c->out[i] = c->f(h[i]);
+        return;
+    }
     for (int64_t i = lo; i < hi; i++) {
         mim_val *e = scalar_at(c->xs, i);
         mim_val *r = c->f(e);
@@ -2345,6 +2431,8 @@ static void each_range(void *vc, int64_t lo, int64_t hi) {
         c->out[i] = r;
     }
 }
+
+static mim_val *list_take(int64_t n, mim_val **xs);
 
 /* `pure` functions (no print / FFI, transitively — decided by the compiler)
  * run in parallel; impure ones run in order on the calling thread. */
@@ -2366,8 +2454,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
         if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
         return NULL;
     }
-    mim_val *r = mim_array_lit(n, tmp);
-    for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+    mim_val *r = list_take(n, tmp); /* the results move in */
     free(tmp);
     if (xs->rank >= 2) set_shape(r, xs->rank, SHAPE(xs)); /* ¨ keeps the shape */
     return r;
@@ -2425,8 +2512,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
         if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
         return NULL;
     }
-    mim_val *r = mim_array_lit(n, tmp);
-    for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+    mim_val *r = list_take(n, tmp); /* the results move in */
     free(tmp);
     if (xs->rank >= 2) set_shape(r, xs->rank, SHAPE(xs)); /* ¨ keeps the shape */
     return r;

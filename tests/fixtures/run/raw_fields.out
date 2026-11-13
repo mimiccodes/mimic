@@ -1,0 +1,16 @@
+P { id: 7, name: "seven", x: 2.0, on: true }
+9.0
+P { id: 7, name: "seven", x: 3.0, on: false }
+P { id: 7, name: "seven", x: 2.0, on: true }
+true
+false
+16.75
+Rect(2.0, 3.5)
+seven at 2.0
+{"id":7,"name":"seven","x":3.0,"on":false}
+Ok(P { id: 7, name: "seven", x: 3.0, on: false })
+Ok(P { id: 1, name: "j", x: 3.0, on: false })
+15.0
+Pair { a: "text", n: 3 }
+Pair { a: 1.5, n: 4 }
+(2.0, 3.0)

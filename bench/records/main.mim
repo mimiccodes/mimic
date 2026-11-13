@@ -1,0 +1,17 @@
+module main
+
+// records: a million records with a name and numbers, updated five times
+// with `with` (each step a new list), then summed
+
+type P = { id: i64, name: str, x: f64, v: f64 }
+
+fn step(p: P) -> P {
+    { p with x: p.x + p.v, v: p.v * 0.5 }
+}
+
+fn main() {
+    let ps = ⍳ 1000000 ¨ (i => P { id: i, name: "p", x: i * 1.0, v: 1.0 })
+    let moved = ps ¨ step ¨ step ¨ step ¨ step ¨ step
+    print(moved ¨ (p => p.x) ▷ +/)
+    print(moved ¨ (p => p.v * p.v * 1024.0) ▷ +/)
+}

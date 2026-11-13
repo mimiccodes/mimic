@@ -25,6 +25,7 @@ typedef struct {
     int32_t tag;              /* variant index */
     int32_t nfields;
     const char *const *fields; /* record field names */
+    uint64_t raw, fbits, bbits; /* fields stored as raw numbers (bit i: field i): i64, f64, bool */
 } mim_desc;
 
 /* FN: a function value. `len` captured handles (its environment) plus a

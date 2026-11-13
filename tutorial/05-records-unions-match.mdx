@@ -78,6 +78,8 @@ fn main() {
 [0.0 2.0 5.0]
 ```
 
+Number fields (`i64`, `f64`, `bool`) are stored in the record itself, as in a C struct, so reading one is a single load. `{ r with x: … }` updates the record in place when nothing else holds it, and copies it once otherwise.
+
 ## Unions
 
 A union is a value that is exactly one of several *variants*, and each variant can carry data:

@@ -1,0 +1,46 @@
+module main
+
+// numbers in records and variants are stored as they are (not boxed):
+// every way of reading, writing, comparing and printing them agrees
+
+type P = { id: i64, name: str, x: f64, on: bool }
+type Shape = Circle(f64) | Rect(f64, f64) | Named(str, i64)
+type Pair[A] = { a: A, n: i64 }
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => 3.0 * r * r,
+        Rect(w, h) => w * h,
+        Named(_, k) => k * 1.0,
+    }
+}
+
+fn bump(p: P) -> P { { p with x: p.x + 1, on: not p.on } }
+
+fn main() {
+    let p = P { id: 7, name: "seven", x: 2, on: true }
+    print(p)
+    print(p.x + p.id)
+    let q = bump(p)
+    print(q)
+    print(p)
+    print(p == P { id: 7, name: "seven", x: 2.0, on: true })
+    print(p == q)
+    print([Circle(1.5) Rect(2.0, 3.0) Named("n", 4)] ¨ area ▷ +/)
+    print(Rect(2.0, 3.5))
+    match p {
+        P { id: 7, x, .. } => print("seven at {x}"),
+        _ => print("other"),
+    }
+    let text = json::encode(q)
+    print(text)
+    print(json::decode[P](text))
+    print(json::decode[P]('{"id": 1, "name": "j", "x": 3, "on": false}'))
+    let ps = ⍳ 5 ¨ (i => P { id: i, name: "p{i}", x: i * 0.5, on: i % 2 == 0 })
+    print(ps ¨ bump ¨ bump ¨ (r => r.x) ▷ +/)
+    print(Pair { a: "text", n: 3 })
+    print({ Pair { a: 1.5, n: 3 } with n: 4 })
+    let shared = [p p]
+    let changed = shared ¨ bump
+    print((shared[0].x, changed[1].x))
+}
