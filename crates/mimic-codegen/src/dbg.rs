@@ -53,10 +53,17 @@ impl<'ctx> Dbg<'ctx> {
         module.add_basic_value_flag("Dwarf Version", inkwell::module::FlagBehavior::Warning, i32t.const_int(4, false));
         let mut types = HashMap::new();
         // DW_ATE_boolean 2, float 4, signed 5, address 1
-        for (n, bits, enc) in [("i64", 64, 5), ("i32", 32, 5), ("f64", 64, 4), ("f32", 32, 4), ("bool", 8, 2), ("value", 64, 1)] {
+        for (n, bits, enc) in [("i64", 64, 5), ("i32", 32, 5), ("f64", 64, 4), ("f32", 32, 4), ("bool", 8, 2)] {
             if let Ok(t) = b.create_basic_type(n, bits, enc, DIFlags::ZERO) {
                 types.insert(n, t.as_type());
             }
+        }
+        // a handle: `value`, a pointer to the runtime's block (header and
+        // elements); `mimic lldb` shows what it holds by that name
+        if let Ok(block) = b.create_basic_type("mim_val", 8, 8, DIFlags::ZERO) {
+            let ptr = b.create_pointer_type("mim_val *", block.as_type(), 64, 64, inkwell::AddressSpace::default());
+            let td = b.create_typedef(ptr.as_type(), "value", cu.get_file(), 0, cu.as_debug_info_scope(), 64);
+            types.insert("value", td.as_type());
         }
         Dbg { b, cu, files: HashMap::new(), cur: None, types }
     }
@@ -149,16 +156,26 @@ impl<'ctx> Cg<'ctx, '_> {
     pub(crate) fn dbg_var(&self, name: &str, slot: PointerValue<'ctx>, t: Ty, line: u32, arg: Option<u32>) {
         let Some(d) = self.dbg.as_ref() else { return };
         let Some((sp, file)) = d.cur else { return };
-        let key = match t {
-            Ty::I64 => "i64",
-            Ty::I32 => "i32",
-            Ty::F64 => "f64",
-            Ty::F32 => "f32",
-            Ty::Bool => "bool",
-            _ if self.repr(t).is_pointer_type() => "value",
-            _ => return,
+        let key = |t: Ty| match t {
+            Ty::I64 => Some("i64"),
+            Ty::I32 => Some("i32"),
+            Ty::F64 => Some("f64"),
+            Ty::F32 => Some("f32"),
+            Ty::Bool => Some("bool"),
+            _ => None,
         };
-        let Some(ty) = d.types.get(key).copied() else { return };
+        let ty = match (key(t), fixed(t)) {
+            (Some(k), _) => d.types.get(k).copied(),
+            // a list of known length kept in registers: an array of its elements
+            (None, Some((el, n))) => {
+                let Some(et) = key(Ty::of_el(el)).and_then(|k| d.types.get(k).copied()) else { return };
+                let bits = if el == El::Bool { 8 } else { 64 };
+                Some(d.b.create_array_type(et, bits * n as u64, 64, &[0..n as i64]).as_type())
+            }
+            _ if self.repr(t).is_pointer_type() => d.types.get("value").copied(),
+            _ => None,
+        };
+        let Some(ty) = ty else { return };
         let Some(bb) = self.b.get_insert_block() else { return };
         let scope = sp.as_debug_info_scope();
         let var = match arg {

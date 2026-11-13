@@ -11,8 +11,9 @@
 *-doc/
 *.stamp
 
-# Benchmark results (bench/run.py)
+# Benchmark results and this machine's history (bench/run.py)
 /bench/results.md
+/bench/history.jsonl
 
 # Archives
 *.zip

@@ -175,6 +175,15 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Debug the current project (or a file) in lldb: a debug build, with
+    /// Mimic's values (numbers, strings, lists, records) shown as Mimic
+    /// writes them
+    Lldb {
+        file: Option<PathBuf>,
+        /// Arguments passed to the program (after `--`)
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Compile the current project (or a single file)
     Build {
         file: Option<PathBuf>,
@@ -517,6 +526,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Test { args, profile } => test_cmd(args, profile),
         Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
         Cmd::Doc { file, std, json, out } => doc_cmd(file, std, json, out),
+        Cmd::Lldb { file, args } => lldb_cmd(file, args),
         Cmd::Mod { cmd } => mod_cmd(cmd),
         Cmd::Install { source } => {
             status("Installing", &source);
@@ -612,6 +622,30 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
 /// `mimic test`: build the test program, list its tests, run each in a
 /// process of its own (a crash fails only that test), in parallel; report
 /// in source order.
+/// lldb formatters for Mimic values (see lldb_mimic.py).
+const LLDB_FORMATTERS: &str = include_str!("lldb_mimic.py");
+
+fn lldb_cmd(file: Option<PathBuf>, args: Vec<String>) -> Result<ExitCode, String> {
+    let input = driver::input_from(file.as_deref()).map_err(|e| e.to_string())?;
+    let mut prof = Profile::for_input(&input, false);
+    prof.net = true;
+    let a = driver::build(&input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
+    let dir = packages::cache_dir().join("lldb");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let script = dir.join("mimic_values.py");
+    std::fs::write(&script, LLDB_FORMATTERS).map_err(|e| format!("cannot write {}: {e}", script.display()))?;
+    status("Debugging", a.path.display().to_string());
+    let st = std::process::Command::new("lldb")
+        .arg("-o")
+        .arg(format!("command script import {}", script.display()))
+        .arg("--")
+        .arg(&a.path)
+        .args(&args)
+        .status()
+        .map_err(|e| format!("cannot start lldb ({e}); it comes with the Xcode command line tools on macOS and the lldb package on Linux"))?;
+    Ok(if st.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
 fn doc_cmd(file: Option<PathBuf>, std: bool, json: bool, out: Option<PathBuf>) -> Result<ExitCode, String> {
     let (program, package, title, strip, default_out) = if std {
         // any program loads the standard library: an empty one

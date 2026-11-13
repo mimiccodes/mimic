@@ -17,6 +17,10 @@ and writes results.md with each time as a ratio to C.
     bench/run.py                 # everything
     bench/run.py fib sort        # some benchmarks
     bench/run.py --runs 3        # fewer timed runs
+
+Every run also appends its times to bench/history.jsonl (with the date, the
+commit and the machine) and reports any Mimic time more than 10% slower
+than the last run on the same machine.
 """
 
 import argparse
@@ -126,6 +130,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="benchmarks to run (default: all)")
     ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--history", default=str(HERE / "history.jsonl"), help="where to append this run's times ('' for nowhere)")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
@@ -164,7 +169,13 @@ def main() -> int:
 
     c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
     load = os.getloadavg()[0]
-    cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip() or platform.processor()
+    try:
+        cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        cpu = ""
+    if not cpu and Path("/proc/cpuinfo").exists():
+        cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines() if l.startswith("model name")), "")
+    cpu = cpu or platform.processor() or platform.machine()
     lines = [
         "# Benchmark results",
         "",
@@ -180,7 +191,48 @@ def main() -> int:
         lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'mimic-all')} |")
     (HERE / "results.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[6:]))
+    if a.history:
+        record(Path(a.history), cpu, a.runs, load, rows)
     return 0
+
+
+def record(path: Path, cpu: str, runs: int, load: float, rows) -> None:
+    """Append this run to the history; report Mimic times >10% slower than
+    the last run on the same machine (same CPU and core count)."""
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        commit = ""
+    entry = {
+        "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "commit": commit,
+        "cpu": cpu,
+        "os": f"{platform.system()} {platform.release()}",
+        "cores": os.cpu_count(),
+        "load": round(load, 1),
+        "runs": runs,
+        "results": {name: {k: round(v, 4) for k, v in t.items()} for name, t in rows},
+    }
+    last = None
+    if path.exists():
+        for line in path.read_text().splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("cpu") == cpu and e.get("cores") == entry["cores"]:
+                last = e
+    if last:
+        slower = []
+        for name, t in entry["results"].items():
+            old = last["results"].get(name, {})
+            for k in ("mimic", "mimic-all"):
+                if k in t and k in old and old[k] > 0 and t[k] > old[k] * 1.10:
+                    slower.append(f"  {name} ({k}): {old[k]:.3f} s -> {t[k]:.3f} s (+{(t[k] / old[k] - 1) * 100:.0f}%)")
+        print(f"\ncompared with {last['date']} ({last['commit']}):")
+        print("\n".join(slower) if slower else "  no Mimic time is more than 10% slower")
+    with path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 if __name__ == "__main__":

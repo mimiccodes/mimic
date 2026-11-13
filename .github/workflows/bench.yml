@@ -1,0 +1,78 @@
+# The benchmark suite (bench/run.py: Mimic against C, Rust and Go) on
+# GitHub's runners: by hand, and every Monday. The results table is shown on
+# the run's page and kept as a download with the run's history line.
+# (Shared runners are noisy: compare ratios to C, not absolute times.)
+name: bench
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 23.1.4
+  TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-arm64
+    name: bench (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ~/.mimic/deps
+          gh release download "$TAG" -p "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -D ~/.mimic/deps
+          tar -xJf ~/.mimic/deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz -C ~/.mimic/deps
+          rm ~/.mimic/deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz
+          ln -sfn ~/.mimic/deps/llvm-$LLVM_VERSION .llvm
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX=$HOME/.mimic/deps/llvm-$LLVM_VERSION tools/deps.sh
+
+      - name: Build mimic
+        run: cargo build --release
+
+      - name: Crates for the Rust versions
+        run: for d in bench/*/rust; do (cd "$d" && cargo fetch); done
+
+      - name: Benchmarks
+        run: python3 bench/run.py --history bench/history.jsonl
+
+      - name: Results
+        if: always()
+        run: |
+          [ -f bench/results.md ] && cat bench/results.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            bench/results.md
+            bench/history.jsonl
+          if-no-files-found: ignore

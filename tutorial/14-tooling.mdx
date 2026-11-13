@@ -116,23 +116,26 @@ release build optimises more and takes a few.
 ## Debugging
 
 Debug builds carry debug information (DWARF), so a debugger works with your
-`.mim` files: breakpoints on lines, stepping, the values of parameters and
-`let`s, and backtraces with file and line. With lldb (on a Mac it comes with
-the Xcode tools):
+`.mim` files: breakpoints on lines, stepping, variables, and backtraces with
+file and line. `mimic lldb` makes a debug build and starts lldb on it (on a
+Mac lldb comes with the Xcode tools), with Mimic's values shown the way
+Mimic prints them:
 
 ```sh
-mimic build --debug
-lldb target/debug/app
-(lldb) breakpoint set --file main.mim --line 5
+mimic lldb                     # or: mimic lldb app.mim -- program arguments
+(lldb) breakpoint set --file main.mim --line 8
 (lldb) run
 (lldb) frame variable
+(value) p = 0x0000000a63440000 Point { x: 1.5, y: -2.0, name: "origin" }
+(long[4]) xs = ([0] = 1, [1] = 2, [2] = 3, [3] = 4)
+(value) words = 0x0000000a6340d8f0 ["a" "bc"]
+(value) s = 0x0000000a6340d950 Circle(2.5)
 (lldb) next
 (lldb) bt
 ```
 
-Functions appear under their Mimic names (`app::main::area`). Numbers and
-truth values show as values; lists, strings and records show as pointers
-for now. Release builds have no debug information.
+Functions appear under their Mimic names (`app::main::area`). Release
+builds have no debug information.
 
 ## Error codes
 
