@@ -89,7 +89,10 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (keep) | `+/ ×/ ≢` over `xs ⌿ mask` fused into one pass; non-atomic reference counts measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (ui) | `ui` benchmark (10k rows, view + diff per frame: 250 → 174 ms on one core, 39 ms on all); inline `≢`, handle indexing and list literals; idle fork-join workers back off; 32-byte headers; inline `with` uniqueness check ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (finish) | Rows from capturing lambdas reused while their captures stay the same; `xs ⌿ mask` of a fused expression counted then filled; chains `xs ¨ f ¨ g` fused (records 4.6× → 3.9× C, 1.6× on all cores); performance-core scheduling measured: nothing to change ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Lists of records stored flat (one block of fields), GPU kernels (F8) | |
+| F8 (GPU) | Metal kernels: fused maps and `xs ¨ f` with pure numeric functions (self tail calls as loops), reductions taking their elements from the GPU; results exactly those of `--strict-math`; unboxed f32/i32 scalars; f32 mandelbrot kernel 18 ms vs ~200 ms on all CPU cores (NVPTX/AMDGPU/SPIR-V wait for hardware to test on) | ✅ |
+| F5, F7, F9 | SIMD across elements (`xs ¨ f` 8 at a time: mandelbrot 0.71× C on one core); compile-time net pre-reduction (nets ~20% faster); `--fast-math` | ✅ |
+| F (records 2) | `¨` into records fused; release builds don't free `main`'s values at exit; records 2.2× C on one core, 1.0× on all ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F (deferred) | Lists of records stored flat (an array of structs): would take records from 2.2× to about 1× C on one core, but every runtime path over lists would need a new kind of list; deferred (2026-11-13) | ⏸ |
 | G1 | `test "name" { }` blocks and `expect` (failures show both sides), `mimic test` (a process per test, in parallel, filters); `mimic fmt` (words or `--glyphs`, indentation, `--check`; checked to keep every token) | ✅ |
 | G | Registry, incremental builds, DWARF, benchmark CI including Rust, CI hosts, `mimic doc` | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
