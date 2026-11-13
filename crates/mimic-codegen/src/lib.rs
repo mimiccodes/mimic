@@ -941,7 +941,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let c_safe = b.build_select(fits, c, i64t.const_zero(), "").s()?.into_int_value();
             let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), i32t.const_int(1, false).into(), c_safe.into()], "").s()? };
             let fl = b.build_load(i32t, lenp, "").s()?.into_int_value();
-            let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(4096, false), "").s()?;
+            let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(1 << 18, false), "").s()?; // FREE_LIST_CAP
             b.build_conditional_branch(room, push_bb, slow).s()?;
             b.position_at_end(push_bb);
             let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), zero.into(), c_safe.into()], "").s()? };
@@ -1208,6 +1208,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_int" | "mim_bool" => ptr.fn_type(&[i64t], false),
             "mim_float" => ptr.fn_type(&[f64t], false),
             "mim_lit_str" => ptr.fn_type(&[p, p, i64t], false),
+            "mim_lit_variant" => ptr.fn_type(&[p, p], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
             "mim_retain" | "mim_release" | "mim_panic" => void.fn_type(&[p], false),
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
@@ -1252,6 +1253,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
+            "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
             "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
             "mim_alloc_vec" => ptr.fn_type(&[i32t, i64t], false),
             "mim_heap" => ptr.fn_type(&[], false),
@@ -2720,9 +2722,62 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(r)
     }
 
+    /// A variant without fields: one immortal value per variant, made once
+    /// and cached in a global (no allocation, no counting afterwards).
+    fn unit_variant(&mut self, t: TypeId, v: usize) -> R<V<'ctx>> {
+        if !self.field_tys(t, v).is_empty() {
+            return self.construct(t, Some(v), vec![]);
+        }
+        let name = format!("unit_variant.{t}.{v}");
+        let g = self.module.get_global(&name).unwrap_or_else(|| {
+            let g = self.module.add_global(self.ptr, None, &name);
+            g.set_linkage(Linkage::Internal);
+            g.set_initializer(&self.ptr.const_null());
+            g
+        });
+        let slot = self.gaddr(g);
+        let cur = self.b.build_load(self.ptr, slot, "").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&cur).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let cur = cur.into_pointer_value();
+        let f = self.cur_fn.unwrap();
+        let have = self.b.build_is_not_null(cur, "").s()?;
+        let pre = self.b.get_insert_block().unwrap();
+        let make = self.ctx.append_basic_block(f, "variant_make");
+        let done = self.ctx.append_basic_block(f, "variant_done");
+        self.b.build_conditional_branch(have, done, make).s()?;
+        self.b.position_at_end(make);
+        let d = self.desc(t, Some(v));
+        let made = self.call_rt("mim_lit_variant", &[slot.into(), d.into()])?.unwrap().into_pointer_value();
+        let make_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "variant").s()?;
+        phi.add_incoming(&[(&cur, pre), (&made, make_end)]);
+        Ok(V::P(phi.as_basic_value().into_pointer_value(), false))
+    }
+
     fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
         // (tuples use t = usize::MAX)
         let i64t = self.ctx.i64_type();
+        // optimised builds: allocate inline and move the fields in (a value
+        // owned here becomes the record's; a borrowed one is retained)
+        if self.heap_ok() && t != usize::MAX {
+            let i32t = self.ctx.i32_type();
+            let n = vals.len() as u64;
+            let V::P(r, _) = self.alloc_vec(5, i64t.const_int(n, false))? else { unreachable!() }; // MIM_OBJ
+            let vt = self.val_ty();
+            self.b.build_store(self.b.build_struct_gep(vt, r, 2, "").s()?, i32t.const_zero()).s()?; // rank 0
+            let d = self.desc(t, variant);
+            self.b.build_store(self.b.build_struct_gep(vt, r, 5, "").s()?, d).s()?;
+            let fields = unsafe { self.b.build_in_bounds_gep(vt, r, &[i32t.const_int(1, false)], "fields").s()? };
+            for (i, v) in vals.into_iter().enumerate() {
+                let b = self.boxed(v)?;
+                let b = self.own(b)?;
+                let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
+                self.b.build_store(fp, self.basic(b)).s()?;
+            }
+            return Ok(V::P(r, true));
+        }
         let n = vals.len() as u32;
         let arr_ty = self.ptr.array_type(n.max(1));
         let arr = self.entry_array(arr_ty)?;
@@ -2924,7 +2979,7 @@ impl<'ctx> Cg<'ctx, '_> {
             Pattern::Variant { path, args, .. } => {
                 let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) else { return Err("not a variant".into()) };
                 let b = self.boxed(val)?;
-                let tag = self.call_rt("mim_obj_tag", &[self.basic(b).into()])?.unwrap().into_int_value();
+                let tag = self.obj_tag(b)?;
                 let eq = self.b.build_int_compare(IntPredicate::EQ, tag, self.ctx.i64_type().const_int(v as u64, false), "").s()?;
                 let ok = self.ctx.append_basic_block(f, "variant_ok");
                 self.b.build_conditional_branch(eq, ok, fail).s()?;
@@ -2934,7 +2989,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if matches!(a, Pattern::Wild(_) | Pattern::Bind(..)) {
                         continue;
                     }
-                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.obj_field(b, i)?;
                     let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     // release the field on both outcomes
                     let fail_k = self.ctx.append_basic_block(f, "pat_fail");
@@ -2949,6 +3004,55 @@ impl<'ctx> Cg<'ctx, '_> {
                 Ok(())
             }
         }
+    }
+
+    /// The variant tag of `b` (a record or union value), read inline after
+    /// one check that it is one (anything else: the runtime reports it).
+    fn obj_tag(&mut self, b: V<'ctx>) -> R<IntValue<'ctx>> {
+        let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+        let p = self.basic(b).into_pointer_value();
+        let vt = self.val_ty();
+        // dtype OBJ (5) and rank 0, as one 64-bit word
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want = if little { 5u64 } else { 5u64 << 32 };
+        let kind = self.b.build_load(i64t, self.b.build_struct_gep(vt, p, 1, "").s()?, "").s()?.into_int_value();
+        let is_obj = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        let f = self.cur_fn.unwrap();
+        let ok = self.ctx.append_basic_block(f, "obj_ok");
+        let bad = self.ctx.append_basic_block(f, "obj_bad");
+        let join = self.ctx.append_basic_block(f, "obj_tag");
+        self.b.build_conditional_branch(is_obj, ok, bad).s()?;
+        self.b.position_at_end(bad);
+        let slow = self.call_rt("mim_obj_tag", &[p.into()])?.unwrap().into_int_value();
+        let bad_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).s()?;
+        self.b.position_at_end(ok);
+        // the descriptor: { type_name, variant, tag (i32), … } (a tuple has
+        // none: the runtime path reports it)
+        let d = self.b.build_load(self.ptr, self.b.build_struct_gep(vt, p, 5, "").s()?, "desc").s()?.into_pointer_value();
+        let has = self.b.build_is_not_null(d, "").s()?;
+        let ok2 = self.ctx.append_basic_block(f, "obj_desc");
+        self.b.build_conditional_branch(has, ok2, bad).s()?;
+        self.b.position_at_end(ok2);
+        let dt = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into()], false);
+        let tag = self.b.build_load(i32t, self.b.build_struct_gep(dt, d, 2, "").s()?, "").s()?.into_int_value();
+        let tag = self.b.build_int_s_extend(tag, i64t, "").s()?;
+        let ok_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(join).s()?;
+        self.b.position_at_end(join);
+        let phi = self.b.build_phi(i64t, "tag").s()?;
+        phi.add_incoming(&[(&tag, ok_end), (&slow, bad_end)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
+    /// Field `i` of `b`, a record or variant whose type has been checked:
+    /// read in place (fields follow the header), borrowed while `b` lives.
+    fn obj_field(&self, b: V<'ctx>, i: usize) -> R<V<'ctx>> {
+        let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+        let p = self.basic(b).into_pointer_value();
+        let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
+        let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
+        Ok(V::P(self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value(), false))
     }
 
     /// Test a sub-value (owned temporary `v`) against `a`, releasing it on both outcomes.
@@ -3094,7 +3198,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if matches!(a, Pattern::Wild(_) | Pattern::Lit(_)) {
                         continue;
                     }
-                    let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+                    let fv = self.obj_field(b, i)?;
                     let fv = self.as_ty(fv, self.pat_ty(ftys[i]), "field")?;
                     self.pattern_bind(a, fv)?;
                     self.drop_tmp(fv)?;
@@ -3656,7 +3760,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 Ok(r)
             }
             ExprKind::Path(path) if !(path.len() == 1 && self.lookup(&path[0]).is_some()) => match self.p.resolve(self.cur_mod, path)? {
-                Resolved::Variant(t, v) => self.construct(t, Some(v), vec![]),
+                Resolved::Variant(t, v) => self.unit_variant(t, v),
                 Resolved::Fn(f) => {
                     let v = self.fn_value(f)?;
                     self.as_ty(v, ty, "function value")

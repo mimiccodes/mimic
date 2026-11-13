@@ -308,6 +308,45 @@ static void parallel_for(int64_t n, mim_task fn, void *ctx);
  * runs it with the same fixed-size chunks as the built-in kernels, so results
  * (including floating-point reductions) do not depend on the thread count. */
 void mim_par_for(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for(n, f, ctx); }
+
+/* A compiled loop whose elements may each be much work (they call into
+ * recursion): time the first element, then share out the rest (in small
+ * chunks: one element each when there are few) when that is worth waking
+ * the threads, as mim_each_fn does. */
+typedef struct {
+    void (*f)(void *, int64_t, int64_t);
+    void *ctx;
+} timed_ctx;
+
+static void timed_range(void *c, int64_t lo, int64_t hi) {
+    timed_ctx *t = (timed_ctx *)c;
+    t->f(t->ctx, lo + 1, hi + 1);
+}
+
+void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
+    if (n <= 0) return;
+    if (n == 1 || g_nthreads <= 1 || t_in_parallel) {
+        f(ctx, 0, n);
+        return;
+    }
+    /* many elements: the usual chunks (one cheap first element says little
+     * about the rest, and there is work enough to share either way) */
+    if (n > mim_grain) {
+        parallel_for(n, f, ctx);
+        return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    f(ctx, 0, 1);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    int64_t one = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+    if (one * (n - 1) > 50000) {
+        timed_ctx c = {f, ctx};
+        parallel_for_grain(n - 1, fine_grain(n - 1), timed_range, &c);
+    } else {
+        f(ctx, 1, n);
+    }
+}
 int64_t mim_par_grain(void);
 
 /* ==== allocation & refcounting ===========================================
@@ -333,7 +372,7 @@ static size_t elsize(int dt) {
 
 #define SMALL_BYTES 16 /* payload bytes (incl. NUL) served by the free list */
 #define MID_BYTES 64   /* a second free list: short vectors, small records, short strings */
-#define FREE_LIST_CAP 4096 /* also in the compiler (release_fn) */
+#define FREE_LIST_CAP (1 << 18) /* blocks per size class and thread; also in the compiler (release_fn) */
 #define MAX_SLOTS 257
 
 /* per-thread counters, padded to 128-byte lines (Apple Silicon) */
@@ -677,6 +716,15 @@ mim_val *mim_lit_float(mim_val **slot, double x) {
     if (v) return v;
     mim_val *n = alloc(MIM_F64, 0, 1);
     ((double *)n->data)[0] = x;
+    return publish(slot, n);
+}
+
+/* A variant without fields (None, Leaf, …): one immortal value, shared. */
+mim_val *mim_lit_variant(mim_val **slot, const mim_desc *d) {
+    mim_val *v = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (v) return v;
+    mim_val *n = alloc(MIM_OBJ, 0, 0);
+    n->desc = d;
     return publish(slot, n);
 }
 

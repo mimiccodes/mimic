@@ -1,0 +1,22 @@
+module main
+
+// allocation: build complete binary trees and count their nodes
+// (64 trees of depth 16, then one of depth 22)
+
+type Tree = Leaf | Node(Tree, Tree)
+
+fn make(d: i64) -> Tree {
+    if d == 0 { Leaf } else { Node(make(d - 1), make(d - 1)) }
+}
+
+fn check(t: Tree) -> i64 {
+    match t {
+        Leaf => 1,
+        Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+fn main() {
+    print(⍳ 64 ¨ (i => check(make(16))) ▷ +/)
+    print(check(make(22)))
+}

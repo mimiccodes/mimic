@@ -51,7 +51,19 @@ pub(crate) enum Node {
     /// `xs ¨ f` with a pure `f` on unboxed numbers: call the native `f` (by
     /// name) on the element, with captured values from slots; `depth`: `f`
     /// takes the native recursion depth too
-    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool },
+    /// `heavy`: `f` can reach recursion, so one element may be a lot of
+    /// work however few elements there are (see `timed_apply`).
+    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool },
+}
+
+/// Does the computation call a function that can reach recursion?
+fn heavy(n: &Node) -> bool {
+    match n {
+        Node::Apply { heavy, arg, .. } => *heavy || self::heavy(arg),
+        Node::Bin(_, a, b) => heavy(a) || heavy(b),
+        Node::Un(_, a) => heavy(a),
+        _ => false,
+    }
 }
 
 /// Values computed before the loop and handed to the kernel.
@@ -187,8 +199,15 @@ impl<'ctx> Cg<'ctx, '_> {
                             slots.push(plan.slots.len() - 1);
                             let _ = t;
                         }
+                        let mut called = Vec::new();
+                        body.walk(&mut |x| {
+                            if let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(x)).cloned()) {
+                                called.push(k);
+                            }
+                        });
+                        let heavy = self.reaches_recursion(called);
                         let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false })
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy })
                     }
                     ExprKind::Path(path) => {
                         let fid = self.resolve_fn(path)?;
@@ -196,7 +215,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
                         let f = self.request(&k, kind)?;
                         let spec = self.spec(&k)?;
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native })
+                        let heavy = self.reaches_recursion(vec![k.clone()]);
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy })
                     }
                     _ => Err("internal compiler error: not a fusible ¨".into()),
                 }
@@ -314,7 +334,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let x = self.eval_node(a, i, slots)?;
                 self.scalar_unary(*op, x)?
             }
-            Node::Apply { f, arg, caps, pt, rt, depth } => {
+            Node::Apply { f, arg, caps, pt, rt, depth, .. } => {
                 let x = self.eval_node(arg, i, slots)?;
                 let x: BasicMetadataValueEnum = match pt {
                     Ty::F64 => self.to_f64(x)?.into(),
@@ -525,12 +545,68 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(())
     }
 
+    /// Can calling any of `keys` (specialised functions) lead to recursion?
+    /// Then a single call may be any amount of work.
+    fn reaches_recursion(&mut self, keys: Vec<types::Key>) -> bool {
+        // depth-first over the call graph: a function met again on the
+        // current path is a cycle
+        fn visit(cg: &mut Cg, k: &types::Key, path: &mut Vec<types::Key>, done: &mut Vec<types::Key>) -> bool {
+            if path.contains(k) {
+                return true;
+            }
+            if done.contains(k) {
+                return false;
+            }
+            let Ok(spec) = cg.spec(k) else { return false };
+            path.push(k.clone());
+            let callees: Vec<types::Key> = spec.calls.values().cloned().collect();
+            let found = callees.iter().any(|c| visit(cg, c, path, done));
+            path.pop();
+            done.push(k.clone());
+            found
+        }
+        let (mut path, mut done) = (Vec::new(), Vec::new());
+        keys.iter().any(|k| visit(self, k, &mut path, &mut done))
+    }
+
+    /// Run a map kernel `k` over `0..n` timed: the first element alone, then
+    /// the rest on the thread pool (one element per task) when they would
+    /// take longer than waking it costs, else here.
+    fn timed_apply(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>) -> R<()> {
+        self.call_rt("mim_par_for_timed", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        Ok(())
+    }
+
     /// Materialise a fusible array expression with one fused pass.
     pub(crate) fn fused_map(&mut self, e: &Expr) -> R<V<'ctx>> {
         let el = num_el(self.ty_of(e)).ok_or("internal compiler error: fused_map on a non-numeric array")?;
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
         let n = self.plan_len(&plan)?;
+        // elements that may each be much work: timed, then shared out
+        if heavy(&root) {
+            let mode = Mode::Map(el);
+            let k = self.emit_kernel(&root, &plan, mode)?;
+            let out = match super::fixed(self.ty_of(e)) {
+                Some((_, len)) => {
+                    let at = self.el_ty(el).array_type(len);
+                    let buf = self.entry_alloca_ty(at.into(), "fixed")?;
+                    let ctx = self.pack_ctx(&plan, &[buf.into(), self.ctx.i64_type().const_zero().into()])?;
+                    self.timed_apply(n, k, ctx)?;
+                    let a = self.b.build_load(at, buf, "").s()?.into_array_value();
+                    V::A(a, el)
+                }
+                None => {
+                    let out = self.alloc_vec(dtype_of(el), n)?;
+                    let data = self.data_of(out)?;
+                    let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
+                    self.timed_apply(n, k, ctx)?;
+                    out
+                }
+            };
+            self.release_plan(&plan)?;
+            return Ok(out);
+        }
         // a result of known length: written to the stack, kept in registers
         if let Some((_, len)) = super::fixed(self.ty_of(e)) {
             let at = self.el_ty(el).array_type(len);
@@ -724,6 +800,24 @@ impl<'ctx> Cg<'ctx, '_> {
             self.panic_if(z, "maximum/minimum of an empty array")?;
         }
         let mode = Mode::Reduce(prim, float);
+        // elements that may each be much work: computed timed (and shared
+        // out) into a buffer, then combined here in order
+        if heavy(&root) {
+            let el = if float { El::F64 } else { El::I64 };
+            let k = self.emit_kernel(&root, &plan, Mode::Map(el))?;
+            let tmp = self.alloc_vec(dtype_of(el), n)?;
+            let data = self.data_of(tmp)?;
+            let ctx = self.pack_ctx(&plan, &[data, i64t.const_zero().into()])?;
+            self.timed_apply(n, k, ctx)?;
+            self.release_plan(&plan)?;
+            let mut p2 = Plan::default();
+            p2.lens.push(n);
+            p2.slots.push(data);
+            let leaf = Node::Leaf(0, el);
+            let r = self.inline_loop(&leaf, &p2, n, mode, i64t.const_zero().into())?;
+            self.drop_tmp(tmp)?;
+            return r.ok_or_else(|| "internal compiler error: reduction".into());
+        }
         let unit = self.ctx.i64_type().const_zero().into();
         let r = self.small_or_kernel(&root, &plan, n, mode, unit, |cg| {
             // one partial result per fixed-size chunk, combined in chunk order
