@@ -78,7 +78,7 @@ fn main() {
 [0.0 2.0 5.0]
 ```
 
-Number fields (`i64`, `f64`, `bool`) are stored in the record itself, as in a C struct, so reading one is a single load. `{ r with x: … }` updates the record in place when nothing else holds it, and copies it once otherwise.
+Number fields (`i64`, `f64`, `bool`) are stored in the record itself, as in a C struct, so reading one is a single load. `{ r with x: … }` updates the record in place when nothing else holds it, and copies it once otherwise. A variable used only once hands its value over, and a function that only updates its record argument takes it over, so `ps ¨ step ¨ step` updates the same records step after step, while code that still uses the old values sees them unchanged.
 
 ## Unions
 

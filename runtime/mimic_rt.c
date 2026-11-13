@@ -2460,6 +2460,89 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     return r;
 }
 
+/* `xs ¨ f` over a vector of numbers (i64 or f64, as the compiler knows it
+ * is): f takes each element's 8 bytes as they are, no box. */
+typedef mim_val *(*mim_fn_raw)(int64_t);
+typedef struct {
+    const int64_t *data;
+    mim_fn_raw f;
+    mim_val **out;
+} each_raw_ctx;
+
+static void each_raw_range(void *vc, int64_t lo, int64_t hi) {
+    each_raw_ctx *c = (each_raw_ctx *)vc;
+    for (int64_t i = lo; i < hi; i++) c->out[i] = c->f(c->data[i]);
+}
+
+mim_val *mim_each_raw(mim_val *xs, mim_fn_raw f, int32_t dt, int32_t pure) {
+    need(xs, "¨ (each)");
+    if (xs->dtype != dt || xs->rank != 1) mim_panic("internal error: ¨ over numbers of another type");
+    int64_t n = xs->len;
+    if (n == 0) return alloc(MIM_I64, 1, 0);
+    mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
+    each_raw_ctx c = {(const int64_t *)xs->data, f, tmp};
+    if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
+    else each_raw_range(&c, 0, n);
+    int64_t units = 0;
+    for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
+    if (units) {
+        for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+        free(tmp);
+        if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
+        return NULL;
+    }
+    mim_val *r = list_take(n, tmp);
+    free(tmp);
+    return r;
+}
+
+/* `xs ¨ f` where f takes its element over (it consumes it: owned.rs) and
+ * xs is handed over too. A list nothing else holds gives its elements away
+ * (f can update them in place) and its block is freed without them;
+ * otherwise each element is handed over as a new reference. */
+static void each_own_range(void *vc, int64_t lo, int64_t hi) {
+    each_ctx *c = (each_ctx *)vc;
+    mim_val **h = (mim_val **)c->xs->data;
+    for (int64_t i = lo; i < hi; i++) c->out[i] = c->f(h[i]);
+}
+
+static void each_lend_range(void *vc, int64_t lo, int64_t hi) {
+    each_ctx *c = (each_ctx *)vc;
+    for (int64_t i = lo; i < hi; i++) c->out[i] = c->f(scalar_at(c->xs, i));
+}
+
+mim_val *mim_each_own(mim_val *xs, mim_fn1 f, int32_t pure) {
+    need(xs, "¨ (each)");
+    if (xs->rank == 0) return f(xs);
+    int64_t n = xs->len;
+    if (n == 0) {
+        mim_release(xs);
+        return alloc(MIM_I64, 1, 0);
+    }
+    int take = xs->dtype == MIM_BOXED && xs->rank == 1 && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
+    mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
+    each_ctx c = {xs, f, tmp};
+    mim_task run = take ? each_own_range : each_lend_range;
+    if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
+    else run(&c, 0, n);
+    if (take) {
+        free_block(&t_heap, xs); /* the block only: its elements were given away */
+    } else {
+        mim_release(xs);
+    }
+    int64_t units = 0;
+    for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
+    if (units) {
+        for (int64_t i = 0; i < n; i++) mim_release(tmp[i]);
+        free(tmp);
+        if (units != n) mim_panic("¨ (each): the function returned a value for some elements and nothing for others");
+        return NULL;
+    }
+    mim_val *r = list_take(n, tmp);
+    free(tmp);
+    return r;
+}
+
 typedef struct {
     mim_val *xs;
     mim_val *f;

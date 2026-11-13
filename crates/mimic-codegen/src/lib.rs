@@ -41,6 +41,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod forkjoin;
+mod owned;
 mod fuse;
 pub mod tonet;
 
@@ -211,6 +212,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         specs,
         fns: HashMap::new(),
         thunks: HashMap::new(),
+        own_thunks: HashMap::new(),
         queue: Vec::new(),
         purity,
         fn_descs: HashMap::new(),
@@ -236,6 +238,8 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         lazy_deep: None,
         cur_kind: Kind::Plain,
         borrow_binds: false,
+        let_moves: false,
+        move_at: Default::default(),
         fj: Default::default(),
     };
     // every standard-library type descriptor, for the runtime (see desc())
@@ -318,6 +322,8 @@ struct Local<'ctx> {
     ty: Ty,
     owned: bool,
     mutable: bool,
+    /// used once: that use takes the value (see owned.rs)
+    moves: bool,
 }
 
 /// An implicit future: `let name = f(…)` running on its own thread.
@@ -376,6 +382,8 @@ struct Cg<'ctx, 'p> {
     specs: HashMap<Key, Rc<Spec>>,
     fns: HashMap<(Key, Kind), FunctionValue<'ctx>>,
     thunks: HashMap<(Key, Kind), FunctionValue<'ctx>>,
+    /// thunks that take over consumed arguments (owned.rs)
+    own_thunks: HashMap<(Key, Kind), FunctionValue<'ctx>>,
     queue: Vec<(Key, Kind)>,
     purity: mimic_check::Purity,
     /// Descriptors of function values already emitted (`fn:<id>`, `op:<n>`).
@@ -414,6 +422,10 @@ struct Cg<'ctx, 'p> {
     cur_kind: Kind,
     /// Pattern variables borrow what they bind (see the `match` codegen).
     borrow_binds: bool,
+    /// The `let` about to be compiled may move (owned.rs).
+    let_moves: bool,
+    /// The variable uses (expression ids) where a value moves (owned.rs).
+    move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
     fj: forkjoin::State<'ctx>,
 }
@@ -1257,7 +1269,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_pat_is" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_pat_len" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_pat_at" | "mim_pat_rest" => ptr.fn_type(&[p, i64t], false),
-            "mim_each" => ptr.fn_type(&[p, p, i32t], false),
+            "mim_each" | "mim_each_own" => ptr.fn_type(&[p, p, i32t], false),
+            "mim_each_raw" => ptr.fn_type(&[p, p, i32t, i32t], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -1402,8 +1415,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let f = self.module.add_function(&name, ft, Some(Linkage::Internal));
         // a vector parameter always points at a live header (rc, dtype, rank,
         // len, data): LLVM may read it early, so header checks leave loops
+        // (not one the function consumes: it may be gone before the end)
+        let consumed = self.consumed(k);
         for (i, t) in s.params.iter().enumerate() {
-            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, 0) | Ty::Obj(_)) && self.flat(*t).is_none() {
+            if matches!(t, Ty::Arr(El::F64 | El::I64 | El::Bool, 0) | Ty::Obj(_)) && self.flat(*t).is_none() && !consumed.get(i).copied().unwrap_or(false) {
                 let attr = |name: &str, v: u64| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(name), v);
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("nonnull", 0));
                 f.add_attribute(inkwell::attributes::AttributeLoc::Param(i as u32), attr("dereferenceable", self.live_bytes(*t)));
@@ -1482,15 +1497,23 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(entry);
         self.scopes = vec![Vec::new()];
         self.fj_begin(fv, kind, decl)?;
+        // parameters it consumes arrive owned (released at the end unless moved on)
+        let sites = self.consumed_sites(k);
+        let consumed: Vec<bool> = sites.iter().map(|s| s.is_some()).collect();
+        self.move_at.clear();
+        self.move_at.extend(sites.iter().flatten());
         for (i, prm) in decl.params.iter().enumerate() {
             let t = spec.params[i];
             let slot = self.entry_alloca(t, &prm.name)?;
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
-            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: false, mutable: false });
+            let c = consumed.get(i).copied().unwrap_or(false);
+            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: c });
         }
         if self.opt_level >= 2 {
             for (i, t) in spec.params.iter().enumerate() {
-                self.assume_params_live(fv.get_nth_param(i as u32).unwrap(), *t)?;
+                if !consumed.get(i).copied().unwrap_or(false) {
+                    self.assume_params_live(fv.get_nth_param(i as u32).unwrap(), *t)?;
+                }
             }
         }
         match kind {
@@ -1647,16 +1670,27 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// `ptr thunk(ptr…)`: unbox arguments (checked), call the typed function, box the result.
     fn thunk(&mut self, k: &Key, kind: Kind) -> R<FunctionValue<'ctx>> {
-        if let Some(f) = self.thunks.get(&(k.clone(), kind)) {
+        self.thunk_with(k, kind, false)
+    }
+
+    /// `owning`: the arguments for parameters the function consumes are
+    /// handed over by the caller (mim_each_own), else they are lent.
+    fn thunk_with(&mut self, k: &Key, kind: Kind, owning: bool) -> R<FunctionValue<'ctx>> {
+        if let Some(f) = (if owning { &self.own_thunks } else { &self.thunks }).get(&(k.clone(), kind)) {
             return Ok(*f);
         }
         let target = self.request(k, kind)?;
         let spec = self.spec(k)?;
         let n = spec.params.len();
-        let name = format!("{}$box", target.get_name().to_str().unwrap());
+        let name = format!("{}$box{}", target.get_name().to_str().unwrap(), if owning { "_own" } else { "" });
         let ps: Vec<BasicMetadataTypeEnum> = (0..n).map(|_| self.ptr.into()).collect();
         let f = self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::Internal));
-        self.thunks.insert((k.clone(), kind), f);
+        if owning {
+            self.own_thunks.insert((k.clone(), kind), f);
+        } else {
+            self.thunks.insert((k.clone(), kind), f);
+        }
+        let consumed = self.consumed(k);
         let path = self.p.fn_path(k.0).join("::");
         let pnames: Vec<String> = match &self.p.fns[k.0].kind {
             FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
@@ -1667,6 +1701,8 @@ impl<'ctx> Cg<'ctx, '_> {
             for (i, pname) in pnames.iter().enumerate().take(n) {
                 let p = f.get_nth_param(i as u32).unwrap().into_pointer_value();
                 let v = cg.as_ty(V::P(p, false), spec.params[i], &format!("argument `{pname}` of `{path}`"))?;
+                // a consumed parameter: handed over (owning), else a new reference
+                let v = if consumed.get(i).copied().unwrap_or(false) && !owning { cg.hand_over(v)? } else { v };
                 args.push(cg.basic(v).into());
             }
             if kind.has_depth() {
@@ -2024,7 +2060,15 @@ impl<'ctx> Cg<'ctx, '_> {
                 continue;
             }
             *self.futures.last_mut().unwrap() = pending.clone(); // for `return`s inside
+            self.let_moves = false;
+            if let Stmt::Let { name, mutable: false, .. } = s
+                && let Some(site) = self.let_move_site(name, &b.stmts[i + 1..], b.tail.as_deref())
+            {
+                self.let_moves = true;
+                self.move_at.insert(site);
+            }
             self.stmt(s)?;
+            self.let_moves = false;
         }
         if !pending.is_empty() && !self.terminated() {
             match &b.tail {
@@ -2117,7 +2161,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let slot = self.entry_alloca(p.ty, &p.name)?;
         self.b.build_store(slot, self.basic(v)).s()?;
         let owned = matches!(v, V::P(..));
-        self.scopes.last_mut().unwrap().push(Local { name: p.name, slot, ty: p.ty, owned, mutable: false });
+        self.scopes.last_mut().unwrap().push(Local { name: p.name, slot, ty: p.ty, owned, mutable: false, moves: false });
         Ok(())
     }
 
@@ -2134,7 +2178,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 let slot = self.entry_alloca(t, name)?;
                 self.b.build_store(slot, self.basic(v)).s()?;
                 let owned = matches!(v, V::P(..));
-                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: *mutable });
+                let moves = std::mem::take(&mut self.let_moves);
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: *mutable, moves });
             }
             Stmt::Assign { name, index, value, .. } => {
                 let (slot, t) = {
@@ -2220,7 +2265,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     let slot = self.entry_alloca(t, n)?;
                     self.b.build_store(slot, self.basic(fv)).s()?;
                     let owned = matches!(fv, V::P(..));
-                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false });
+                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves: false });
                 }
                 self.drop_tmp(b)?;
             }
@@ -2249,7 +2294,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let slot = self.entry_alloca(t, name)?;
                 self.b.build_store(slot, self.basic(fv)).s()?;
                 let owned = matches!(fv, V::P(..));
-                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: false });
+                self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot, ty: t, owned, mutable: false, moves: false });
             }
         }
         Ok(())
@@ -2284,7 +2329,7 @@ impl<'ctx> Cg<'ctx, '_> {
             for (i, (name, pt)) in names.iter().zip(&all).enumerate() {
                 let slot = cg.entry_alloca(*pt, name)?;
                 cg.b.build_store(slot, f.get_nth_param(i as u32).unwrap()).s()?;
-                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false });
+                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false, moves: false });
             }
             cg.scopes = vec![locals];
             let v = cg.expr(body)?;
@@ -2313,7 +2358,7 @@ impl<'ctx> Cg<'ctx, '_> {
             for (i, (name, pt)) in params.iter().zip(&pts).enumerate() {
                 let slot = cg.entry_alloca(*pt, name)?;
                 cg.b.build_store(slot, f.get_nth_param(i as u32).unwrap()).s()?;
-                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false });
+                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false, moves: false });
             }
             cg.scopes = vec![locals];
             let v = cg.expr(body)?;
@@ -2477,7 +2522,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let owned = matches!(v, V::P(_, true));
                 let slot = cg.entry_alloca(t, name)?;
                 cg.b.build_store(slot, cg.basic(v)).s()?;
-                locals.push(Local { name: name.to_string(), slot, ty: t, owned, mutable: false });
+                locals.push(Local { name: name.to_string(), slot, ty: t, owned, mutable: false, moves: false });
                 Ok(())
             };
             for (i, name) in params2.iter().enumerate() {
@@ -2617,6 +2662,31 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// A boxed-ABI wrapper around a typed lambda (for `¨`).
+    /// `ptr thunk(i64 bits)`: call `target` (parameter `pt`, i64 or f64,
+    /// from the bits as they are; `depth`: a native body) and box its result.
+    fn raw_thunk(&mut self, target: FunctionValue<'ctx>, pt: Ty, rt: Ty, depth: bool) -> R<FunctionValue<'ctx>> {
+        let name = format!("{}$raw", target.get_name().to_str().unwrap());
+        if let Some(f) = self.module.get_function(&name) {
+            return Ok(f);
+        }
+        let i64t = self.ctx.i64_type();
+        let f = self.module.add_function(&name, self.ptr.fn_type(&[i64t.into()], false), Some(Linkage::Internal));
+        self.in_new_fn(f, |cg| {
+            let bits = f.get_nth_param(0).unwrap().into_int_value();
+            let a: BasicMetadataValueEnum = if pt == Ty::F64 { cg.b.build_bit_cast(bits, cg.ctx.f64_type(), "").s()?.into() } else { bits.into() };
+            let mut args = vec![a];
+            if depth {
+                args.push(cg.ctx.i32_type().const_zero().into()); // a fresh native stack
+            }
+            let r = cg.b.build_call(target, &args, "").s()?.try_as_basic_value().basic().unwrap();
+            let b = cg.boxed(cg.val_of(r, rt, true))?;
+            let bv = cg.basic(b);
+            cg.b.build_return(Some(&bv)).s()?;
+            Ok(())
+        })?;
+        Ok(f)
+    }
+
     fn lambda_thunk(&mut self, e: &Expr) -> R<FunctionValue<'ctx>> {
         let (lf, pts, rt) = self.lambda_fn(e)?;
         let pt = pts.first().copied().unwrap_or(Ty::Dyn);
@@ -3272,7 +3342,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let slot = self.entry_alloca(t, n)?;
             self.b.build_store(slot, self.basic(v)).s()?;
             let owned = matches!(v, V::P(_, true));
-            self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false });
+            self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false, moves: false });
             return Ok(());
         }
         let v = match val {
@@ -3286,7 +3356,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let slot = self.entry_alloca(t, n)?;
         self.b.build_store(slot, self.basic(v)).s()?;
         let owned = matches!(v, V::P(..));
-        self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false });
+        self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false, moves: false });
         Ok(())
     }
 
@@ -3363,7 +3433,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         let lslot = self.entry_alloca(t, name)?;
                         self.b.build_store(lslot, self.basic(v)).s()?;
                         let owned = matches!(v, V::P(..));
-                        self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot: lslot, ty: t, owned, mutable: false });
+                        self.scopes.last_mut().unwrap().push(Local { name: name.clone(), slot: lslot, ty: t, owned, mutable: false, moves: false });
                         k += 1;
                     }
                 }
@@ -3966,9 +4036,14 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
-                let (slot, lt, mutable) = (l.slot, l.ty, l.mutable);
+                let (slot, lt, mutable, moves) = (l.slot, l.ty, l.mutable, l.owned && l.moves && !l.mutable && self.move_at.contains(&id(e)));
                 let bv = self.b.build_load(self.repr(lt), slot, &path[0]).s()?;
                 let v = self.val_of(bv, lt, false);
+                // its one use: the value moves out (the slot keeps a null)
+                if moves && let V::P(p, _) = v {
+                    self.b.build_store(slot, self.ptr.const_null()).s()?;
+                    return Ok(V::P(p, true));
+                }
                 if mutable { self.own(v) } else { Ok(v) }
             }
             ExprKind::Call { callee, args } => {
@@ -4159,8 +4234,14 @@ impl<'ctx> Cg<'ctx, '_> {
                 };
                 let mut argv = Vec::new();
                 let mut conv = Vec::new();
+                let consumed = self.consumed(&k);
                 for (i, v) in vals.into_iter().enumerate() {
                     let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
+                    if consumed.get(i).copied().unwrap_or(false) {
+                        let c = self.hand_over(c)?; // the callee takes it
+                        argv.push(self.basic(c).into());
+                        continue;
+                    }
                     argv.push(self.basic(c).into());
                     conv.push(c);
                 }
@@ -4404,6 +4485,36 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.drop_tmp(a)?;
                         return self.as_ty(r, ty, "primitive result");
                     }
+                    // numbers in, the function on a number: no box per element
+                    if let Some(el @ (El::I64 | El::F64)) = fuse::num_el(self.ty_of(&args[0])) {
+                        let et = if el == El::F64 { Ty::F64 } else { Ty::I64 };
+                        let typed = match &args[1].kind {
+                            ExprKind::Lambda { .. } => {
+                                let (lf, pts, rt) = self.lambda_fn(&args[1])?;
+                                (pts.len() == 1 && pts[0] == et).then_some((lf, rt, false))
+                            }
+                            ExprKind::Path(path) => {
+                                let fid = self.resolve_fn(path)?;
+                                match self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) {
+                                    Some(k) if matches!(self.p.fns[fid].kind, FnKind::User(_)) && self.spec(&k)?.params == [et] => {
+                                        let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                                        let f = self.request(&k, kind)?;
+                                        Some((f, self.spec(&k)?.ret, kind == Kind::Native))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some((target, rt, depth)) = typed {
+                            let t = self.raw_thunk(target, et, rt, depth)?;
+                            let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
+                            let dt = if el == El::F64 { 1 } else { 0 };
+                            let r = self.call_rt_ptr("mim_each_raw", &[self.basic(a).into(), self.fn_addr(t).into(), self.i32c(dt), self.i32c(pure as i32)])?;
+                            self.drop_tmp(a)?;
+                            return self.as_ty(r, ty, "primitive result");
+                        }
+                    }
                     let f = match &args[1].kind {
                         ExprKind::Lambda { .. } => self.lambda_thunk(&args[1])?,
                         _ => {
@@ -4412,6 +4523,14 @@ impl<'ctx> Cg<'ctx, '_> {
                             let k = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()).ok_or("internal error: untyped ¨ callback")?;
                             // ¨ is already parallel across elements: use the native body
                             let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                            // a list of our own to a function that consumes its
+                            // element: the elements are handed over (in place)
+                            if matches!(a, V::P(_, true)) && self.consumed(&k) == [true] {
+                                let f = self.thunk_with(&k, kind, true)?;
+                                let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
+                                let r = self.call_rt_ptr("mim_each_own", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?;
+                                return self.as_ty(r, ty, "primitive result");
+                            }
                             self.thunk(&k, kind)?
                         }
                     };
@@ -4544,12 +4663,22 @@ impl<'ctx> Cg<'ctx, '_> {
             {
                 let Ty::Obj(t) = self.ty_of(base) else { unreachable!() };
                 let tid = types::obj_tid(t);
+                // a variable as the base: the new values first (they may read
+                // it), then the record (which may move: owned.rs); reading a
+                // variable has no effects, so the order is not observable
+                let path_base = matches!(base.kind, ExprKind::Path(_));
+                let mut early = Vec::new();
+                if path_base {
+                    for (_, x, _) in fields {
+                        early.push(self.expr(x)?);
+                    }
+                }
                 let b = self.expr(base)?;
                 let cur = self.own(self.boxed(b)?)?;
                 let V::P(cur, _) = self.call_rt_ptr("mim_obj_unique", &[self.basic(cur).into()])? else { unreachable!() };
-                for (n, x, _) in fields {
+                for (k, (n, x, _)) in fields.iter().enumerate() {
                     let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
-                    let v = self.expr(x)?;
+                    let v = if path_base { early[k] } else { self.expr(x)? };
                     let fp = self.slot_ptr(cur, i)?;
                     if let Some(el) = self.raw_field(tid, None, i) {
                         self.store_raw(fp, v, el)?;
@@ -4637,7 +4766,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 if let V::P(p, true) = sv {
                     let slot = self.entry_alloca(Ty::Dyn, "scrutinee")?;
                     self.b.build_store(slot, p).s()?;
-                    self.scopes.last_mut().unwrap().push(Local { name: "\u{0}scrutinee".into(), slot, ty: Ty::Dyn, owned: true, mutable: false });
+                    self.scopes.last_mut().unwrap().push(Local { name: "\u{0}scrutinee".into(), slot, ty: Ty::Dyn, owned: true, mutable: false, moves: false });
                 }
                 let merge = self.ctx.append_basic_block(f, "match_end");
                 let mut incoming = Vec::new();

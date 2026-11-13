@@ -94,34 +94,41 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
-### records: the gap that is left (27× C)
+### records: reuse in place (27× → 5.9× C)
 
 A million records `{id, name, x, v}` (a string and numbers), updated five
 times with `{ p with x: …, v: … }` over the whole list, then summed. C,
 Rust and Go update their arrays in place; Mimic's values are immutable,
-so each step builds a new list of new records. Apple M3 Pro, 2026-11-13.
+so in principle each step builds a new list of new records. Apple M3 Pro,
+2026-11-13.
 
 | Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
 |---|---|---|---|---|---|
-| records | 0.045 s | 3.32× | 3.60× | 26.69× | 11.97× |
+| records | 0.046 s | 3.33× | 3.59× | **5.89×** | **2.53×** |
 
-The same program took 1.94 s of CPU before this step and 0.93 s after:
+| Step | 1 core | All cores |
+|---|---|---|
+| before | 1.94 s CPU (about 40× C) | — |
+| numbers stored raw in records; `with` inline; `¨` lends and moves | 1.208 s (26.7×) | 0.542 s (12.0×) |
+| reuse in place (consumed parameters, moving locals, `¨` hands elements over) | 0.538 s (11.9×) | 0.276 s (6.1×) |
+| `¨` over numbers without boxing them | 0.407 s (9.0×) | 0.212 s (4.7×) |
+| `¨` over a list of records fused into the loop around it | 0.270 s (5.9×) | 0.116 s (2.5×) |
 
-* numbers in records and variants are stored in the object itself (8 raw
-  bytes), not as a separate boxed value per field: reading one is a load,
-  writing one a store, freeing a record no longer frees its numbers
-  (the program's own types on 64-bit targets; generic fields and the
-  standard library's types keep handles);
-* `{ r with … }` is compiled inline: the record is updated in place when
-  nothing else holds it, else copied once, and its fields are written
-  directly;
-* `xs ¨ f` over a list of records lends each element to `f` and moves the
-  results into the new list (no reference-count pairs).
+* **Raw number fields:** numbers in records and variants are stored in
+  the object itself (8 bytes), not as a boxed value per field (the
+  program's own types on 64-bit targets; generic fields and the standard
+  library's types keep handles).
+* **Reuse in place:** a value used once is handed over at that use instead
+  of shared; a function whose record parameter goes into `{ p with … }`
+  takes it owned; `xs ¨ f` hands the elements of a list nothing else holds
+  to such an `f`. `with` then finds the only reference and writes in
+  place: after the first step no record is allocated or freed.
+* **`¨` without boxes:** over a list of numbers, each element reaches the
+  function as it is; over a list of records feeding `+/` (or any fused
+  expression), the records are read in the loop and nothing is built.
 
-What is left is allocating a new record per element and step, and freeing
-the old one: the input list still holds each record when `step` runs, so
-`with` must copy. Reusing it in place needs functions to take arguments
-they consume as owned values (roadmap F3, next).
+What is left is making the first list: a million separate records (C has
+one array of structs; Rust's `String` per record is why it is 3.3×).
 
 ### http: a hello-world server (faster than hyper on one core)
 

@@ -335,10 +335,16 @@ impl<'ctx> Cg<'ctx, '_> {
             let ExprKind::Call { args, .. } = &c.kind else { return Err("internal compiler error: fork of a non-call".into()) };
             let k = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(*c)).cloned()).ok_or("internal compiler error: fork call without a callee")?;
             let spec = self.spec(&k)?;
+            let consumed = self.consumed(&k);
             let mut argv = Vec::new();
             for (j, a) in args.iter().enumerate() {
                 let v = self.expr(a)?;
                 let cv = self.as_ty(v, spec.params[j], "argument")?;
+                if consumed.get(j).copied().unwrap_or(false) {
+                    let cv = self.hand_over(cv)?; // the task's call takes it
+                    argv.push(self.basic(cv));
+                    continue;
+                }
                 argv.push(self.basic(cv));
                 temps.push(cv);
             }

@@ -40,6 +40,9 @@ pub(crate) enum Node {
     Offset(usize),
     /// a materialised vector read at the index (slot holds its data pointer)
     Leaf(usize, El),
+    /// a list of records read at the index: the record, lent (slot holds
+    /// the list's data pointer)
+    LeafObj(usize),
     /// a scalar computed once before the loop (slot holds its value)
     Scalar(usize, Ty),
     /// a number written in the program: a constant inside the kernel, so
@@ -120,19 +123,21 @@ impl<'ctx> Cg<'ctx, '_> {
     /// lambda of one parameter (capturing only numbers and numeric arrays) or
     /// a pure named function, both on unboxed numbers.
     fn each_fusible(&self, e: &Expr, args: &[Expr]) -> bool {
-        if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some()) {
+        if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
             return false;
         }
         let simple = |t: Ty| t.is_unboxed() && t != Ty::Unit;
+        // a record on the heap comes in lent, as a pointer
+        let simple_in = |t: Ty| simple(t) || (matches!(t, Ty::Obj(_)) && self.flat(t).is_none());
         match &args[1].kind {
             ExprKind::Lambda { params, body } => {
                 let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
                 params.len() == 1
                     && pts.len() == 1
-                    && simple(pts[0])
+                    && simple_in(pts[0])
                     && simple(rt)
                     // captured values reach the kernel as they are (numbers
                     // unboxed, anything else as a borrowed reference)
@@ -145,7 +150,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) else { return false };
                 let Ok(spec) = self.spec(&k) else { return false };
-                spec.params.len() == 1 && simple(spec.params[0]) && simple(spec.ret)
+                spec.params.len() == 1 && simple_in(spec.params[0]) && simple(spec.ret)
             }
             _ => false,
         }
@@ -285,6 +290,15 @@ impl<'ctx> Cg<'ctx, '_> {
             _ => {}
         }
         let t = self.ty_of(x);
+        if let Ty::Arr(el @ El::Obj(_), _) = t {
+            let v = self.expr(x)?;
+            let v = self.boxed(v)?;
+            let (len, data) = self.vec_header(v, el)?;
+            plan.lens.push(len);
+            plan.slots.push(data);
+            plan.temps.push(v);
+            return Ok(Node::LeafObj(plan.slots.len() - 1));
+        }
         if let Some(el) = num_el(t) {
             let v = self.expr(x)?;
             // a list in registers: the loop reads a stack copy of it
@@ -376,6 +390,10 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                 }
             }
+            Node::LeafObj(s) => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ptr, slots[*s].into_pointer_value(), &[i], "").s()? };
+                V::P(self.b.build_load(self.ptr, p, "elem").s()?.into_pointer_value(), false)
+            }
             Node::Scalar(s, t) => self.val_of(slots[*s], *t, false),
             Node::ConstI(v) => V::I(self.ctx.i64_type().const_int(*v as u64, true)),
             Node::ConstF(v) => V::F(self.ctx.f64_type().const_float(*v)),
@@ -401,6 +419,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let x: BasicMetadataValueEnum = match pt {
                     Ty::F64 => self.to_f64(x)?.into(),
                     Ty::Bool => self.truth(x)?.into(),
+                    Ty::Obj(_) => self.basic(x).into(), // a record, lent
                     _ => self.to_i64(x)?.into(),
                 };
                 let mut args = vec![x];
@@ -1052,7 +1071,14 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         let dtype = load(self, 1, i32t.into())?.into_int_value();
         let rank = load(self, 2, i32t.into())?.into_int_value();
-        let ok_t = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(dtype_of(el) as u64, false), "").s()?;
+        // a list of records holds handles (an empty list has no elements to read)
+        let want = if matches!(el, El::Obj(_)) { 4 } else { dtype_of(el) };
+        let mut ok_t = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want as u64, false), "").s()?;
+        if want == 4 {
+            let n = load(self, 3, i64t.into())?.into_int_value();
+            let empty = self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?;
+            ok_t = self.b.build_or(ok_t, empty, "").s()?;
+        }
         let ok_r = self.b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
         let ok = self.b.build_and(ok_t, ok_r, "").s()?;
         let f = self.cur_fn.unwrap();
@@ -1060,7 +1086,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let good = self.ctx.append_basic_block(f, "vec_ok");
         self.b.build_conditional_branch(ok, good, bad).s()?;
         self.b.position_at_end(bad);
-        self.call_rt("mim_vec_len", &[p.into(), self.i32c(dtype_of(el))])?; // reports it
+        self.call_rt("mim_vec_len", &[p.into(), self.i32c(want)])?; // reports it
         self.b.build_unreachable().s()?;
         self.b.position_at_end(good);
         let len = load(self, 3, i64t.into())?.into_int_value();

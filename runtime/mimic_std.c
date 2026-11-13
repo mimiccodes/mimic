@@ -30,8 +30,10 @@ static int64_t int_arg(mim_val *v, const char *fn) {
 /* A list from owned values, which it takes over (no retain/release pairs):
  * numbers become a numeric vector, as in an array literal. */
 static mim_val *list_take(int64_t n, mim_val **xs) {
-    int boxed = 0, dt = -1;
-    for (int64_t k = 0; k < n; k++) {
+    /* one handle makes a list of handles: a first one settles it without
+     * reading the rest (a list of records: no pass over all of them) */
+    int boxed = n > 0 && (xs[0]->rank != 0 || IS_HANDLES(xs[0])), dt = -1;
+    for (int64_t k = 0; k < n && !boxed; k++) {
         if (xs[k]->rank != 0 || IS_HANDLES(xs[k])) boxed = 1;
         else dt = dt == -1 ? xs[k]->dtype : join_dtype(dt, xs[k]->dtype);
     }

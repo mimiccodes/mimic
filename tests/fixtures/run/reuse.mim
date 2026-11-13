@@ -1,0 +1,52 @@
+module main
+
+// records updated in place only when nothing else can see them
+
+type P = { x: f64, y: f64, tag: str }
+
+fn bump(p: P) -> P { { p with x: p.x + 1, y: p.y * 2 } }
+
+fn swap(p: P) -> P { { p with x: p.y, y: p.x } }
+
+fn mk(i: i64) -> P { P { x: i * 1.0, y: i * 10.0, tag: "t{i}" } }
+
+fn walk(p: P, n: i64) -> P {
+    if n == 0 { p } else { walk(bump(p), n - 1) }
+}
+
+fn main() {
+    // still used afterwards: copied, the original unchanged
+    let a = mk(1)
+    let b = bump(a)
+    print((a.x, a.y, b.x, b.y))
+
+    // used once: handed over (same results)
+    let c = mk(2)
+    print(bump(c))
+
+    // new values read the old ones: computed first
+    print(swap(mk(3)))
+    print(swap(swap(mk(3))))
+
+    // a list still used afterwards keeps its records
+    let ps = ⍳ 4 ¨ mk
+    let qs = ps ¨ bump ¨ swap
+    print(ps ¨ (p => p.x))
+    print(qs ¨ (p => p.x))
+
+    // a list of our own: updated in place, step after step
+    print(⍳ 4 ¨ mk ¨ bump ¨ bump ¨ swap ¨ (p => p.x + p.y) ▷ +/)
+
+    // a move in one branch only
+    let d = mk(5)
+    let e = if d.x > 1 { 1 } else { 0 }
+    print((e, bump(d).x))
+
+    // recursion
+    print(walk(mk(1), 10))
+
+    // the same record twice in a list: each element sees its own copy
+    let f = mk(7)
+    let twice = [f f] ¨ bump
+    print((f.x, twice[0].x, twice[1].x))
+}
