@@ -1,0 +1,12 @@
+module main
+
+// http: a hello-world server (keep-alive connections); bench/run.py
+// measures it with load.go
+
+fn handle(req: http::Request) -> http::Response {
+    http::ok("Hello, World!")
+}
+
+fn main() {
+    http::serve(18432, handle)
+}

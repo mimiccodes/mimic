@@ -33,7 +33,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 7 | `sort` (10M ints) | branches, memory | array primitive |
 | 8 | `tree` (build and fold a depth-22 tree) | allocation, sharing | `arms`, nets, reference-count elision |
 | 9 | `json` (encode and decode 300,000 records, 21 MB) | strings, numbers, records | `json::encode`, `json::decode[T]` |
-| 10 | `http` (hello-world requests/s) | I/O, concurrency | concurrent I/O, event loop |
+| 10 | `http` (hello-world server, 400,000 requests) | I/O, concurrency | `http::serve`, event loop, keep-alive |
 | 11 | `ui` (frame time, 10k-row list) | diffing, rendering | `view`, `each` |
 
 ## Building the suite, step by step
@@ -92,6 +92,35 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### http: a hello-world server (faster than hyper on one core)
+
+Each version is a server answering `Hello, World!`; a Go load generator
+(`bench/http/load`) sends 400,000 requests over 64 keep-alive connections,
+16 pipelined per write, and checks every response. The time is the load
+generator's; it runs on the same machine. Apple M3 Pro, 2026-11-13.
+
+| Benchmark | C | Rust (hyper) | Go (net/http) | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| http | 0.712 s | 1.523 s (2.14×) | 13.952 s (19.60×) | **1.336 s (1.88×)** | **0.962 s (1.35×)** |
+
+The C version is a floor rather than an HTTP server: one kqueue loop that
+finds the end of each request and copies a fixed answer, without reading
+the request line or headers. Against real servers, Mimic on one core
+(about 300,000 requests a second) is ahead of hyper (260,000) and far
+ahead of Go's net/http, which flushes every pipelined answer on its own.
+
+What it took:
+
+* **keep-alive:** the server used to answer one request per connection
+  (`Connection: close`); it now serves request after request on a
+  connection, keeping pipelined bytes for the next request;
+* **one write for pipelined answers:** while the next request is already
+  read, answers wait and then leave together;
+* the status line and `Content-Length` are written without printf.
+
+All cores gain less (0.96 s) because the load generator shares the
+machine; one server thread already keeps up with most of what it sends.
 
 ### json: encode and decode (1.10× C)
 

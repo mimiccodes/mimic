@@ -82,7 +82,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F6 (fork-join) | Independent calls to pure recursive functions run in parallel (`f(a) + f(b)`, constructors, runs of `let`s): fork, sequential and ordinary versions of each function, a work-stealing pool, parallel freeing of large values; small blocks carved from per-thread chunks ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F2 (part) | Fusion through `⌽`, `↑` and `↓`: index remaps inside the fused loop, no intermediate arrays | ✅ |
 | F (json) | `json` benchmark (C, serde, Go): direct typed decoding, fast number formatting and parsing; 2.9× → 1.10× C. LTO with the runtime measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (RC elision and reuse, fusion through `⌿`, SIMD, scheduling, GPU; http and ui benchmarks) | |
+| F (http) | `http` benchmark (C floor, hyper, net/http, Go load generator in run.py); HTTP/1.1 keep-alive and pipelining in `http::serve`; Mimic 1.34 s vs hyper 1.52 s on one core ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (RC elision and reuse, fusion through `⌿`, SIMD, scheduling, GPU; ui benchmark) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 

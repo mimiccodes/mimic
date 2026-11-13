@@ -759,3 +759,41 @@ fn windows() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+
+/// `http::serve` keeps connections open (HTTP/1.1): pipelined requests,
+/// bodies between them, answered in order; `Connection: close` ends it.
+#[test]
+fn http_keep_alive() {
+    use std::io::{Read, Write};
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let dir = std::env::temp_dir().join(format!("mimic-golden-keepalive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("ka.mim");
+    std::fs::write(&src, format!("module main\n\nfn handle(req: http::Request) -> http::Response {{ http::ok(\"{{req.path}}:{{req.body}}\") }}\n\nfn main() {{ http::serve({port}, handle) }}\n")).unwrap();
+    let out = mimic().args(["build", "--emit-json"]).arg(&src).output().unwrap();
+    let json = String::from_utf8_lossy(&out.stdout);
+    let at = json.find("\"path\":\"").expect("an artifact path") + 8;
+    let exe = &json[at..at + json[at..].find('"').unwrap()];
+    let mut server = Command::new(exe).spawn().unwrap();
+    let mut conn = None;
+    for _ in 0..200 {
+        if let Ok(c) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            conn = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let mut c = conn.expect("the server listens");
+    c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    // three requests in one write, the second with a body, the third closing
+    c.write_all(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nxyzGET /c HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
+    let mut got = String::new();
+    c.read_to_string(&mut got).unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    let bodies: Vec<&str> = got.split("\r\n\r\n").skip(1).map(|s| s.split("HTTP/1.1").next().unwrap()).collect();
+    assert_eq!(bodies, ["/a:", "/b:xyz", "/c:"], "{got}");
+    assert_eq!(got.matches("Connection: close").count(), 1, "{got}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

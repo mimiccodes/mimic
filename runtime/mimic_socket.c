@@ -1553,9 +1553,11 @@ static const char *reason(int64_t s) {
     }
 }
 
-/* one request on a connection: parse, call the handler, answer, close */
-static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off);
+/* answer one request whose head is in b; 1 when the connection stays open
+ * for the next (b then holds what was read beyond this request) */
+static int http_answer(mconn *c, mim_val *handler, sbuf *bp, int64_t off, int keep_ok, sbuf *pend);
 
+/* one request on a connection: parse, call the handler, answer, close */
 static void serve_one(mconn *c, mim_val *handler) {
     sock_timeout(c->fd, 30);
     sbuf b = {0};
@@ -1565,26 +1567,68 @@ static void serve_one(mconn *c, mim_val *handler) {
         conn_close(c);
         return;
     }
-    http_after_head(c, handler, b, off);
+    http_answer(c, handler, &b, off, 0, NULL);
+    free(b.p);
 }
 
-/* answer one HTTP request whose head is in b (b is freed) */
-static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
+/* is a whole request head already read? */
+static int head_ready(const sbuf *b) { return b->n >= 4 && memmem(b->p, b->n, "\r\n\r\n", 4) != NULL; }
+
+/* HTTP/1.1 persistent connections: requests one after another on the same
+ * connection until the client closes it, asks to, or is idle for 30 s */
+static void serve_keep(mconn *c, mim_val *handler) {
+    sock_timeout(c->fd, 30);
+    sbuf b = {0}, pend = {0}; /* answers not sent yet */
+    for (;;) {
+        int64_t off = read_head(c, &b);
+        if (off < 0) {
+            if (pend.n) conn_send_all(c, pend.p, pend.n);
+            conn_close(c);
+            break;
+        }
+        if (!http_answer(c, handler, &b, off, 1, &pend)) break;
+        /* pipelined requests: their answers leave together, in one write,
+         * when the next would wait for the client (or 64 KB are waiting) */
+        if (head_ready(&b) && pend.n < 65536) continue;
+        if (conn_send_all(c, pend.p, pend.n) != 0) {
+            conn_close(c);
+            break;
+        }
+        pend.n = 0;
+    }
+    free(b.p);
+    free(pend.p);
+}
+
+static int http_answer(mconn *c, mim_val *handler, sbuf *bp, int64_t off, int keep_ok, sbuf *pend) {
+    sbuf b = *bp;
     const char *line_end = strstr(b.p, "\r\n");
     const char *sp1 = memchr(b.p, ' ', (size_t)(line_end - b.p));
     const char *sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(line_end - sp1 - 1)) : NULL;
     if (!sp1 || !sp2) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        if (pend && pend->n) conn_send_all(c, pend->p, pend->n);
         conn_send_all(c, bad, strlen(bad));
-        free(b.p);
         conn_close(c);
-        return;
+        return 0;
     }
     const char *target = sp1 + 1, *q = memchr(target, '?', (size_t)(sp2 - target));
     int64_t clen;
     int chunked;
     mim_val *hm = parse_headers(line_end + 2, b.p + off - 2, &clen, &chunked);
-    mim_val *bodyv = read_body(c, &b, off, clen < 0 && !chunked ? 0 : clen, chunked, 0);
+    /* keep the connection: HTTP/1.1, no `Connection: close`, a body of known length */
+    int keep = keep_ok && !chunked && (size_t)(line_end - sp2) == 9 && memcmp(sp2 + 1, "HTTP/1.1", 8) == 0;
+    if (keep) {
+        mim_val **h = (mim_val **)hm->data;
+        int64_t count = ((const int64_t *)(const void *)hm->desc)[0];
+        for (int64_t i = 0; i < count; i++) {
+            mim_val *k = h[2 * i], *v = h[2 * i + 1];
+            if (k->len == 10 && memcmp(k->data, "connection", 10) == 0 && v->len >= 5 && ieq((const char *)v->data, "close", 5)) keep = 0;
+        }
+    }
+    int64_t body_len = clen < 0 && !chunked ? 0 : clen;
+    mim_val *bodyv = read_body(c, &b, off, body_len, chunked, 0);
+    *bp = b; /* read_body may have grown it */
     mim_val *fields[5] = {
         mim_str(b.p, (int64_t)(sp1 - b.p)),
         mim_str(target, (int64_t)((q ? q : sp2) - target)),
@@ -1593,7 +1637,12 @@ static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
         bodyv,
     };
     mim_val *req = obj_owned(&mim_desc_http_Request, 5, fields);
-    free(b.p);
+    /* what the client sent after this request stays for the next */
+    int64_t used = off + (body_len > 0 ? body_len : 0);
+    if (used > (int64_t)b.n) used = (int64_t)b.n;
+    memmove(b.p, b.p + used, b.n - (size_t)used);
+    b.n -= (size_t)used;
+    *bp = b;
     if (c->turn) co_lock(c->turn);
     mim_val *resp = mim_call(handler, 1, &req);
     if (c->turn) pthread_mutex_unlock(c->turn);
@@ -1602,9 +1651,11 @@ static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     mim_val *rh = field_of(resp, &mim_desc_http_Response, 1, "an HTTP handler's result");
     mim_val *rb = field_of(resp, &mim_desc_http_Response, 2, "an HTTP handler's result");
     sbuf out = {0};
-    char line[256];
-    snprintf(line, sizeof line, "HTTP/1.1 %lld %s\r\n", (long long)status, reason(status));
-    sb_put(&out, line, strlen(line));
+    sb_put(&out, "HTTP/1.1 ", 9);
+    sb_i64(&out, status);
+    sb_put(&out, " ", 1);
+    sb_str(&out, reason(status));
+    sb_put(&out, "\r\n", 2);
     int has_type = 0;
     if (rh && rh->dtype == MIM_MAP) {
         mim_val **h = (mim_val **)rh->data;
@@ -1622,14 +1673,24 @@ static void http_after_head(mconn *c, mim_val *handler, sbuf b, int64_t off) {
     }
     if (!has_type) sb_str(&out, "Content-Type: text/plain; charset=utf-8\r\n");
     int64_t blen = rb && rb->dtype == MIM_CHAR ? rb->len : 0;
-    snprintf(line, sizeof line, "Content-Length: %lld\r\nConnection: close\r\n\r\n", (long long)blen);
-    sb_put(&out, line, strlen(line));
+    sb_put(&out, "Content-Length: ", 16);
+    sb_i64(&out, blen);
+    sb_str(&out, keep ? "\r\n\r\n" : "\r\nConnection: close\r\n\r\n");
     if (blen) sb_put(&out, (const char *)rb->data, (size_t)blen);
-    conn_send_all(c, out.p, out.n);
-    free(out.p);
     mim_release(resp);
+    if (pend) { /* after the answers before it */
+        sb_put(pend, out.p, out.n);
+        free(out.p);
+        if (keep) return 1;
+        out = *pend;
+        *pend = (sbuf){0};
+    }
+    int sent = conn_send_all(c, out.p, out.n);
+    free(out.p);
+    if (keep && sent == 0) return 1;
     if (!c->tls) shutdown(c->fd, SHUT_WR);
     conn_close(c);
+    return 0;
 }
 
 typedef void (*conn_fn)(mconn *c, mim_val *handler);
@@ -1775,7 +1836,7 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
     return ok_of(mim_int(served));
 }
 
-mim_val *mim_std_http_serve(mim_val *port, mim_val *handler) { return serve_loop(port, handler, 0); }
+mim_val *mim_std_http_serve(mim_val *port, mim_val *handler) { return serve_loop_with(port, handler, 0, serve_keep, NULL); }
 
 mim_val *mim_std_http_serve_requests(mim_val *port, mim_val *handler, mim_val *count) {
     return serve_loop(port, handler, geti(count, 0) > 0 ? geti(count, 0) : 1);
@@ -2627,7 +2688,7 @@ mim_val *mim_std_tls_self_signed(mim_val *hostv) {
 static int64_t count_of(mim_val *n) { return geti(n, 0) > 0 ? geti(n, 0) : 1; }
 
 mim_val *mim_std_http_serve_tls(mim_val *port, mim_val *handler, mim_val *identity) {
-    return serve_loop_with(port, handler, 0, serve_one, identity_of(identity, "http::serve_tls"));
+    return serve_loop_with(port, handler, 0, serve_keep, identity_of(identity, "http::serve_tls"));
 }
 
 mim_val *mim_std_http_serve_tls_requests(mim_val *port, mim_val *handler, mim_val *identity, mim_val *count) {
@@ -2665,7 +2726,10 @@ static void app_serve_one(mconn *c, mim_val *pair) {
     }
     mim_val **h = (mim_val **)pair->data;
     if (wants_websocket(b.p, (size_t)off)) ws_after_head(c, h[1], b, off);
-    else http_after_head(c, h[0], b, off);
+    else {
+        http_answer(c, h[0], &b, off, 0, NULL);
+        free(b.p);
+    }
 }
 
 /* serve HTTP requests with `page` and WebSocket connections with `session`

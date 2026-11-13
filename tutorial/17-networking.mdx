@@ -65,6 +65,8 @@ fn main() {
 
 If `handle` is pure, as here, every request is handled in parallel. If it prints or writes files, requests are handled one at a time, in order, so its effects never interleave. Either way you write the same code.
 
+The server keeps each connection open for the client's next request (HTTP/1.1 keep-alive), and answers pipelined requests together in one write. A hello-world server answers about 300,000 requests a second on one core, slightly faster than Rust's hyper (see `BENCHMARK.md`).
+
 ## A server and its client in one program
 
 Because a server with a pure handler only has overlapping effects, starting it with `let` runs it in the background like any other implicit future:

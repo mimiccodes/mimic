@@ -5,6 +5,11 @@ Every folder here holds one benchmark in Mimic, C, Rust and Go (main.mim,
 main.c, main.rs, main.go) and the output they must all print (expected.txt).
 A Rust version that needs crates is a cargo project in rust/ instead of
 main.rs (built --offline: the crates must be in the local cargo cache).
+
+A folder with a load/ directory (a Go program) is a server benchmark: each
+version is a server on port 18432, and the time is how long the load
+generator takes to send its requests and check every response body
+(expected.txt).
 This builds each version the fastest way for its language, checks its output,
 then times a warm-up run and 5 measured runs, on one core and on all cores,
 and writes results.md with each time as a ratio to C.
@@ -15,6 +20,7 @@ and writes results.md with each time as a ratio to C.
 """
 
 import argparse
+import socket
 import json
 import os
 import platform
@@ -82,6 +88,40 @@ def time_runs(exe: Path, env: dict, runs: int, expected: str) -> float:
     return best
 
 
+# server benchmarks: requests, keep-alive connections, requests per write
+LOAD = {"port": 18432, "conns": 64, "requests": 400000, "depth": 16}
+
+
+def wait_port(port: int, proc, seconds: float = 10.0) -> None:
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < seconds:
+        if proc.poll() is not None:
+            raise RuntimeError(f"the server exited ({proc.returncode})")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("the server did not start listening")
+
+
+def time_server(exe: Path, load: Path, env: dict, runs: int, expected: str) -> float:
+    """Best load-generator time against a running server (a warm-up first)."""
+    proc = subprocess.Popen([str(exe)], env={**os.environ, **env}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_port(LOAD["port"], proc)
+        args = [str(load), str(LOAD["port"]), str(LOAD["conns"]), str(LOAD["requests"]), str(LOAD["depth"]), expected]
+        best = float("inf")
+        for i in range(runs + 1):
+            t = float(run(args).stdout.strip())
+            if i:
+                best = min(best, t)
+        return best
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("names", nargs="*", help="benchmarks to run (default: all)")
@@ -91,11 +131,19 @@ def main() -> int:
     benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
     if a.names:
         benches = [b for b in benches if b.name in a.names]
-    one = {"MIMIC_THREADS": "1", "GOMAXPROCS": "1"}
+    one = {"MIMIC_THREADS": "1", "GOMAXPROCS": "1", "TOKIO_WORKER_THREADS": "1"}
     rows = []
     for b in benches:
         expected = (b / "expected.txt").read_text().strip()
         times = {}
+        load = None
+        if (b / "load").is_dir():
+            if not shutil.which("go"):
+                print(f"  {b.name}: skipped (the load generator needs Go)")
+                continue
+            load = OUT / f"{b.name}-load"
+            run(["go", "build", "-o", str(load), "."], cwd=b / "load", env={**os.environ, "GO111MODULE": "off"})
+        timed = (lambda exe, env: time_server(exe, load, env, a.runs, expected)) if load else (lambda exe, env: time_runs(exe, env, a.runs, expected))
         for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("go", "main.go"), ("mimic", "main.mim")]:
             src = b / file
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
@@ -106,9 +154,9 @@ def main() -> int:
             if exe is None:
                 continue
             print(f"  {b.name:<16} {lang:<6}", end="", flush=True)
-            times[lang] = time_runs(exe, one, a.runs, expected)
+            times[lang] = timed(exe, one)
             if lang == "mimic":
-                times["mimic-all"] = time_runs(exe, {}, a.runs, expected)
+                times["mimic-all"] = timed(exe, {})
                 print(f" {times['mimic']:.3f} s (1 core), {times['mimic-all']:.3f} s (all cores)")
             else:
                 print(f" {times[lang]:.3f} s")
