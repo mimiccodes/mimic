@@ -19,4 +19,18 @@ serde_json = "1"
 inkwell = { version = "0.11", default-features = false, features = ["llvm23-1", "target-all"] }
 
 [profile.release]
-lto = "thin"
+# the compiler itself as fast as it can be built
+opt-level = 3
+# whole-program optimisation across every crate, and one codegen unit per
+# crate (more inlining, slower to build)
+lto = "fat"
+codegen-units = 1
+# no unwinding: nothing catches panics; an internal error still prints its
+# message, then aborts
+panic = "abort"
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
+# no symbol tables in the binary (much smaller)
+strip = "symbols"
