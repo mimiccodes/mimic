@@ -73,6 +73,14 @@ Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Wha
   * `true`, `false`, small integers and every literal in the program are **immortal**: they are created once and never refcounted or freed.
 * **Panics.** If several threads panic, only the first one reports.
 
+## GPU kernels
+
+A fused map (see kernel fusion) that the GPU computes *exactly* as the CPU does is also compiled to a Metal kernel (`crates/mimic-codegen/src/gpu.rs`); the runtime (`runtime/mimic_gpu.c`) runs it on the GPU when that pays off. No annotation: like threads, it is the compiler's and runtime's call.
+
+* **What qualifies.** Elementwise arithmetic, comparisons and logic over `[f32]`, `[i32]`, `[i64]` and `[bool]`, with `⌽ ↑ ↓` and `⍳`. Apple GPUs have no `f64`, so an `f32` kernel is made only where each float operation takes f32 operands and rounds to f32 — exactly what the CPU computes. Integer `div` and `mod` qualify by a constant (no division by zero on the GPU). Calls, records and `f64` stay on the CPU.
+* **When.** Metal is loaded on first use (`dlopen`, no link-time dependency; on other systems everything runs on the CPU). Lists are read and written in place (unified memory: no copies). Starting Metal takes about 0.1 s once, and the CPU's cores do simple arithmetic about as fast, so by default a kernel goes to the GPU only with a lot of work (about 4·10⁹ estimated operations, a quarter of that once the GPU is running). `MIMIC_GPU=1` sends every kernel there, `MIMIC_GPU=0` none.
+* **Results.** The same as the CPU's; with fused multiply-add on (the default) both may contract `a * b + c`, and `--strict-math` keeps every kernel on the CPU. The golden tests run every fixture with `MIMIC_GPU=1` too.
+
 ## Milestone 2, phase 2 (implemented): interaction-net core
 
 The parallel reducer for interaction nets is described in [net.md](net.md). It has:

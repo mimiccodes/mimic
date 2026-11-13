@@ -17,7 +17,7 @@ use super::*;
 /// Element type of a numeric vector the kernels can read and write directly.
 pub(crate) fn num_el(t: Ty) -> Option<El> {
     match t {
-        Ty::Arr(e @ (El::I64 | El::F64 | El::Bool), _) => Some(e),
+        Ty::Arr(e @ (El::I64 | El::F64 | El::Bool | El::F32 | El::I32), _) => Some(e),
         _ => None,
     }
 }
@@ -26,6 +26,8 @@ pub(crate) fn num_el(t: Ty) -> Option<El> {
 fn dtype_of(e: El) -> i32 {
     match e {
         El::F64 => 1,
+        El::F32 => 9,
+        El::I32 => 10,
         El::Bool => 2,
         _ => 0,
     }
@@ -64,6 +66,10 @@ pub(crate) enum Node {
     /// the second when the first (a truth value) holds, else the third: how
     /// `+/ (xs ⌿ mask)` reads, without building the filtered list
     Sel(Box<Node>, Box<Node>, Box<Node>),
+    /// a value made f32 (rounded) or i32 (wrapped): kernels compute in f64
+    /// and i64 and narrow where the type says so, which is exactly f32 and
+    /// i32 arithmetic for + - × ÷ (and what the runtime does)
+    Narrow(El, Box<Node>),
 }
 
 /// Does the computation call a function that can reach recursion?
@@ -71,7 +77,7 @@ fn heavy(n: &Node) -> bool {
     match n {
         Node::Apply { heavy, arg, .. } => *heavy || self::heavy(arg),
         Node::Bin(_, a, b) => heavy(a) || heavy(b),
-        Node::Un(_, a) | Node::Rev(_, a) | Node::Shift(_, a) => heavy(a),
+        Node::Un(_, a) | Node::Rev(_, a) | Node::Shift(_, a) | Node::Narrow(_, a) => heavy(a),
         Node::Sel(c, a, b) => heavy(c) || heavy(a) || heavy(b),
         _ => false,
     }
@@ -83,6 +89,10 @@ pub(crate) struct Plan<'ctx> {
     slots: Vec<BasicValueEnum<'ctx>>,
     lens: Vec<IntValue<'ctx>>,
     temps: Vec<V<'ctx>>,
+    /// each leaf's slot and length (a GPU kernel copies the leaves)
+    leaf_lens: Vec<(usize, IntValue<'ctx>)>,
+    /// variables already read as leaves: name, slot
+    named: Vec<(String, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -208,9 +218,31 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.operand(lhs, plan)?;
                 let b = self.operand(rhs, plan)?;
+                // f32 (i32) arithmetic: its operands made f32 (i32) first
+                // (`xs * 0.1` multiplies by the f32 nearest 0.1; `xs > 0.1`
+                // compares with it), then the result, unless a truth value
+                let (tl, tr) = (self.ty_of(lhs), self.ty_of(rhs));
+                let el_of = |t: Ty| match t {
+                    Ty::Arr(el, _) => (Ty::of_el(el), true),
+                    t => (t, false),
+                };
+                let ((x, xl), (y, yl)) = (el_of(tl), el_of(tr));
+                let joint = types::num_join(x, xl, y, yl);
+                if matches!(joint, Ty::F32 | Ty::I32) {
+                    let el = if joint == Ty::F32 { El::F32 } else { El::I32 };
+                    let (a, b) = (Node::Narrow(el, Box::new(a)), Node::Narrow(el, Box::new(b)));
+                    let bin = Node::Bin(*op, Box::new(a), Box::new(b));
+                    return Ok(if num_el(self.ty_of(e)) == Some(el) { Node::Narrow(el, Box::new(bin)) } else { bin });
+                }
                 Ok(Node::Bin(*op, Box::new(a), Box::new(b)))
             }
-            ExprKind::Unary { op, expr } => Ok(Node::Un(*op, Box::new(self.operand(expr, plan)?))),
+            ExprKind::Unary { op, expr } => {
+                let a = Node::Un(*op, Box::new(self.operand(expr, plan)?));
+                if let Some(el @ (El::F32 | El::I32)) = num_el(self.ty_of(e)) {
+                    return Ok(Node::Narrow(el, Box::new(a)));
+                }
+                Ok(a)
+            }
             ExprKind::Prim { prim: Prim::Each, args } => {
                 let arg = Box::new(self.operand(&args[0], plan)?);
                 match &args[1].kind {
@@ -291,6 +323,11 @@ impl<'ctx> Cg<'ctx, '_> {
         match &x.kind {
             ExprKind::Int(v) if self.ty_of(x) == Ty::I64 => return Ok(Node::ConstI(*v)),
             ExprKind::Float(v) if self.ty_of(x) == Ty::F64 => return Ok(Node::ConstF(*v)),
+            // f32 and i32 numbers written in the program: already rounded
+            // (wrapped), so constants too
+            ExprKind::Float(v) if self.ty_of(x) == Ty::F32 => return Ok(Node::ConstF(*v as f32 as f64)),
+            ExprKind::Int(v) if self.ty_of(x) == Ty::F32 => return Ok(Node::ConstF(*v as f64 as f32 as f64)),
+            ExprKind::Int(v) if self.ty_of(x) == Ty::I32 => return Ok(Node::ConstI(*v as i32 as i64)),
             _ => {}
         }
         let t = self.ty_of(x);
@@ -304,27 +341,53 @@ impl<'ctx> Cg<'ctx, '_> {
             return Ok(Node::LeafObj(plan.slots.len() - 1));
         }
         if let Some(el) = num_el(t) {
-            let v = self.expr(x)?;
-            // a list in registers: the loop reads a stack copy of it
-            if let V::A(a, _) = v {
-                let at = a.get_type();
-                let tmp = self.entry_alloca_ty(at.into(), "leaf")?;
-                self.b.build_store(tmp, a).s()?;
-                plan.lens.push(self.ctx.i64_type().const_int(at.len() as u64, false));
-                plan.slots.push(tmp.into());
-                return Ok(Node::Leaf(plan.slots.len() - 1, el));
+            // a variable read again: the same leaf
+            let name = match &x.kind {
+                ExprKind::Path(p) if p.len() == 1 && self.lookup(&p[0]).is_some() => Some(p[0].clone()),
+                _ => None,
+            };
+            if let Some(n) = &name
+                && let Some((_, s)) = plan.named.iter().find(|(m, _)| m == n)
+            {
+                // (its length again: ⌽ ↑ ↓ collect the lengths inside them)
+                let s = *s;
+                let len = plan.leaf_lens.iter().find(|(t, _)| *t == s).map(|(_, l)| *l).ok_or("internal compiler error: a leaf without a length")?;
+                plan.lens.push(len);
+                return Ok(Node::Leaf(s, el));
             }
-            let v = self.boxed(v)?;
-            let (len, data) = self.vec_header(v, el)?;
-            plan.lens.push(len);
-            plan.slots.push(data);
-            plan.temps.push(v);
-            return Ok(Node::Leaf(plan.slots.len() - 1, el));
+            let v = self.expr(x)?;
+            let node = self.leaf(v, el, plan)?;
+            if let (Some(n), Node::Leaf(s, _)) = (name, &node) {
+                plan.named.push((n, *s));
+            }
+            return Ok(node);
         }
         let v = self.expr(x)?;
         let v = self.as_ty(v, t, "operand")?;
         plan.slots.push(self.basic(v));
         Ok(Node::Scalar(plan.slots.len() - 1, t))
+    }
+
+    /// A numeric list read at the index.
+    fn leaf(&mut self, v: V<'ctx>, el: El, plan: &mut Plan<'ctx>) -> R<Node> {
+        // a list in registers: the loop reads a stack copy of it
+        if let V::A(a, _) = v {
+            let at = a.get_type();
+            let tmp = self.entry_alloca_ty(at.into(), "leaf")?;
+            self.b.build_store(tmp, a).s()?;
+            let len = self.ctx.i64_type().const_int(at.len() as u64, false);
+            plan.lens.push(len);
+            plan.slots.push(tmp.into());
+            plan.leaf_lens.push((plan.slots.len() - 1, len));
+            return Ok(Node::Leaf(plan.slots.len() - 1, el));
+        }
+        let v = self.boxed(v)?;
+        let (len, data) = self.vec_header(v, el)?;
+        plan.lens.push(len);
+        plan.slots.push(data);
+        plan.temps.push(v);
+        plan.leaf_lens.push((plan.slots.len() - 1, len));
+        Ok(Node::Leaf(plan.slots.len() - 1, el))
     }
 
     /// The common length of every array in the expression (panics on mismatch).
@@ -379,6 +442,17 @@ impl<'ctx> Cg<'ctx, '_> {
             Node::Leaf(s, el) => {
                 let base = slots[*s].into_pointer_value();
                 match el {
+                    // 4-byte numbers, widened for the computation
+                    El::F32 => {
+                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), base, &[i], "").s()? };
+                        let x = self.b.build_load(self.ctx.f32_type(), p, "").s()?.into_float_value();
+                        V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
+                    }
+                    El::I32 => {
+                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), base, &[i], "").s()? };
+                        let x = self.b.build_load(self.ctx.i32_type(), p, "").s()?.into_int_value();
+                        V::I(self.b.build_int_s_extend(x, self.ctx.i64_type(), "").s()?)
+                    }
                     El::F64 => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
                         V::F(self.b.build_load(self.ctx.f64_type(), p, "").s()?.into_float_value())
@@ -413,6 +487,23 @@ impl<'ctx> Cg<'ctx, '_> {
             Node::Rev(s, a) => {
                 let j = self.b.build_int_sub(slots[*s].into_int_value(), i, "").s()?;
                 self.eval_node(a, j, slots)?
+            }
+            Node::Narrow(el, a) => {
+                let x = self.eval_node(a, i, slots)?;
+                match (el, x) {
+                    (_, V::B(_)) => x, // a comparison's truth value stays one
+                    (El::F32, _) => {
+                        let d = self.to_f64(x)?;
+                        let f = self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?;
+                        V::F(self.b.build_float_ext(f, self.ctx.f64_type(), "").s()?)
+                    }
+                    (_, V::F(_)) => x, // (an i32 operand of a float: not narrowed)
+                    _ => {
+                        let n = self.to_i64(x)?;
+                        let t = self.b.build_int_truncate(n, self.ctx.i32_type(), "").s()?;
+                        V::I(self.b.build_int_s_extend(t, self.ctx.i64_type(), "").s()?)
+                    }
+                }
             }
             Node::Sel(c, a, b) => {
                 let c = self.eval_node(c, i, slots)?;
@@ -529,21 +620,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let acc = accphi.as_basic_value();
             let next_acc: BasicValueEnum = match mode {
                 Mode::Map(el) => {
-                    match el {
-                        El::F64 => {
-                            let p = unsafe { cg.b.build_in_bounds_gep(cg.ctx.f64_type(), out, &[i], "").s()? };
-                            cg.b.build_store(p, cg.to_f64(v)?).s()?;
-                        }
-                        El::Bool => {
-                            let p = unsafe { cg.b.build_in_bounds_gep(cg.ctx.i8_type(), out, &[i], "").s()? };
-                            let t = cg.truth(v)?;
-                            cg.b.build_store(p, cg.b.build_int_z_extend(t, cg.ctx.i8_type(), "").s()?).s()?;
-                        }
-                        _ => {
-                            let p = unsafe { cg.b.build_in_bounds_gep(i64t, out, &[i], "").s()? };
-                            cg.b.build_store(p, cg.to_i64(v)?).s()?;
-                        }
-                    }
+                    cg.store_elem(out.into(), el, i, v)?;
                     acc
                 }
                 Mode::Reduce(prim, _) => cg.combine(prim, float, acc, v)?,
@@ -719,13 +796,88 @@ impl<'ctx> Cg<'ctx, '_> {
         let data = self.data_of(out)?;
         let mode = Mode::Map(el);
         self.small_or_kernel(&root, &plan, n, mode, data, |cg| {
-            let k = cg.emit_kernel(&root, &plan, mode)?;
-            let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
-            cg.par_for(n, k, ctx)?;
+            cg.gpu_or(&root, &plan, el, n, data, |cg| {
+                let k = cg.emit_kernel(&root, &plan, mode)?;
+                let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
+                cg.par_for(n, k, ctx)
+            })?;
             Ok(None)
         })?;
         self.release_plan(&plan)?;
         Ok(out)
+    }
+
+    /// Bytes per element of a kernel's vector.
+    fn el_bytes(el: El) -> u64 {
+        match el {
+            El::F32 | El::I32 => 4,
+            El::Bool => 1,
+            _ => 8,
+        }
+    }
+
+    /// A map into `data` (n elements of `el`): on the GPU when the runtime
+    /// wants it there (gpu.rs; macOS, not with --strict-math), else `cpu`.
+    fn gpu_or(&mut self, root: &Node, plan: &Plan<'ctx>, el: El, n: IntValue<'ctx>, data: BasicValueEnum<'ctx>, cpu: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+        let triple = self.module.get_triple().as_str().to_string_lossy().into_owned();
+        let mac = triple.contains("apple") && (triple.contains("macos") || triple.contains("darwin")) && !triple.contains("macabi");
+        let gk = if self.contract && mac && self.opt_level >= 2 { gpu::map_kernel(root, el, plan.slots.len()) } else { None };
+        let Some(gk) = gk else { return cpu(self) };
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let f = self.cur_fn.unwrap();
+        let (gb, cb, done) = (self.ctx.append_basic_block(f, "gpu"), self.ctx.append_basic_block(f, "cpu"), self.ctx.append_basic_block(f, "gpu_done"));
+        let wants = self.call_rt("mim_gpu_wants", &[n.into(), i64t.const_int(gk.cost as u64, false).into()])?.unwrap().into_int_value();
+        let w = self.b.build_int_compare(IntPredicate::NE, wants, i32t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(w, gb, cb).s()?;
+        self.b.position_at_end(gb);
+        let nb = gk.bufs.len() as u32;
+        let ins_ty = self.ptr.array_type(nb.max(1));
+        let ins = self.entry_array_of(ins_ty)?;
+        let bytes_ty = i64t.array_type(nb.max(1));
+        let bytes = self.entry_array_of(bytes_ty)?;
+        for (k, (slot, lel)) in gk.bufs.iter().enumerate() {
+            let at = |cg: &Self, ty: inkwell::types::ArrayType<'ctx>, base: PointerValue<'ctx>| unsafe { cg.b.build_in_bounds_gep(ty, base, &[i64t.const_zero(), i64t.const_int(k as u64, false)], "") };
+            let p = at(self, ins_ty, ins).s()?;
+            self.b.build_store(p, plan.slots[*slot]).s()?;
+            let len = plan.leaf_lens.iter().find(|(s, _)| s == slot).map(|(_, l)| *l).ok_or("internal compiler error: GPU leaf without a length")?;
+            let sz = self.b.build_int_mul(len, i64t.const_int(Self::el_bytes(*lel), false), "").s()?;
+            let p = at(self, bytes_ty, bytes).s()?;
+            self.b.build_store(p, sz).s()?;
+        }
+        let na = plan.slots.len() as u32;
+        let args_ty = i64t.array_type(na.max(1));
+        let args = self.entry_array_of(args_ty)?;
+        for (s, a) in gk.args.iter().enumerate() {
+            let v: IntValue = match a {
+                gpu::Arg::None => continue,
+                gpu::Arg::Raw => {
+                    let v = plan.slots[s].into_int_value();
+                    if v.get_type().get_bit_width() < 64 { self.b.build_int_z_extend(v, i64t, "").s()? } else { v }
+                }
+                gpu::Arg::F32 => {
+                    let d = plan.slots[s].into_float_value();
+                    let f = self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?;
+                    let bits = self.b.build_bit_cast(f, i32t, "").s()?.into_int_value();
+                    self.b.build_int_z_extend(bits, i64t, "").s()?
+                }
+            };
+            let p = unsafe { self.b.build_in_bounds_gep(args_ty, args, &[i64t.const_zero(), i64t.const_int(s as u64, false)], "").s()? };
+            self.b.build_store(p, v).s()?;
+        }
+        let src = self.cstring(&gk.src)?;
+        let out_bytes = self.b.build_int_mul(n, i64t.const_int(Self::el_bytes(el), false), "").s()?;
+        let ok = self
+            .call_rt("mim_gpu_run", &[src.into(), n.into(), i32t.const_int(nb as u64, false).into(), ins.into(), bytes.into(), args.into(), i32t.const_int(na as u64, false).into(), data.into(), out_bytes.into()])?
+            .unwrap()
+            .into_int_value();
+        let ok = self.b.build_int_compare(IntPredicate::NE, ok, i32t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(ok, done, cb).s()?;
+        self.b.position_at_end(cb);
+        cpu(self)?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        Ok(())
     }
 
     /// Small loops (up to SMALL_LOOP elements) run inline in the calling
@@ -813,6 +965,16 @@ impl<'ctx> Cg<'ctx, '_> {
             El::F64 => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
                 self.b.build_store(p, self.to_f64(v)?).s()?;
+            }
+            El::F32 => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), base, &[i], "").s()? };
+                let d = self.to_f64(v)?;
+                self.b.build_store(p, self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?).s()?;
+            }
+            El::I32 => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), base, &[i], "").s()? };
+                let n = self.to_i64(v)?;
+                self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i32_type(), "").s()?).s()?;
             }
             El::Bool => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
@@ -1322,10 +1484,37 @@ impl<'ctx> Cg<'ctx, '_> {
         if !self.is_fae(value) || !self.trivially_pure(value) {
             return false;
         }
+        // substituted at every use: once, or cheap enough to compute again
+        // (else a chain `b = a × a`, `c = b × b`, … doubles at each step)
+        let mut roots = Vec::new();
+        super::owned::block_roots(rest, tail, &mut roots);
+        let mut uses = 0;
+        for r in &roots {
+            r.walk(&mut |x| {
+                if matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) {
+                    uses += 1;
+                }
+            });
+        }
+        if uses > 1 && self.lazy_size(value) > 8 {
+            return false;
+        }
         self.lazies.push((name.to_string(), value as *const Expr));
         let ok = rest.iter().all(|s| self.stmt_uses_ok(name, s)) && tail.is_none_or(|t| self.uses_ok(name, t, false));
         self.lazies.pop();
         ok
+    }
+
+    /// How many operations `e` is, lazy lets in it substituted.
+    fn lazy_size(&self, e: &Expr) -> usize {
+        let mut n = 0;
+        e.walk(&mut |x| {
+            n += match &x.kind {
+                ExprKind::Path(p) if p.len() == 1 => self.lazy_expr(&p[0]).map_or(1, |inner| self.lazy_size(inner)),
+                _ => 1,
+            };
+        });
+        n
     }
 
     fn trivially_pure(&self, e: &Expr) -> bool {

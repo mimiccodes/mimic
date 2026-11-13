@@ -1,0 +1,28 @@
+module main
+
+// Maps the GPU computes exactly as the CPU does (f32, i32, i64, truth
+// values): the golden tests run this with MIMIC_GPU=1 too
+
+fn main() {
+    let n = 1000
+    let xs: [f32] = ⍳ n
+    let half = xs * 0.5
+    print(half ↓ 995)
+    let third = xs / 3.0
+    print(third ↓ 997)
+    print(+/ (xs * xs))
+    let is: [i32] = ⍳ n
+    let wrapped = is * 3000000
+    print(wrapped ↓ 996)
+    let ks = ⍳ n - 500
+    let q = ks div 7
+    print(q ↑ 4)
+    let r = ks % -3
+    print(r ↑ 4)
+    let big = ks > 490
+    print(+/ big)
+    let back = ⌽ (ks × 2)
+    print(back ↑ 3)
+    let mid = (ks + 1) ↓ 998
+    print(mid)
+}

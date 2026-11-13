@@ -405,6 +405,8 @@ The annotation types are:
 * **Mixing.** Floats beat integers. Between two widths of the same kind, a list keeps its own type against a single value: `xs * 0.5` on an `[f32]` is an `[f32]`, and `ys + 1` on an `[i32]` is an `[i32]`. Otherwise the wider type wins: an `f32` times an `f64` is an `f64`.
 * **Division.** `/` of integers gives an `f64`, as always; `div` keeps an `i32`.
 * **Sums.** `+/` of an `[f32]` adds in f32, and of an `[i32]` wraps.
+* **Multiply-add.** As with `f64`, `a * b + c` on `f32` may be one fused multiply-add (one rounding instead of two) unless the program is built with `--strict-math`.
+* **The GPU.** Long maps over `[f32]`, `[i32]`, `[i64]` and `[bool]` with a lot of arithmetic per element can run on the GPU (macOS, Metal), with the same results as the CPU. See [design.md](design.md#gpu-kernels).
 * **The other C widths** (`i8`, `i16`, `u16`, `u32`, `u64`, `isize`, `usize`) are still `i64` in Mimic code; they keep their meaning for C functions.
 
 ### Generics

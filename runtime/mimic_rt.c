@@ -1333,6 +1333,7 @@ typedef struct {
     const mim_val *a, *b;
     mim_val *r;
     int64_t sa, sb; /* 0 = broadcast scalar, 1 = vector */
+    int f32, i32;   /* a comparison of f32 (i32) numbers: compared as such */
 } binop_ctx;
 
 /* Fast typed loops (vectorisable) for the common same-dtype cases. */
@@ -1387,6 +1388,10 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
         mim_val *r = c->r;
         if (floaty || op == OP_DIV) { /* note: OP_IDIV on ints stays integer */
             double x = getf(c->a, ia), y = getf(c->b, ib);
+            if (r->dtype == MIM_F32 || (is_cmp(op) && c->f32)) { /* f32 arithmetic: f32 operands */
+                x = (double)(float)x;
+                y = (double)(float)y;
+            }
             switch (op) {
             case OP_ADD: setf(r, i, x + y); break;
             case OP_SUB: setf(r, i, x - y); break;
@@ -1407,6 +1412,10 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
             }
         } else {
             int64_t x = geti(c->a, ia), y = geti(c->b, ib);
+            if (r->dtype == MIM_I32 || (is_cmp(op) && c->i32)) { /* i32 arithmetic: i32 operands */
+                x = (int32_t)(uint32_t)x;
+                y = (int32_t)(uint32_t)y;
+            }
             switch (op) {
             case OP_ADD: seti(r, i, (int64_t)((uint64_t)x + (uint64_t)y)); break;
             case OP_SUB: seti(r, i, (int64_t)((uint64_t)x - (uint64_t)y)); break;
@@ -1507,7 +1516,8 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         dt = (a->dtype == MIM_BOOL && b->dtype == MIM_BOOL && op <= OP_BXOR) ? MIM_BOOL : MIM_I64;
     }
     mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
-    binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1};
+    int jt = arith_dtype(a->dtype, a->rank, b->dtype, b->rank);
+    binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1, jt == MIM_F32, jt == MIM_I32};
     /* the fast loops index x[i] for vectors and x[0] for scalars */
     parallel_for(n, binop_range, &c);
     return r;
@@ -3558,3 +3568,5 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_json.c"
 /* native windows for ui (macOS) */
 #include "mimic_window.c"
+/* GPU kernels (Metal, macOS) */
+#include "mimic_gpu.c"

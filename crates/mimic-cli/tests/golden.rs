@@ -23,9 +23,7 @@ fn mimic() -> Command {
 fn run_fixtures() {
     let mut failures = Vec::new();
     for f in fixtures("run") {
-        // (profile, env): the third run forces every kernel through the thread
-        // pool, one element per chunk, with the leak check on.
-        // The third run forces every kernel through the thread pool, one element
+        // (profile, env): the third run forces every kernel through the thread pool, one element
         // per chunk, with the leak check on. The last runs everything natively:
         // nets and native code must agree on every program.
         type Run<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
@@ -33,7 +31,8 @@ fn run_fixtures() {
             (&["--debug"], &[]),
             (&["--release"], &[]),
             (&["--debug"], &[("MIMIC_THREADS", "8"), ("MIMIC_PAR_GRAIN", "1")]),
-            (&["--release"], &[("MIMIC_THREADS", "1")]),
+            // (and every map the GPU can do on the GPU, where there is one)
+            (&["--release"], &[("MIMIC_THREADS", "1"), ("MIMIC_GPU", "1")]),
             (&["--debug", "--no-net"], &[]),
         ];
         for (k, (profile, env)) in runs.into_iter().enumerate() {

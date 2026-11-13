@@ -43,6 +43,7 @@ use std::rc::Rc;
 mod forkjoin;
 mod owned;
 mod fuse;
+mod gpu;
 pub mod tonet;
 
 pub struct Settings {
@@ -893,7 +894,10 @@ impl<'ctx> Cg<'ctx, '_> {
             // bool, char and byte vectors take 1 byte per element, numbers 8
             let small = |k: u64| b.build_int_compare(IntPredicate::EQ, dt, i32t.const_int(k, false), "");
             let one = b.build_or(b.build_or(small(2).s()?, small(3).s()?, "").s()?, small(8).s()?, "").s()?;
-            let es = b.build_select(one, i64t.const_int(1, false), i64t.const_int(8, false), "").s()?.into_int_value();
+            // f32 and i32: 4 bytes
+            let four = b.build_or(small(9).s()?, small(10).s()?, "").s()?;
+            let es = b.build_select(four, i64t.const_int(4, false), i64t.const_int(8, false), "").s()?.into_int_value();
+            let es = b.build_select(one, i64t.const_int(1, false), es, "").s()?.into_int_value();
             // (1-byte elements: one more byte, kept 0; see payload_bytes)
             let extra = b.build_int_z_extend(one, i64t, "").s()?;
             let bytes = b.build_int_add(b.build_int_mul(n, es, "").s()?, extra, "bytes").s()?;
@@ -1341,6 +1345,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
+            "mim_gpu_wants" => self.ctx.i32_type().fn_type(&[i64t, i64t], false),
+            "mim_gpu_run" => self.ctx.i32_type().fn_type(&[p, i64t, i32t, p, p, p, i32t, p, i64t], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
             "mim_scalar_as" => ptr.fn_type(&[p, i32t], false),
             "mim_format_i64" => ptr.fn_type(&[i64t], false),
@@ -4197,7 +4203,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 return self.as_ty(r, ty, "reduction");
             }
             ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum | Prim::Len), args }
-                if self.is_fae(&args[0]) =>
+                if self.is_fae(&args[0]) && (*p == Prim::Len || !matches!(fuse::num_el(self.ty_of(&args[0])), Some(El::F32 | El::I32))) =>
             {
                 let r = self.fused_reduce(*p, &args[0])?;
                 return self.as_ty(r, ty, "reduction");

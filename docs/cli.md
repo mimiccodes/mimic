@@ -59,6 +59,7 @@ LLVM generates the code for that triple. If `mimic` has a C library for the targ
 | `MIMIC_HOME` | Overrides `~/.mimic`, which holds the libraries, the runtime cache and the build directories for single-file runs. |
 | `MIMIC_THREADS` | **Runtime:** the number of worker threads (default: all CPUs; `1` runs sequentially). |
 | `MIMIC_PAR_GRAIN` | **Runtime:** the number of elements per parallel chunk (default 16384). |
+| `MIMIC_GPU` | **Runtime:** `0` never uses the GPU, `1` runs every map the GPU can compute there (default: only maps with a lot of work; macOS). `MIMIC_GPU_DEBUG=1` reports each GPU kernel, `2` also prints its Metal source. |
 | `MIMIC_NET_NODES` | **Runtime:** the interaction-net capacity in nodes (default 16M). |
 
 ## Planned commands

@@ -134,4 +134,16 @@ instruction and one that does not. Nothing is ever reordered: `(a + b) + c`
 stays exactly that. When you need the same bits on every machine (golden
 files, simulations compared across platforms), build with `--strict-math`.
 
+### The GPU
+
+On a Mac, long maps over `[f32]`, `[i32]`, `[i64]` or `[bool]` with a lot
+of arithmetic per element can run on the GPU. You don't ask for it, just as
+you don't ask for threads, and the results are the same as on the CPU. Set
+`MIMIC_GPU=0` to keep everything on the CPU, `MIMIC_GPU=1` to send every
+map the GPU can do there, and `MIMIC_GPU_DEBUG=1` to see which kernels ran:
+
+```sh
+MIMIC_GPU=1 MIMIC_GPU_DEBUG=1 ./target/release/app
+```
+
 That's the tour. For every detail, see the reference in [`docs/`](../docs/).

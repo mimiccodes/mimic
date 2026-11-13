@@ -69,7 +69,7 @@ fn move_site(name: &str, roots: &[&Expr]) -> Option<usize> {
 }
 
 /// Every expression of a block's statements and tail, as roots to walk.
-fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
+pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
     for s in stmts {
         match s {
             Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => out.push(value),
