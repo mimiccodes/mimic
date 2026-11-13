@@ -72,6 +72,7 @@ Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Wha
   * The live count used by the leak check is kept per thread, padded to 128-byte cache lines.
   * `true`, `false`, small integers and every literal in the program are **immortal**: they are created once and never refcounted or freed.
 * **Panics.** If several threads panic, only the first one reports.
+* **At exit.** In release builds (no leak check) the values `main` still holds when it ends are not freed one by one: the process exits right after, and the system takes the memory back at once. Nothing is lost: releasing a value only ever frees memory. Debug builds free everything and check for leaks.
 
 ## GPU kernels
 

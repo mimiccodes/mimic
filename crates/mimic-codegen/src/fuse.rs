@@ -138,16 +138,34 @@ impl<'ctx> Cg<'ctx, '_> {
     /// lambda of one parameter (capturing only numbers and numeric arrays) or
     /// a pure named function, both on unboxed numbers.
     fn each_fusible(&self, e: &Expr, args: &[Expr]) -> bool {
+        self.each_fusible_to(e, args, false)
+    }
 
+    /// `xs ¨ f` over numbers (or a fusible expression) where `f` makes a
+    /// record: one pass that writes the records straight into the new list
+    /// (no `⍳` list, no boxed call per element), in parallel.
+    pub(crate) fn each_obj_fusible(&self, e: &Expr) -> bool {
+        let ExprKind::Prim { prim: Prim::Each, args } = &e.kind else { return false };
+        matches!(self.ty_of(e), Ty::Arr(El::Obj(_), _))
+            // (rows of a screen keep their own path: reused when unchanged)
+            && !self.screen_rows(self.ty_of(e))
+            && args.len() == 2
+            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some())
+            && self.each_fusible_to(e, args, true)
+    }
+
+    /// (`records`: `f` may return a record)
+    fn each_fusible_to(&self, e: &Expr, args: &[Expr], records: bool) -> bool {
         if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
             return false;
         }
-        let simple = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
+        let simple_num = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
+        let simple = |t: Ty| simple_num(t) || (records && matches!(t, Ty::Obj(_)));
         // a record on the heap comes in lent, as a pointer
-        let simple_in = |t: Ty| simple(t) || (matches!(t, Ty::Obj(_)) && self.flat(t).is_none());
+        let simple_in = |t: Ty| simple_num(t) || (matches!(t, Ty::Obj(_)) && self.flat(t).is_none());
         match &args[1].kind {
             ExprKind::Lambda { params, body } => {
                 let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
@@ -546,7 +564,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 let fv = self.module.get_function(f).ok_or("internal compiler error: missing ¨ function")?;
                 let r = self.b.build_call(fv, &args, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: ¨ function returns nothing")?;
-                self.val_of(r, *rt, false)
+                // (a record made by the function is ours)
+                self.val_of(r, *rt, matches!(rt, Ty::Obj(_)))
             }
         })
     }
@@ -817,6 +836,26 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(out)
     }
 
+    /// `xs ¨ f` making records (see each_obj_fusible).
+    pub(crate) fn fused_each_obj(&mut self, e: &Expr) -> R<V<'ctx>> {
+        let Ty::Arr(el @ El::Obj(_), _) = self.ty_of(e) else { return Err("internal compiler error: not a list of records".into()) };
+        let mut plan = Plan::default();
+        let root = self.build(e, &mut plan)?;
+        let n = self.plan_len(&plan)?;
+        let out = self.alloc_vec(4, n)?; // MIM_BOXED: a list of handles
+        let data = self.data_of(out)?;
+        let mode = Mode::Map(el);
+        let k = self.emit_kernel(&root, &plan, mode)?;
+        let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
+        if heavy(&root) {
+            self.timed_apply(n, k, ctx)?;
+        } else {
+            self.par_for(n, k, ctx)?;
+        }
+        self.release_plan(&plan)?;
+        Ok(out)
+    }
+
     /// Bytes per element of a kernel's vector.
     fn el_bytes(el: El) -> u64 {
         match el {
@@ -1010,6 +1049,13 @@ impl<'ctx> Cg<'ctx, '_> {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
                 let t = self.truth(v)?;
                 self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+            }
+            // a record: the list takes a reference of its own
+            El::Obj(_) => {
+                let p = unsafe { self.b.build_in_bounds_gep(self.ptr, base, &[i], "").s()? };
+                let b = self.boxed(v)?;
+                let b = self.own(b)?;
+                self.b.build_store(p, self.basic(b)).s()?;
             }
             _ => {
                 let p = unsafe { self.b.build_in_bounds_gep(i64t, base, &[i], "").s()? };

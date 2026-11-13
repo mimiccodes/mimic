@@ -251,6 +251,8 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         opt_level: settings.opt_level,
         contract: !settings.strict_math,
         fast: settings.fast_math,
+        exit_fid: None,
+        body_exit: None,
         lazy_deep: None,
         cur_kind: Kind::Plain,
         borrow_binds: false,
@@ -274,6 +276,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if !cg.plan.book.defs.is_empty() {
         let f = cg.module.add_function("_mimic_net_ensure", cg.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
         cg.net_ensure = Some(f);
+    }
+    if settings.emit_main && !settings.tests && !settings.leak_check {
+        cg.exit_fid = p.entry();
     }
     let entry_fn = match (settings.emit_main && !settings.tests, p.entry()) {
         (true, Some(e)) => Some(cg.request(&(e, vec![]), Kind::Plain)?),
@@ -443,6 +448,13 @@ struct Cg<'ctx, 'p> {
     contract: bool,
     /// --fast-math (see Settings::fast_math)
     fast: bool,
+    /// The program's `main`, when its last values need not be freed: the
+    /// process ends right after it (release builds, no leak check). Freeing
+    /// ten million records one by one only to exit costs more than making
+    /// them; the system takes the memory back at once.
+    exit_fid: Option<mimic_check::FnId>,
+    /// The scope depth of that function's body while it is compiled.
+    body_exit: Option<usize>,
     /// In a native function of plain numbers: its key (the depth is checked
     /// before each call it makes; see `scalars_only`).
     lazy_deep: Option<Key>,
@@ -1709,7 +1721,9 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             Kind::Plain | Kind::Seq => {}
         }
+        self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
         let v = self.block(&decl.body)?;
+        self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
         }
@@ -2169,8 +2183,10 @@ impl<'ctx> Cg<'ctx, '_> {
     fn release_scope(&self, scope: &[Local<'ctx>]) -> R<()> {
         for l in scope.iter().rev() {
             if l.owned {
+                // (inline: a value that moved away left a null, which
+                // LLVM sees and drops the release entirely)
                 let cur = self.b.build_load(self.ptr, l.slot, "").s()?;
-                self.call_rt("mim_release", &[cur.into()])?;
+                self.release(cur.into_pointer_value())?;
             }
         }
         Ok(())
@@ -2178,6 +2194,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
         self.scopes.push(Vec::new());
+        // the end of `main`: the process exits next (see Cg::exit_fid)
+        let at_exit = self.body_exit == Some(self.scopes.len());
         let lazy_mark = self.lazies.len();
         // implicit futures started in this block and not awaited yet
         let mut pending: Vec<Pending<'ctx>> = Vec::new();
@@ -2246,7 +2264,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let v = self.own(v)?;
         let scope = self.scopes.pop().unwrap();
         self.lazies.truncate(lazy_mark);
-        if !self.terminated() {
+        if !self.terminated() && !at_exit {
             self.release_scope(&scope)?;
         }
         Ok(v)
@@ -4336,6 +4354,8 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(p) if p.len() == 1 && self.lazies.iter().any(|(n, _)| *n == p[0]) => return self.fused_map(e),
             _ if self.fusible_root(e) => return self.fused_map(e),
+            // numbers into records: one fused pass
+            ExprKind::Prim { prim: Prim::Each, .. } if self.each_obj_fusible(e) => return self.fused_each_obj(e),
             _ => {}
         }
         match &e.kind {
