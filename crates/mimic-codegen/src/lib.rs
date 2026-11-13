@@ -218,6 +218,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
         contract: !settings.strict_math,
+        lazy_deep: None,
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -385,6 +386,9 @@ struct Cg<'ctx, 'p> {
     opt_level: u8,
     /// Float `+ - ×` may fuse into multiply-adds (Settings::strict_math off).
     contract: bool,
+    /// In a native function of plain numbers: its key (the depth is checked
+    /// before each call it makes; see `scalars_only`).
+    lazy_deep: Option<Key>,
     /// This thread's heap (`mim_heap()`), fetched once at the top of each
     /// function that allocates or frees inline.
     heaps: std::cell::RefCell<Vec<(FunctionValue<'ctx>, PointerValue<'ctx>)>>,
@@ -393,6 +397,26 @@ struct Cg<'ctx, 'p> {
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
 /// whose other operand has no self-call (LLVM's accumulator tail-recursion
 /// elimination)? Then optimised builds compile the recursion to a loop.
+/// Does every value in `d` (parameters, result, every expression and
+/// binding) live in registers as a plain number or truth value? Then it
+/// holds nothing on the heap at any point, and a call can be abandoned and
+/// started over (on the net) without leaking.
+fn scalars_only(spec: &Spec, d: &FnDecl) -> bool {
+    let plain = |t: Ty| matches!(t, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Never | Ty::Unit);
+    if !spec.params.iter().all(|t| matches!(t, Ty::I64 | Ty::F64 | Ty::Bool)) || !plain(spec.ret) {
+        return false;
+    }
+    let mut ok = true;
+    d.body.walk(&mut |x| {
+        match spec.exprs.get(&id(x)).copied() {
+            Some(t) => ok &= plain(t),
+            // a function's name in a call (values all have a type)
+            None => ok &= matches!(x.kind, ExprKind::Path(_)),
+        }
+    });
+    ok && spec.binds.values().all(|t| plain(*t)) && spec.lets.values().all(|t| plain(*t))
+}
+
 fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
     struct W<'a> {
         p: &'a Program,
@@ -1395,6 +1419,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.cur_ret = spec.ret;
         self.ret_what = format!("return value of `{path}`");
         self.native_frame = false;
+        self.lazy_deep = None;
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
         self.scopes = vec![Vec::new()];
@@ -1436,12 +1461,24 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.scopes.clear();
                 return Ok(());
             }
-            Kind::Native if self.opt_level >= 2 && loops_only(self.p, k.0, decl) => {
+            // (an accumulated float sum is not a loop to LLVM: it may not
+            // reorder float additions, so only integer results qualify)
+            Kind::Native if self.opt_level >= 2 && matches!(spec.ret, Ty::I64 | Ty::Bool | Ty::Unit) && loops_only(self.p, k.0, decl) => {
                 // every self-call is a tail call (or `x + f(…)` / `x × f(…)`):
                 // LLVM turns the recursion into a loop, so it cannot grow the stack
                 let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
                 self.native_frame = true;
                 self.cur_depth = Some(depth);
+            }
+            Kind::Native if self.opt_level >= 2 && scalars_only(spec.as_ref(), decl) => {
+                // a function of plain numbers only: the depth is checked just
+                // before it calls itself (calls that end the recursion pay
+                // nothing); past the limit it starts over on the net, which is
+                // safe: it is pure, and holds nothing that needs releasing
+                let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
+                self.native_frame = true;
+                self.cur_depth = Some(depth);
+                self.lazy_deep = Some(k.clone());
             }
             Kind::Native => {
                 // Bounded native recursion: past the limit, hand the call to the net.
@@ -1517,6 +1554,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_native = std::mem::replace(&mut self.native_frame, false);
         let saved_depth = self.cur_depth.take();
+        let saved_lazy = self.lazy_deep.take();
         let saved_ret = self.cur_ret;
         let saved_what = std::mem::take(&mut self.ret_what);
         let saved_futures = std::mem::take(&mut self.futures);
@@ -1527,6 +1565,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.scopes = saved_scopes;
         self.native_frame = saved_native;
         self.cur_depth = saved_depth;
+        self.lazy_deep = saved_lazy;
         self.cur_ret = saved_ret;
         self.ret_what = saved_what;
         self.futures = saved_futures;
@@ -3824,6 +3863,28 @@ impl<'ctx> Cg<'ctx, '_> {
                     let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
                     argv.push(self.basic(c).into());
                     conv.push(c);
+                }
+                if kind == Kind::Native
+                    && let Some(me) = self.lazy_deep.clone()
+                {
+                    // too deep: this whole call starts over on the net
+                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+                    let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+                    let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
+                    let is_deep = self.b.build_int_compare(IntPredicate::UGT, d, limit, "deep").s()?;
+                    let fun = self.cur_fn.unwrap();
+                    let deep_bb = self.ctx.append_basic_block(fun, "restart_deep");
+                    let go = self.ctx.append_basic_block(fun, "call");
+                    self.b.build_conditional_branch(is_deep, deep_bb, go).s()?;
+                    self.b.position_at_end(deep_bb);
+                    let wrap = self.request(&me, Kind::NetWrap)?;
+                    let n = fun.count_params() - 1;
+                    let own: Vec<BasicMetadataValueEnum> = (0..n).map(|i| fun.get_nth_param(i).unwrap().into()).collect();
+                    self.call_rt("mim_deep_enter", &[])?;
+                    let r = self.b.build_call(wrap, &own, "").s()?.try_as_basic_value().basic().unwrap();
+                    self.call_rt("mim_deep_leave", &[])?;
+                    self.b.build_return(Some(&r)).s()?;
+                    self.b.position_at_end(go);
                 }
                 if kind == Kind::Native {
                     let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;

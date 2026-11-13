@@ -1,0 +1,28 @@
+module main
+
+// recursion far past the native depth limit: restarts on the net
+fn depth(n: i64) -> i64 {
+    if n == 0 { 0 } else { depth(n - 1) * 1 + 1 + zero(n) }
+}
+
+fn zero(n: i64) -> i64 {
+    if n < 0 { zero(n + 1) } else { 0 }
+}
+
+fn ping(n: i64) -> i64 {
+    if n == 0 { 0 } else { pong(n - 1) + 1 }
+}
+
+fn pong(n: i64) -> i64 {
+    if n == 0 { 0 } else { ping(n - 1) + 1 }
+}
+
+fn tri(n: i64) -> f64 {
+    if n == 0 { 0.0 } else { tri(n - 1) + n * 1.0 }
+}
+
+fn main() {
+    print(depth(20000))
+    print(ping(30001))
+    print(tri(10000))
+}
