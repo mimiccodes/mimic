@@ -94,6 +94,29 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### All benchmarks (after F3)
+
+Apple M3 Pro, 12 cores, 2026-11-13, best of 5 runs; the ratio is to C.
+Other programs kept the load average near 10, so all-core times are on the
+slow side.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.567 s | 1.08× | 1.17× | 1.03× | **0.19×** |
+| http | 0.706 s | 2.16× | 19.38× | 1.88× | 1.27× |
+| json | 1.134 s | 0.60× | 1.76× | **0.97×** | **0.75×** |
+| mandelbrot | 2.639 s | 1.16× | 1.22× | 1.10× | **0.13×** |
+| matmul | 0.895 s | 1.01× | 2.42× | **0.09×** | **0.08×** |
+| nbody | 0.192 s | 1.31× | 1.57× | 1.03× | 1.04× |
+| prefix_sum | 0.475 s | 2.32× | 1.06× | **0.99×** | **0.63×** |
+| records | 0.044 s | 3.41× | 3.77× | 7.43× | 3.50× |
+| sort | 4.894 s | 0.15× | 0.72× | **0.07×** | **0.03×** |
+| sum_of_squares | 0.134 s | 1.60× | 2.52× | 1.01× | **0.23×** |
+| tree | 1.566 s | 1.15× | 1.28× | **0.60×** | **0.14×** |
+
+(http's C is a floor that never parses requests; json's C a hand-written
+parser for one record shape. records measured 5.9× on its own run.)
+
 ### records: reuse in place (27× → 5.9× C)
 
 A million records `{id, name, x, v}` (a string and numbers), updated five
