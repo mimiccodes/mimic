@@ -96,7 +96,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | G1 | `test "name" { }` blocks and `expect` (failures show both sides), `mimic test` (a process per test, in parallel, filters); `mimic fmt` (words or `--glyphs`, indentation, `--check`; checked to keep every token) | ✅ |
 | G4 | Debug information (DWARF) in debug builds: breakpoints on `.mim` lines, stepping, numeric parameters and `let`s, backtraces under Mimic names (lldb) | ✅ |
 | G3 | Builds that change nothing are skipped (a stamp of every input: 7.4 s → 0.2 s); machine code generated on several threads (the optimised module split into parts); quiet name lookups in the type checker (no "did you mean" search on every annotation); a changed release build of `examples/todo` 7.4 s → 4.3 s | ✅ |
-| G | Registry, per-module incremental compilation (would need stable symbols across builds), benchmark CI including Rust, CI hosts, `mimic doc`; lists, strings and records shown as values in the debugger | |
+| G7 | `mimic doc`: public items with signatures and comments, one HTML page (sidebar, search) or JSON; `--std` documents the standard library | ✅ |
+| G | Registry, per-module incremental compilation (would need stable symbols across builds), benchmark CI including Rust, CI hosts; lists, strings and records shown as values in the debugger | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
 ## Later milestones

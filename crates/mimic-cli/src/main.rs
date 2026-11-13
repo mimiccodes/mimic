@@ -5,6 +5,7 @@
 
 mod cc;
 mod cimport;
+mod doc;
 mod driver;
 mod modfile;
 mod report;
@@ -156,6 +157,21 @@ enum Cmd {
         /// Change nothing: list the files that are not formatted (exit code 1 if any)
         #[arg(long)]
         check: bool,
+    },
+    /// Write documentation of the public functions, types and modules of
+    /// the current project (or a file) from their signatures and the `//`
+    /// comments above them: one HTML page (target/doc/index.html)
+    Doc {
+        file: Option<PathBuf>,
+        /// Document the standard library instead
+        #[arg(long)]
+        std: bool,
+        /// Print the documentation as JSON instead (for editors and tools)
+        #[arg(long)]
+        json: bool,
+        /// Where to write index.html
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
     },
     /// Compile the current project (or a single file)
     Build {
@@ -498,6 +514,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Test { args, profile } => test_cmd(args, profile),
         Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
+        Cmd::Doc { file, std, json, out } => doc_cmd(file, std, json, out),
         Cmd::Mod { cmd } => mod_cmd(cmd),
         Cmd::Install { source } => {
             status("Installing", &source);
@@ -593,6 +610,41 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
 /// `mimic test`: build the test program, list its tests, run each in a
 /// process of its own (a crash fails only that test), in parallel; report
 /// in source order.
+fn doc_cmd(file: Option<PathBuf>, std: bool, json: bool, out: Option<PathBuf>) -> Result<ExitCode, String> {
+    let (program, package, title, strip, default_out) = if std {
+        // any program loads the standard library: an empty one
+        let dir = std::env::temp_dir().join(format!("mimic-doc-std-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let f = dir.join("main.mim");
+        std::fs::write(&f, "module main\n\nfn main() {\n}\n").map_err(|e| e.to_string())?;
+        let input = driver::input_from(Some(f.as_path())).map_err(|e| e.to_string())?;
+        let p = driver::load(&input).map_err(|r| r.human());
+        let _ = std::fs::remove_dir_all(&dir);
+        (p?, "std".to_string(), "Mimic standard library".to_string(), Some("prelude"), PathBuf::from("std-doc"))
+    } else {
+        let input = driver::input_from(file.as_deref()).map_err(|e| e.to_string())?;
+        let p = driver::load(&input).map_err(|r| r.human())?;
+        let name = input.name();
+        let out = match &input {
+            Input::Project(pr) => pr.root.join("target").join("doc"),
+            Input::File(_) => PathBuf::from(format!("{name}-doc")),
+        };
+        (p, name.clone(), name, None, out)
+    };
+    let mods = doc::collect(&program, &package, strip);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&doc::to_json(&title, &mods)).map_err(|e| e.to_string())?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let dir = out.unwrap_or(default_out);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let page = dir.join("index.html");
+    std::fs::write(&page, doc::to_html(&title, &mods)).map_err(|e| format!("cannot write {}: {e}", page.display()))?;
+    let n: usize = mods.iter().map(|m| m.items.iter().filter(|i| i.kind != "group").count()).sum();
+    status("Documented", format!("{n} items in {} modules → {}", mods.len(), page.display()));
+    Ok(ExitCode::SUCCESS)
+}
+
 fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String> {
     let (files, filters): (Vec<String>, Vec<String>) = args.into_iter().partition(|a| a.ends_with(".mim"));
     if files.len() > 1 {

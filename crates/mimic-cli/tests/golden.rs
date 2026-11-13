@@ -440,6 +440,37 @@ fn cpu_flag() {
     assert!(err.contains("unknown CPU `znver44`") && err.contains("did you mean `znver4`?"), "{err}");
 }
 
+/// `mimic doc`: public items with their signatures and the comments above
+/// them; private ones left out; HTML page and JSON.
+#[test]
+fn doc_command() {
+    let dir = std::env::temp_dir().join(format!("mimic-doc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("shapes.mim");
+    std::fs::write(
+        &f,
+        "module main\n\n// A point on the plane.\npub type Point = { x: f64, y: f64 }\n\n// Distance between two points, `a` and `b`.\npub fn dist(a: Point, b: Point, scale: f64 = 1.0) -> f64 {\n    scale * math::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y))\n}\n\nfn hidden() -> i64 { 1 }\n\nfn main() {\n    print(dist(Point { x: 0.0, y: 0.0 }, Point { x: 3.0, y: 4.0 }))\n}\n",
+    )
+    .unwrap();
+    let out = mimic().arg("doc").arg(&f).arg("--json").output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    let items = &v["modules"][0]["items"];
+    assert_eq!(items[0]["signature"], "type Point = {\n    x: f64,\n    y: f64\n}");
+    assert_eq!(items[0]["doc"], "A point on the plane.");
+    assert_eq!(items[1]["signature"], "fn dist(a: Point, b: Point, scale: f64 = 1.0) -> f64");
+    assert_eq!(items[1]["doc"], "Distance between two points, `a` and `b`.");
+    assert_eq!(items.as_array().unwrap().len(), 2, "{v}");
+    let html = mimic().arg("doc").arg(&f).arg("--out").arg(dir.join("out")).output().unwrap();
+    assert!(html.status.success(), "{}", String::from_utf8_lossy(&html.stderr));
+    let page = std::fs::read_to_string(dir.join("out/index.html")).unwrap();
+    assert!(page.contains("<code>a</code>") && page.contains("fn dist(a: Point") && !page.contains("hidden"));
+    let std = mimic().arg("doc").arg("--std").arg("--json").output().unwrap();
+    let s: serde_json::Value = serde_json::from_slice(&std.stdout).unwrap();
+    let paths: Vec<&str> = s["modules"].as_array().unwrap().iter().map(|m| m["path"].as_str().unwrap()).collect();
+    assert!(paths.contains(&"fs") && paths.contains(&"http") && paths.contains(&"json"), "{paths:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Debug builds carry DWARF: the functions under their Mimic names, the
 /// source file, line tables; release builds carry none.
 #[test]
