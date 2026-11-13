@@ -1,0 +1,33 @@
+module main
+
+// xs ¨ f ¨ g ¨ …: one pass, each element through every stage; the same
+// results as one ¨ at a time
+
+type P = { id: i64, tag: str, x: f64 }
+
+fn mk(i: i64) -> P { P { id: i, tag: "p{i}", x: i * 1.0 } }
+fn bump(p: P) -> P { { p with x: p.x + 1 } }
+fn twice(p: P) -> P { { p with x: p.x * 2 } }
+fn label(p: P) -> str { "{p.tag}={p.x}" }
+
+fn main() {
+    // a chain, then the same steps one at a time
+    let a = ⍳ 5 ¨ mk ¨ bump ¨ twice ¨ bump
+    let s1 = ⍳ 5 ¨ mk
+    let s2 = s1 ¨ bump
+    let s3 = s2 ¨ twice
+    let s4 = s3 ¨ bump
+    print(a ¨ label)
+    print((a ¨ label) == (s4 ¨ label))
+
+    // a list still used afterwards keeps its records
+    let ps = ⍳ 3 ¨ mk
+    let qs = ps ¨ bump ¨ bump ¨ twice
+    print(ps ¨ (p => p.x))
+    print(qs ¨ (p => p.x))
+
+    // lambdas, and a chain that ends in numbers or text
+    print(⍳ 4 ¨ (i => mk(i * 10)) ¨ (p => { p with x: p.x / 2 }) ¨ (p => p.x) ▷ +/)
+    print(ps ¨ bump ¨ label)
+    print(["a", "bb", "ccc"] ¨ (s => s + "!") ¨ (s => len(s)))
+}

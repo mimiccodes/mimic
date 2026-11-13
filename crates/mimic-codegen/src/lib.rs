@@ -2713,6 +2713,134 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// A boxed-ABI wrapper around a typed lambda (for `¨`).
+    /// `xs ¨ f ¨ g ¨ …` with pure functions (named, or lambdas capturing
+    /// nothing): `xs ¨ (x => … g(f(x)))`, one pass and no list between the
+    /// stages; each element goes through all of them while it is at hand.
+    /// A stage that consumes its record (owned.rs) takes the last stage's
+    /// result over, so `with` updates it in place.
+    fn each_chain(&mut self, e: &Expr, ty: Ty) -> R<Option<V<'ctx>>> {
+        if self.screen_rows(ty) || !self.heap_ok() {
+            return Ok(None);
+        }
+        // the stages, outermost first: (the ¨ expression, its function)
+        let mut stages: Vec<(&Expr, &Expr)> = Vec::new();
+        let mut cur = e;
+        while let ExprKind::Prim { prim: Prim::Each, args } = &cur.kind {
+            if args.len() != 2 || !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
+                break;
+            }
+            let ok = match &args[1].kind {
+                ExprKind::Lambda { params, body } => params.len() == 1 && self.captures(params, body).is_empty(),
+                ExprKind::Path(path) => {
+                    !(path.len() == 1 && self.lookup(&path[0]).is_some())
+                        && matches!(self.p.resolve(self.cur_mod, path), Ok(Resolved::Fn(f)) if matches!(self.p.fns[f].kind, FnKind::User(_)))
+                        && self.cur_spec.as_ref().is_some_and(|sp| sp.calls.contains_key(&id(cur)))
+                }
+                _ => false,
+            };
+            if !ok {
+                break;
+            }
+            stages.push((cur, &args[1]));
+            let ExprKind::Prim { args, .. } = &cur.kind else { unreachable!() };
+            cur = &args[0];
+        }
+        if stages.len() < 2 {
+            return Ok(None);
+        }
+        stages.reverse(); // innermost first
+        let base = cur;
+        // a stage as a boxed-ABI function: (thunk, takes its element over)
+        let mut thunks = Vec::new();
+        for (i, (se, f)) in stages.iter().enumerate() {
+            let t = match &f.kind {
+                ExprKind::Lambda { .. } => (self.lambda_thunk(f)?, false),
+                _ => {
+                    let ExprKind::Path(path) = &f.kind else { unreachable!() };
+                    let fid = self.resolve_fn(path)?;
+                    let k = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(*se)).cloned()).ok_or("internal error: untyped ¨ stage")?;
+                    let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                    // (after the first stage, every element is one of our own)
+                    if i > 0 && self.consumed(&k) == [true] { (self.thunk_with(&k, kind, true)?, true) } else { (self.thunk(&k, kind)?, false) }
+                }
+            };
+            thunks.push(t);
+        }
+        // numbers in: the first stage on the number itself
+        let raw_first = match (fuse::num_el(self.ty_of(base)), &stages[0].1.kind) {
+            (Some(el @ (El::I64 | El::F64)), ExprKind::Lambda { .. }) => {
+                let et = if el == El::F64 { Ty::F64 } else { Ty::I64 };
+                let (lf, pts, rt) = self.lambda_fn(stages[0].1)?;
+                (pts.len() == 1 && pts[0] == et).then_some((lf, et, rt, false, el))
+            }
+            (Some(el @ (El::I64 | El::F64)), ExprKind::Path(path)) => {
+                let et = if el == El::F64 { Ty::F64 } else { Ty::I64 };
+                let fid = self.resolve_fn(path)?;
+                let k = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(stages[0].0)).cloned()).ok_or("internal error: untyped ¨ stage")?;
+                if self.spec(&k)?.params == [et] {
+                    let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                    let f = self.request(&k, kind)?;
+                    Some((f, et, self.spec(&k)?.ret, kind == Kind::Native, el))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let a = self.expr(base)?;
+        let a = self.boxed(a)?;
+        // a list of our own into a first stage that consumes: its elements
+        // are handed over (mim_each_own), so the first `with` is in place too
+        let mut own_first = false;
+        if raw_first.is_none()
+            && matches!(a, V::P(_, true))
+            && let ExprKind::Path(path) = &stages[0].1.kind
+        {
+            let fid = self.resolve_fn(path)?;
+            let k = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(stages[0].0)).cloned()).ok_or("internal error: untyped ¨ stage")?;
+            if self.consumed(&k) == [true] {
+                let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
+                thunks[0] = (self.thunk_with(&k, kind, true)?, true);
+                own_first = true;
+            }
+        }
+        let first_raw = match raw_first {
+            Some((target, et, rt, depth, _)) => Some(self.raw_thunk(target, et, rt, depth)?),
+            None => None,
+        };
+        self.lambdas += 1;
+        let pt: BasicMetadataTypeEnum = if first_raw.is_some() { self.ctx.i64_type().into() } else { self.ptr.into() };
+        let comp = self.module.add_function(&format!("_mimic_chain_{}", self.lambdas), self.ptr.fn_type(&[pt], false), Some(Linkage::Internal));
+        let first = first_raw.unwrap_or(thunks[0].0);
+        let rest: Vec<(FunctionValue<'ctx>, bool)> = thunks[1..].to_vec();
+        self.in_new_fn(comp, |cg| {
+            let x = comp.get_nth_param(0).unwrap();
+            let mut v = cg.b.build_call(first, &[x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+            for (t, takes) in &rest {
+                let r = cg.b.build_call(*t, &[v.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                if !takes {
+                    cg.release(v)?; // lent to the stage: the last stage's result ends here
+                }
+                v = r;
+            }
+            cg.b.build_return(Some(&v)).s()?;
+            Ok(())
+        })?;
+        let r = match raw_first {
+            Some((_, _, _, _, el)) => {
+                let dt = if el == El::F64 { 1 } else { 0 };
+                self.call_rt_ptr("mim_each_raw", &[self.basic(a).into(), self.fn_addr(comp).into(), self.i32c(dt), self.i32c(1)])?
+            }
+            None if own_first => {
+                let r = self.call_rt_ptr("mim_each_own", &[self.basic(a).into(), self.fn_addr(comp).into(), self.i32c(1)])?;
+                return Ok(Some(self.as_ty(r, ty, "primitive result")?)); // (the list was handed over)
+            }
+            None => self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(comp).into(), self.i32c(1)])?,
+        };
+        self.drop_tmp(a)?;
+        Ok(Some(self.as_ty(r, ty, "primitive result")?))
+    }
+
     /// A list of screen parts (`[ui::Node[M]]`): what `xs ¨ row` makes in
     /// a `view`.
     fn screen_rows(&self, t: Ty) -> bool {
@@ -4041,6 +4169,11 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(v)?;
                 return self.as_ty(V::I(n), ty, "length");
             }
+            // `(xs × 2) ⌿ (xs > 0)`: counted, then filled; nothing else built
+            ExprKind::Prim { prim: Prim::Keep, .. } if self.keep_list_fusible(e) => {
+                let r = self.fused_keep_list(e)?;
+                return self.as_ty(r, ty, "keep");
+            }
             // `+/ (xs ⌿ mask)`: filtered and summed in one pass
             ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Len), args } if self.keep_fusible(*p, &args[0]) => {
                 let r = self.fused_reduce_keep(*p, &args[0])?;
@@ -4596,6 +4729,12 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.as_ty(r, ty, "map")
             }
             ExprKind::Prim { prim, args } => {
+                // `xs ¨ f ¨ g ¨ …`: one pass, each element through every stage
+                if *prim == Prim::Each
+                    && let Some(r) = self.each_chain(e, ty)?
+                {
+                    return Ok(r);
+                }
                 let a = self.expr(&args[0])?;
                 let a = self.boxed(a)?;
                 let r = if *prim == Prim::Each {

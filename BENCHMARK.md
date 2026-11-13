@@ -136,6 +136,8 @@ so in principle each step builds a new list of new records. Apple M3 Pro,
 | reuse in place (consumed parameters, moving locals, `¨` hands elements over) | 0.538 s (11.9×) | 0.276 s (6.1×) |
 | `¨` over numbers without boxing them | 0.407 s (9.0×) | 0.212 s (4.7×) |
 | `¨` over a list of records fused into the loop around it | 0.270 s (5.9×) | 0.116 s (2.5×) |
+| `with` checks for the only reference inline | 0.189 s (4.6×) | 0.087 s (2.1×) |
+| chains `xs ¨ f ¨ g ¨ …` fused: each record through every step while it is at hand | **0.185 s (3.9×)** | **0.077 s (1.6×)** |
 
 * **Raw number fields:** numbers in records and variants are stored in
   the object itself (8 bytes), not as a boxed value per field (the
@@ -150,8 +152,12 @@ so in principle each step builds a new list of new records. Apple M3 Pro,
   function as it is; over a list of records feeding `+/` (or any fused
   expression), the records are read in the loop and nothing is built.
 
-What is left is making the first list: a million separate records (C has
-one array of structs; Rust's `String` per record is why it is 3.3×).
+A chain of `¨` with pure functions is now one pass: `ps ¨ step ¨ step`
+is `ps ¨ (p => step(step(p)))`, with no list between the steps, and each
+record goes through all five steps while it is in the cache (updated in
+place, the list's elements handed over). Rust (3.3×) and Go (3.4×) are
+close; what is left is making a million separate records (C has one
+array of structs).
 
 ### http: a hello-world server (faster than hyper on one core)
 
@@ -230,6 +236,16 @@ values, with a pure `row` capturing nothing, keeps the last run's rows by
 element (mim_each_memo), and an element that is the very same value gets
 its old row back; `ui::diff` skips identical parts before even making
 their paths. 3.48 s → 0.36 s for the 20 frames (about 10×).
+
+### Performance and efficiency cores: nothing to change
+
+The M3 Pro has 6 performance and 6 efficiency cores. Work is handed out
+dynamically everywhere (loop chunks claimed one by one, fork-join tasks
+stolen), so slower cores simply take fewer pieces. Asking macOS to run
+the workers on performance cores (quality of service "user interactive")
+changed nothing measurable (best of 14 runs: mandelbrot 0.275 → 0.272 s,
+sum_of_squares 0.024 s both, fib 0.075 → 0.099 s): macOS already favours
+them for a busy command-line program. Not adopted.
 
 ### Non-atomic reference counts: no gain
 

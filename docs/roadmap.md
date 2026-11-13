@@ -87,7 +87,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F3 (reuse) | Reuse in place: moving locals (one use), consumed parameters (`{ p with … }`), `¨` handing elements over (`mim_each_own`); `¨` over numbers without boxes, over records fused; records 26.7× → 5.9× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (keep) | `+/ ×/ ≢` over `xs ⌿ mask` fused into one pass; non-atomic reference counts measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (ui) | `ui` benchmark (10k rows, view + diff per frame: 250 → 174 ms on one core, 39 ms on all); inline `≢`, handle indexing and list literals; idle fork-join workers back off; 32-byte headers; inline `with` uniqueness check ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (lists of records stored flat, lazy ui rows, `⌿` with counts and outside reductions, GPU) | |
+| F (finish) | Rows from capturing lambdas reused while their captures stay the same; `xs ⌿ mask` of a fused expression counted then filled; chains `xs ¨ f ¨ g` fused (records 4.6× → 3.9× C, 1.6× on all cores); performance-core scheduling measured: nothing to change ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Lists of records stored flat (one block of fields), GPU kernels (F8) | |
 | G1 | `test "name" { }` blocks and `expect` (failures show both sides), `mimic test` (a process per test, in parallel, filters); `mimic fmt` (words or `--glyphs`, indentation, `--check`; checked to keep every token) | ✅ |
 | G | Registry, incremental builds, DWARF, benchmark CI including Rust, CI hosts, `mimic doc` | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |

@@ -1,6 +1,7 @@
 module main
 
-// +/ ×/ ≢ over xs ⌿ mask: filtered and reduced in one pass
+// +/ ×/ ≢ over xs ⌿ mask: filtered and reduced in one pass; a filtered
+// list of a fused expression: counted, then filled
 fn main() {
     let xs = ⍳ 10 - 4
     let fs = xs * 0.5
@@ -15,4 +16,10 @@ fn main() {
     let big = ⍳ n
     let s = big ⌿ (big % 3 == 0) ▷ +/
     print(s)
+    print((xs * 2) ⌿ (xs > 0))
+    print((xs * 0.5) ⌿ (xs % 2 == 0))
+    print(xs ⌿ (xs > 100))
+    let ys = xs + 1
+    print(ys ⌿ (ys > 3))
+    print(≢ ((big * 3) ⌿ (big % 7 == 0)))
 }

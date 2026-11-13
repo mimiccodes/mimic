@@ -880,6 +880,77 @@ impl<'ctx> Cg<'ctx, '_> {
         })
     }
 
+    /// `xs ⌿ mask` with numbers on the left, truth values on the right, and
+    /// at least one side an expression to fuse: counted, then filled, from
+    /// one evaluation of each side's parts (no mask or values list built).
+    pub(crate) fn keep_list_fusible(&self, e: &Expr) -> bool {
+        let ExprKind::Prim { prim: Prim::Keep, args } = &e.kind else { return false };
+        args.len() == 2
+            && matches!(num_el(self.ty_of(&args[0])), Some(El::I64 | El::F64))
+            && num_el(self.ty_of(&args[1])) == Some(El::Bool)
+            && (self.is_fae(&args[0]) || self.is_fae(&args[1]))
+            && num_el(self.ty_of(e)).is_some()
+    }
+
+    pub(crate) fn fused_keep_list(&mut self, e: &Expr) -> R<V<'ctx>> {
+        let ExprKind::Prim { args, .. } = &e.kind else { return Err("internal compiler error: not a keep".into()) };
+        let el = num_el(self.ty_of(e)).ok_or("internal compiler error: keep of non-numbers")?;
+        let i64t = self.ctx.i64_type();
+        let mut plan = Plan::default();
+        let xs = self.operand(&args[0], &mut plan)?;
+        let lx = self.common_len(&plan.lens)?;
+        let k = plan.lens.len();
+        let m = self.operand(&args[1], &mut plan)?;
+        let lm = self.common_len(&plan.lens[k..])?;
+        let ne = self.b.build_int_compare(IntPredicate::NE, lx, lm, "").s()?;
+        self.panic_if(ne, "⌿ (keep): length mismatch")?;
+        // 1. how many are kept
+        let count_root = Node::Sel(Box::new(m.clone()), Box::new(Node::ConstI(1)), Box::new(Node::ConstI(0)));
+        let unit = i64t.const_zero().into();
+        let count = self.inline_loop(&count_root, &plan, lx, Mode::Reduce(Prim::Sum, false), unit)?.ok_or("internal compiler error: keep count")?;
+        let V::I(count) = count else { return Err("internal compiler error: keep count".into()) };
+        // 2. those, in order
+        let out = self.alloc_vec(dtype_of(el), count)?;
+        let data = self.data_of(out)?;
+        let f = self.cur_fn.unwrap();
+        let pre = self.b.get_insert_block().unwrap();
+        let body = self.ctx.append_basic_block(f, "keep_body");
+        let put = self.ctx.append_basic_block(f, "keep_put");
+        let next = self.ctx.append_basic_block(f, "keep_next");
+        let done = self.ctx.append_basic_block(f, "keep_done");
+        let none = self.b.build_int_compare(IntPredicate::SLE, lx, i64t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(none, done, body).s()?;
+        self.b.position_at_end(body);
+        let iphi = self.b.build_phi(i64t, "ki").s()?;
+        let kphi = self.b.build_phi(i64t, "kk").s()?;
+        let (i, kk) = (iphi.as_basic_value().into_int_value(), kphi.as_basic_value().into_int_value());
+        let slots = plan.slots.clone();
+        let c = self.eval_node(&m, i, &slots)?;
+        let c = self.truth(c)?;
+        let test_end = self.b.get_insert_block().unwrap(); // (the mask may add blocks)
+        self.b.build_conditional_branch(c, put, next).s()?;
+        self.b.position_at_end(put);
+        let v = self.eval_node(&xs, i, &slots)?;
+        self.store_elem(data, el, kk, v)?;
+        let k1 = self.b.build_int_add(kk, i64t.const_int(1, false), "").s()?;
+        let put_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(next).s()?;
+        self.b.position_at_end(next);
+        let kn = self.b.build_phi(i64t, "kn").s()?;
+        let body_end = self.b.get_insert_block().unwrap();
+        kn.add_incoming(&[(&kk, test_end), (&k1, put_end)]);
+        let _ = body_end;
+        let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+        let more = self.b.build_int_compare(IntPredicate::SLT, i1, lx, "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_conditional_branch(more, body, done).s()?;
+        iphi.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        kphi.add_incoming(&[(&i64t.const_zero(), pre), (&kn.as_basic_value(), latch)]);
+        self.b.position_at_end(done);
+        self.release_plan(&plan)?;
+        Ok(out)
+    }
+
     /// `+/ ×/ ≢` over `xs ⌿ mask` (a list of truth values): one pass, the
     /// filtered list never built.
     pub(crate) fn keep_fusible(&self, prim: Prim, arg: &Expr) -> bool {
