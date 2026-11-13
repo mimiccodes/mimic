@@ -1288,8 +1288,11 @@ static void ec_free(void *key) { (void)key; }
 static int64_t read_head(mconn *c, sbuf *b) {
     char tmp[16384];
     for (;;) {
-        for (size_t i = b->n >= 4 ? 0 : 0; i + 3 < b->n; i++)
-            if (b->p[i] == '\r' && b->p[i + 1] == '\n' && b->p[i + 2] == '\r' && b->p[i + 3] == '\n') return (int64_t)i + 4;
+        for (size_t i = 0; i + 3 < b->n; i++)
+            if (b->p[i] == '\r' && b->p[i + 1] == '\n' && b->p[i + 2] == '\r' && b->p[i + 3] == '\n') {
+                b->p[b->n] = 0; /* text functions stop here (sb_put keeps a byte for it) */
+                return (int64_t)i + 4;
+            }
         if (b->n > (1 << 20)) return -1; /* headers over 1 MB */
         ssize_t r = conn_recv(c, tmp, sizeof tmp);
         if (r < 0 && errno == EINTR) continue;
@@ -1602,8 +1605,10 @@ static void serve_keep(mconn *c, mim_val *handler) {
 
 static int http_answer(mconn *c, mim_val *handler, sbuf *bp, int64_t off, int keep_ok, sbuf *pend) {
     sbuf b = *bp;
-    const char *line_end = strstr(b.p, "\r\n");
-    const char *sp1 = memchr(b.p, ' ', (size_t)(line_end - b.p));
+    /* the request line: within this request's head (the buffer may hold
+     * the start of the next one after it) */
+    const char *line_end = memmem(b.p, (size_t)off, "\r\n", 2);
+    const char *sp1 = line_end ? memchr(b.p, ' ', (size_t)(line_end - b.p)) : NULL;
     const char *sp2 = sp1 ? memchr(sp1 + 1, ' ', (size_t)(line_end - sp1 - 1)) : NULL;
     if (!sp1 || !sp2) {
         const char *bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1627,12 +1632,15 @@ static int http_answer(mconn *c, mim_val *handler, sbuf *bp, int64_t off, int ke
         }
     }
     int64_t body_len = clen < 0 && !chunked ? 0 : clen;
+    /* the request line as offsets: reading the body may move the buffer */
+    size_t m_end = (size_t)(sp1 - b.p), t_at = (size_t)(target - b.p), t_end = (size_t)((q ? q : sp2) - b.p), q_end = (size_t)(sp2 - b.p);
+    int has_q = q != NULL;
     mim_val *bodyv = read_body(c, &b, off, body_len, chunked, 0);
-    *bp = b; /* read_body may have grown it */
+    *bp = b; /* read_body may have grown (and moved) it */
     mim_val *fields[5] = {
-        mim_str(b.p, (int64_t)(sp1 - b.p)),
-        mim_str(target, (int64_t)((q ? q : sp2) - target)),
-        q ? mim_str(q + 1, (int64_t)(sp2 - q - 1)) : mim_str("", 0),
+        mim_str(b.p, (int64_t)m_end),
+        mim_str(b.p + t_at, (int64_t)(t_end - t_at)),
+        has_q ? mim_str(b.p + t_end + 1, (int64_t)(q_end - t_end - 1)) : mim_str("", 0),
         hm,
         bodyv,
     };

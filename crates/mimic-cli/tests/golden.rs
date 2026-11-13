@@ -784,14 +784,28 @@ fn http_keep_alive() {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    let mut c = conn.expect("the server listens");
-    c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
-    // three requests in one write, the second with a body, the third closing
-    c.write_all(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nxyzGET /c HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
-    let mut got = String::new();
-    c.read_to_string(&mut got).unwrap();
-    let _ = server.kill();
+    // three requests in one write, the second with a body, the third closing;
+    // then the same split into pieces (each read separately by the server)
+    let msg: &[u8] = b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nPOST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nxyzGET /c HTTP/1.1\r\nConnection: close\r\n\r\n";
+    let exchange = |c: &mut std::net::TcpStream, cuts: &[usize]| -> std::io::Result<String> {
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        let mut at = 0;
+        for &cut in cuts.iter().chain([msg.len()].iter()) {
+            c.write_all(&msg[at..cut])?;
+            c.flush()?;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            at = cut;
+        }
+        let mut got = String::new();
+        c.read_to_string(&mut got)?;
+        Ok(got)
+    };
+    let first = conn.ok_or("the server does not listen").and_then(|mut c| exchange(&mut c, &[]).map_err(|_| "no answer"));
+    let split = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|_| "no second connection").and_then(|mut c| exchange(&mut c, &[7, 32, 51, 71, 78, 93]).map_err(|_| "no answer (split)"));
+    let _ = server.kill(); // before any assertion: never leave it running
     let _ = server.wait();
+    let got = first.unwrap();
+    assert_eq!(split.unwrap(), got, "the same answers when the requests arrive in pieces");
     let bodies: Vec<&str> = got.split("\r\n\r\n").skip(1).map(|s| s.split("HTTP/1.1").next().unwrap()).collect();
     assert_eq!(bodies, ["/a:", "/b:xyz", "/c:"], "{got}");
     assert_eq!(got.matches("Connection: close").count(), 1, "{got}");
