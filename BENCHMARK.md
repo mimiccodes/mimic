@@ -93,7 +93,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
-### Single core within 10% of C everywhere except fib
+### Single core within 10% of C on every benchmark
 
 Apple M3 Pro, 12 cores, 2026-11-13. Best of 5 runs; the ratio is to C.
 
@@ -119,9 +119,13 @@ and within a few percent of C on one core on all but fib and mandelbrot.
 * **Fused multiply-add by default.** Like C compilers, `a * b + c` in one
   expression may become one fused multiply-add; `--strict-math` turns it
   off for bit-identical results on every CPU (mandelbrot 1.18× → 1.09×).
-* **fib** is the remaining gap: native recursion carries a depth counter
-  so very deep recursion can move to the interaction-net runtime instead
-  of overflowing the stack (net-layer work, F7).
+* **fib**, measured after the table: **1.01×** C on one core (0.526 s vs
+  0.518 s; Rust 1.10×, Go 1.18×) and 0.15× on all cores. Native recursion
+  guards its depth so very deep recursion moves to the interaction-net
+  runtime instead of overflowing the stack; a function of plain numbers
+  now checks only right before it calls itself and, past the limit,
+  starts the whole call over on the net (it is pure, and holds nothing on
+  the heap), so calls that end the recursion pay nothing.
 
 ### Small lists and records in registers (nbody 8.6× → 1.09× C)
 
