@@ -103,7 +103,7 @@ Pure recursive functions also have a second form, an **interaction net**: a grap
 
 Freeing is parallel too: dropping a large tree hands its subtrees to the same scheduler.
 
-Array operations are **fused**. `(xs * 2 + 1) ▷ +/` becomes a single loop that reads `xs` once. The loop is split into chunks across cores and vectorized with your CPU's SIMD instructions.
+Array operations are **fused**. `(xs * 2 + 1) ▷ +/` becomes a single loop that reads `xs` once. Reversing, taking and dropping (`⌽ ↑ ↓`) fuse too: `⌽ (xs * 2) ↓ 1 ▷ +/` reads each element of `xs` once and builds no array at all. The loop is split into chunks across cores and vectorized with your CPU's SIMD instructions.
 
 ## Looking under the hood
 

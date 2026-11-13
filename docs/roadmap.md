@@ -80,7 +80,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (benchmarks) | `bench/` suite in Mimic, C, Rust and Go (7 benchmarks); radix sort; typed scans; `math` module; direct field access; adaptive `¨` ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (static lengths) | Lists of known length (≤ 8) in registers, shaped and flat records, `evolve` compiled as a loop, short loops unrolled; inline allocator; storage follows the static type. nbody 8.6× → 1.09× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F6 (fork-join) | Independent calls to pure recursive functions run in parallel (`f(a) + f(b)`, constructors, runs of `let`s): fork, sequential and ordinary versions of each function, a work-stealing pool, parallel freeing of large values; small blocks carved from per-thread chunks ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (RC elision and reuse, fusion through `↑`/`↓`/`⌽`/`⌿`, LTO, SIMD, scheduling, GPU) | |
+| F2 (part) | Fusion through `⌽`, `↑` and `↓`: index remaps inside the fused loop, no intermediate arrays | ✅ |
+| F | Performance (RC elision and reuse, fusion through `⌿`, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
@@ -110,7 +111,7 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 **Implemented (M3 step 5)**, with these details:
 * **Glyphs for `gather` and `trail`.** These are `∕` (U+2215) and `⍀`. Plain `/` is division and `\` starts digraphs, so neither is free. Type them as `\g` and `\t`.
 * **The function must be associative.** `gather` and `trail` combine chunks in order. With an associative function (`+`, `⌈`, string join) the parallel result equals a left fold.
-* **How `arms` runs.** `arms` is lifted to a hidden named function, with captured variables passed as extra parameters. When that function is pure and uses only numbers, recursion and the reductions, it compiles to interaction nets and every `arm` runs in parallel. A 3-million-element Collatz sum took 3.39 s on one core and 0.32 s on all cores. A body that uses `¨`, strings or closures runs its recursion on one core for now. Independent calls inside such a body fork and join natively (F6); `arms` itself still runs its arms in parallel only through the nets.
+* **How `arms` runs.** `arms` is lifted to a hidden named function, with captured variables passed as extra parameters. When that function is pure and uses only numbers, recursion and the reductions, it compiles to interaction nets and every `arm` runs in parallel. A 3-million-element Collatz sum took 3.39 s on one core and 0.32 s on all cores. A body that uses `¨`, strings or closures runs its recursion on one core for now. Since F6 any pure `arms` body runs in parallel by fork-join, closures, `¨` and strings included (the same Collatz sum with a `¨` in the body: 3.74 s on one core, 0.39 s on all).
 
 ```mimic
 let total   = prices ▷ gather(+)

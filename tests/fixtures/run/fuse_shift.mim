@@ -1,0 +1,23 @@
+module main
+
+// reverse, take and drop fuse into the loops around them
+fn main() {
+    let xs = ⍳ 10
+    let ys = xs * 1.5
+    print(⌽ (xs * 2))
+    print((xs * 2) ↑ 3)
+    print((xs * 2) ↑ (0 - 3))
+    print((xs + 1) ↓ 4)
+    print((xs + 1) ↓ (0 - 4))
+    print((xs + 1) ↑ 50)
+    print((xs + 1) ↓ 50)
+    print((xs + 1) ↑ 0)
+    print((⌽ xs) + xs)
+    print((xs ↓ 1) - (xs ↑ 9))
+    print(⌽ (ys + 0.5) ▷ +/)
+    print((⍳ 1000000) ↓ 1 ▷ +/)
+    print((⌽ ((⍳ 7) ¨ (i => i × i))) ↑ 3)
+    let d = xs ↓ 2
+    print(d × d ▷ +/)
+    print(≢ (xs ↑ (0 - 4)))
+}

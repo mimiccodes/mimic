@@ -54,6 +54,10 @@ pub(crate) enum Node {
     /// `heavy`: `f` can reach recursion, so one element may be a lot of
     /// work however few elements there are (see `timed_apply`).
     Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool },
+    /// `⌽ xs`: element `last - index` of the inner computation (slot: last)
+    Rev(usize, Box<Node>),
+    /// `xs ↑ n`, `xs ↓ n`: element `index + offset` (slot: offset)
+    Shift(usize, Box<Node>),
 }
 
 /// Does the computation call a function that can reach recursion?
@@ -61,7 +65,7 @@ fn heavy(n: &Node) -> bool {
     match n {
         Node::Apply { heavy, arg, .. } => *heavy || self::heavy(arg),
         Node::Bin(_, a, b) => heavy(a) || heavy(b),
-        Node::Un(_, a) => heavy(a),
+        Node::Un(_, a) | Node::Rev(_, a) | Node::Shift(_, a) => heavy(a),
         _ => false,
     }
 }
@@ -100,8 +104,16 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Unary { expr, .. } => self.is_operand(expr),
             ExprKind::Path(p) => p.len() == 1 && self.lazy_expr(&p[0]).is_some(),
             ExprKind::Prim { prim: Prim::Each, args } => self.each_fusible(e, args),
+            // reversed, taken or dropped: the same elements at other indices
+            ExprKind::Prim { prim: Prim::Reverse, args } => args.len() == 1 && self.is_vec_operand(&args[0]),
+            ExprKind::Prim { prim: Prim::Take | Prim::Drop, args } => args.len() == 2 && self.is_vec_operand(&args[0]) && self.ty_of(&args[1]) == Ty::I64,
             _ => false,
         }
+    }
+
+    /// A numeric vector, fusible or materialised.
+    fn is_vec_operand(&self, x: &Expr) -> bool {
+        self.is_fae(x) || num_el(self.ty_of(x)).is_some()
     }
 
     /// `xs ¨ f` computed element by element: `xs` a numeric array, `f` a pure
@@ -147,7 +159,12 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Worth fusing: an operation over arrays (a lone `⍳ n` or variable is not).
     pub(crate) fn fusible_root(&self, e: &Expr) -> bool {
-        matches!(e.kind, ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Prim { prim: Prim::Each, .. }) && self.is_fae(e)
+        match &e.kind {
+            ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Prim { prim: Prim::Each, .. } => self.is_fae(e),
+            // `⌽ (xs × 2)`: one pass; `⌽ xs` alone is a plain copy (the runtime's)
+            ExprKind::Prim { prim: Prim::Reverse | Prim::Take | Prim::Drop, args } => self.is_fae(e) && self.is_fae(&args[0]) && !matches!(args[0].kind, ExprKind::Path(_)),
+            _ => false,
+        }
     }
 
     /// Evaluate the parts of a fusible expression that are computed once
@@ -221,6 +238,39 @@ impl<'ctx> Cg<'ctx, '_> {
                     _ => Err("internal compiler error: not a fusible ¨".into()),
                 }
             }
+            ExprKind::Prim { prim: p @ (Prim::Reverse | Prim::Take | Prim::Drop), args } => {
+                // the inner computation has a length of its own
+                let mark = plan.lens.len();
+                let inner = self.operand(&args[0], plan)?;
+                let inner_lens: Vec<IntValue<'ctx>> = plan.lens.drain(mark..).collect();
+                let n = self.common_len(&inner_lens)?;
+                let i64t = self.ctx.i64_type();
+                let zero = i64t.const_zero();
+                if *p == Prim::Reverse {
+                    let last = self.b.build_int_sub(n, i64t.const_int(1, false), "last").s()?;
+                    plan.lens.push(n);
+                    plan.slots.push(last.into());
+                    return Ok(Node::Rev(plan.slots.len() - 1, Box::new(inner)));
+                }
+                // as the runtime: |count| clamped to the length; a negative
+                // count takes (drops) from the end
+                let c = self.expr(&args[1])?;
+                let c = self.to_i64(c)?;
+                let neg = self.b.build_int_compare(IntPredicate::SLT, c, zero, "").s()?;
+                let mc = self.b.build_int_neg(c, "").s()?;
+                let k = self.b.build_select(neg, mc, c, "").s()?.into_int_value();
+                let big = self.b.build_int_compare(IntPredicate::SGT, k, n, "").s()?;
+                let k = self.b.build_select(big, n, k, "k").s()?.into_int_value();
+                let rest = self.b.build_int_sub(n, k, "").s()?;
+                let (len, off) = if *p == Prim::Take {
+                    (k, self.b.build_select(neg, rest, zero, "").s()?.into_int_value())
+                } else {
+                    (rest, self.b.build_select(neg, zero, k, "").s()?.into_int_value())
+                };
+                plan.lens.push(len);
+                plan.slots.push(off.into());
+                Ok(Node::Shift(plan.slots.len() - 1, Box::new(inner)))
+            }
             _ => Err("internal compiler error: not a fusible expression".into()),
         }
     }
@@ -261,8 +311,12 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// The common length of every array in the expression (panics on mismatch).
     fn plan_len(&self, plan: &Plan<'ctx>) -> R<IntValue<'ctx>> {
-        let n = plan.lens[0];
-        for l in &plan.lens[1..] {
+        self.common_len(&plan.lens)
+    }
+
+    fn common_len(&self, lens: &[IntValue<'ctx>]) -> R<IntValue<'ctx>> {
+        let n = *lens.first().ok_or("internal compiler error: a fused expression without arrays")?;
+        for l in &lens[1..] {
             let ne = self.b.build_int_compare(IntPredicate::NE, n, *l, "").s()?;
             self.panic_if(ne, "length mismatch between arrays in an elementwise operation")?;
         }
@@ -333,6 +387,14 @@ impl<'ctx> Cg<'ctx, '_> {
             Node::Un(op, a) => {
                 let x = self.eval_node(a, i, slots)?;
                 self.scalar_unary(*op, x)?
+            }
+            Node::Rev(s, a) => {
+                let j = self.b.build_int_sub(slots[*s].into_int_value(), i, "").s()?;
+                self.eval_node(a, j, slots)?
+            }
+            Node::Shift(s, a) => {
+                let j = self.b.build_int_add(i, slots[*s].into_int_value(), "").s()?;
+                self.eval_node(a, j, slots)?
             }
             Node::Apply { f, arg, caps, pt, rt, depth, .. } => {
                 let x = self.eval_node(arg, i, slots)?;
@@ -1119,7 +1181,7 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Binary { lhs, rhs, .. } => self.trivially_pure(lhs) && self.trivially_pure(rhs),
             ExprKind::Unary { expr, .. } => self.trivially_pure(expr),
-            ExprKind::Prim { prim: Prim::Iota | Prim::Range, args } => args.iter().all(|a| self.trivially_pure(a)),
+            ExprKind::Prim { prim: Prim::Iota | Prim::Range | Prim::Reverse | Prim::Take | Prim::Drop, args } => args.iter().all(|a| self.trivially_pure(a)),
             _ => false,
         }
     }
@@ -1148,6 +1210,10 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Unary { expr, .. } => self.uses_ok(name, expr, self.is_fae(e)),
             ExprKind::Prim { prim: Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum | Prim::Len, args } => {
                 self.uses_ok(name, &args[0], self.is_fae(&args[0]))
+            }
+            ExprKind::Prim { prim: Prim::Reverse | Prim::Take | Prim::Drop, args } => {
+                let f = self.is_fae(e);
+                self.uses_ok(name, &args[0], f) && args[1..].iter().all(|a| self.uses_ok(name, a, false))
             }
             ExprKind::Prim { args, .. } | ExprKind::Array(args) | ExprKind::Tuple(args) => args.iter().all(|a| self.uses_ok(name, a, false)),
             ExprKind::Call { callee, args } => self.uses_ok(name, callee, false) && args.iter().all(|a| self.uses_ok(name, a, false)),
