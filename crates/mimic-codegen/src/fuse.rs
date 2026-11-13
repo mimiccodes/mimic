@@ -34,7 +34,7 @@ fn dtype_of(e: El) -> i32 {
 }
 
 /// The fused computation of one element, given the loop index.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum Node {
     /// `⍳ n`: the index itself
     Index,
@@ -58,7 +58,8 @@ pub(crate) enum Node {
     /// takes the native recursion depth too
     /// `heavy`: `f` can reach recursion, so one element may be a lot of
     /// work however few elements there are (see `timed_apply`).
-    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool },
+    /// `msl`: the function for a GPU kernel (gpufn.rs), when there is one.
+    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool, msl: Option<std::rc::Rc<super::gpufn::MslFn>> },
     /// `⌽ xs`: element `last - index` of the inner computation (slot: last)
     Rev(usize, Box<Node>),
     /// `xs ↑ n`, `xs ↓ n`: element `index + offset` (slot: offset)
@@ -137,13 +138,14 @@ impl<'ctx> Cg<'ctx, '_> {
     /// lambda of one parameter (capturing only numbers and numeric arrays) or
     /// a pure named function, both on unboxed numbers.
     fn each_fusible(&self, e: &Expr, args: &[Expr]) -> bool {
+
         if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
             return false;
         }
-        let simple = |t: Ty| t.is_unboxed() && t != Ty::Unit;
+        let simple = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
         // a record on the heap comes in lent, as a pointer
         let simple_in = |t: Ty| simple(t) || (matches!(t, Ty::Obj(_)) && self.flat(t).is_none());
         match &args[1].kind {
@@ -265,7 +267,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         });
                         let heavy = self.reaches_recursion(called);
                         let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy })
+                        let msl = self.gpu_wanted().then(|| self.msl_lambda(&args[1], &caps)).flatten().map(std::rc::Rc::new);
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy, msl })
                     }
                     ExprKind::Path(path) => {
                         let fid = self.resolve_fn(path)?;
@@ -274,7 +277,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let f = self.request(&k, kind)?;
                         let spec = self.spec(&k)?;
                         let heavy = self.reaches_recursion(vec![k.clone()]);
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy })
+                        let msl = self.gpu_wanted().then(|| self.msl_named(&k)).flatten().map(std::rc::Rc::new);
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy, msl })
                     }
                     _ => Err("internal compiler error: not a fusible ¨".into()),
                 }
@@ -525,6 +529,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 let x = self.eval_node(arg, i, slots)?;
                 let x: BasicMetadataValueEnum = match pt {
                     Ty::F64 => self.to_f64(x)?.into(),
+                    Ty::F32 | Ty::I32 => {
+                        let n = self.narrow_to(x, *pt, "argument")?;
+                        self.basic(n).into()
+                    }
                     Ty::Bool => self.truth(x)?.into(),
                     Ty::Obj(_) => self.basic(x).into(), // a record, lent
                     _ => self.to_i64(x)?.into(),
@@ -773,8 +781,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 None => {
                     let out = self.alloc_vec(dtype_of(el), n)?;
                     let data = self.data_of(out)?;
-                    let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
-                    self.timed_apply(n, k, ctx)?;
+                    self.gpu_or(&root, &plan, el, n, data, |cg| {
+                        let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
+                        cg.timed_apply(n, k, ctx)
+                    })?;
                     out
                 }
             };
@@ -817,18 +827,34 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// A map into `data` (n elements of `el`): on the GPU when the runtime
-    /// wants it there (gpu.rs; macOS, not with --strict-math), else `cpu`.
-    fn gpu_or(&mut self, root: &Node, plan: &Plan<'ctx>, el: El, n: IntValue<'ctx>, data: BasicValueEnum<'ctx>, cpu: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+    /// wants it there (gpu.rs; macOS), else `cpu`.
+    /// Are GPU kernels made in this build? (macOS, optimised.) The GPU
+    /// never fuses a multiply and an add: its results are those of
+    /// --strict-math exactly.
+    pub(crate) fn gpu_wanted(&self) -> bool {
         let triple = self.module.get_triple().as_str().to_string_lossy().into_owned();
         let mac = triple.contains("apple") && (triple.contains("macos") || triple.contains("darwin")) && !triple.contains("macabi");
-        let gk = if self.contract && mac && self.opt_level >= 2 { gpu::map_kernel(root, el, plan.slots.len()) } else { None };
+        mac && self.opt_level >= 2
+    }
+
+    fn gpu_or(&mut self, root: &Node, plan: &Plan<'ctx>, el: El, n: IntValue<'ctx>, data: BasicValueEnum<'ctx>, cpu: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+        let gk = if self.gpu_wanted() { gpu::map_kernel(root, el, plan.slots.len()) } else { None };
         let Some(gk) = gk else { return cpu(self) };
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
         let f = self.cur_fn.unwrap();
         let (gb, cb, done) = (self.ctx.append_basic_block(f, "gpu"), self.ctx.append_basic_block(f, "cpu"), self.ctx.append_basic_block(f, "gpu_done"));
         let wants = self.call_rt("mim_gpu_wants", &[n.into(), i64t.const_int(gk.cost as u64, false).into()])?.unwrap().into_int_value();
-        let w = self.b.build_int_compare(IntPredicate::NE, wants, i32t.const_zero(), "").s()?;
+        let mut w = self.b.build_int_compare(IntPredicate::NE, wants, i32t.const_zero(), "").s()?;
+        // divisors the CPU would check: anything doubtful stays there
+        for s in &gk.guards {
+            let v = plan.slots[*s].into_int_value();
+            let v = if v.get_type().get_bit_width() < 64 { self.b.build_int_s_extend(v, i64t, "").s()? } else { v };
+            let nz = self.b.build_int_compare(IntPredicate::NE, v, i64t.const_zero(), "").s()?;
+            let nm = self.b.build_int_compare(IntPredicate::NE, v, i64t.const_all_ones(), "").s()?;
+            w = self.b.build_and(w, nz, "").s()?;
+            w = self.b.build_and(w, nm, "").s()?;
+        }
         self.b.build_conditional_branch(w, gb, cb).s()?;
         self.b.position_at_end(gb);
         let nb = gk.bufs.len() as u32;
@@ -853,11 +879,15 @@ impl<'ctx> Cg<'ctx, '_> {
                 gpu::Arg::None => continue,
                 gpu::Arg::Raw => {
                     let v = plan.slots[s].into_int_value();
-                    if v.get_type().get_bit_width() < 64 { self.b.build_int_z_extend(v, i64t, "").s()? } else { v }
+                    match v.get_type().get_bit_width() {
+                        1 => self.b.build_int_z_extend(v, i64t, "").s()?,
+                        64 => v,
+                        _ => self.b.build_int_s_extend(v, i64t, "").s()?,
+                    }
                 }
                 gpu::Arg::F32 => {
                     let d = plan.slots[s].into_float_value();
-                    let f = self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?;
+                    let f = if d.get_type() == self.ctx.f32_type() { d } else { self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()? };
                     let bits = self.b.build_bit_cast(f, i32t, "").s()?.into_int_value();
                     self.b.build_int_z_extend(bits, i64t, "").s()?
                 }
@@ -1179,8 +1209,12 @@ impl<'ctx> Cg<'ctx, '_> {
             let k = self.emit_kernel(&root, &plan, Mode::Map(el))?;
             let tmp = self.alloc_vec(dtype_of(el), n)?;
             let data = self.data_of(tmp)?;
-            let ctx = self.pack_ctx(&plan, &[data, i64t.const_zero().into()])?;
-            self.timed_apply(n, k, ctx)?;
+            // (the GPU computes the elements when it can; they are combined
+            // here, in order, either way)
+            self.gpu_or(&root, &plan, el, n, data, |cg| {
+                let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
+                cg.timed_apply(n, k, ctx)
+            })?;
             self.release_plan(&plan)?;
             let mut p2 = Plan::default();
             p2.lens.push(n);

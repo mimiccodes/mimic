@@ -44,6 +44,7 @@ mod forkjoin;
 mod owned;
 mod fuse;
 mod gpu;
+mod gpufn;
 pub mod tonet;
 
 pub struct Settings {
@@ -68,6 +69,11 @@ pub struct Settings {
     /// CPU (`--strict-math`). Off by default: like C compilers, Mimic fuses
     /// them within an expression (faster; can differ in the last bits).
     pub strict_math: bool,
+    /// `--fast-math`: float `+ - × ÷` and reductions may be regrouped (so
+    /// vectorised), divisions use reciprocals, math functions approximate,
+    /// zero's sign is ignored. Never "no NaN / no infinity": LLVM could then
+    /// drop bounds checks on indices computed from floats.
+    pub fast_math: bool,
     /// A test build: a `main` that lists and runs the program's tests
     /// (`test "…" { }`; see mim_test_main) instead of `main::main`.
     pub tests: bool,
@@ -244,6 +250,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
         contract: !settings.strict_math,
+        fast: settings.fast_math,
         lazy_deep: None,
         cur_kind: Kind::Plain,
         borrow_binds: false,
@@ -326,6 +333,11 @@ enum V<'ctx> {
     I(IntValue<'ctx>),
     F(FloatValue<'ctx>),
     B(IntValue<'ctx>),
+    /// an f32 (LLVM `float`) and an i32 (LLVM `i32`): 32-bit numbers in
+    /// registers; arithmetic widens them, computes and narrows again (which
+    /// is exactly f32 / i32 arithmetic, see `narrow_to`)
+    F32(FloatValue<'ctx>),
+    I32(IntValue<'ctx>),
     /// A list of numbers (or truth values) of a length known statically: the
     /// elements themselves, in registers (`[n x double]`, …); see Ty::Arr.
     A(inkwell::values::ArrayValue<'ctx>, El),
@@ -429,6 +441,8 @@ struct Cg<'ctx, 'p> {
     opt_level: u8,
     /// Float `+ - ×` may fuse into multiply-adds (Settings::strict_math off).
     contract: bool,
+    /// --fast-math (see Settings::fast_math)
+    fast: bool,
     /// In a native function of plain numbers: its key (the depth is checked
     /// before each call it makes; see `scalars_only`).
     lazy_deep: Option<Key>,
@@ -641,6 +655,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Ty::I64 => self.ctx.i64_type().into(),
             Ty::F64 => self.ctx.f64_type().into(),
             Ty::Bool => self.ctx.bool_type().into(),
+            Ty::F32 => self.ctx.f32_type().into(),
+            Ty::I32 => self.ctx.i32_type().into(),
             _ => match fixed(t) {
                 Some((el, n)) => self.el_ty(el).array_type(n).into(),
                 None => match self.flat(t) {
@@ -682,7 +698,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Kept in registers: a list of known length or a flat record.
     fn in_regs(&self, t: Ty) -> bool {
-        fixed(t).is_some() || self.flat(t).is_some()
+        matches!(t, Ty::F32 | Ty::I32) || fixed(t).is_some() || self.flat(t).is_some()
     }
 
     /// The LLVM type of one element of a list kept in registers.
@@ -751,8 +767,8 @@ impl<'ctx> Cg<'ctx, '_> {
     fn basic(&self, v: V<'ctx>) -> BasicValueEnum<'ctx> {
         match v {
             V::P(p, _) => p.into(),
-            V::I(i) | V::B(i) => i.into(),
-            V::F(f) => f.into(),
+            V::I(i) | V::B(i) | V::I32(i) => i.into(),
+            V::F(f) | V::F32(f) => f.into(),
             V::A(a, _) => a.into(),
             V::R(r, _) => r.into(),
         }
@@ -763,6 +779,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Ty::I64 => V::I(bv.into_int_value()),
             Ty::F64 => V::F(bv.into_float_value()),
             Ty::Bool => V::B(bv.into_int_value()),
+            Ty::F32 => V::F32(bv.into_float_value()),
+            Ty::I32 => V::I32(bv.into_int_value()),
             _ => match fixed(t) {
                 Some((el, _)) => V::A(bv.into_array_value(), el),
                 None if self.flat(t).is_some() => V::R(bv.into_struct_value(), t),
@@ -1039,6 +1057,8 @@ impl<'ctx> Cg<'ctx, '_> {
     fn boxed(&self, v: V<'ctx>) -> R<V<'ctx>> {
         Ok(match v {
             V::P(..) => v,
+            V::F32(_) => self.call_rt_ptr("mim_float32", &[self.to_f64(v)?.into()])?,
+            V::I32(_) => self.call_rt_ptr("mim_int32", &[self.to_i64(v)?.into()])?,
             // a flat record becomes a record on the heap
             V::R(r, t) => {
                 let fs = self.flat(t).ok_or("internal compiler error: not a flat record")?;
@@ -1083,7 +1103,8 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(match v {
             V::I(i) => i,
             V::B(b) => self.b.build_int_z_extend(b, self.ctx.i64_type(), "").s()?,
-            V::F(f) => self.b.build_float_to_signed_int(f, self.ctx.i64_type(), "").s()?,
+            V::I32(i) => self.b.build_int_s_extend(i, self.ctx.i64_type(), "").s()?,
+            V::F(f) | V::F32(f) => self.b.build_float_to_signed_int(f, self.ctx.i64_type(), "").s()?,
             V::P(p, _) => self.call_rt("mim_as_i64", &[p.into()])?.unwrap().into_int_value(),
             // a list where a number is expected: the runtime reports it
             V::A(..) | V::R(..) => return self.to_i64(self.boxed(v)?),
@@ -1093,7 +1114,8 @@ impl<'ctx> Cg<'ctx, '_> {
     fn to_f64(&self, v: V<'ctx>) -> R<FloatValue<'ctx>> {
         Ok(match v {
             V::F(f) => f,
-            V::I(i) => self.b.build_signed_int_to_float(i, self.ctx.f64_type(), "").s()?,
+            V::F32(f) => self.b.build_float_ext(f, self.ctx.f64_type(), "").s()?,
+            V::I(i) | V::I32(i) => self.b.build_signed_int_to_float(i, self.ctx.f64_type(), "").s()?,
             V::B(b) => self.b.build_unsigned_int_to_float(b, self.ctx.f64_type(), "").s()?,
             V::P(p, _) => self.call_rt("mim_as_f64", &[p.into()])?.unwrap().into_float_value(),
             V::A(..) | V::R(..) => return self.to_f64(self.boxed(v)?),
@@ -1104,8 +1126,8 @@ impl<'ctx> Cg<'ctx, '_> {
     fn truth(&self, v: V<'ctx>) -> R<IntValue<'ctx>> {
         Ok(match v {
             V::B(b) => b,
-            V::I(i) => self.b.build_int_compare(IntPredicate::NE, i, self.ctx.i64_type().const_zero(), "").s()?,
-            V::F(f) => self.b.build_float_compare(FloatPredicate::UNE, f, self.ctx.f64_type().const_zero(), "").s()?,
+            V::I(i) | V::I32(i) => self.b.build_int_compare(IntPredicate::NE, i, i.get_type().const_zero(), "").s()?,
+            V::F(f) | V::F32(f) => self.b.build_float_compare(FloatPredicate::UNE, f, f.get_type().const_zero(), "").s()?,
             V::P(p, _) => {
                 let t = self.call_rt("mim_truthy", &[p.into()])?.unwrap().into_int_value();
                 self.drop_tmp(v)?;
@@ -1121,11 +1143,14 @@ impl<'ctx> Cg<'ctx, '_> {
         if let Some((el, n)) = fixed(t) {
             return self.as_fixed(v, el, n, what);
         }
-        // f32 and i32 (boxed for now): converted by the runtime, which
-        // rounds to f32 and range-checks i32
+        if matches!(t, Ty::F32 | Ty::I32) {
+            return self.narrow_to(v, t, what);
+        }
+        // lists of f32 and i32: converted by the runtime, which rounds to
+        // f32 and range-checks i32
         let narrow = match t {
-            Ty::F32 | Ty::Arr(El::F32, _) => Some(9),
-            Ty::I32 | Ty::Arr(El::I32, _) => Some(10),
+            Ty::Arr(El::F32, _) => Some(9),
+            Ty::Arr(El::I32, _) => Some(10),
             _ => None,
         };
         if let Some(dt) = narrow {
@@ -1159,6 +1184,56 @@ impl<'ctx> Cg<'ctx, '_> {
             (Ty::I64, V::F(_)) => Ok(V::I(self.to_i64(v)?)),
             (Ty::Bool, V::I(_) | V::F(_)) => Ok(V::B(self.truth(v)?)),
             _ => self.boxed(v),
+        }
+    }
+
+    /// A value as an f32 (rounded, as the runtime's `(float)` of a double)
+    /// or an i32 (one that does not fit stops the program, as the runtime
+    /// does).
+    pub(crate) fn narrow_to(&self, v: V<'ctx>, t: Ty, what: &str) -> R<V<'ctx>> {
+        let (f32t, i32t) = (self.ctx.f32_type(), self.ctx.i32_type());
+        match (t, v) {
+            (Ty::F32, V::F32(_)) | (Ty::I32, V::I32(_)) => Ok(v),
+            (Ty::F32, V::F(_) | V::I(_) | V::I32(_) | V::B(_)) => {
+                let d = self.to_f64(v)?;
+                Ok(V::F32(self.b.build_float_trunc(d, f32t, "").s()?))
+            }
+            (Ty::I32, V::I(x)) => {
+                let n = self.b.build_int_truncate(x, i32t, "").s()?;
+                if x.get_sign_extended_constant().is_some_and(|c| c == c as i32 as i64) {
+                    return Ok(V::I32(n));
+                }
+                // out of range: the runtime says so (and stops)
+                let back = self.b.build_int_s_extend(n, self.ctx.i64_type(), "").s()?;
+                let bad = self.b.build_int_compare(IntPredicate::NE, back, x, "").s()?;
+                let f = self.cur_fn.unwrap();
+                let (bb, ok) = (self.ctx.append_basic_block(f, "i32_range"), self.ctx.append_basic_block(f, "i32_ok"));
+                self.b.build_conditional_branch(bad, bb, ok).s()?;
+                self.b.position_at_end(bb);
+                let boxed = self.boxed(v)?;
+                self.call_rt("mim_scalar_as", &[self.basic(boxed).into(), self.i32c(10)])?;
+                self.b.build_unconditional_branch(ok).s()?;
+                self.b.position_at_end(ok);
+                Ok(V::I32(n))
+            }
+            (Ty::I32, V::B(_)) => Ok(V::I32(self.b.build_int_truncate(self.to_i64(v)?, i32t, "").s()?)),
+            _ => {
+                // anything else (a handle, a float as an i32): the runtime
+                let b = self.boxed(v)?;
+                let w = self.cstring(what)?;
+                let _ = w;
+                let dt = if t == Ty::F32 { 9 } else { 10 };
+                let r = self.call_rt_ptr("mim_scalar_as", &[self.basic(b).into(), self.i32c(dt)])?;
+                self.drop_tmp(b)?;
+                let out = if t == Ty::F32 {
+                    let d = self.to_f64(r)?;
+                    V::F32(self.b.build_float_trunc(d, f32t, "").s()?)
+                } else {
+                    V::I32(self.b.build_int_truncate(self.to_i64(r)?, i32t, "").s()?)
+                };
+                self.drop_tmp(r)?;
+                Ok(out)
+            }
         }
     }
 
@@ -1294,7 +1369,8 @@ impl<'ctx> Cg<'ctx, '_> {
         let void = self.ctx.void_type();
         let ty = match name {
             "mim_int" | "mim_bool" => ptr.fn_type(&[i64t], false),
-            "mim_float" => ptr.fn_type(&[f64t], false),
+            "mim_float" | "mim_float32" => ptr.fn_type(&[f64t], false),
+            "mim_int32" => ptr.fn_type(&[i64t], false),
             "mim_lit_str" => ptr.fn_type(&[p, p, i64t], false),
             "mim_lit_variant" => ptr.fn_type(&[p, p], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
@@ -3671,16 +3747,19 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A float `+ - ×` that may fuse with its neighbours into a multiply-add
     /// (unless --strict-math): what C compilers do within an expression.
     pub(crate) fn contracted(&self, v: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        use inkwell::values::FastMathFlags as F;
         if self.contract
             && let Some(i) = inkwell::values::BasicValue::as_instruction_value(&v)
         {
-            let _ = i.set_fast_math_flags(inkwell::values::FastMathFlags::AllowContract);
+            let flags = if self.fast { F::AllowContract | F::AllowReassoc | F::NoSignedZeros | F::AllowReciprocal | F::ApproxFunc } else { F::AllowContract };
+            let _ = i.set_fast_math_flags(flags);
         }
         v
     }
 
     fn scalar_binary(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
         use BinOp::*;
+        let (a, b) = (self.widen(a)?, self.widen(b)?);
         let bld = &self.b;
         if matches!(op, And | Or) {
             let x = self.truth(a)?;
@@ -3699,7 +3778,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 Add => Ok(V::F(self.contracted(bld.build_float_add(x, y, "").s()?))),
                 Sub => Ok(V::F(self.contracted(bld.build_float_sub(x, y, "").s()?))),
                 Mul => Ok(V::F(self.contracted(bld.build_float_mul(x, y, "").s()?))),
-                Div => Ok(V::F(bld.build_float_div(x, y, "").s()?)),
+                Div => Ok(V::F(self.contracted(bld.build_float_div(x, y, "").s()?))),
                 Mod => Ok(V::F(bld.build_float_rem(x, y, "").s()?)),
                 IntDiv => {
                     let q = bld.build_float_div(x, y, "").s()?;
@@ -3819,6 +3898,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     pub(crate) fn scalar_unary(&self, op: UnOp, a: V<'ctx>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
+        let a = self.widen(a)?;
         Ok(match (op, a) {
             (UnOp::Not, _) => V::B(self.b.build_not(self.truth(a)?, "").s()?),
             (UnOp::BitNot, V::B(x)) => V::B(self.b.build_not(x, "").s()?),
@@ -3841,6 +3921,34 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn is_unboxed(v: &V) -> bool {
         !matches!(v, V::P(..))
+    }
+
+    /// An f32 or i32 as an f64 or i64 (exactly); anything else as it is.
+    pub(crate) fn widen(&self, v: V<'ctx>) -> R<V<'ctx>> {
+        Ok(match v {
+            V::F32(_) => V::F(self.to_f64(v)?),
+            V::I32(_) => V::I(self.to_i64(v)?),
+            _ => v,
+        })
+    }
+
+    /// `op` on scalars where f32 or i32 is involved: the operands made the
+    /// type the two make together (types::num_join), the operation done
+    /// wide, the result narrowed to `ty` (a comparison stays a truth
+    /// value). For + - × ÷ that is exactly f32 (i32) arithmetic.
+    fn narrow_binary(&self, op: BinOp, a: V<'ctx>, ta: Ty, b: V<'ctx>, tb: Ty, ty: Ty) -> R<V<'ctx>> {
+        let joint = types::num_join(ta, false, tb, false);
+        let (a, b) = if matches!(joint, Ty::F32 | Ty::I32) { (self.narrow_to(a, joint, "operand")?, self.narrow_to(b, joint, "operand")?) } else { (a, b) };
+        let r = self.scalar_binary(op, a, b)?;
+        if matches!(ty, Ty::F32 | Ty::I32) { self.wrap_to(r, ty) } else { self.as_ty(r, ty, "operator result") }
+    }
+
+    /// An arithmetic result as an f32 (rounded) or an i32 (wrapped).
+    fn wrap_to(&self, v: V<'ctx>, ty: Ty) -> R<V<'ctx>> {
+        match (ty, v) {
+            (Ty::I32, V::I(x)) => Ok(V::I32(self.b.build_int_truncate(x, self.ctx.i32_type(), "").s()?)),
+            _ => self.narrow_to(v, ty, "operator result"),
+        }
     }
 
     /// `v` (of type `from`) moving into a slot of type `to`. A value's type
@@ -4170,6 +4278,8 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = self.ty_of(e);
         match (self.in_regs(ty), v) {
             (true, V::P(..)) => self.as_ty(v, ty, "value"),
+            // (a number written in the program, typed f32 or i32)
+            (true, V::F(_) | V::I(_)) if matches!(ty, Ty::F32 | Ty::I32) => self.narrow_to(v, ty, "value"),
             (false, V::A(..) | V::R(..)) => self.boxed(v),
             _ => Ok(v),
         }
@@ -4635,6 +4745,10 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Unary { op, expr } => {
                 let a = self.expr(expr)?;
+                if Self::is_unboxed(&a) && matches!(ty, Ty::F32 | Ty::I32) {
+                    let r = self.scalar_unary(*op, a)?;
+                    return self.wrap_to(r, ty);
+                }
                 if Self::is_unboxed(&a) && ty.is_unboxed() {
                     return self.scalar_unary(*op, a);
                 }
@@ -4682,6 +4796,11 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;
                 let b = self.expr(rhs)?;
+                let (ta, tb) = (self.ty_of(lhs), self.ty_of(rhs));
+                let small = |t: Ty| matches!(t, Ty::F32 | Ty::I32);
+                if (small(ta) || small(tb) || small(ty)) && Self::is_unboxed(&a) && Self::is_unboxed(&b) && (ty.is_unboxed() || small(ty)) {
+                    return self.narrow_binary(*op, a, ta, b, tb, ty);
+                }
                 if Self::is_unboxed(&a) && Self::is_unboxed(&b) && ty.is_unboxed() {
                     return self.scalar_binary(*op, a, b);
                 }

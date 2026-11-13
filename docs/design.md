@@ -77,9 +77,9 @@ Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Wha
 
 A fused map (see kernel fusion) that the GPU computes *exactly* as the CPU does is also compiled to a Metal kernel (`crates/mimic-codegen/src/gpu.rs`); the runtime (`runtime/mimic_gpu.c`) runs it on the GPU when that pays off. No annotation: like threads, it is the compiler's and runtime's call.
 
-* **What qualifies.** Elementwise arithmetic, comparisons and logic over `[f32]`, `[i32]`, `[i64]` and `[bool]`, with `⌽ ↑ ↓` and `⍳`. Apple GPUs have no `f64`, so an `f32` kernel is made only where each float operation takes f32 operands and rounds to f32 — exactly what the CPU computes. Integer `div` and `mod` qualify by a constant (no division by zero on the GPU). Calls, records and `f64` stay on the CPU.
+* **What qualifies.** Elementwise arithmetic, comparisons and logic over `[f32]`, `[i32]`, `[i64]` and `[bool]`, with `⌽ ↑ ↓` and `⍳`; and `xs ¨ f` where `f` (a named function or a lambda, and every function it calls) is pure and works on `f32`, `i32`, `i64` and truth values: `let`, `if`/`else`, operators, calls (`gpufn.rs`). A function calling itself last becomes a loop; other recursion stays on the CPU. Apple GPUs have no `f64`, so `f32` code is made only where each float operation takes f32 operands and rounds to f32, exactly what the CPU computes. Integer `div` and `mod` qualify by a number written in the program, or by a value the lambda captures (checked once before the GPU starts: 0 or -1 keeps the map on the CPU, which reports a division by zero as always). Calls to other kinds of functions, records and `f64` stay on the CPU.
 * **When.** Metal is loaded on first use (`dlopen`, no link-time dependency; on other systems everything runs on the CPU). Lists are read and written in place (unified memory: no copies). Starting Metal takes about 0.1 s once, and the CPU's cores do simple arithmetic about as fast, so by default a kernel goes to the GPU only with a lot of work (about 4·10⁹ estimated operations, a quarter of that once the GPU is running). `MIMIC_GPU=1` sends every kernel there, `MIMIC_GPU=0` none.
-* **Results.** The same as the CPU's; with fused multiply-add on (the default) both may contract `a * b + c`, and `--strict-math` keeps every kernel on the CPU. The golden tests run every fixture with `MIMIC_GPU=1` too.
+* **Results.** The GPU never fuses a multiply and an add, so its results are exactly those of the CPU with `--strict-math` (and with `--strict-math` both agree bit for bit). By default the CPU may fuse `a * b + c` (see fused multiply-add), so a float result can differ in its last bits between the two, as between CPUs with and without the instruction. The golden tests run every fixture with `MIMIC_GPU=1` too.
 
 ## Milestone 2, phase 2 (implemented): interaction-net core
 
@@ -99,6 +99,8 @@ Pure functions compile to interaction nets ([net.md](net.md#compiling-mimic-to-n
 * Independent calls such as `fib(n-1) + fib(n-2)` reduce on different cores.
 * `if` is lazy.
 * Type annotations are enforced in nets exactly as in native code.
+
+**Pre-reduction (F7).** Before a definition is encoded, every interaction that needs no definition expanded is done at compile time (`Def::pre_reduce`): constructor and duplicator pairs annihilate, erasers and copies of numbers propagate, integer `+ - ×` on known numbers fold, a switch on a known number picks its branch, and a wire between a variable and a tree becomes the tree itself. References are never expanded, so laziness and recursion are unchanged. Most of the redexes a compiled function starts with were such wires: `fib` on nets runs about 20% faster (4.2 s → 3.4 s for `fib(30)` on one thread). Functions on `f32` or `i32` stay native: nets carry 64-bit numbers.
 
 Adaptive native fallback runs each core's share of the work at native speed. Bounded native recursion hands deep recursion back to the heap-allocated net. `--no-net` compiles everything natively, for comparison.
 

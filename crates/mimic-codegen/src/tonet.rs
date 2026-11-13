@@ -42,6 +42,19 @@ pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
         if !purity.fns[fid] {
             continue;
         }
+        // nets carry 64-bit numbers: f32 and i32 code stays native
+        let narrow = d.params.iter().filter_map(|p| p.ty.as_ref()).chain(d.ret.as_ref()).any(mentions_32) || {
+            let mut found = false;
+            d.body.walk(&mut |x| {
+                if let ExprKind::Block(b) = &x.kind {
+                    found |= b.stmts.iter().any(|s| matches!(s, Stmt::Let { ty: Some(t), .. } if mentions_32(t)));
+                }
+            });
+            found || d.body.stmts.iter().any(|s| matches!(s, Stmt::Let { ty: Some(t), .. } if mentions_32(t)))
+        };
+        if narrow {
+            continue;
+        }
         let Some(body) = desugar_block(&d.body) else { continue };
         let mut callees = Vec::new();
         if (Eligible { p, module: f.module, callees: &mut callees }).block(&body) {
@@ -104,7 +117,10 @@ pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
     let def_index: HashMap<FnId, u32> =
         ids.iter().map(|f| (*f, defs.iter().position(|d| d.name == names[f]).unwrap() as u32)).collect();
     let entered = ids.iter().copied().filter(|f| !cand[f].1.is_empty()).collect();
-    NetPlan { book: Book { defs }, def_index, entered, check_msgs }
+    // what needs no definition expanded is reduced now, once (F7)
+    let mut book = Book { defs };
+    book.pre_reduce();
+    NetPlan { book, def_index, entered, check_msgs }
 }
 
 fn def_name(p: &Program, f: FnId) -> String {
@@ -140,6 +156,17 @@ fn contains_return(b: &Block) -> bool {
         Stmt::Expr(x) => e(x),
         _ => false,
     }) || b.tail.as_deref().is_some_and(e)
+}
+
+/// Does a type annotation name f32 or i32?
+fn mentions_32(t: &Type) -> bool {
+    match t {
+        Type::Named(n, _) => n == "f32" || n == "i32",
+        Type::App(_, ts, _) | Type::Tuple(ts, _) => ts.iter().any(mentions_32),
+        Type::Array(t, _) | Type::Ptr(t, _) => mentions_32(t),
+        Type::Map(a, b, _) => mentions_32(a) || mentions_32(b),
+        Type::Fn(ps, r, _) => ps.iter().any(mentions_32) || r.as_deref().is_some_and(mentions_32),
+    }
 }
 
 /// Rewrite a block so that it has no `return` statements, or give up.

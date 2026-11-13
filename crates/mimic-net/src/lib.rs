@@ -165,6 +165,149 @@ const BIN_OPS: &[(&str, BinOp)] = &[
     ("ushr", BinOp::UShr),
 ];
 
+// ---- compile-time pre-reduction ---------------------------------------------
+
+impl Tree {
+    /// Replace the occurrence of variable `name` with `t`; true if found.
+    fn subst(&mut self, name: &str, t: &Tree) -> bool {
+        match self {
+            Tree::Var(v) if v == name => {
+                *self = t.clone();
+                true
+            }
+            Tree::Con(a, b) | Tree::Dup(_, a, b) | Tree::Opr(_, a, b) | Tree::Swi(a, b) => a.subst(name, t) || b.subst(name, t),
+            _ => false,
+        }
+    }
+
+    fn has_var(&self, name: &str) -> bool {
+        match self {
+            Tree::Var(v) => v == name,
+            Tree::Con(a, b) | Tree::Dup(_, a, b) | Tree::Opr(_, a, b) | Tree::Swi(a, b) => a.has_var(name) || b.has_var(name),
+            _ => false,
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Tree::Con(a, b) | Tree::Dup(_, a, b) | Tree::Opr(_, a, b) | Tree::Swi(a, b) => 1 + a.size() + b.size(),
+            _ => 0,
+        }
+    }
+}
+
+/// `x op y` on two numbers, where it is certain to be what the runtime
+/// computes (wrapping integer + - ×); None to leave it to the runtime.
+fn fold(op: Op, x: Num, y: Num) -> Option<Num> {
+    match (op, x, y) {
+        (Op::Bin(BinOp::Add), Num::Int(a), Num::Int(b)) => Some(Num::Int(a.wrapping_add(b))),
+        (Op::Bin(BinOp::Sub), Num::Int(a), Num::Int(b)) => Some(Num::Int(a.wrapping_sub(b))),
+        (Op::Bin(BinOp::Mul), Num::Int(a), Num::Int(b)) => Some(Num::Int(a.wrapping_mul(b))),
+        _ => None,
+    }
+}
+
+impl Def {
+    /// Reduce at compile time what the runtime would reduce first anyway:
+    /// every interaction that needs no definition expanded (annihilation,
+    /// erasure, copying numbers, constant arithmetic, a switch on a known
+    /// number), and a wire between a variable and a tree replaced by the tree
+    /// itself (no wire to allocate at run time). References are never
+    /// expanded, so laziness and recursion are as before.
+    pub fn pre_reduce(&mut self) {
+        let mut work: Vec<(Tree, Tree)> = std::mem::take(&mut self.redexes);
+        let mut kept: Vec<(Tree, Tree)> = Vec::new();
+        let mut steps = 0;
+        while let Some((a, b)) = work.pop() {
+            steps += 1;
+            if steps > 100_000 {
+                kept.push((a, b));
+                kept.append(&mut work);
+                break;
+            }
+            match (a, b) {
+                // a wire: the other end of the variable gets the tree
+                (Tree::Var(x), t) | (t, Tree::Var(x)) => {
+                    if t.has_var(&x) {
+                        kept.push((Tree::Var(x), t));
+                        continue;
+                    }
+                    let mut done = self.root.subst(&x, &t);
+                    for (p, q) in work.iter_mut().chain(kept.iter_mut()) {
+                        if done {
+                            break;
+                        }
+                        done = p.subst(&x, &t) || q.subst(&x, &t);
+                    }
+                    if !done {
+                        kept.push((Tree::Var(x), t));
+                    } else {
+                        // the substituted tree may now face another tree in a
+                        // kept redex: look at those again
+                        let again: Vec<(Tree, Tree)> = std::mem::take(&mut kept);
+                        work.extend(again);
+                    }
+                }
+                (Tree::Con(a1, a2), Tree::Con(b1, b2)) => {
+                    work.push((*a1, *b1));
+                    work.push((*a2, *b2));
+                }
+                (Tree::Dup(l, a1, a2), Tree::Dup(m, b1, b2)) if l == m => {
+                    work.push((*a1, *b1));
+                    work.push((*a2, *b2));
+                }
+                // two nullary nodes: nothing (a reference met by an eraser
+                // or a number is dropped unexpanded, as the runtime does)
+                (Tree::Era | Tree::Num(_) | Tree::Ref(_), Tree::Era | Tree::Num(_) | Tree::Ref(_)) => {}
+                (Tree::Era, Tree::Con(x, y) | Tree::Dup(_, x, y) | Tree::Opr(_, x, y) | Tree::Swi(x, y))
+                | (Tree::Con(x, y) | Tree::Dup(_, x, y) | Tree::Opr(_, x, y) | Tree::Swi(x, y), Tree::Era) => {
+                    work.push((*x, Tree::Era));
+                    work.push((*y, Tree::Era));
+                }
+                (Tree::Num(n), Tree::Dup(_, x, y)) | (Tree::Dup(_, x, y), Tree::Num(n)) => {
+                    work.push((*x, Tree::Num(n)));
+                    work.push((*y, Tree::Num(n)));
+                }
+                (Tree::Num(n), Tree::Swi(sel, r)) | (Tree::Swi(sel, r), Tree::Num(n)) if matches!(*sel, Tree::Con(..)) => {
+                    let truth = match n {
+                        Num::Int(i) => i != 0,
+                        Num::F64(f) => f != 0.0,
+                        Num::Bool(b) => b,
+                    };
+                    let Tree::Con(yes, no) = *sel else { unreachable!() };
+                    let (take, drop) = if truth { (yes, no) } else { (no, yes) };
+                    work.push((*take, *r));
+                    work.push((*drop, Tree::Era));
+                }
+                (Tree::Num(n), Tree::Opr(op, y, r)) | (Tree::Opr(op, y, r), Tree::Num(n)) if !op.is_unary() && matches!(*y, Tree::Num(_)) => {
+                    let Tree::Num(m) = *y else { unreachable!() };
+                    match fold(op, n, m) {
+                        Some(v) => work.push((*r, Tree::Num(v))),
+                        None => kept.push((Tree::Num(n), Tree::Opr(op, Box::new(Tree::Num(m)), r))),
+                    }
+                }
+                (a, b) => kept.push((a, b)),
+            }
+        }
+        kept.reverse();
+        self.redexes = kept;
+    }
+
+    /// Nodes in the definition (for tests and statistics).
+    pub fn node_count(&self) -> usize {
+        self.root.size() + self.redexes.iter().map(|(a, b)| a.size() + b.size()).sum::<usize>()
+    }
+}
+
+impl Book {
+    /// Pre-reduce every definition (Def::pre_reduce).
+    pub fn pre_reduce(&mut self) {
+        for d in &mut self.defs {
+            d.pre_reduce();
+        }
+    }
+}
+
 // ---- printing ---------------------------------------------------------------
 
 impl fmt::Display for Num {
@@ -590,6 +733,21 @@ mod tests {
         assert!(encode(&parse("@main = (a a) & a ~ *").unwrap()).unwrap_err().contains("used 3"));
         assert!(encode(&parse("@main = @nope").unwrap()).unwrap_err().contains("unknown definition"));
         assert!(parse("@main = $bogus(a a)").is_err());
+    }
+
+    #[test]
+    fn pre_reduction() {
+        // annihilation, erasing, copying a number, constant arithmetic, a
+        // switch on a known number, wires: all done; the reference stays
+        let mut b = parse("@yes = #1\n@no = #0\n@main = r & (x y) ~ (#3 c) & c ~ * & y ~ * & x ~ {p q} & p ~ $+(#4 s) & q ~ * & s ~ ?((@yes @no) r)").unwrap();
+        b.pre_reduce();
+        assert_eq!(b.defs[2].to_string(), "@main = @yes");
+        // a reference is never expanded
+        let mut f = parse(FIB).unwrap();
+        let before = f.defs[3].clone();
+        f.pre_reduce();
+        assert_eq!(f.defs[3].to_string(), "@main = r\n  & @fib ~ (#20 r)");
+        let _ = before;
     }
 
     #[test]

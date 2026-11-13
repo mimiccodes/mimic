@@ -1318,7 +1318,7 @@ mim_val *mim_array_lit(int64_t n, mim_val **elems) {
     }
     mim_val *v = alloc(dt, 1, n);
     for (int64_t i = 0; i < n; i++) {
-        if (dt == MIM_F64) setf(v, i, getf(elems[i], 0));
+        if (IS_FLOAT(dt)) setf(v, i, getf(elems[i], 0));
         else seti(v, i, geti(elems[i], 0));
     }
     return v;

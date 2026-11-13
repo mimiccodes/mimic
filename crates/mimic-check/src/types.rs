@@ -1026,6 +1026,14 @@ impl Walk<'_, '_> {
         }
     }
 
+    /// A literal (or a negated one) given the type `t` (see literal_as).
+    fn retype_literal(&mut self, e: &Expr, t: Ty) {
+        self.out.exprs.insert(id(e), t);
+        if let ExprKind::Unary { expr, .. } = &e.kind {
+            self.out.exprs.insert(id(expr.as_ref()), t);
+        }
+    }
+
     fn expr(&mut self, e: &Expr) -> Ty {
         let t = self.expr_inner(e);
         self.out.exprs.insert(id(e), t);
@@ -1199,12 +1207,22 @@ impl Walk<'_, '_> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let a = self.expr(lhs);
-                let b = self.expr(rhs);
+                let mut a = self.expr(lhs);
+                let mut b = self.expr(rhs);
                 let elem = |t: Ty| match t {
                     Ty::Arr(x, _) => Ty::of_el(x),
                     t => t,
                 };
+                // a number written in the program takes the 32-bit type of
+                // the other side: `z * 0.5` on an f32 is f32, `n + 1` on an
+                // i32 is i32 (as Go's constants)
+                if let Some(t) = literal_as(lhs, elem(b)) {
+                    a = t;
+                    self.retype_literal(lhs, t);
+                } else if let Some(t) = literal_as(rhs, elem(a)) {
+                    b = t;
+                    self.retype_literal(rhs, t);
+                }
                 let whole = |t: Ty| matches!(elem(t), Ty::Obj(_) | Ty::Tup(_));
                 if matches!(op, BinOp::Eq | BinOp::Ne) && (whole(a) || whole(b)) {
                     // structural equality: same type, compared field by field
@@ -1473,9 +1491,26 @@ impl Walk<'_, '_> {
             }
             ExprKind::If { cond, then, els } => {
                 self.expr(cond);
-                let t = self.block(then);
+                let mut t = self.block(then);
                 match els {
-                    Some(x) => t.join(self.expr(x)),
+                    Some(x) => {
+                        let mut u = self.expr(x);
+                        // a branch that is a number written in the program
+                        // takes the other's f32 or i32: `if c { 0 } else { n }`
+                        if let Some(lit) = then.tail.as_deref().filter(|l| is_literal(l))
+                            && let Some(nt) = literal_branch_as(lit, u)
+                        {
+                            self.retype_literal(lit, nt);
+                            t = nt;
+                        } else if let Some(lit) = tail_literal(x)
+                            && let Some(nt) = literal_branch_as(lit, t)
+                        {
+                            self.retype_literal(lit, nt);
+                            self.out.exprs.insert(id(x.as_ref()), nt);
+                            u = nt;
+                        }
+                        t.join(u)
+                    }
                     None => t.join(Ty::Unit),
                 }
             }
@@ -1676,6 +1711,56 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
         (Ty::Arr(x, n), Ty::Arr(y, m)) => Ty::Arr(scalar(Ty::of_el(x), true, Ty::of_el(y), true).el(), if n == m { n } else { 0 }),
         (Ty::Arr(_, _), _) | (_, Ty::Arr(_, _)) => Ty::Dyn,
         _ => Ty::Dyn,
+    }
+}
+
+/// The type a number written in the program takes next to a value of
+/// type `other`: f32 for a float (or an integer) next to an f32, i32 for an
+/// integer that fits next to an i32; None to keep its own.
+fn literal_as(e: &Expr, other: Ty) -> Option<Ty> {
+    let (lit, neg) = match &e.kind {
+        ExprKind::Unary { op: UnOp::Neg, expr } => (expr.as_ref(), true),
+        _ => (e, false),
+    };
+    match (&lit.kind, other) {
+        (ExprKind::Float(_), Ty::F32) => Some(Ty::F32),
+        (ExprKind::Int(v), Ty::I32) => {
+            let v = if neg { v.checked_neg()? } else { *v };
+            (v == v as i32 as i64).then_some(Ty::I32)
+        }
+        _ => None,
+    }
+}
+
+fn is_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) => true,
+        ExprKind::Unary { op: UnOp::Neg, expr } => matches!(expr.kind, ExprKind::Int(_) | ExprKind::Float(_)),
+        _ => false,
+    }
+}
+
+/// The literal an `else` branch is (`else { 0 }`), if it is one.
+fn tail_literal(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_literal(l)),
+        _ => is_literal(e).then_some(e),
+    }
+}
+
+/// The type a literal branch takes next to a branch of type `other`.
+fn literal_branch_as(e: &Expr, other: Ty) -> Option<Ty> {
+    let (lit, neg) = match &e.kind {
+        ExprKind::Unary { op: UnOp::Neg, expr } => (expr.as_ref(), true),
+        _ => (e, false),
+    };
+    match (&lit.kind, other) {
+        (ExprKind::Float(_) | ExprKind::Int(_), Ty::F32) => Some(Ty::F32),
+        (ExprKind::Int(v), Ty::I32) => {
+            let v = if neg { v.checked_neg()? } else { *v };
+            (v == v as i32 as i64).then_some(Ty::I32)
+        }
+        _ => None,
     }
 }
 

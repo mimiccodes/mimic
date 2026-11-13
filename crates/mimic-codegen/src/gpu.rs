@@ -15,6 +15,7 @@
 
 use super::fuse::Node;
 use super::types::El;
+use super::Ty;
 use mimic_syntax::ast::{BinOp, UnOp};
 use std::fmt::Write;
 
@@ -31,12 +32,16 @@ pub(crate) enum Arg {
 
 pub(crate) struct Kernel {
     pub src: String,
-    /// estimated work per element (about one per simple operation)
+    /// estimated work per element (about one per simple operation; 0 for
+    /// 64-bit integer arithmetic in functions, which Apple GPUs emulate: by
+    /// default such kernels stay on the CPU)
     pub cost: i64,
     /// the leaves read as buffers, in buffer order: slot and element type
     pub bufs: Vec<(usize, El)>,
     /// per slot of the plan
     pub args: Vec<Arg>,
+    /// slots (integers) that must be neither 0 nor -1 for the kernel to run
+    pub guards: Vec<usize>,
 }
 
 /// The type of a value in the kernel.
@@ -56,6 +61,10 @@ enum G {
 }
 
 struct Tr {
+    long_math: bool,
+    /// Metal functions the kernel calls
+    defs: String,
+    guards: Vec<usize>,
     bufs: Vec<(usize, El)>,
     args: Vec<Arg>,
     cost: i64,
@@ -97,15 +106,15 @@ impl Tr {
                 }
             }
             Node::Scalar(s, t) => match t {
-                super::Ty::I64 => {
+                Ty::I64 => {
                     self.arg(*s, Arg::Raw)?;
                     (format!("a[{s}]"), G::L)
                 }
-                super::Ty::Bool => {
+                Ty::Bool => {
                     self.arg(*s, Arg::Raw)?;
                     (format!("(a[{s}] != 0)"), G::B)
                 }
-                super::Ty::F64 => {
+                Ty::F64 => {
                     self.arg(*s, Arg::F32)?;
                     (format!("as_type<float>((uint)a[{s}])"), G::D)
                 }
@@ -127,8 +136,8 @@ impl Tr {
                 match (el, t) {
                     (_, G::B) => (x, G::B),
                     (El::F32, G::F | G::D | G::Op) => (x, G::F),
-                    // (i64 → f64 → f32 on the CPU: the same for |x| < 2^53)
-                    (El::F32, G::L) => (format!("((float){x})"), G::F),
+                    // (i64 → f64 → f32, as the CPU: l2f)
+                    (El::F32, G::L) => (format!("l2f({x})"), G::F),
                     (El::I32, G::L) => (format!("((long)(int){x})"), G::L),
                     _ => return None,
                 }
@@ -167,6 +176,56 @@ impl Tr {
             Node::Shift(s, a) => {
                 self.arg(*s, Arg::Raw)?;
                 self.node(a, &format!("(({ix}) + a[{s}])"))?
+            }
+            Node::Apply { arg, caps, pt, rt, heavy, msl: Some(m), .. } => {
+                let (x, t) = self.node(arg, ix)?;
+                let x = match (pt, t) {
+                    (Ty::F32, G::F) | (Ty::I64, G::L) | (Ty::Bool, G::B) => x,
+                    // (only an i32 read as one: no range to check)
+                    (Ty::I32, G::L) if matches!(arg.as_ref(), Node::Leaf(_, El::I32) | Node::Narrow(El::I32, _)) => format!("((int){x})"),
+                    _ => return None,
+                };
+                let mut args = vec![x];
+                for (s, t) in caps.iter().zip(&m.caps) {
+                    args.push(match t {
+                        Ty::I64 => {
+                            self.arg(*s, Arg::Raw)?;
+                            format!("a[{s}]")
+                        }
+                        Ty::I32 => {
+                            self.arg(*s, Arg::Raw)?;
+                            format!("((int)a[{s}])")
+                        }
+                        Ty::Bool => {
+                            self.arg(*s, Arg::Raw)?;
+                            format!("(a[{s}] != 0)")
+                        }
+                        Ty::F32 => {
+                            self.arg(*s, Arg::F32)?;
+                            format!("as_type<float>((uint)a[{s}])")
+                        }
+                        _ => return None,
+                    });
+                }
+                for g in &m.guards {
+                    let slot = *caps.get(*g)?;
+                    if !self.guards.contains(&slot) {
+                        self.guards.push(slot);
+                    }
+                }
+                if !self.defs.contains(&m.defs) {
+                    self.defs.push_str(&m.defs);
+                }
+                self.cost += if *heavy { 1000 } else { 30 };
+                self.long_math |= m.long_math;
+                let call = format!("{}({})", m.name, args.join(", "));
+                match rt {
+                    Ty::F32 => (call, G::F),
+                    Ty::I64 => (call, G::L),
+                    Ty::I32 => (format!("((long){call})"), G::L),
+                    Ty::Bool => (call, G::B),
+                    _ => return None,
+                }
             }
             Node::Apply { .. } | Node::LeafObj(_) => return None,
         })
@@ -254,7 +313,7 @@ impl Tr {
 /// The kernel for a fused map of `root` producing `out` elements, if the
 /// GPU computes it exactly. `nslots`: the plan's slots.
 pub(crate) fn map_kernel(root: &Node, out: El, nslots: usize) -> Option<Kernel> {
-    let mut tr = Tr { bufs: Vec::new(), args: vec![Arg::None; nslots], cost: 0 };
+    let mut tr = Tr { long_math: false, defs: String::new(), guards: Vec::new(), bufs: Vec::new(), args: vec![Arg::None; nslots], cost: 0 };
     let (x, t) = tr.node(root, "i")?;
     let (oty, value) = match (out, t) {
         (El::F32, G::F) => ("float", x),
@@ -267,11 +326,16 @@ pub(crate) fn map_kernel(root: &Node, out: El, nslots: usize) -> Option<Kernel> 
         return None;
     }
     let mut src = String::from(
-        "#include <metal_stdlib>\nusing namespace metal;\n\
+        "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n\
          static inline long fdiv(long x, long y) { long q = x / y; return q - ((x % y != 0) && ((x % y < 0) != (y < 0))); }\n\
          static inline long fmod_(long x, long y) { long r = x % y; return (r != 0 && ((r < 0) != (y < 0))) ? r + y : r; }\n\
-         kernel void k(",
+         static inline float l2f(long x) { ulong a = x < 0 ? 0ul - (ulong)x : (ulong)x; if (a <= (1ul << 53)) return (float)x; \
+         int sh = 11 - (int)clz(a); ulong hf = 1ul << (sh - 1), low = a & ((1ul << sh) - 1), r = a >> sh; \
+         if (low > hf || (low == hf && (r & 1))) r += 1; float f = ldexp((float)r, sh); return x < 0 ? -f : f; }\n\
+         ",
     );
+    src.push_str(&tr.defs);
+    src.push_str("kernel void k(");
     for (k, (_, el)) in tr.bufs.iter().enumerate() {
         let t = match el {
             El::F32 => "float",
@@ -287,5 +351,5 @@ pub(crate) fn map_kernel(root: &Node, out: El, nslots: usize) -> Option<Kernel> 
         "device {oty} *out [[buffer({nb})]], device const long *a [[buffer({})]], uint gi [[thread_position_in_grid]]) {{\n    long i = (long)gi;\n    out[i] = {value};\n}}\n",
         nb + 1
     );
-    Some(Kernel { src, cost: tr.cost.max(1), bufs: tr.bufs, args: tr.args })
+    Some(Kernel { src, cost: if tr.long_math { 0 } else { tr.cost.max(1) }, bufs: tr.bufs, args: tr.args, guards: tr.guards })
 }

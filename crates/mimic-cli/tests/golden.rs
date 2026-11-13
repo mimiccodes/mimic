@@ -440,6 +440,24 @@ fn cpu_flag() {
     assert!(err.contains("unknown CPU `znver44`") && err.contains("did you mean `znver4`?"), "{err}");
 }
 
+/// `--fast-math` and `--strict-math`: every fixture of numbers gives its
+/// expected output either way (their float results are exact), and the two
+/// flags exclude each other.
+#[test]
+fn math_flags() {
+    for name in ["fusion.mim", "sized_numbers.mim", "gpu_map.mim", "each_kernels.mim"] {
+        let f = fixtures("run").into_iter().find(|p| p.ends_with(name)).unwrap();
+        let want = std::fs::read_to_string(f.with_extension("out")).unwrap();
+        for flag in ["--fast-math", "--strict-math"] {
+            let out = mimic().arg("run").arg(&f).args(["--release", flag]).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{name} {flag}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+    let f = fixtures("run").into_iter().find(|p| p.ends_with("basics.mim")).unwrap();
+    let out = mimic().arg("build").arg(&f).args(["--fast-math", "--strict-math"]).output().unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
+}
+
 /// A real C library with no binding code: SQLite's header is imported, its
 /// handles are opaque `cptr` values, out-parameters are one-element arrays.
 #[test]

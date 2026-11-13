@@ -58,6 +58,11 @@ struct ProfileArgs {
     /// results on every CPU. By default Mimic fuses them, like C compilers
     #[arg(long)]
     strict_math: bool,
+    /// Faster float arithmetic: sums and products may be regrouped (and so
+    /// vectorised), divisions done by reciprocals, math functions
+    /// approximated. Results can change in the last bits
+    #[arg(long, conflicts_with = "strict_math")]
+    fast_math: bool,
 }
 
 /// `default_release`: `build` produces the fastest binary unless told otherwise;
@@ -68,6 +73,7 @@ fn profile_of(input: &Input, args: ProfileArgs, default_release: bool) -> Profil
     p.net = !args.no_net;
     p.cpu = args.cpu;
     p.strict_math = args.strict_math;
+    p.fast_math = args.fast_math;
     p
 }
 

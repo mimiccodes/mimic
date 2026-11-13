@@ -1,0 +1,40 @@
+module main
+
+// Functions over lists the GPU can run (pure, on f32, i32, i64 and truth
+// values; a function calling itself last becomes a loop): the golden tests
+// run this with MIMIC_GPU=1 too
+
+// steps of the Collatz sequence from n to 1
+fn collatz(n: i64, steps: i64) -> i64 {
+    if n == 1 { steps } else if n % 2 == 0 { collatz(n div 2, steps + 1) } else { collatz(3 * n + 1, steps + 1) }
+}
+
+fn halve(x: f32, k: i32) -> f32 {
+    if k == 0 { x } else { halve(x * 0.5, k - 1) }
+}
+
+fn clamp(x: i32) -> i32 { if x > 100 { 100 } else if x < -100 { -100 } else { x } }
+
+// wraps around past 2147483647, as i32 arithmetic does
+fn square(x: i32) -> i32 { x * x * x * 3000 }
+
+fn main() {
+    let n = 1000
+    let steps = (⍳ n + 1) ¨ (k => collatz(k, 0))
+    print(steps ↑ 10)
+    print(⌈/ steps)
+    let xs: [f32] = ⍳ n
+    let h = xs ¨ (x => halve(x, 3))
+    print(h ↓ 996)
+    let w = 7
+    let m = ⍳ n ¨ (i => (i % w) * 10 - 30)
+    print(m ↑ 8)
+    let is: [i32] = ⍳ n
+    let c = is ¨ (i => clamp(i - 500))
+    print(c ↑ 3)
+    print(c ↓ 997)
+    let sq = is ¨ square
+    print(sq ↓ 997)
+    let flags = ⍳ n ¨ (i => i % 3 == 0 and i > 990)
+    print(flags ↓ 990)
+}

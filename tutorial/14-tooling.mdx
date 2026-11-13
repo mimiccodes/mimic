@@ -123,6 +123,7 @@ mimic glyphs                # glyph ↔ word ↔ ASCII digraph for everything
 | `--emit-header` | Write a C header for `extern "C" fn` exports |
 | `--no-net` | Compile everything as plain native code |
 | `--strict-math` | No fused multiply-add (see below) |
+| `--fast-math` | Faster floats: sums may be regrouped and vectorised (see below) |
 
 ### Floating point: fused multiply-add
 
@@ -134,11 +135,43 @@ instruction and one that does not. Nothing is ever reordered: `(a + b) + c`
 stays exactly that. When you need the same bits on every machine (golden
 files, simulations compared across platforms), build with `--strict-math`.
 
+The other way, `--fast-math` lets Mimic regroup float sums and products
+(`(a + b) + c` may become `a + (b + c)`), which lets the CPU add several
+numbers at once: `+/` over a long list of floats gets several times faster.
+Results can change in their last bits. It never assumes a number isn't NaN
+or infinity, so every bounds check stays.
+
 ### The GPU
 
 On a Mac, long maps over `[f32]`, `[i32]`, `[i64]` or `[bool]` with a lot
-of arithmetic per element can run on the GPU. You don't ask for it, just as
-you don't ask for threads, and the results are the same as on the CPU. Set
+of work per element can run on the GPU, including `xs ¨ f` where `f` is a
+pure function on such numbers (one that calls itself last becomes a loop
+there). You don't ask for it, just as you don't ask for threads. The GPU
+never fuses a multiply and an add, so its results are exactly those of
+`--strict-math`. An f32 Mandelbrot set, for example:
+
+```mimic
+module main
+
+fn inside(cr: f32, ci: f32, zr: f32, zi: f32, k: i32) -> i32 {
+    if k == 200 {
+        1
+    } else if zr * zr + zi * zi > 4.0 {
+        0
+    } else {
+        inside(cr, ci, zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, k + 1)
+    }
+}
+
+fn main() {
+    let n = 400
+    let s: f32 = 2.5 / n
+    let pixels = ⍳ (n * n) ¨ (p => inside(-2.0 + s * (p % n), -1.25 + s * (p div n), 0.0, 0.0, 0))
+    print(+/ pixels)
+}
+```
+
+Set
 `MIMIC_GPU=0` to keep everything on the CPU, `MIMIC_GPU=1` to send every
 map the GPU can do there, and `MIMIC_GPU_DEBUG=1` to see which kernels ran:
 
