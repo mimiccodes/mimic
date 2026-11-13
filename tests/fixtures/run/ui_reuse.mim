@@ -12,8 +12,13 @@ fn row(t: Todo) -> ui::Node[Msg] {
 
 fn view(todos: [Todo]) -> ui::Node[Msg] { ui::column(todos ¨ row) }
 
-// the same screen, every row built anew (a lambda that captures: no reuse)
-fn fresh(todos: [Todo], n: i64) -> ui::Node[Msg] { ui::column(todos ¨ (t => if n >= 0 { row(t) } else { row(t) })) }
+// the same screen, every row built anew (by position: no reuse)
+fn fresh(todos: [Todo], n: i64) -> ui::Node[Msg] { ui::column(⍳ ≢ todos ¨ (i => row(todos[i]))) }
+
+// rows that depend on a captured value: kept only while it stays the same
+fn marked(t: Todo, sel: i64) -> ui::Node[Msg] { ui::text(if t.id == sel { "> {t.title}" } else { t.title }) }
+fn view_sel(todos: [Todo], sel: i64) -> ui::Node[Msg] { ui::column(todos ¨ (t => marked(t, sel))) }
+fn fresh_sel(todos: [Todo], sel: i64) -> ui::Node[Msg] { ui::column(⍳ ≢ todos ¨ (i => marked(todos[i], sel))) }
 
 fn tick(todos: [Todo], k: i64) -> [Todo] {
     todos ¨ (t => if t.id == k { { t with done: not t.done } } else { t })
@@ -38,4 +43,11 @@ fn main() {
     print(ui::html(s4) == ui::html(fresh(d, 0)))
     let e = [d[0], d[0]]
     print(ui::html(view(e)) == ui::html(fresh(e, 0)))
+    // the selection moves: rows are made again where it matters
+    let m1 = view_sel(d, 1)
+    let m2 = view_sel(d, 3)
+    show(ui::diff(m1, m2, "0"))
+    print(ui::html(m2) == ui::html(fresh_sel(d, 3)))
+    let m3 = view_sel(d, 3)
+    print(len(ui::diff(m2, m3, "0")) == 0)
 }

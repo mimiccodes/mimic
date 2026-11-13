@@ -2507,7 +2507,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
 typedef struct memo_tab {
     int64_t cap; /* a power of two; 0 = empty */
     mim_val **key, **val;
-    struct memo_tab *next_site; /* (unused) */
+    mim_val *fn; /* the closure that made them (its captures), or NULL */
 } memo_tab;
 
 static inline uint64_t memo_hash(const void *p) {
@@ -2534,6 +2534,7 @@ static void memo_free(memo_tab *t) {
         }
     free(t->key);
     free(t->val);
+    mim_release(t->fn);
     free(t);
 }
 
@@ -2557,6 +2558,7 @@ static void memo_release_all(void) {
 typedef struct {
     mim_val **in;
     mim_fn1 f;
+    mim_val *closure; /* instead of f */
     mim_val **out;
     const memo_tab *old;
 } memo_ctx;
@@ -2569,19 +2571,57 @@ static void memo_range(void *vc, int64_t lo, int64_t hi) {
             mim_retain(r);
             c->out[i] = r;
         } else {
-            c->out[i] = c->f(c->in[i]);
+            c->out[i] = c->closure ? mim_call(c->closure, 1, &c->in[i]) : c->f(c->in[i]);
         }
     }
 }
 
+/* The same value for a capture: the same object, an equal number, or the
+ * same text. */
+static int memo_same(const mim_val *a, const mim_val *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->rank == 0 && b->rank == 0 && !IS_HANDLES(a) && !IS_HANDLES(b) && a->dtype != MIM_CHAR && b->dtype != MIM_CHAR) return (int)mim_equal(a, b);
+    if (a->dtype == MIM_CHAR && b->dtype == MIM_CHAR && a->rank == 1 && b->rank == 1)
+        return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
+    return 0;
+}
+
+/* Does closure f capture the same values as the one that made `old`? */
+static int memo_same_closure(const memo_tab *old, const mim_val *f) {
+    const mim_val *g = old->fn;
+    if (!f || !g) return f == g;
+    if (FN_DESC(f)->code != FN_DESC(g)->code || f->len != g->len) return 0;
+    for (int64_t i = 0; i < f->len; i++)
+        if (!memo_same(((mim_val *const *)f->data)[i], ((mim_val *const *)g->data)[i])) return 0;
+    return 1;
+}
+
+static mim_val *each_memo_run(mim_val *xs, mim_fn1 f, mim_val *closure, int32_t pure, void **site);
+mim_val *mim_each_fn(mim_val *xs, mim_val *f);
+
 mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
     need(xs, "¨ (each)");
     if (xs->dtype != MIM_BOXED || xs->rank != 1 || xs->len == 0) return mim_each(xs, f, pure);
+    return each_memo_run(xs, f, NULL, pure, site);
+}
+
+/* The same with a closure (a lambda that captures): the kept rows count
+ * only while it captures the same values. */
+mim_val *mim_each_fn_memo(mim_val *xs, mim_val *f, void **site) {
+    need(xs, "¨ (each)");
+    need(f, "¨ (each)");
+    if (xs->dtype != MIM_BOXED || xs->rank != 1 || xs->len == 0 || f->dtype != MIM_FN || !FN_DESC(f)->pure) return mim_each_fn(xs, f);
+    return each_memo_run(xs, NULL, f, 1, site);
+}
+
+static mim_val *each_memo_run(mim_val *xs, mim_fn1 f, mim_val *closure, int32_t pure, void **site) {
     int64_t n = xs->len;
     memo_register(site);
     memo_tab *old = (memo_tab *)__atomic_exchange_n(site, NULL, __ATOMIC_ACQ_REL);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
-    memo_ctx c = {(mim_val **)xs->data, f, tmp, old};
+    /* rows made with other captures do not count */
+    memo_ctx c = {(mim_val **)xs->data, f, closure, tmp, old && memo_same_closure(old, closure) ? old : NULL};
     if (pure) parallel_for_grain(n, fine_grain(n), memo_range, &c);
     else memo_range(&c, 0, n);
     for (int64_t i = 0; i < n; i++)
@@ -2596,6 +2636,8 @@ mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
     int64_t cap = 16;
     while (cap < 2 * n) cap *= 2;
     t->cap = cap;
+    t->fn = closure;
+    mim_retain(closure);
     t->key = (mim_val **)calloc((size_t)cap, sizeof(mim_val *));
     t->val = (mim_val **)calloc((size_t)cap, sizeof(mim_val *));
     for (int64_t i = 0; i < n; i++) {

@@ -93,8 +93,8 @@ fn update(s: State, m: Msg) -> State {
     match m {
         Typed(t) => { s with draft: t },
         Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { id: s.next, text: trim(s.draft), done: false }), draft: "", next: s.next + 1 } },
-        Toggle(i, on) => { s with todos[i].done: on },
-        Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
+        Toggle(id, on) => { s with todos: s.todos ¨ (t => if t.id == id { { t with done: on } } else { t }) },
+        Remove(id) => { s with todos: s.todos ⌿ (s.todos ¨ (t => t.id != id)) },
         ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
     }
 }
@@ -107,7 +107,7 @@ fn view(s: State) -> ui::Node[Msg] {
             ui::input(s.draft, on_input: Typed, placeholder: "What needs doing?"),
             ui::submit("Add"),
         ]),
-        ui::column(gap: 6, ⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))),
+        ui::column(gap: 6, s.todos ¨ item),
         ui::row([
             ui::text("{left} left", color: "#888"),
             ui::spacer(),
@@ -117,12 +117,12 @@ fn view(s: State) -> ui::Node[Msg] {
 }
 
 // keyed by id: removing a row touches only that row
-fn item(i: i64, t: Todo) -> ui::Node[Msg] {
+fn item(t: Todo) -> ui::Node[Msg] {
     ui::keyed("{t.id}", ui::row([
-        ui::checkbox(t.done, on_change: on => Toggle(i, on)),
+        ui::checkbox(t.done, on_change: on => Toggle(t.id, on)),
         ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
         ui::spacer(),
-        ui::button("×", on_click: Remove(i)),
+        ui::button("×", on_click: Remove(t.id)),
     ]))
 }
 
@@ -132,10 +132,10 @@ fn main() {
 ```
 
 Things to notice:
-* **No loops.** The list of rows is `⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))`, built in parallel like any other `¨`.
-* **Nested updates.** `{ s with todos[i].done: on }` changes one field of one element ([chapter 5](05-records-unions-match.mdx)).
+* **No loops.** The list of rows is `s.todos ¨ item`, built in parallel like any other `¨`, and the update maps over the todos the same way.
+* **Messages name rows by id.** `Toggle(t.id, on)` still means the same todo after rows above it are added or removed.
 * **Keyed rows.** `ui::keyed("{t.id}", …)` gives each row an identity, so removing one row from a long list sends just that change.
-* **Rows that did not change are reused.** When the rows are made as `todos ¨ row` (a function of the row's own data), a row whose todo is the same value as on the last screen is not built again, and comparing the screens skips it. That keeps a 10 000-row list fast.
+* **Rows that did not change are reused.** With the rows made as `s.todos ¨ item` (from each todo's own data, or a lambda whose captured values stay the same), a row whose todo is the same value as on the last screen is not built again, and comparing the screens skips it. That keeps a 10 000-row list fast. Making rows by position (`⍳ ≢ s.todos ¨ (i => …)`) builds every row each time.
 * **One state per tab.** Open the page in two tabs and each has its own list. Each tab is a task on the event loop, so thousands of tabs are cheap.
 * **Functions inside a screen must be pure.** `on_input: t => { print(t); Typed(t) }` is error E0605, because the screen may be rendered at any time and in parallel.
 

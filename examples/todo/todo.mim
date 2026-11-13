@@ -11,8 +11,8 @@ fn update(s: State, m: Msg) -> State {
     match m {
         Typed(t) => { s with draft: t },
         Add => if trim(s.draft) == "" { s } else { { s with todos: push(s.todos, Todo { id: s.next, text: trim(s.draft), done: false }), draft: "", next: s.next + 1 } },
-        Toggle(i, on) => { s with todos[i].done: on },
-        Remove(i) => { s with todos: s.todos ⌿ (⍳ ≢ s.todos ¨ (k => k != i)) },
+        Toggle(id, on) => { s with todos: s.todos ¨ (t => if t.id == id { { t with done: on } } else { t }) },
+        Remove(id) => { s with todos: s.todos ⌿ (s.todos ¨ (t => t.id != id)) },
         ClearDone => { s with todos: s.todos ⌿ (s.todos ¨ (t => not t.done)) },
     }
 }
@@ -25,7 +25,7 @@ fn view(s: State) -> ui::Node[Msg] {
             ui::input(s.draft, on_input: Typed, placeholder: "What needs doing?"),
             ui::submit("Add"),
         ]),
-        ui::column(gap: 6, ⍳ ≢ s.todos ¨ (i => item(i, s.todos[i]))),
+        ui::column(gap: 6, s.todos ¨ item),
         ui::row([
             ui::text("{left} left", color: "#888"),
             ui::spacer(),
@@ -35,12 +35,12 @@ fn view(s: State) -> ui::Node[Msg] {
 }
 
 // keyed by id: removing a row touches only that row
-fn item(i: i64, t: Todo) -> ui::Node[Msg] {
+fn item(t: Todo) -> ui::Node[Msg] {
     ui::keyed("{t.id}", ui::row([
-        ui::checkbox(t.done, on_change: on => Toggle(i, on)),
+        ui::checkbox(t.done, on_change: on => Toggle(t.id, on)),
         ui::text(t.text, strike: t.done, color: if t.done { "#999" } else { "" }),
         ui::spacer(),
-        ui::button("×", on_click: Remove(i)),
+        ui::button("×", on_click: Remove(t.id)),
     ]))
 }
 

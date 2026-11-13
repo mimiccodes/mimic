@@ -1288,6 +1288,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each" | "mim_each_own" => ptr.fn_type(&[p, p, i32t], false),
             "mim_each_raw" => ptr.fn_type(&[p, p, i32t, i32t], false),
             "mim_each_memo" => ptr.fn_type(&[p, p, i32t, p], false),
+            "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -4610,6 +4611,17 @@ impl<'ctx> Cg<'ctx, '_> {
                             _ => self.expr(&args[1])?,
                         };
                         let f = self.boxed(f)?;
+                        // rows of a screen from a lambda that captures: kept
+                        // while the captures stay the same (mim_each_fn_memo)
+                        if self.screen_rows(ty) && self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
+                            let g = self.module.add_global(self.ptr, None, "screen_rows");
+                            g.set_linkage(Linkage::Internal);
+                            g.set_initializer(&self.ptr.const_null());
+                            let r = self.call_rt_ptr("mim_each_fn_memo", &[self.basic(a).into(), self.basic(f).into(), self.gaddr(g).into()])?;
+                            self.drop_tmp(f)?;
+                            self.drop_tmp(a)?;
+                            return self.as_ty(r, ty, "primitive result");
+                        }
                         let r = self.call_rt_ptr("mim_each_fn", &[self.basic(a).into(), self.basic(f).into()])?;
                         self.drop_tmp(f)?;
                         self.drop_tmp(a)?;
