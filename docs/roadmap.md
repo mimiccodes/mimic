@@ -85,7 +85,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | F (http) | `http` benchmark (C floor, hyper, net/http, Go load generator in run.py); HTTP/1.1 keep-alive and pipelining in `http::serve`; Mimic 1.34 s vs hyper 1.52 s on one core ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (records) | Numbers stored raw in records and variants; `with` inline (in place when unshared); `¨` lends elements and moves results; `records` benchmark (1.94 s → 0.93 s CPU; 27× C, reuse is next) ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F3 (reuse) | Reuse in place: moving locals (one use), consumed parameters (`{ p with … }`), `¨` handing elements over (`mim_each_own`); `¨` over numbers without boxes, over records fused; records 26.7× → 5.9× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (fewer and non-atomic reference counts, fusion through `⌿`, SIMD, scheduling, GPU; ui benchmark) | |
+| F (keep) | `+/ ×/ ≢` over `xs ⌿ mask` fused into one pass; non-atomic reference counts measured: no gain, not adopted ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (lists of records stored flat, `⌿` with counts and outside reductions, scheduling, GPU; ui benchmark) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 

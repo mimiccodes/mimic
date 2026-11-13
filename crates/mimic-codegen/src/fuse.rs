@@ -61,6 +61,9 @@ pub(crate) enum Node {
     Rev(usize, Box<Node>),
     /// `xs ↑ n`, `xs ↓ n`: element `index + offset` (slot: offset)
     Shift(usize, Box<Node>),
+    /// the second when the first (a truth value) holds, else the third: how
+    /// `+/ (xs ⌿ mask)` reads, without building the filtered list
+    Sel(Box<Node>, Box<Node>, Box<Node>),
 }
 
 /// Does the computation call a function that can reach recursion?
@@ -69,6 +72,7 @@ fn heavy(n: &Node) -> bool {
         Node::Apply { heavy, arg, .. } => *heavy || self::heavy(arg),
         Node::Bin(_, a, b) => heavy(a) || heavy(b),
         Node::Un(_, a) | Node::Rev(_, a) | Node::Shift(_, a) => heavy(a),
+        Node::Sel(c, a, b) => heavy(c) || heavy(a) || heavy(b),
         _ => false,
     }
 }
@@ -409,6 +413,18 @@ impl<'ctx> Cg<'ctx, '_> {
             Node::Rev(s, a) => {
                 let j = self.b.build_int_sub(slots[*s].into_int_value(), i, "").s()?;
                 self.eval_node(a, j, slots)?
+            }
+            Node::Sel(c, a, b) => {
+                let c = self.eval_node(c, i, slots)?;
+                let c = self.truth(c)?;
+                let (x, y) = (self.eval_node(a, i, slots)?, self.eval_node(b, i, slots)?);
+                match (x, y) {
+                    (V::I(x), V::I(y)) => V::I(self.b.build_select(c, x, y, "").s()?.into_int_value()),
+                    _ => {
+                        let (x, y) = (self.to_f64(x)?, self.to_f64(y)?);
+                        V::F(self.b.build_select(c, x, y, "").s()?.into_float_value())
+                    }
+                }
             }
             Node::Shift(s, a) => {
                 let j = self.b.build_int_add(i, slots[*s].into_int_value(), "").s()?;
@@ -864,16 +880,58 @@ impl<'ctx> Cg<'ctx, '_> {
         })
     }
 
+    /// `+/ ×/ ≢` over `xs ⌿ mask` (a list of truth values): one pass, the
+    /// filtered list never built.
+    pub(crate) fn keep_fusible(&self, prim: Prim, arg: &Expr) -> bool {
+        let ExprKind::Prim { prim: Prim::Keep, args } = &arg.kind else { return false };
+        matches!(prim, Prim::Sum | Prim::Product | Prim::Len)
+            && args.len() == 2
+            && matches!(num_el(self.ty_of(&args[0])), Some(El::I64 | El::F64))
+            && num_el(self.ty_of(&args[1])) == Some(El::Bool)
+    }
+
+    pub(crate) fn fused_reduce_keep(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
+        let ExprKind::Prim { args, .. } = &arg.kind else { return Err("internal compiler error: not a keep".into()) };
+        let mut plan = Plan::default();
+        let xs = self.operand(&args[0], &mut plan)?;
+        let lx = self.common_len(&plan.lens)?;
+        let k = plan.lens.len();
+        let m = self.operand(&args[1], &mut plan)?;
+        let lm = self.common_len(&plan.lens[k..])?;
+        let ne = self.b.build_int_compare(IntPredicate::NE, lx, lm, "").s()?;
+        self.panic_if(ne, "⌿ (keep): length mismatch")?;
+        plan.lens = vec![lx];
+        let float = num_el(self.ty_of(&args[0])) == Some(El::F64);
+        let (root, prim, float) = match prim {
+            // the count: how many truth values hold
+            Prim::Len => (Node::Sel(Box::new(m), Box::new(Node::ConstI(1)), Box::new(Node::ConstI(0))), Prim::Sum, false),
+            _ => {
+                let unit = match (prim, float) {
+                    (Prim::Product, true) => Node::ConstF(1.0),
+                    (Prim::Product, false) => Node::ConstI(1),
+                    (_, true) => Node::ConstF(0.0),
+                    _ => Node::ConstI(0),
+                };
+                (Node::Sel(Box::new(m), Box::new(xs), Box::new(unit)), prim, float)
+            }
+        };
+        self.fused_reduce_root(prim, root, plan, float)
+    }
+
     /// A reduction (`+/ ×/ ⌈/ ⌊/ ≢`) over a fusible expression: no array is built.
     pub(crate) fn fused_reduce(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
         let mut plan = Plan::default();
         let root = self.build(arg, &mut plan)?;
+        let float = num_el(self.ty_of(arg)) == Some(El::F64);
+        self.fused_reduce_root(prim, root, plan, float)
+    }
+
+    fn fused_reduce_root(&mut self, prim: Prim, root: Node, plan: Plan<'ctx>, float: bool) -> R<V<'ctx>> {
         let n = self.plan_len(&plan)?;
         if prim == Prim::Len {
             self.release_plan(&plan)?;
             return Ok(V::I(n));
         }
-        let float = num_el(self.ty_of(arg)) == Some(El::F64);
         let i64t = self.ctx.i64_type();
         let acc_ty: BasicTypeEnum = if float { self.ctx.f64_type().into() } else { i64t.into() };
         if matches!(prim, Prim::Maximum | Prim::Minimum) {

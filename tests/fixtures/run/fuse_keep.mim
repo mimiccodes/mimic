@@ -1,0 +1,18 @@
+module main
+
+// +/ ×/ ≢ over xs ⌿ mask: filtered and reduced in one pass
+fn main() {
+    let xs = ⍳ 10 - 4
+    let fs = xs * 0.5
+    print(xs ⌿ (xs > 0) ▷ +/)
+    print(fs ⌿ (fs > 0) ▷ +/)
+    print(xs ⌿ (xs > 2) ▷ ×/)
+    print(≢ (xs ⌿ (xs % 2 == 0)))
+    print(xs ⌿ (xs > 100) ▷ +/)
+    print(fs ⌿ (xs > 100) ▷ ×/)
+    print(≢ (xs ⌿ (xs > 100)))
+    let n = 2000000
+    let big = ⍳ n
+    let s = big ⌿ (big % 3 == 0) ▷ +/
+    print(s)
+}

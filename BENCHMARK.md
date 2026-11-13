@@ -208,6 +208,16 @@ serde_json is still faster (0.59×): it writes into one buffer with no
 reference counts at all. All cores: only building the records runs in
 parallel; encoding and decoding one text are sequential.
 
+### Non-atomic reference counts: no gain
+
+Reference counts are updated with atomic instructions, so values can be
+shared between threads. Replacing them with plain increments and
+decrements (unsafe across threads; a measurement only) changed nothing on
+one core: json 0.90 s, tree 0.73 s, records 0.19 s of CPU either way.
+Uncontended atomics cost about nothing on Apple silicon, and the compiler
+already avoids most counting (borrowed parameters and bindings, moves,
+values built in place). Not adopted.
+
 ### Link-time optimisation (F4): no gain
 
 Linking the runtime into each program as LLVM bitcode (full LTO, so

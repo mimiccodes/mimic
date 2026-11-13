@@ -3943,6 +3943,11 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = self.ty_of(e);
         // kernel fusion: whole array expressions become one loop
         match &e.kind {
+            // `+/ (xs ⌿ mask)`: filtered and summed in one pass
+            ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Len), args } if self.keep_fusible(*p, &args[0]) => {
+                let r = self.fused_reduce_keep(*p, &args[0])?;
+                return self.as_ty(r, ty, "reduction");
+            }
             ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum | Prim::Len), args }
                 if self.is_fae(&args[0]) =>
             {
