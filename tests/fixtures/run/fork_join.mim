@@ -1,0 +1,75 @@
+module main
+
+// independent calls run in parallel (fork-join); results never change
+
+type Tree = Leaf | Node(Tree, Tree)
+
+fn make(d: i64) -> Tree {
+    if d == 0 { Leaf } else { Node(make(d - 1), make(d - 1)) }
+}
+
+fn check(t: Tree) -> i64 {
+    match t {
+        Leaf => 1,
+        Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// a run of `let`s
+fn range_sum(lo: i64, hi: i64) -> i64 {
+    if hi - lo == 1 {
+        lo
+    } else {
+        let mid = (lo + hi) div 2
+        let a = range_sum(lo, mid)
+        let b = range_sum(mid, hi)
+        a + b
+    }
+}
+
+// float results: the same additions in the same order
+fn harmonic(lo: i64, hi: i64) -> f64 {
+    if hi - lo == 1 { 1.0 / lo } else { harmonic(lo, (lo + hi) div 2) + harmonic((lo + hi) div 2, hi) }
+}
+
+// tuples
+fn minmax(lo: i64, hi: i64) -> (i64, i64) {
+    if hi - lo == 1 {
+        (lo * 7 % 1000, lo * 7 % 1000)
+    } else {
+        let (a, b) = minmax(lo, (lo + hi) div 2)
+        let (c, d) = minmax((lo + hi) div 2, hi)
+        (a ⌊ c, b ⌈ d)
+    }
+}
+
+// effects keep their order: never forked
+fn noisy(n: i64) -> i64 {
+    print(n)
+    if n > 100 { noisy(n - 100) } else { n }
+}
+
+// far past the native depth limit, inside parallel tasks
+fn deep(n: i64) -> i64 {
+    if n == 0 { 0 } else { deep(n - 1) + 1 + zero(n) }
+}
+
+fn zero(n: i64) -> i64 {
+    if n < 0 { zero(n + 1) } else { 0 }
+}
+
+fn main() {
+    print(check(make(16)))
+    print(⍳ 8 ¨ (i => check(make(i))) ▷ +/)
+    print(fib(24) + fib(23))
+    print(fib(fib(5) + fib(6)))
+    print(range_sum(0, 100000))
+    print(harmonic(1, 100001))
+    print(minmax(0, 5000))
+    print(noisy(250) + noisy(120))
+    print(deep(20000) + deep(30000))
+}

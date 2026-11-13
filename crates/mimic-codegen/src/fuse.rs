@@ -547,7 +547,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Can calling any of `keys` (specialised functions) lead to recursion?
     /// Then a single call may be any amount of work.
-    fn reaches_recursion(&mut self, keys: Vec<types::Key>) -> bool {
+    pub(crate) fn reaches_recursion(&mut self, keys: Vec<types::Key>) -> bool {
         // depth-first over the call graph: a function met again on the
         // current path is a cycle
         fn visit(cg: &mut Cg, k: &types::Key, path: &mut Vec<types::Key>, done: &mut Vec<types::Key>) -> bool {

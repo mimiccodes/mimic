@@ -16,7 +16,7 @@ Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compil
 | chains like `(xs * 2 + 1) ▷ +/` | always fused into **one** pass over memory, then split across cores |
 | `xs ¨ f` | `f` is pure |
 | `gather`, `trail`, `arms` | the function or body is pure |
-| `f(a) + g(b)` inside a pure function | always: independent calls run at the same time |
+| `f(a) + g(b)`, `Node(make(d - 1), make(d - 1))`, `let a = f(x)` `let b = f(y)` | `f` and `g` are pure and can recurse: independent calls run at the same time |
 | `let x = f(…)` where `f` only reads, sleeps or fetches | always: `f` starts at once and the program waits only where `x` is used |
 | C functions | when their `extern` block says `pure` or `concurrent` ([chapter 12](12-calling-c.mdx)) |
 
@@ -97,9 +97,11 @@ Parallel code usually goes wrong when two threads change the same data. In Mimic
 
 ## How it works
 
-Mimic compiles each pure function in two ways:
-* **Native code**, for the straight-line parts.
-* **An interaction net**, a graph form in which every independent piece of work can be reduced by any core at any time. Recursion like `fib(n - 1) + fib(n - 2)` becomes a tree of independent tasks that a work-stealing scheduler spreads over your cores.
+Independent calls are **forked and joined**. When an expression evaluates two or more calls to pure functions that can recurse, as in `fib(n - 1) + fib(n - 2)`, a constructor like `Node(make(d - 1), make(d - 1))`, or a run of `let`s, the calls go to a work-stealing scheduler that spreads them over your cores. Near the top of the recursion the calls fork. Deeper down, once there are enough tasks to keep every core busy, they run as plain sequential code, so the small calls cost no more than in C. Small programs never wake the other cores.
+
+Pure recursive functions also have a second form, an **interaction net**: a graph in which every independent piece of work can be reduced by any core at any time. Recursion too deep for the native stack continues there instead of overflowing.
+
+Freeing is parallel too: dropping a large tree hands its subtrees to the same scheduler.
 
 Array operations are **fused**. `(xs * 2 + 1) ▷ +/` becomes a single loop that reads `xs` once. The loop is split into chunks across cores and vectorized with your CPU's SIMD instructions.
 

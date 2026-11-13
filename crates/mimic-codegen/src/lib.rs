@@ -40,6 +40,7 @@ use std::fmt::Display;
 use std::path::Path;
 use std::rc::Rc;
 
+mod forkjoin;
 mod fuse;
 pub mod tonet;
 
@@ -83,6 +84,20 @@ enum Kind {
     Plain,
     NetWrap,
     Native,
+    /// Plain, never opening a fork-join region (see forkjoin.rs).
+    Seq,
+    /// Native, never opening a fork-join region.
+    NativeSeq,
+    /// Inside a fork-join region: independent calls run in parallel while
+    /// the hidden fork depth is below `mim_fj_cut`.
+    Fork,
+}
+
+impl Kind {
+    /// Has the hidden trailing `i32` depth argument.
+    fn has_depth(self) -> bool {
+        matches!(self, Kind::Native | Kind::NativeSeq | Kind::Fork)
+    }
 }
 
 /// Compile the checked program to a native object file (and optionally
@@ -219,6 +234,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         opt_level: settings.opt_level,
         contract: !settings.strict_math,
         lazy_deep: None,
+        cur_kind: Kind::Plain,
+        borrow_binds: false,
+        fj: Default::default(),
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -392,6 +410,12 @@ struct Cg<'ctx, 'p> {
     /// This thread's heap (`mim_heap()`), fetched once at the top of each
     /// function that allocates or frees inline.
     heaps: std::cell::RefCell<Vec<(FunctionValue<'ctx>, PointerValue<'ctx>)>>,
+    /// The kind of the function being defined.
+    cur_kind: Kind,
+    /// Pattern variables borrow what they bind (see the `match` codegen).
+    borrow_binds: bool,
+    /// Fork-join state of the function being defined (see forkjoin.rs).
+    fj: forkjoin::State<'ctx>,
 }
 
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
@@ -839,7 +863,9 @@ impl<'ctx> Cg<'ctx, '_> {
             let small = |k: u64| b.build_int_compare(IntPredicate::EQ, dt, i32t.const_int(k, false), "");
             let one = b.build_or(b.build_or(small(2).s()?, small(3).s()?, "").s()?, small(8).s()?, "").s()?;
             let es = b.build_select(one, i64t.const_int(1, false), i64t.const_int(8, false), "").s()?.into_int_value();
-            let bytes = b.build_int_add(b.build_int_mul(n, es, "").s()?, i64t.const_int(1, false), "bytes").s()?;
+            // (1-byte elements: one more byte, kept 0; see payload_bytes)
+            let extra = b.build_int_z_extend(one, i64t, "").s()?;
+            let bytes = b.build_int_add(b.build_int_mul(n, es, "").s()?, extra, "bytes").s()?;
             let c = self.size_class_of(&b, bytes)?;
             let fits = b.build_int_compare(IntPredicate::ULT, c, i64t.const_int(3, false), "").s()?;
             b.build_conditional_branch(fits, pop, slow).s()?;
@@ -864,8 +890,16 @@ impl<'ctx> Cg<'ctx, '_> {
             let data = unsafe { b.build_in_bounds_gep(vt, v, &[i32t.const_int(1, false)], "data").s()? };
             b.build_store(fld(4).s()?, data).s()?;
             b.build_store(fld(5).s()?, self.ptr.const_null()).s()?;
-            let last = unsafe { b.build_in_bounds_gep(i8t, data, &[b.build_int_sub(bytes, i64t.const_int(1, false), "").s()?], "").s()? };
+            // the NUL after 1-byte elements (an 8-byte element vector has
+            // none: index n × es of a 1-byte vector is its last byte)
+            let nul = self.ctx.append_basic_block(f, "nul");
+            let counted = self.ctx.append_basic_block(f, "counted");
+            b.build_conditional_branch(one, nul, counted).s()?;
+            b.position_at_end(nul);
+            let last = unsafe { b.build_in_bounds_gep(i8t, data, &[n], "").s()? };
             b.build_store(last, i8t.const_zero()).s()?;
+            b.build_unconditional_branch(counted).s()?;
+            b.position_at_end(counted);
             // one more live value on this thread
             let livep = b.build_struct_gep(ht, h, 2, "").s()?;
             let live = b.build_load(self.ptr, livep, "").s()?.into_pointer_value();
@@ -924,7 +958,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let is_f = b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(k(1), false), "").s()?;
             let num = b.build_or(is_i, is_f, "").s()?;
             let len = b.build_load(i64t, b.build_struct_gep(vt, v, 3, "").s()?, "").s()?.into_int_value();
-            let bytes = b.build_int_add(b.build_int_mul(len, i64t.const_int(8, false), "").s()?, i64t.const_int(1, false), "").s()?;
+            let bytes = b.build_int_mul(len, i64t.const_int(8, false), "").s()?;
             let c = self.size_class_of(&b, bytes)?;
             let fits = b.build_int_compare(IntPredicate::ULT, c, i64t.const_int(3, false), "").s()?;
             let zero = i32t.const_zero();
@@ -1254,6 +1288,10 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
+            "mim_fj_enter" => self.ctx.i32_type().fn_type(&[], false),
+            "mim_fj_leave" => void.fn_type(&[], false),
+            "mim_fj_fork" => void.fn_type(&[p, p, p], false),
+            "mim_fj_join" => void.fn_type(&[p], false),
             "mim_par_grain" => self.ctx.i64_type().fn_type(&[], false),
             "mim_alloc_vec" => ptr.fn_type(&[i32t, i64t], false),
             "mim_heap" => ptr.fn_type(&[], false),
@@ -1341,10 +1379,13 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Plain => "",
             Kind::NetWrap => ".net",
             Kind::Native => ".native",
+            Kind::Seq => ".seq",
+            Kind::NativeSeq => ".nseq",
+            Kind::Fork => ".fork",
         };
         let name = format!("{}${}{}", self.p.fns[k.0].symbol, ty_suffix(&k.1), suffix);
         let mut ft = self.fn_type(&s.params, s.ret);
-        if kind == Kind::Native {
+        if kind.has_depth() {
             // hidden trailing argument: the native recursion depth
             let mut ps: Vec<BasicMetadataTypeEnum> = s.params.iter().map(|t| self.repr(*t).into()).collect();
             ps.push(self.ctx.i32_type().into());
@@ -1375,11 +1416,17 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Which kind of a callee to call from the current context.
     fn kind_for(&self, fid: usize) -> Kind {
-        if self.plan.entered.contains(&fid) {
+        let base = if self.plan.entered.contains(&fid) {
             if self.native_frame { Kind::Native } else { Kind::NetWrap }
         } else {
             Kind::Plain
+        };
+        // a sequential or fork version calls itself sequentially (a loop
+        // stays a loop: it calls the same function)
+        if Some(fid) == self.cur_fid && matches!(self.cur_kind, Kind::Seq | Kind::NativeSeq | Kind::Fork) {
+            return forkjoin::seq_of(base);
         }
+        base
     }
 
     fn entry_alloca(&self, t: Ty, name: &str) -> R<PointerValue<'ctx>> {
@@ -1422,9 +1469,11 @@ impl<'ctx> Cg<'ctx, '_> {
         self.ret_what = format!("return value of `{path}`");
         self.native_frame = false;
         self.lazy_deep = None;
+        self.cur_kind = kind;
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
         self.scopes = vec![Vec::new()];
+        self.fj_begin(fv, kind, decl)?;
         for (i, prm) in decl.params.iter().enumerate() {
             let t = spec.params[i];
             let slot = self.entry_alloca(t, &prm.name)?;
@@ -1465,14 +1514,14 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             // (an accumulated float sum is not a loop to LLVM: it may not
             // reorder float additions, so only integer results qualify)
-            Kind::Native if self.opt_level >= 2 && matches!(spec.ret, Ty::I64 | Ty::Bool | Ty::Unit) && loops_only(self.p, k.0, decl) => {
+            Kind::Native | Kind::NativeSeq if self.opt_level >= 2 && matches!(spec.ret, Ty::I64 | Ty::Bool | Ty::Unit) && loops_only(self.p, k.0, decl) => {
                 // every self-call is a tail call (or `x + f(…)` / `x × f(…)`):
                 // LLVM turns the recursion into a loop, so it cannot grow the stack
                 let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
                 self.native_frame = true;
                 self.cur_depth = Some(depth);
             }
-            Kind::Native if self.opt_level >= 2 && scalars_only(spec.as_ref(), decl) => {
+            Kind::Native | Kind::NativeSeq if self.opt_level >= 2 && scalars_only(spec.as_ref(), decl) => {
                 // a function of plain numbers only: the depth is checked just
                 // before it calls itself (calls that end the recursion pay
                 // nothing); past the limit it starts over on the net, which is
@@ -1482,7 +1531,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.cur_depth = Some(depth);
                 self.lazy_deep = Some(k.clone());
             }
-            Kind::Native => {
+            Kind::Native | Kind::NativeSeq => {
                 // Bounded native recursion: past the limit, hand the call to the net.
                 let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
                 let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
@@ -1502,7 +1551,15 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.native_frame = true;
                 self.cur_depth = Some(depth);
             }
-            Kind::Plain => {}
+            Kind::Fork => {
+                // at most `mim_fj_cut` deep: no depth checks of its own; the
+                // fork depth counts as the native depth of what it calls
+                let depth = fv.get_nth_param(decl.params.len() as u32).unwrap().into_int_value();
+                self.native_frame = true;
+                self.cur_depth = Some(depth);
+                self.fj.mode = forkjoin::Mode::Fork(depth);
+            }
+            Kind::Plain | Kind::Seq => {}
         }
         let v = self.block(&decl.body)?;
         if !self.terminated() {
@@ -1511,6 +1568,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.scopes.clear();
         self.native_frame = false;
         self.cur_depth = None;
+        self.fj_end();
         Ok(())
     }
 
@@ -1560,6 +1618,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_ret = self.cur_ret;
         let saved_what = std::mem::take(&mut self.ret_what);
         let saved_futures = std::mem::take(&mut self.futures);
+        let saved_kind = std::mem::replace(&mut self.cur_kind, Kind::Plain);
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
         let r = f(self);
@@ -1571,6 +1630,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.cur_ret = saved_ret;
         self.ret_what = saved_what;
         self.futures = saved_futures;
+        self.cur_kind = saved_kind;
         if let Some(bb) = saved_bb {
             self.b.position_at_end(bb);
         }
@@ -1601,7 +1661,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let v = cg.as_ty(V::P(p, false), spec.params[i], &format!("argument `{pname}` of `{path}`"))?;
                 args.push(cg.basic(v).into());
             }
-            if kind == Kind::Native {
+            if kind.has_depth() {
                 args.push(cg.ctx.i32_type().const_zero().into()); // a fresh native stack
             }
             let r = cg.b.build_call(target, &args, "").s()?.try_as_basic_value().basic().unwrap();
@@ -1935,6 +1995,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 } else {
                     self.await_all(&mut pending)?; // an ordered effect, or leaving the block
                 }
+            }
+            // `let a = f(…)` `let b = f(…)`: independent calls in parallel
+            if pending.is_empty() {
+                self.fork_lets(&b.stmts[i..])?;
             }
             // `let x = f(…)` with only overlapping effects: start it, await at first use
             if let Stmt::Let { name, mutable: false, value, .. } = s
@@ -3096,6 +3160,17 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A new local `n` holding (a retained copy of) `val`; its type was recorded under `key`.
     fn bind_local(&mut self, n: &str, key: usize, val: V<'ctx>) -> R<()> {
         let t = self.cur_spec.as_ref().and_then(|s| s.binds.get(&key).copied()).unwrap_or(Ty::Dyn);
+        // part of a scrutinee that outlives the arm: borrowed, like a parameter
+        if self.borrow_binds
+            && let V::P(_, false) = val
+        {
+            let v = self.as_ty(val, t, &format!("`{n}`"))?;
+            let slot = self.entry_alloca(t, n)?;
+            self.b.build_store(slot, self.basic(v)).s()?;
+            let owned = matches!(v, V::P(_, true));
+            self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false });
+            return Ok(());
+        }
         let v = match val {
             V::P(p, _) => {
                 self.call_rt("mim_retain", &[p.into()])?;
@@ -3666,6 +3741,20 @@ impl<'ctx> Cg<'ctx, '_> {
     /// An expression's value, in the form its type asks for: a list of known
     /// length in registers (V::A), any other list as a pointer.
     fn expr(&mut self, e: &Expr) -> R<V<'ctx>> {
+        // computed ahead, in parallel with its siblings (forkjoin.rs)
+        if let Some(v) = self.fj.pre.remove(&id(e)) {
+            return Ok(v);
+        }
+        if let Some(calls) = self.fj_site_at(e) {
+            self.fork_site(&calls)?;
+            let v = self.expr_plain(e);
+            self.fj_drop_unused(&calls)?;
+            return v;
+        }
+        self.expr_plain(e)
+    }
+
+    fn expr_plain(&mut self, e: &Expr) -> R<V<'ctx>> {
         let v = self.expr_raw(e)?;
         let ty = self.ty_of(e);
         match (self.in_regs(ty), v) {
@@ -3953,7 +4042,10 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.call_rt("mim_panic", &[m.into()])?;
                     return Ok(self.null());
                 };
-                let kind = self.kind_for(fid);
+                let (kind, fork_depth) = match self.fj.kinds.remove(&id(e)) {
+                    Some((kd, d)) => (kd, d),
+                    None => (self.kind_for(fid), None),
+                };
                 let f = self.request(&k, kind)?;
                 let spec = self.spec(&k)?;
                 let path_s = self.p.fn_path(fid).join("::");
@@ -3968,7 +4060,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     argv.push(self.basic(c).into());
                     conv.push(c);
                 }
-                if kind == Kind::Native
+                if matches!(kind, Kind::Native | Kind::NativeSeq)
                     && let Some(me) = self.lazy_deep.clone()
                 {
                     // too deep: this whole call starts over on the net
@@ -3990,9 +4082,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.b.build_return(Some(&r)).s()?;
                     self.b.position_at_end(go);
                 }
-                if kind == Kind::Native {
-                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
-                    let d1 = self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?;
+                if kind.has_depth() {
+                    let d1 = match fork_depth {
+                        Some(d) => d,
+                        None => {
+                            let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+                            self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?
+                        }
+                    };
                     argv.push(d1.into());
                 }
                 let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
@@ -4385,6 +4482,11 @@ impl<'ctx> Cg<'ctx, '_> {
                 // patterns read lists through the runtime: a list in registers
                 // is boxed once (and released with the match)
                 let sv = if let V::A(..) | V::R(..) = sv { self.boxed(sv)? } else { sv };
+                let scrut_lives = match sv {
+                    V::P(_, true) => true,
+                    V::P(_, false) => matches!(&scrut.kind, ExprKind::Path(path) if path.len() == 1 && self.lookup(&path[0]).is_some_and(|l| !l.mutable)),
+                    _ => false,
+                };
                 let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
                 let f = self.cur_fn.unwrap();
                 // keep an owned scrutinee in a scope so early `return`s release it
@@ -4400,7 +4502,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     let next = self.ctx.append_basic_block(f, "next_arm");
                     self.pattern_test(&arm.pat, sv, next)?;
                     self.scopes.push(Vec::new());
-                    self.pattern_bind(&arm.pat, sv)?;
+                    // the scrutinee lives until the match ends (owned here, or
+                    // an immutable variable): what it holds can be borrowed
+                    self.borrow_binds = scrut_lives;
+                    let r = self.pattern_bind(&arm.pat, sv);
+                    self.borrow_binds = false;
+                    r?;
                     if let Some(g) = &arm.guard {
                         let gv = self.expr(g)?;
                         let bit = self.truth(gv)?;

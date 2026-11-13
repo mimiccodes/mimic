@@ -129,6 +129,7 @@ static int g_nthreads = 1;
 /* g_nthreads for compiled code (a scan on one thread makes one pass) */
 int64_t mim_threads = 1;
 static _Thread_local int t_in_parallel = 0;
+extern int32_t mim_fj_open;
 
 #if MIM_THREADS
 #ifdef _WIN32
@@ -251,6 +252,7 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         if (!g_started) start_pool();
         mim_job j = {fn, ctx, n, nchunks, grain, 0, nchunks, 0};
         mutex_lock(&g_mu);
+        __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED); /* no regions inside */
         g_job = &j;
         g_gen++;
         cond_broadcast(&g_work);
@@ -262,6 +264,7 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         while (__atomic_load_n(&j.remaining, __ATOMIC_ACQUIRE) > 0) cond_wait(&g_done, &g_mu);
         g_job = NULL; /* no new worker may attach */
         while (j.active > 0) cond_wait(&g_done, &g_mu);
+        __atomic_store_n(&mim_fj_open, 1, __ATOMIC_RELAXED);
         mutex_unlock(&g_mu);
         return;
     }
@@ -349,6 +352,212 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
 }
 int64_t mim_par_grain(void);
 
+/* ==== fork-join ===========================================================
+ * Independent calls in one expression (`f(n - 1) + f(n - 2)`,
+ * `Node(make(d - 1), make(d - 1))`) run in parallel. The compiler emits
+ * three versions of such a function: the plain one, which may open a
+ * fork-join region at its first such site (mim_fj_enter); a fork version,
+ * used inside the region, which hands all but the last call of a site to
+ * this thread's deque (mim_fj_fork) while it runs the last itself, then
+ * takes back or waits for each (mim_fj_join); and a sequential version, used
+ * below the depth `mim_fj_cut` and outside regions.
+ *
+ * The region borrows the thread pool as one job: every worker steals tasks
+ * from the others' deques until the region closes. Inside a region,
+ * data-parallel loops run sequentially (t_in_parallel), as in any task. */
+
+/* A hint for compiled code: may a region open now? (more threads than one
+ * and none in use; mim_fj_enter decides) */
+int32_t mim_fj_open = 0;
+/* The fork depth below which a fork version still forks (2^cut tasks). */
+int32_t mim_fj_cut = 0;
+
+typedef struct mim_fj_task {
+    void (*fn)(void *);
+    void *ctx;
+    int32_t state; /* 0 queued, 1 taken, 2 done */
+} mim_fj_task;
+_Static_assert(sizeof(mim_fj_task) <= 32, "the compiler reserves 32 bytes per task");
+
+#define FJ_CAP 1024
+typedef struct {
+    int32_t lock;
+    int32_t top, bot;
+    mim_fj_task *items[FJ_CAP];
+    char pad[64];
+} fj_deque;
+
+static fj_deque *g_fjq = NULL;
+static int32_t g_fj_done = 0;
+static _Thread_local fj_deque *t_fj_q = NULL;
+static _Thread_local int t_fj_nest = 0;
+/* tiny regions are not worth opening: after one, skip the next few */
+static _Thread_local int t_fj_skip = 0, t_fj_backoff = 0;
+
+static inline void fj_relax(void) {
+#if defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#elif defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
+static inline void fj_lock(fj_deque *q) {
+    while (__atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE)) fj_relax();
+}
+static inline void fj_unlock(fj_deque *q) { __atomic_store_n(&q->lock, 0, __ATOMIC_RELEASE); }
+
+static void fj_run(mim_fj_task *t) {
+    t->fn(t->ctx);
+    __atomic_store_n(&t->state, 2, __ATOMIC_RELEASE);
+}
+
+/* The oldest task of another thread's deque, if any. */
+static mim_fj_task *fj_steal(fj_deque *self) {
+    int n = g_nthreads;
+    int start = (int)(((uintptr_t)self >> 6) % (uintptr_t)n);
+    for (int k = 0; k < n; k++) {
+        fj_deque *q = &g_fjq[(start + k) % n];
+        if (q == self) continue;
+        if (__atomic_load_n(&q->top, __ATOMIC_RELAXED) >= __atomic_load_n(&q->bot, __ATOMIC_RELAXED)) continue;
+        fj_lock(q);
+        mim_fj_task *t = NULL;
+        if (q->top < q->bot) {
+            t = q->items[q->top++];
+            t->state = 1;
+            if (q->top == q->bot) q->top = q->bot = 0;
+        }
+        fj_unlock(q);
+        if (t) return t;
+    }
+    return NULL;
+}
+
+void mim_fj_fork(mim_fj_task *t, void (*fn)(void *), void *ctx) {
+    t->fn = fn;
+    t->ctx = ctx;
+    t->state = 0;
+    fj_deque *q = t_fj_q;
+    if (q) {
+        fj_lock(q);
+        if (q->bot < FJ_CAP) {
+            q->items[q->bot++] = t;
+            fj_unlock(q);
+            return;
+        }
+        fj_unlock(q);
+    }
+    fj_run(t); /* no region, or a full deque: run it now */
+}
+
+void mim_fj_join(mim_fj_task *t) {
+    if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == 2) return;
+    fj_deque *q = t_fj_q;
+    if (q) {
+        fj_lock(q);
+        if (q->bot > q->top && q->items[q->bot - 1] == t) {
+            q->bot--;
+            if (q->top == q->bot) q->top = q->bot = 0;
+            fj_unlock(q);
+            fj_run(t);
+            return;
+        }
+        fj_unlock(q);
+    }
+    /* stolen: help with other work until it is done (not too deep: each
+     * task helped with runs on top of this stack) */
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != 2) {
+        mim_fj_task *o = (q && t_fj_nest < 8) ? fj_steal(q) : NULL;
+        if (o) {
+            t_fj_nest++;
+            fj_run(o);
+            t_fj_nest--;
+        } else {
+            fj_relax();
+        }
+    }
+}
+
+#if MIM_THREADS
+/* One pool worker's part of a region: steal until it closes. */
+static void fj_worker(void *ctx, int64_t lo, int64_t hi) {
+    (void)ctx;
+    (void)hi;
+    fj_deque *self = &g_fjq[lo + 1];
+    t_fj_q = self;
+    while (!__atomic_load_n(&g_fj_done, __ATOMIC_ACQUIRE)) {
+        mim_fj_task *t = fj_steal(self);
+        if (t) fj_run(t);
+        else fj_relax();
+    }
+    t_fj_q = NULL;
+}
+
+static mim_job g_fj_job;
+static struct timespec g_fj_start;
+#endif
+
+/* Open a region on this thread: 1 when it did (close it with mim_fj_leave). */
+int32_t mim_fj_enter(void) {
+#if MIM_THREADS
+    if (g_nthreads <= 1 || t_in_parallel || t_fj_q) return 0;
+    if (t_fj_skip > 0) {
+        t_fj_skip--;
+        return 0;
+    }
+    if (!g_started) start_pool();
+    if (!g_fjq) {
+        fj_deque *q = (fj_deque *)calloc((size_t)g_nthreads, sizeof(fj_deque));
+        if (!q) return 0;
+        g_fjq = q;
+    }
+    mutex_lock(&g_mu);
+    if (g_job != NULL) { /* the pool is busy (another thread's loop) */
+        mutex_unlock(&g_mu);
+        return 0;
+    }
+    __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_fj_done, 0, __ATOMIC_RELAXED);
+    int64_t w = g_nthreads - 1;
+    mim_job j = {fj_worker, NULL, w, w, 1, 0, w, 0};
+    g_fj_job = j;
+    g_job = &g_fj_job;
+    g_gen++;
+    cond_broadcast(&g_work);
+    mutex_unlock(&g_mu);
+    t_in_parallel = 1;
+    t_fj_q = &g_fjq[0];
+    clock_gettime(CLOCK_MONOTONIC, &g_fj_start);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+void mim_fj_leave(void) {
+#if MIM_THREADS
+    __atomic_store_n(&g_fj_done, 1, __ATOMIC_RELEASE);
+    run_chunks(&g_fj_job); /* workers that never came: their parts end at once */
+    mutex_lock(&g_mu);
+    while (__atomic_load_n(&g_fj_job.remaining, __ATOMIC_ACQUIRE) > 0) cond_wait(&g_done, &g_mu);
+    g_job = NULL;
+    while (g_fj_job.active > 0) cond_wait(&g_done, &g_mu);
+    mutex_unlock(&g_mu);
+    t_fj_q = NULL;
+    t_in_parallel = 0;
+    __atomic_store_n(&mim_fj_open, 1, __ATOMIC_RELAXED);
+    struct timespec b;
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    int64_t ns = (int64_t)(b.tv_sec - g_fj_start.tv_sec) * 1000000000 + (b.tv_nsec - g_fj_start.tv_nsec);
+    if (ns < 200000) {
+        t_fj_backoff = t_fj_backoff ? (t_fj_backoff < 4096 ? t_fj_backoff * 2 : 4096) : 1;
+        t_fj_skip = t_fj_backoff;
+    } else {
+        t_fj_backoff = 0;
+    }
+#endif
+}
+
 /* ==== allocation & refcounting ===========================================
  *
  * - one malloc per value: header and elements live in the same block;
@@ -422,17 +631,97 @@ static inline int size_class(size_t bytes) {
     return bytes <= SMALL_BYTES ? 0 : bytes <= MID_BYTES ? 1 : bytes <= 256 ? 2 : SIZE_CLASSES;
 }
 
+/* Payload bytes: vectors of 1-byte elements (text, bytes, truth values) get
+ * one more, kept 0, so text is NUL-terminated for C. The compiler's inline
+ * allocator (alloc_vec_fn, release_fn) computes the same. */
+static inline size_t payload_bytes(int dtype, int64_t len) {
+    size_t es = elsize(dtype);
+    return (size_t)len * es + (es == 1);
+}
+
+/* Small blocks are carved from chunks and never go back to malloc: a free
+ * list that grows past FREE_LIST_CAP hands the whole list to a shared pool,
+ * and an empty one takes a batch from there before it carves a new chunk.
+ * (Threads never contend in malloc for small values.) */
+#define CHUNK_BYTES (256 * 1024)
+#define POOL_BATCH 4096
+typedef struct {
+    int32_t lock;
+    int64_t n;
+    mim_val *head;
+    char pad[104];
+} block_pool;
+static block_pool g_pool[SIZE_CLASSES];
+
+static inline void pool_lock(block_pool *p) {
+    while (__atomic_exchange_n(&p->lock, 1, __ATOMIC_ACQUIRE)) {
+    }
+}
+static inline void pool_unlock(block_pool *p) { __atomic_store_n(&p->lock, 0, __ATOMIC_RELEASE); }
+
+/* Hand this thread's list of class c to the pool. */
+static void pool_give(heap_state *h, int c) {
+    mim_val *head = h->free[c];
+    if (!head) return;
+    mim_val *tail = head;
+    while (*(mim_val **)tail) tail = *(mim_val **)tail;
+    block_pool *p = &g_pool[c];
+    pool_lock(p);
+    *(mim_val **)tail = p->head;
+    p->head = head;
+    p->n += h->free_len[c];
+    pool_unlock(p);
+    h->free[c] = NULL;
+    h->free_len[c] = 0;
+}
+
+/* Fill this thread's empty list of class c: a batch from the pool, or a
+ * new chunk. */
+static void refill(heap_state *h, int c) {
+    block_pool *p = &g_pool[c];
+    if (__atomic_load_n(&p->n, __ATOMIC_RELAXED) > 0) {
+        pool_lock(p);
+        mim_val *head = p->head, *tail = NULL, *v = head;
+        int k = 0;
+        while (v && k < POOL_BATCH) {
+            tail = v;
+            v = *(mim_val **)v;
+            k++;
+        }
+        if (tail) {
+            p->head = v;
+            p->n -= k;
+            *(mim_val **)tail = h->free[c];
+            h->free[c] = head;
+            h->free_len[c] += k;
+        }
+        pool_unlock(p);
+        if (k) return;
+    }
+    size_t block = sizeof(mim_val) + class_bytes[c];
+    size_t nb = CHUNK_BYTES / block;
+    char *chunk = (char *)malloc(nb * block);
+    if (!chunk) mim_panic("out of memory");
+    for (size_t i = nb; i-- > 0;) {
+        mim_val *b = (mim_val *)(chunk + i * block);
+        *(mim_val **)b = h->free[c];
+        h->free[c] = b;
+    }
+    h->free_len[c] += (int)nb;
+}
+
 static mim_val *alloc(int dtype, int rank, int64_t len) {
-    size_t bytes = (size_t)len * elsize(dtype) + 1; /* +1: char vectors stay NUL-terminated for FFI */
+    size_t bytes = payload_bytes(dtype, len);
     heap_state *h = &t_heap;
     int c = size_class(bytes);
     mim_val *v;
-    if (c < SIZE_CLASSES && h->free[c]) {
+    if (c < SIZE_CLASSES) {
+        if (!h->free[c]) refill(h, c);
         v = h->free[c];
         h->free[c] = *(mim_val **)v;
         h->free_len[c]--;
     } else {
-        v = (mim_val *)malloc(sizeof(mim_val) + (c < SIZE_CLASSES ? class_bytes[c] : bytes));
+        v = (mim_val *)malloc(sizeof(mim_val) + bytes);
         if (!v) mim_panic("out of memory");
     }
     v->rc = 1;
@@ -441,7 +730,7 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
     v->len = len;
     v->data = v->inl;
     v->desc = NULL;
-    ((char *)v->data)[bytes - 1] = 0;
+    if (elsize(dtype) == 1) ((char *)v->data)[bytes - 1] = 0;
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n + 1, __ATOMIC_RELAXED);
     return v;
@@ -462,19 +751,26 @@ static inline void release_in(heap_state *h, mim_val *v) {
     else if (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0) dealloc_in(h, v);
 }
 
-static void dealloc_in(heap_state *h, mim_val *v) {
+static inline int holds_values(int dt) { return dt == MIM_BOXED || dt == MIM_OBJ || dt == MIM_FN || dt == MIM_MAP; }
+
+/* Drop a reference: 1 when it was the last. */
+static inline int drop_ref(mim_val *v) {
+    if (!v) return 0;
+    int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
+    return rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0);
+}
+
+/* Give one value's block back (what it holds is released already). */
+static void free_block(heap_state *h, mim_val *v) {
     int dt = v->dtype;
-    if (dt == MIM_BOXED || dt == MIM_OBJ || dt == MIM_FN || dt == MIM_MAP) { /* release children */
-        mim_val **hs = (mim_val **)v->data;
-        for (int64_t i = 0; i < v->len; i++) release_in(h, hs[i]);
-        if (dt == MIM_MAP) map_dealloc_meta(v);
-    }
+    if (dt == MIM_MAP) map_dealloc_meta(v);
     if (v->rank >= 2 && dt != MIM_MAP) free((void *)v->desc); /* the shape of a matrix */
-    size_t bytes = (size_t)v->len * elsize(dt) + 1;
+    size_t bytes = payload_bytes(dt, v->len);
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
     int c = size_class(bytes);
-    if (c < SIZE_CLASSES && h->free_len[c] < FREE_LIST_CAP) {
+    if (c < SIZE_CLASSES) {
+        if (h->free_len[c] >= FREE_LIST_CAP) pool_give(h, c);
         *(mim_val **)v = h->free[c];
         h->free[c] = v;
         h->free_len[c]++;
@@ -483,19 +779,99 @@ static void dealloc_in(heap_state *h, mim_val *v) {
     }
 }
 
+static void release_all(mim_val **items, int64_t n);
+
+typedef struct {
+    mim_fj_task task;
+    int64_t n;
+    mim_val *items[];
+} release_job;
+
+static void release_task(void *c) {
+    release_job *j = (release_job *)c;
+    release_all(j->items, j->n);
+}
+
+/* Free values whose last reference is gone, and everything only they held:
+ * depth-first with a stack of its own (any depth of nesting). A big release
+ * (a large tree) shares its pending subtrees out to the fork-join pool. */
+static void release_all(mim_val **items, int64_t n) {
+    heap_state *h = &t_heap;
+    mim_val *local[64];
+    mim_val **st = local;
+    int64_t cap = 64, top = 0;
+    release_job *forked[32];
+    int nf = 0, opened = 0;
+    int64_t done = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (top == cap) {
+            mim_val **ns = (mim_val **)malloc(sizeof(mim_val *) * (size_t)cap * 2);
+            if (!ns) mim_panic("out of memory");
+            memcpy(ns, st, sizeof(mim_val *) * (size_t)top);
+            if (st != local) free(st);
+            st = ns;
+            cap *= 2;
+        }
+        st[top++] = items[i];
+    }
+    while (top > 0) {
+        mim_val *v = st[--top];
+        mim_val **hs = (mim_val **)v->data;
+        for (int64_t i = 0; i < v->len; i++) {
+            mim_val *c = hs[i];
+            if (!drop_ref(c)) continue;
+            if (!holds_values(c->dtype)) {
+                free_block(h, c);
+                continue;
+            }
+            if (top == cap) {
+                mim_val **ns = (mim_val **)malloc(sizeof(mim_val *) * (size_t)cap * 2);
+                if (!ns) mim_panic("out of memory");
+                memcpy(ns, st, sizeof(mim_val *) * (size_t)top);
+                if (st != local) free(st);
+                st = ns;
+                cap *= 2;
+            }
+            st[top++] = c;
+        }
+        free_block(h, v);
+        /* big: the older half of the stack (the larger subtrees) to the pool */
+        if ((++done & 0xFFFF) == 0 && top >= 2 && nf < 32) {
+            if (!t_fj_q && !opened && __atomic_load_n(&mim_fj_open, __ATOMIC_RELAXED) && mim_fj_enter()) opened = 1;
+            if (t_fj_q) {
+                int64_t k = top / 2;
+                release_job *j = (release_job *)malloc(sizeof(release_job) + sizeof(mim_val *) * (size_t)k);
+                if (j) {
+                    j->n = k;
+                    memcpy(j->items, st, sizeof(mim_val *) * (size_t)k);
+                    memmove(st, st + k, sizeof(mim_val *) * (size_t)(top - k));
+                    top -= k;
+                    forked[nf++] = j;
+                    mim_fj_fork(&j->task, release_task, j);
+                }
+            }
+        }
+    }
+    while (nf > 0) {
+        release_job *j = forked[--nf];
+        mim_fj_join(&j->task);
+        free(j);
+    }
+    if (opened) mim_fj_leave();
+    if (st != local) free(st);
+}
+
+static void dealloc_in(heap_state *h, mim_val *v) {
+    if (holds_values(v->dtype)) release_all(&v, 1);
+    else free_block(h, v);
+}
+
 static void dealloc(mim_val *v) { dealloc_in(&t_heap, v); }
 
-/* Give this thread's cached blocks back to malloc (before the thread ends). */
+/* Give this thread's cached blocks to the shared pool (the thread ends). */
 static void free_list_drain(void) {
     heap_state *h = &t_heap;
-    for (int c = 0; c < SIZE_CLASSES; c++) {
-        while (h->free[c]) {
-            mim_val *v = h->free[c];
-            h->free[c] = *(mim_val **)v;
-            free(v);
-        }
-        h->free_len[c] = 0;
-    }
+    for (int c = 0; c < SIZE_CLASSES; c++) pool_give(h, c);
 }
 
 /* A fresh vector for a fused kernel's output. */
@@ -563,6 +939,12 @@ void mim_rt_init(int32_t argc, char **argv) {
     }
     if (g_nthreads > 256) g_nthreads = 256;
     mim_threads = g_nthreads;
+    if (g_nthreads > 1) {
+        int lg = 0;
+        while ((1 << lg) < g_nthreads) lg++;
+        mim_fj_cut = lg + 6; /* ~64 tasks per thread */
+        mim_fj_open = 1;
+    }
 #else
     (void)t;
     g_nthreads = 1;
@@ -697,7 +1079,9 @@ static mim_val *publish(mim_val **slot, mim_val *v) {
     v = immortal(v);
     mim_val *expected = NULL;
     if (!__atomic_compare_exchange_n(slot, &expected, v, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        free(v); /* another thread won the race */
+        v->rc = 1; /* another thread won the race: an ordinary value again */
+        __atomic_store_n(&live_slot()->n, live_slot()->n + 1, __ATOMIC_RELAXED);
+        dealloc(v);
         return expected;
     }
     return v;

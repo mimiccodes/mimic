@@ -2135,6 +2135,22 @@ impl Purity {
         (matches!(p.fns[f].kind, FnKind::User(_)) && !self.fns[f] && self.overlap[f] && args_ok).then_some(f)
     }
 
+    /// `f(args)` with `f` pure and arguments without effects: such calls may
+    /// run in parallel with each other (fork-join; see the codegen).
+    pub fn fork_call(&self, p: &Program, module: ModId, cur: Option<FnId>, value: &Expr) -> Option<FnId> {
+        let ExprKind::Call { callee, args } = &value.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        let Ok(Resolved::Fn(f)) = p.lookup(module, path).ok_or(()) else { return None };
+        if !matches!(p.fns[f].kind, FnKind::User(_)) || !self.fns[f] {
+            return None;
+        }
+        let params = param_names(p, cur);
+        let w = self.walk(p, module, &self.fns, false, &params);
+        let uses = self.fn_params.get(f).cloned().unwrap_or_default();
+        let args_ok = args.iter().enumerate().all(|(j, a)| if uses.get(j).copied().unwrap_or(false) { w.fn_operand(a) } else { w.expr(a) });
+        args_ok.then_some(f)
+    }
+
     /// May this statement run while implicit futures are still pending? It
     /// changes nothing they might read (printing is fine; writing files,
     /// changing the environment or running programs is not). A `return`
