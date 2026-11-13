@@ -26,11 +26,13 @@ use targets::Target;
 #[command(
     name = "mimic",
     version,
-    about = "Mimic: an array-based, massively parallel, memory-safe compiled language",
-    long_about = "Mimic: an array-based, massively parallel, memory-safe compiled language.\n\n\
+    about = "MIMIC (https://mimic.codes/) :: A Compiled, Array-based, Massively Parallel, Memory-safe Programming Language by Harcorp Industries (https://harcorp.ai)",
+    long_about = "MIMIC (https://mimic.codes/) :: A Compiled, Array-based, Massively Parallel, Memory-safe\n\
+                  Programming Language by Harcorp Industries (https://harcorp.ai)\n\n\
                   Every primitive has a glyph and a word: `⍳ 10 ▷ +/` is `iota 10 |> sum`.\n\
                   Run `mimic glyphs` for the full table.",
-    after_help = "Examples:\n  mimic create hello && cd hello && mimic run\n  mimic run script.mim --release\n  mimic build                     # fastest binary (release is the default)\n  mimic build --target x86_64-linux-gnu\n  mimic install github.com/harcorp/ai.git"
+    after_help = "Examples:\n  mimic create hello && cd hello && mimic run\n  mimic run script.mim --release\n  mimic build                     # fastest binary (release is the default)\n  mimic build --target x86_64-linux-gnu\n  mimic install github.com/harcorp/ai.git\n\n\
+                  Made With Love By Harsh Kumar"
 )]
 struct Cli {
     #[command(subcommand)]
