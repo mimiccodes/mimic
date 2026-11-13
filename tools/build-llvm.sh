@@ -5,6 +5,8 @@
 #
 #   tools/build-llvm.sh                 # uses the sources tools/deps.sh fetched
 #   JOBS=4 NICE=19 tools/build-llvm.sh  # gentler on the machine (the default)
+#   GENERATOR=Ninja tools/build-llvm.sh # with Ninja (faster; CI)
+#   CLEAN=1 tools/build-llvm.sh         # delete the build tree afterwards (disk)
 #
 # Result: $MIMIC_DEPS/llvm-23.1.4 (point LLVM_SYS_231_PREFIX at it).
 set -eu
@@ -13,6 +15,7 @@ LLVM_VERSION=23.1.4
 DEPS=${MIMIC_DEPS:-$HOME/.mimic/deps}
 JOBS=${JOBS:-4}
 NICE=${NICE:-19}
+GENERATOR=${GENERATOR:-Unix Makefiles}
 TARBALL=$DEPS/llvm-project-$LLVM_VERSION.src.tar.xz
 SRC=$DEPS/llvm-full-$LLVM_VERSION.src
 OUT=$DEPS/llvm-$LLVM_VERSION
@@ -31,7 +34,7 @@ if [ ! -d "$SRC/libc" ]; then
     mv "$SRC.part" "$SRC"
 fi
 
-cmake -S "$SRC/llvm" -B "$BUILD" -G "Unix Makefiles" \
+cmake -S "$SRC/llvm" -B "$BUILD" -G "$GENERATOR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$OUT" \
     -DLLVM_ENABLE_PROJECTS="clang;lld" \
@@ -49,6 +52,7 @@ cmake -S "$SRC/llvm" -B "$BUILD" -G "Unix Makefiles" \
 
 nice -n "$NICE" cmake --build "$BUILD" -j "$JOBS"
 cmake --install "$BUILD"
+[ "${CLEAN:-0}" = 1 ] && rm -rf "$BUILD" "$SRC"
 echo "llvm: $OUT"
 # make it the LLVM this repository builds against (.cargo/config.toml)
 ln -sfn "$OUT" "$(cd "$(dirname "$0")/.." && pwd)/.llvm"

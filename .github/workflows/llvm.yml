@@ -1,0 +1,70 @@
+# Build the LLVM that `mimic` links (LLVM + Clang + LLD 23.1.4, static, every
+# backend; tools/build-llvm.sh) once per platform, and publish it as a
+# release download that every CI run then uses. Run by hand (Actions → llvm →
+# Run workflow) when the LLVM version changes.
+name: llvm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: 23.1.4
+  LLVM_SHA256: 819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2
+  TAG: deps-llvm-23.1.4
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make room (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          df -h /
+
+      - name: Tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: LLVM sources
+        run: |
+          mkdir -p ~/.mimic/deps
+          T=~/.mimic/deps/llvm-project-$LLVM_VERSION.src.tar.xz
+          curl -fL --retry 3 -o "$T" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/llvm-project-$LLVM_VERSION.src.tar.xz"
+          echo "$LLVM_SHA256  $T" | shasum -a 256 -c
+
+      - name: Build LLVM
+        run: |
+          JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu) NICE=0 GENERATOR=Ninja CLEAN=1 tools/build-llvm.sh
+          df -h ~
+
+      - name: Package
+        run: |
+          F=llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz
+          XZ_OPT="-T0 -6" tar -C ~/.mimic/deps -cJf "$F" llvm-$LLVM_VERSION
+          ls -lh "$F"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --prerelease \
+            --title "LLVM $LLVM_VERSION for building mimic" \
+            --notes "LLVM, Clang and LLD $LLVM_VERSION, static, every backend (tools/build-llvm.sh). Used by CI." || true
+          gh release upload "$TAG" "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" --clobber

@@ -52,7 +52,10 @@ fi
 
 # ---- LLD (static libraries, standalone build against the installed LLVM) ----
 LLD_OUT=$DEPS/lld-$LLVM_VERSION
-if [ ! -f "$LLD_OUT/lib/liblldELF.a" ]; then
+# (an LLVM built by tools/build-llvm.sh includes LLD already)
+if [ -f "$LLVM_PREFIX/lib/liblldELF.a" ]; then
+    LLD_OUT=$LLVM_PREFIX
+elif [ ! -f "$LLD_OUT/lib/liblldELF.a" ]; then
     B=$DEPS/build-lld
     rm -rf "$B"
     cmake -S "$SRC/lld" -B "$B" -G "Unix Makefiles" \
