@@ -603,6 +603,8 @@ fn type_code(t: Ty) -> i32 {
         Ty::I64 => 1,
         Ty::F64 => 2,
         Ty::Bool => 3,
+        Ty::F32 => 11,
+        Ty::I32 => 12,
         _ => 0,
     }
 }
@@ -1115,6 +1117,20 @@ impl<'ctx> Cg<'ctx, '_> {
         if let Some((el, n)) = fixed(t) {
             return self.as_fixed(v, el, n, what);
         }
+        // f32 and i32 (boxed for now): converted by the runtime, which
+        // rounds to f32 and range-checks i32
+        let narrow = match t {
+            Ty::F32 | Ty::Arr(El::F32, _) => Some(9),
+            Ty::I32 | Ty::Arr(El::I32, _) => Some(10),
+            _ => None,
+        };
+        if let Some(dt) = narrow {
+            let b = self.boxed(v)?;
+            let f = if matches!(t, Ty::Arr(..)) { "mim_vec_as" } else { "mim_scalar_as" };
+            let r = self.call_rt_ptr(f, &[self.basic(b).into(), self.i32c(dt)])?;
+            self.drop_tmp(b)?;
+            return Ok(r);
+        }
         if let Some(fs) = self.flat(t) {
             return self.as_flat(v, t, &fs, what);
         }
@@ -1326,6 +1342,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
+            "mim_scalar_as" => ptr.fn_type(&[p, i32t], false),
             "mim_format_i64" => ptr.fn_type(&[i64t], false),
             "mim_fj_enter" => self.ctx.i32_type().fn_type(&[], false),
             "mim_fj_leave" => void.fn_type(&[], false),

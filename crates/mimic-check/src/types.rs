@@ -224,6 +224,10 @@ pub enum El {
     /// tuples (a list of tuples)
     Tup(u32),
     Dyn,
+    /// 32-bit floats and integers (`[f32]`, `[i32]`): 4 bytes each; f32
+    /// arithmetic rounds to f32, i32 arithmetic wraps
+    F32,
+    I32,
 }
 
 /// The longest list whose length types carry (see [`Ty::Arr`]).
@@ -276,11 +280,19 @@ pub enum Ty {
     Tup(u32),
     /// Unknown statically: a boxed runtime value.
     Dyn,
+    /// 32-bit float and integer scalars (for now boxed: their arithmetic is
+    /// the runtime's)
+    F32,
+    I32,
 }
 
 impl Ty {
     pub fn is_scalar(self) -> bool {
-        matches!(self, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Char)
+        matches!(self, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Char | Ty::F32 | Ty::I32)
+    }
+    /// f64 or f32
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::F64 | Ty::F32)
     }
     /// Scalars that live unboxed in registers.
     pub fn is_unboxed(self) -> bool {
@@ -292,6 +304,8 @@ impl Ty {
             Ty::F64 => El::F64,
             Ty::Bool => El::Bool,
             Ty::Char => El::Char,
+            Ty::F32 => El::F32,
+            Ty::I32 => El::I32,
             Ty::Arr(El::Char, _) => El::Str,
             Ty::Obj(t) => El::Obj(t),
             Ty::Tup(t) => El::Tup(t),
@@ -309,6 +323,8 @@ impl Ty {
             El::U8 => Ty::I64,
             El::Tup(t) => Ty::Tup(t),
             El::Dyn => Ty::Dyn,
+            El::F32 => Ty::F32,
+            El::I32 => Ty::I32,
         }
     }
     pub fn join(self, o: Ty) -> Ty {
@@ -351,12 +367,16 @@ impl std::fmt::Display for Ty {
             El::U8 => "u8",
             El::Tup(_) => "tuple",
             El::Dyn => "?",
+            El::F32 => "f32",
+            El::I32 => "i32",
         };
         match self {
             Ty::Never => write!(f, "never"),
             Ty::Unit => write!(f, "()"),
             Ty::I64 => write!(f, "i64"),
             Ty::F64 => write!(f, "f64"),
+            Ty::F32 => write!(f, "f32"),
+            Ty::I32 => write!(f, "i32"),
             Ty::Bool => write!(f, "bool"),
             Ty::Char => write!(f, "char"),
             Ty::Arr(El::Char, _) => write!(f, "str"),
@@ -415,8 +435,10 @@ impl TypeInfo {
 fn ann_ty(t: &Type) -> Option<Ty> {
     Some(match t {
         Type::Named(n, _) => match n.as_str() {
-            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr" => Ty::I64,
-            "f32" | "f64" => Ty::F64,
+            "i32" => Ty::I32,
+            "f32" => Ty::F32,
+            "i8" | "i16" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr" => Ty::I64,
+            "f64" => Ty::F64,
             "bool" => Ty::Bool,
             "char" | "c_char" => Ty::Char,
             "str" | "cstr" => Ty::Arr(El::Char, 0),
@@ -427,6 +449,8 @@ fn ann_ty(t: &Type) -> Option<Ty> {
         Type::Array(inner, _) => match ann_ty(inner)? {
             Ty::I64 => Ty::Arr(El::I64, 0),
             Ty::F64 => Ty::Arr(El::F64, 0),
+            Ty::F32 => Ty::Arr(El::F32, 0),
+            Ty::I32 => Ty::Arr(El::I32, 0),
             Ty::Bool => Ty::Arr(El::Bool, 0),
             _ => return None,
         },
@@ -544,8 +568,13 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
     let ok = matches!(
         (a, got),
         (_, Ty::Never | Ty::Dyn)
-            | (Ty::I64, Ty::I64 | Ty::Bool)
-            | (Ty::F64, Ty::I64 | Ty::F64 | Ty::Bool)
+            | (Ty::I64, Ty::I64 | Ty::Bool | Ty::I32)
+            | (Ty::F64, Ty::I64 | Ty::F64 | Ty::Bool | Ty::F32 | Ty::I32)
+            | (Ty::F32, Ty::I64 | Ty::F64 | Ty::Bool | Ty::F32 | Ty::I32)
+            | (Ty::I32, Ty::I64 | Ty::Bool | Ty::I32)
+            | (Ty::Arr(El::F32 | El::I32, _), Ty::Arr(El::I64 | El::F64 | El::Bool | El::F32 | El::I32 | El::Dyn, _))
+            | (Ty::Arr(El::F64, _), Ty::Arr(El::F32 | El::I32, _))
+            | (Ty::Arr(El::I64, _), Ty::Arr(El::I32, _))
             | (Ty::Bool, Ty::Bool)
             | (Ty::Char, Ty::Char)
             | (Ty::Arr(El::Char, _), Ty::Arr(El::Char | El::Dyn, _))
@@ -558,6 +587,9 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
         return Err(format!("expected {a}, found {got}"));
     }
     Ok(match (a, got) {
+        // lists of f32 or i32 (and from them): converted to the annotation
+        (Ty::Arr(e @ (El::F32 | El::I32), _), g) if g != Ty::Never && g != Ty::Arr(e, 0) => Ty::Arr(e, 0),
+        (Ty::Arr(El::F64 | El::I64, _), Ty::Arr(El::F32 | El::I32, _)) => a,
         (Ty::Arr(_, _), g) if g != Ty::Dyn && g != Ty::Never => g, // arrays: a check, not a conversion
         (Ty::Arr(_, _), _) => got,
         (scalar, _) => scalar,
@@ -1014,9 +1046,7 @@ impl Walk<'_, '_> {
                     el = match (el, t) {
                         (Ty::Never, t) => t,
                         (a, b) if a == b => a,
-                        (a, b) if a.is_scalar() && b.is_scalar() => {
-                            if a == Ty::F64 || b == Ty::F64 { Ty::F64 } else { Ty::I64 }
-                        }
+                        (a, b) if a.is_scalar() && b.is_scalar() => num_join(a, false, b, false),
                         _ => Ty::Dyn,
                     };
                 }
@@ -1145,7 +1175,7 @@ impl Walk<'_, '_> {
             ExprKind::Unary { op, expr } => {
                 let t = self.expr(expr);
                 if *op == UnOp::BitNot
-                    && matches!(t, Ty::F64 | Ty::Char | Ty::Arr(El::F64 | El::Char | El::Str, _))
+                    && matches!(t, Ty::F64 | Ty::F32 | Ty::Char | Ty::Arr(El::F64 | El::F32 | El::Char | El::Str, _))
                 {
                     self.err(Diag::new(&C::NO_OPERATOR, "`~` needs an integer (or a bool)", expr.span));
                     return Ty::Dyn;
@@ -1154,8 +1184,10 @@ impl Walk<'_, '_> {
                     (UnOp::Not, _) => Ty::Bool,
                     (UnOp::BitNot, Ty::Bool) => Ty::Bool,
                     (UnOp::BitNot, Ty::Dyn) => Ty::Dyn,
+                    (UnOp::BitNot, Ty::I32) => Ty::I32,
                     (UnOp::BitNot, _) => Ty::I64,
                     (_, Ty::F64) => Ty::F64,
+                    (_, s @ (Ty::F32 | Ty::I32)) => s,
                     (_, Ty::Dyn) => Ty::Dyn,
                     _ => Ty::I64,
                 };
@@ -1621,25 +1653,61 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
     if op == Add && a == Ty::Arr(El::Char, 0) && b == Ty::Arr(El::Char, 0) {
         return Ty::Arr(El::Char, 0);
     }
-    let scalar = |x: Ty, y: Ty| -> Ty {
+    // (xl, yl: the operand is a list; see num_join)
+    let scalar = |x: Ty, xl: bool, y: Ty, yl: bool| -> Ty {
         match op {
             Eq | Ne | Lt | Le | Gt | Ge | And | Or => Ty::Bool,
             BitAnd | BitOr | BitXor if x == Ty::Bool && y == Ty::Bool => Ty::Bool,
             BitAnd | BitOr | BitXor | Shl | Shr | UShr if x == Ty::Dyn || y == Ty::Dyn => Ty::Dyn,
+            BitAnd | BitOr | BitXor | Shl | Shr | UShr if num_join(x, xl, y, yl) == Ty::I32 => Ty::I32,
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => Ty::I64,
-            Div => Ty::F64,
             _ if x == Ty::Dyn || y == Ty::Dyn => Ty::Dyn,
-            _ if x == Ty::F64 || y == Ty::F64 => Ty::F64,
-            _ => Ty::I64,
+            Div => match num_join(x, xl, y, yl) {
+                t if t.is_float() => t,
+                _ => Ty::F64, // integers divided: a float
+            },
+            _ => num_join(x, xl, y, yl),
         }
     };
     match (a, b) {
-        (x, y) if x.is_scalar() && y.is_scalar() => scalar(x, y),
-        (Ty::Arr(x, n), y) if y.is_scalar() => Ty::Arr(scalar(Ty::of_el(x), y).el(), n),
-        (x, Ty::Arr(y, n)) if x.is_scalar() => Ty::Arr(scalar(x, Ty::of_el(y)).el(), n),
-        (Ty::Arr(x, n), Ty::Arr(y, m)) => Ty::Arr(scalar(Ty::of_el(x), Ty::of_el(y)).el(), if n == m { n } else { 0 }),
+        (x, y) if x.is_scalar() && y.is_scalar() => scalar(x, false, y, false),
+        (Ty::Arr(x, n), y) if y.is_scalar() => Ty::Arr(scalar(Ty::of_el(x), true, y, false).el(), n),
+        (x, Ty::Arr(y, n)) if x.is_scalar() => Ty::Arr(scalar(x, false, Ty::of_el(y), true).el(), n),
+        (Ty::Arr(x, n), Ty::Arr(y, m)) => Ty::Arr(scalar(Ty::of_el(x), true, Ty::of_el(y), true).el(), if n == m { n } else { 0 }),
         (Ty::Arr(_, _), _) | (_, Ty::Arr(_, _)) => Ty::Dyn,
         _ => Ty::Dyn,
+    }
+}
+
+/// The number type of arithmetic on `x` and `y` (`xl`, `yl`: a list's
+/// elements). Floats beat integers; between two widths of the same kind, a
+/// list keeps its own type against a single value (`[f32] * 0.5` stays
+/// `[f32]`), else the wider wins. The runtime (arith_dtype) does the same.
+pub fn num_join(x: Ty, xl: bool, y: Ty, yl: bool) -> Ty {
+    if x == Ty::Dyn || y == Ty::Dyn {
+        return Ty::Dyn;
+    }
+    let (fx, fy) = (x.is_float(), y.is_float());
+    if fx != fy {
+        return if fx { x } else { y };
+    }
+    if fx {
+        return if x == y {
+            x
+        } else if xl != yl {
+            if xl { x } else { y }
+        } else {
+            Ty::F64
+        };
+    }
+    let small = |t: Ty| matches!(t, Ty::Bool | Ty::Char);
+    match (x, y) {
+        (Ty::I32, Ty::I32) => Ty::I32,
+        (Ty::I32, t) | (t, Ty::I32) if small(t) => Ty::I32,
+        (Ty::I32, Ty::I64) | (Ty::I64, Ty::I32) if xl != yl => {
+            if xl { x } else { y }
+        }
+        _ => Ty::I64,
     }
 }
 
@@ -1647,6 +1715,8 @@ pub fn binary_ty(op: BinOp, a: Ty, b: Ty) -> Ty {
 pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
     let reduce = |a: Ty| match a {
         Ty::Arr(El::F64, _) => Ty::F64,
+        Ty::Arr(El::F32, _) => Ty::F32,
+        Ty::Arr(El::I32, _) => Ty::I32,
         Ty::Arr(El::I64 | El::Bool | El::Char, _) => Ty::I64,
         Ty::Arr(El::Dyn, _) | Ty::Dyn => Ty::Dyn,
         s => s, // reducing a scalar returns it

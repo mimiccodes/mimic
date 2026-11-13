@@ -346,8 +346,8 @@ static int cmp_vals(const mim_val *a, const mim_val *b) {
         int c = memcmp(a->data, b->data, (size_t)n);
         return c ? c : (a->len > b->len) - (a->len < b->len);
     }
-    if (a->rank == 0 && b->rank == 0 && a->dtype <= MIM_BOOL && b->dtype <= MIM_BOOL) {
-        if (a->dtype == MIM_F64 || b->dtype == MIM_F64) {
+    if (a->rank == 0 && b->rank == 0 && IS_NUMDT(a->dtype) && IS_NUMDT(b->dtype)) {
+        if (IS_FLOAT(a->dtype) || IS_FLOAT(b->dtype)) {
             double x = getf(a, 0), y = getf(b, 0);
             return (x > y) - (x < y);
         }
@@ -513,14 +513,14 @@ static uint64_t hash_val(const mim_val *v) {
         for (int64_t i = 0; i < v->len; i++) h = (h ^ ((const unsigned char *)v->data)[i]) * 1099511628211ULL;
         return h;
     }
-    if (v->rank == 0 && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL || v->dtype == MIM_CHAR)) {
-        uint64_t x = (uint64_t)geti(v, 0) + 0x9E3779B97F4A7C15ULL;
+    if (v->rank == 0 && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL || v->dtype == MIM_CHAR || v->dtype == MIM_I32)) {
+        uint64_t x = (uint64_t)geti(v, 0) + 0x9E3779B97F4A7C15ULL; /* (an i32 key equals the i64 of its value) */
         x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
         x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
         return x ^ (x >> 31);
     }
-    if (v->rank == 0 && v->dtype == MIM_F64) {
-        double d = getf(v, 0);
+    if (v->rank == 0 && IS_FLOAT(v->dtype)) {
+        double d = getf(v, 0); /* (an f32 key hashes as its value) */
         uint64_t x;
         memcpy(&x, &d, sizeof x);
         return x * 0x9E3779B97F4A7C15ULL;
@@ -535,8 +535,8 @@ static int vals_equal(const mim_val *a, const mim_val *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (is_str(a) || is_str(b)) return is_str(a) && is_str(b) && a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
-    if (a->rank == 0 && b->rank == 0 && a->dtype <= MIM_CHAR && b->dtype <= MIM_CHAR) {
-        if (a->dtype == MIM_F64 || b->dtype == MIM_F64) return a->dtype == b->dtype && getf(a, 0) == getf(b, 0);
+    if (a->rank == 0 && b->rank == 0 && (IS_NUMDT(a->dtype) || a->dtype == MIM_CHAR) && (IS_NUMDT(b->dtype) || b->dtype == MIM_CHAR)) {
+        if (IS_FLOAT(a->dtype) || IS_FLOAT(b->dtype)) return a->dtype == b->dtype && getf(a, 0) == getf(b, 0);
         return geti(a, 0) == geti(b, 0) && (a->dtype == MIM_CHAR) == (b->dtype == MIM_CHAR);
     }
     return 0;
@@ -548,7 +548,7 @@ static int map_equal(const mim_val *a, const mim_val *b);
 
 /* Element i of an array as a comparable scalar: 0 = int, 1 = float, 2 = char. */
 static int elem_num(const mim_val *v, int64_t i, int64_t *iv, double *fv) {
-    if (v->dtype == MIM_F64) { *fv = getf(v, i); return 1; }
+    if (IS_FLOAT(v->dtype)) { *fv = getf(v, i); return 1; }
     *iv = geti(v, i);
     *fv = (double)*iv;
     return v->dtype == MIM_CHAR ? 2 : 0;
@@ -605,8 +605,8 @@ int64_t mim_equal(const mim_val *a, const mim_val *b) {
         return 1;
     }
     if ((a->dtype == MIM_CHAR) != (b->dtype == MIM_CHAR)) return 0; /* text is not numbers */
-    if (a->dtype == b->dtype && a->dtype != MIM_F64)
-        return memcmp(a->data, b->data, (size_t)a->len * (size_t)(a->dtype == MIM_I64 ? 8 : 1)) == 0;
+    if (a->dtype == b->dtype && !IS_FLOAT(a->dtype))
+        return memcmp(a->data, b->data, (size_t)a->len * elsize(a->dtype)) == 0;
     for (int64_t i = 0; i < a->len; i++) {
         int64_t xi, yi;
         double xf, yf;
@@ -808,7 +808,7 @@ mim_val *mim_std_map_new(void) { return map_alloc(4); }
 /* ==== math (when the compiler does not know the numbers are floats) ======= */
 
 static double math_arg(mim_val *x, const char *fn) {
-    if (!x || x->rank != 0 || (x->dtype != MIM_F64 && x->dtype != MIM_I64 && x->dtype != MIM_U8)) {
+    if (!x || x->rank != 0 || !(IS_NUMDT(x->dtype) && x->dtype != MIM_BOOL)) {
         char buf[96];
         snprintf(buf, sizeof buf, "math::%s: expected a number", fn);
         mim_panic(buf);

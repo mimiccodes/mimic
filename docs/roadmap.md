@@ -63,7 +63,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | D5, D6 (first part) | Maps (`["a": 1]`, `m[k]`, copy-on-write `m[k] = v`, `get`/`has`/`keys`/`values`/`put`/`remove`), list functions (`push`, `concat`, `sort`), the string library (`split`, `join`, `trim`, `replace`, `find`, `parse_int`, …), `+` and `==` on strings; built on `extern "mimic"` runtime intrinsics ([std.md](std.md)) | ✅ |
 | D4, D7–D10 | Generics (`Option[T]`, `fn f[T]`), bitwise operators and hex/binary literals, guards/alternatives/ranges/record/array patterns and `if let`, structural `==`, matrices (`⥊ ⍉ ⊠`, `m[i, j]`) | ✅ |
 | D (bytes) | `[u8]` byte arrays (compact; elements read as i64), the `bytes` module (text, hex, base64), `fs::read_bytes`/`write_bytes`, `tcp::send_bytes`/`receive_bytes` | ✅ |
-| D (rest) | Other sized element types (`[i32]`, `[f32]`, …), sized integer scalars | |
+| D (sized, part 1) | `f32` and `i32` as real types: scalars and lists (`[f32]`, `[i32]`, 4 bytes each), f32 arithmetic rounded to f32, i32 wrapping; promotion rules shared by the type checker and the runtime; boxed for now (compiled registers and fused loops next), for the GPU (F8) | ✅ |
+| D (rest) | `f32`/`i32` in registers and fused loops; other sized types (`i8`, `i16`, `u16`, `u32`, `u64`) | |
 | E1, E2 | Arguments, environment, stdin, files, directories, paths; clocks, dates, random numbers, running programs ([std.md](std.md)) | ✅ |
 | E3 (first part) | Implicit futures for overlapping effects; `¨` runs I/O-only functions in parallel ([syntax.md](syntax.md#concurrency-implicit-futures)) | ✅ |
 | E4 (first part) | `http` module (client, server with route patterns, parallel pure handlers) and `tcp` module; effect annotations on `extern` blocks (`pure`, `concurrent`, `ordered`, `sync`) for C libraries and the runtime | ✅ |

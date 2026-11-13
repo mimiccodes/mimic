@@ -39,7 +39,12 @@
 
 /* BOXED: a vector of handles (nested arrays, lists of strings/records).
  * OBJ: a record or union variant — `len` field handles plus a descriptor. */
-typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7, MIM_U8 = 8 } mim_dtype;
+typedef enum { MIM_I64 = 0, MIM_F64 = 1, MIM_BOOL = 2, MIM_CHAR = 3, MIM_BOXED = 4, MIM_OBJ = 5, MIM_FN = 6, MIM_MAP = 7, MIM_U8 = 8, MIM_F32 = 9, MIM_I32 = 10 } mim_dtype;
+/* floats of either width (f32 arithmetic is computed in double and rounded
+ * to f32 after every operation: exactly f32 arithmetic for + - × ÷) */
+#define IS_FLOAT(dt) ((dt) == MIM_F64 || (dt) == MIM_F32)
+/* plain numbers (and truth values): i64, f64, bool, f32, i32, u8 */
+#define IS_NUMDT(dt) ((dt) == MIM_I64 || (dt) == MIM_F64 || (dt) == MIM_BOOL || (dt) == MIM_F32 || (dt) == MIM_I32 || (dt) == MIM_U8)
 
 /* Emitted by the compiler, one per record type / union variant. */
 typedef struct {
@@ -107,7 +112,7 @@ static int64_t floordiv(int64_t x, int64_t y) {
     if ((x % y != 0) && ((x < 0) != (y < 0))) q--;
     return q;
 }
-enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC, TY_FN, TY_BYTES };
+enum { TY_INT = 1, TY_FLOAT, TY_BOOL, TY_CHAR, TY_STR, TY_INTVEC, TY_FLOATVEC, TY_BOOLVEC, TY_FN, TY_BYTES, TY_F32, TY_I32, TY_F32VEC, TY_I32VEC };
 
 static void park_forever(void);
 
@@ -603,6 +608,8 @@ static size_t elsize(int dt) {
     switch (dt) {
     case MIM_I64: return 8;
     case MIM_F64: return 8;
+    case MIM_F32:
+    case MIM_I32: return 4;
     case MIM_BOXED:
     case MIM_OBJ:
     case MIM_FN:
@@ -1039,6 +1046,8 @@ static double getf(const mim_val *v, int64_t i) {
     switch (v->dtype) {
     case MIM_F64: return ((double *)v->data)[i];
     case MIM_I64: return (double)((int64_t *)v->data)[i];
+    case MIM_F32: return (double)((float *)v->data)[i];
+    case MIM_I32: return (double)((int32_t *)v->data)[i];
     default: return (double)((uint8_t *)v->data)[i];
     }
 }
@@ -1047,6 +1056,8 @@ static int64_t geti(const mim_val *v, int64_t i) {
     switch (v->dtype) {
     case MIM_F64: return (int64_t)((double *)v->data)[i];
     case MIM_I64: return ((int64_t *)v->data)[i];
+    case MIM_F32: return (int64_t)((float *)v->data)[i];
+    case MIM_I32: return ((int32_t *)v->data)[i];
     default: return (int64_t)((uint8_t *)v->data)[i];
     }
 }
@@ -1055,6 +1066,8 @@ static void setf(mim_val *v, int64_t i, double x) {
     switch (v->dtype) {
     case MIM_F64: ((double *)v->data)[i] = x; break;
     case MIM_I64: ((int64_t *)v->data)[i] = (int64_t)x; break;
+    case MIM_F32: ((float *)v->data)[i] = (float)x; break;
+    case MIM_I32: ((int32_t *)v->data)[i] = (int32_t)(uint32_t)(int64_t)x; break;
     default: ((uint8_t *)v->data)[i] = (uint8_t)x; break;
     }
 }
@@ -1063,6 +1076,8 @@ static void seti(mim_val *v, int64_t i, int64_t x) {
     switch (v->dtype) {
     case MIM_F64: ((double *)v->data)[i] = (double)x; break;
     case MIM_I64: ((int64_t *)v->data)[i] = x; break;
+    case MIM_F32: ((float *)v->data)[i] = (float)x; break;
+    case MIM_I32: ((int32_t *)v->data)[i] = (int32_t)(uint32_t)x; break; /* wraps, as i32 arithmetic does */
     case MIM_BOOL: ((uint8_t *)v->data)[i] = x != 0; break;
     default: ((uint8_t *)v->data)[i] = (uint8_t)x; break;
     }
@@ -1077,6 +1092,8 @@ static const char *dtname(const mim_val *v) {
     if (v->dtype == MIM_FN) return "function";
     if (v->dtype == MIM_MAP) return "map";
     if (v->dtype == MIM_U8) return v->rank == 0 ? "i64" : "[u8]";
+    if (v->dtype == MIM_F32) return v->rank == 0 ? "f32" : "[f32]";
+    if (v->dtype == MIM_I32) return v->rank == 0 ? "i32" : "[i32]";
     return v->rank == 0 ? s[v->dtype] : vs[v->dtype];
 }
 
@@ -1101,6 +1118,40 @@ mim_val *mim_float(double x) {
     mim_val *v = alloc(MIM_F64, 0, 1);
     ((double *)v->data)[0] = x;
     return v;
+}
+
+mim_val *mim_float32(double x) {
+    mim_val *v = alloc(MIM_F32, 0, 1);
+    ((float *)v->data)[0] = (float)x;
+    return v;
+}
+
+mim_val *mim_int32(int64_t x) {
+    mim_val *v = alloc(MIM_I32, 0, 1);
+    ((int32_t *)v->data)[0] = (int32_t)(uint32_t)x;
+    return v;
+}
+
+/* The element type of an arithmetic result. Floats beat integers; between
+ * two widths of the same kind, a list keeps its own type against a single
+ * value (`[f32] * 0.5` is `[f32]`), else the wider wins. The type checker
+ * (types.rs binary_ty) follows the same rules. */
+static int arith_dtype(int a, int ra, int b, int rb) {
+    int fa = IS_FLOAT(a), fb = IS_FLOAT(b);
+    if (fa != fb) return fa ? a : b;
+    if (fa) {
+        if (a == b) return a;
+        if ((ra == 0) != (rb == 0)) return ra ? a : b;
+        return MIM_F64;
+    }
+    int ia = a == MIM_I32 ? 32 : 64, ib = b == MIM_I32 ? 32 : 64;
+    int sa = a == MIM_BOOL || a == MIM_U8 || a == MIM_CHAR, sb = b == MIM_BOOL || b == MIM_U8 || b == MIM_CHAR;
+    if (ia == 32 && (ib == 32 || sb)) return MIM_I32;
+    if (ib == 32 && sa) return MIM_I32;
+    if (ia == 32 || ib == 32) {
+        if ((ra == 0) != (rb == 0)) return ra ? (ia == 32 ? MIM_I32 : MIM_I64) : (ib == 32 ? MIM_I32 : MIM_I64);
+    }
+    return MIM_I64;
 }
 
 mim_val *mim_bool(int64_t x) {
@@ -1169,7 +1220,7 @@ mim_val *mim_from_cstr(const char *s) {
 
 static int join_dtype(int a, int b) {
     if (a == b) return a;
-    return (a == MIM_F64 || b == MIM_F64) ? MIM_F64 : MIM_I64;
+    return arith_dtype(a, 0, b, 0);
 }
 
 static void retain_children(mim_val *v) {
@@ -1330,7 +1381,7 @@ static void binop_range(void *vc, int64_t lo, int64_t hi) {
     binop_ctx *c = (binop_ctx *)vc;
     if (binop_fast(c, lo, hi)) return;
     int op = c->op;
-    int floaty = c->a->dtype == MIM_F64 || c->b->dtype == MIM_F64;
+    int floaty = IS_FLOAT(c->a->dtype) || IS_FLOAT(c->b->dtype);
     for (int64_t i = lo; i < hi; i++) {
         int64_t ia = i * c->sa, ib = i * c->sb;
         mim_val *r = c->r;
@@ -1447,8 +1498,9 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         n = a->len;
         like = a;
     }
-    int floaty = a->dtype == MIM_F64 || b->dtype == MIM_F64;
-    int dt = is_cmp(op) ? MIM_BOOL : (op == OP_DIV || floaty) ? MIM_F64 : MIM_I64;
+    int floaty = IS_FLOAT(a->dtype) || IS_FLOAT(b->dtype);
+    int dt = is_cmp(op) ? MIM_BOOL : arith_dtype(a->dtype, a->rank, b->dtype, b->rank);
+    if (op == OP_DIV && !IS_FLOAT(dt)) dt = MIM_F64; /* integers divided: a float */
     if (IS_BITOP(op)) {
         if (floaty || a->dtype == MIM_CHAR || b->dtype == MIM_CHAR) mim_panic("bitwise operators need integers");
         /* bool & bool stays bool (non-short-circuit logic on masks) */
@@ -1469,18 +1521,19 @@ static void unop_range(void *vc, int64_t lo, int64_t hi) {
         if (c->op == UOP_NOT) seti(c->r, i, getf(c->a, i) == 0);
         else if (c->op == UOP_BNOT) seti(c->r, i, c->a->dtype == MIM_BOOL ? !geti(c->a, i) : ~geti(c->a, i));
         else if (c->op == UOP_ABS) {
-            if (c->a->dtype == MIM_F64) setf(c->r, i, fabs(getf(c->a, i)));
+            if (IS_FLOAT(c->a->dtype)) setf(c->r, i, fabs(getf(c->a, i)));
             else { int64_t x = geti(c->a, i); seti(c->r, i, x < 0 ? -x : x); }
         }
-        else if (c->a->dtype == MIM_F64) setf(c->r, i, -getf(c->a, i));
+        else if (IS_FLOAT(c->a->dtype)) setf(c->r, i, -getf(c->a, i));
         else seti(c->r, i, -geti(c->a, i));
     }
 }
 
 mim_val *mim_unop(int32_t op, mim_val *a) {
     need(a, "operator");
-    if (op == UOP_BNOT && (a->dtype == MIM_F64 || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
-    int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (a->dtype == MIM_F64 ? MIM_F64 : MIM_I64);
+    if (op == UOP_BNOT && (IS_FLOAT(a->dtype) || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
+    int keep = a->dtype == MIM_F64 || a->dtype == MIM_F32 || a->dtype == MIM_I32;
+    int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (keep ? a->dtype : MIM_I64);
     mim_val *r = alloc_like(dt, a);
     unop_ctx c = {op, a, r};
     parallel_for(a->len, unop_range, &c);
@@ -1534,6 +1587,18 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     case MIM_F64: {
         double x = getf(v, i);
         snprintf(buf, sizeof buf, "%.15g", x);
+        sb_str(b, buf);
+        if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
+        break;
+    }
+    case MIM_I32: sb_i64(b, geti(v, i)); break;
+    case MIM_F32: {
+        /* the shortest text that reads back as the same f32 */
+        float x = ((const float *)v->data)[i];
+        for (int prec = 6; prec <= 9; prec++) {
+            snprintf(buf, sizeof buf, "%.*g", prec, (double)x);
+            if (strtof(buf, NULL) == x) break;
+        }
         sb_str(b, buf);
         if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
         break;
@@ -1731,12 +1796,12 @@ static void slot_init(mim_val *o, int64_t i, mim_val *v) {
     }
     uint64_t bits;
     if ((o->desc->fbits >> i) & 1) {
-        double x = v->dtype == MIM_F64 ? getf(v, 0) : (double)geti(v, 0);
+        double x = IS_FLOAT(v->dtype) ? getf(v, 0) : (double)geti(v, 0);
         memcpy(&bits, &x, sizeof bits);
     } else if ((o->desc->bbits >> i) & 1) {
-        bits = v->dtype == MIM_F64 ? getf(v, 0) != 0 : geti(v, 0) != 0;
+        bits = IS_FLOAT(v->dtype) ? getf(v, 0) != 0 : geti(v, 0) != 0;
     } else {
-        if (v->dtype == MIM_F64) {
+        if (IS_FLOAT(v->dtype)) {
             double x = getf(v, 0);
             if (x != (double)(int64_t)x) mim_panic("an integer field cannot hold a fraction");
             bits = (uint64_t)(int64_t)x;
@@ -1969,7 +2034,22 @@ typedef struct {
 static void reduce_range(void *vc, int64_t lo, int64_t hi) {
     reduce_ctx *c = (reduce_ctx *)vc;
     int64_t slot = lo / g_grain;
-    if (c->pf) {
+    if (c->pf && c->a->dtype != MIM_F64) {
+        /* f32: every step rounded to f32 (the result of f32 arithmetic) */
+        int r32 = c->a->dtype == MIM_F32;
+        double acc = getf(c->a, lo);
+        for (int64_t i = lo + 1; i < hi; i++) {
+            double x = getf(c->a, i);
+            switch (c->prim) {
+            case P_SUM: acc += x; break;
+            case P_PRODUCT: acc *= x; break;
+            case P_MAX: acc = x > acc ? x : acc; break;
+            case P_MIN: acc = x < acc ? x : acc; break;
+            }
+            if (r32) acc = (double)(float)acc;
+        }
+        c->pf[slot] = acc;
+    } else if (c->pf) {
         const double *x = (const double *)c->a->data;
         double acc = x[lo];
         switch (c->prim) {
@@ -2002,7 +2082,8 @@ static void reduce_rows_range(void *vc, int64_t lo, int64_t hi) {
     int64_t row = c->row;
     for (int64_t i = lo; i < hi; i++) {
         int64_t base = i * row;
-        if (c->r->dtype == MIM_F64) {
+        if (IS_FLOAT(c->r->dtype)) {
+            int r32 = c->r->dtype == MIM_F32;
             double acc = c->prim == P_PRODUCT ? 1.0 : c->prim == P_SUM ? 0.0 : getf(c->a, base);
             for (int64_t j = 0; j < row; j++) {
                 double x = getf(c->a, base + j);
@@ -2012,8 +2093,9 @@ static void reduce_rows_range(void *vc, int64_t lo, int64_t hi) {
                 case P_MAX: acc = x > acc ? x : acc; break;
                 case P_MIN: acc = x < acc ? x : acc; break;
                 }
+                if (r32) acc = (double)(float)acc;
             }
-            ((double *)c->r->data)[i] = acc;
+            setf(c->r, i, acc);
         } else {
             int64_t acc = c->prim == P_PRODUCT ? 1 : c->prim == P_SUM ? 0 : geti(c->a, base);
             for (int64_t j = 0; j < row; j++) {
@@ -2025,7 +2107,7 @@ static void reduce_rows_range(void *vc, int64_t lo, int64_t hi) {
                 case P_MIN: acc = x < acc ? x : acc; break;
                 }
             }
-            ((int64_t *)c->r->data)[i] = acc;
+            seti(c->r, i, acc);
         }
     }
 }
@@ -2037,7 +2119,8 @@ static mim_val *reduce(int prim, mim_val *a) {
         /* +/ ×/ ⌈/ ⌊/ on a matrix reduce each row: the result drops the last axis */
         int64_t row = dim_of(a, a->rank - 1);
         if (row == 0 && (prim == P_MAX || prim == P_MIN)) mim_panic("maximum/minimum of empty rows");
-        mim_val *r = alloc_shaped(a->dtype == MIM_F64 ? MIM_F64 : MIM_I64, a->rank - 1, SHAPE(a));
+        int rdt = IS_FLOAT(a->dtype) || a->dtype == MIM_I32 ? a->dtype : MIM_I64;
+        mim_val *r = alloc_shaped(rdt, a->rank - 1, SHAPE(a));
         rows_ctx c = {prim, a, r, row};
         parallel_for(r->len, reduce_rows_range, &c);
         return r;
@@ -2047,7 +2130,7 @@ static mim_val *reduce(int prim, mim_val *a) {
         if (prim == P_PRODUCT) return mim_int(1);
         mim_panic("maximum/minimum of an empty array");
     }
-    int f = a->dtype == MIM_F64;
+    int f = IS_FLOAT(a->dtype), r32 = a->dtype == MIM_F32;
     int64_t nc = nchunks_of(a->len);
     reduce_ctx c = {prim, a, NULL, NULL};
     if (f) c.pf = (double *)malloc(sizeof(double) * (size_t)nc);
@@ -2064,8 +2147,9 @@ static mim_val *reduce(int prim, mim_val *a) {
             case P_MAX: acc = x > acc ? x : acc; break;
             case P_MIN: acc = x < acc ? x : acc; break;
             }
+            if (r32) acc = (double)(float)acc;
         }
-        r = mim_float(acc);
+        r = r32 ? mim_float32(acc) : mim_float(acc);
         free(c.pf);
     } else {
         int64_t acc = c.pi[0];
@@ -2078,7 +2162,7 @@ static mim_val *reduce(int prim, mim_val *a) {
             case P_MIN: acc = x < acc ? x : acc; break;
             }
         }
-        r = mim_int(acc);
+        r = a->dtype == MIM_I32 ? mim_int32(acc) : mim_int(acc); /* (i32: wrapping, as each step would) */
         free(c.pi);
     }
     return r;
@@ -2143,7 +2227,7 @@ static mim_val *transpose(mim_val *a) {
 static mim_val *reshape(mim_val *a, mim_val *b) {
     if (a->dtype == MIM_OBJ || a->dtype == MIM_MAP || a->dtype == MIM_FN)
         mim_panic("⥊ (reshape) works on arrays of numbers, bools, characters and strings");
-    if (b->dtype == MIM_F64 || IS_HANDLES(b) || b->rank > 1) mim_panic("⥊ (reshape): the new shape must be a list of integers, e.g. [2 3]");
+    if (IS_FLOAT(b->dtype) || IS_HANDLES(b) || b->rank > 1) mim_panic("⥊ (reshape): the new shape must be a list of integers, e.g. [2 3]");
     int R = b->rank == 0 ? 1 : (int)b->len;
     if (R == 0) mim_panic("⥊ (reshape): the shape needs at least one dimension");
     if (R > 16) mim_panic("⥊ (reshape): at most 16 dimensions");
@@ -2327,7 +2411,7 @@ mim_val *mim_prim1(int32_t prim, mim_val *a) {
     need(a, "primitive");
     switch (prim) {
     case P_IOTA: {
-        if (a->rank != 0 || a->dtype == MIM_F64) mim_panic("⍳ (iota) expects an integer scalar");
+        if (a->rank != 0 || IS_FLOAT(a->dtype)) mim_panic("⍳ (iota) expects an integer scalar");
         int64_t n = geti(a, 0);
         if (n < 0) mim_panic("⍳ (iota) of a negative number");
         mim_val *r = alloc(MIM_I64, 1, n);
@@ -2381,7 +2465,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     switch (prim) {
     case P_TAKE:
     case P_DROP: {
-        if (b->rank != 0 || b->dtype == MIM_F64) mim_panic("take/drop count must be an integer scalar");
+        if (b->rank != 0 || IS_FLOAT(b->dtype)) mim_panic("take/drop count must be an integer scalar");
         if (a->rank == 0) mim_panic("take/drop expects a vector on the left");
         int64_t n = geti(b, 0), len = dim_of(a, 0);
         int64_t k = n < 0 ? -n : n;
@@ -2396,7 +2480,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     case P_RESHAPE: return reshape(a, b);
     case P_MATMUL: return matmul(a, b);
     case P_RANGE: {
-        if (a->rank != 0 || b->rank != 0 || a->dtype == MIM_F64 || b->dtype == MIM_F64)
+        if (a->rank != 0 || b->rank != 0 || IS_FLOAT(a->dtype) || IS_FLOAT(b->dtype))
             mim_panic("‥ (range) expects two integer scalars");
         int64_t lo = geti(a, 0), hi = geti(b, 0), n = hi > lo ? hi - lo : 0;
         mim_val *r = alloc(MIM_I64, 1, n);
@@ -2438,6 +2522,8 @@ static mim_val *scalar_at(const mim_val *xs, int64_t i) {
         return e;
     }
     case MIM_F64: return mim_float(getf(xs, i));
+    case MIM_F32: return mim_float32(getf(xs, i));
+    case MIM_I32: return mim_int32(geti(xs, i));
     case MIM_BOOL: return mim_bool(geti(xs, i));
     case MIM_CHAR: {
         mim_val *v = alloc(MIM_CHAR, 0, 1);
@@ -3099,7 +3185,7 @@ static int64_t check_index(mim_val *xs, mim_val *i) {
     need(xs, "index");
     need(i, "index");
     if (xs->rank == 0) mim_panic("cannot index a scalar");
-    if (i->rank != 0 || i->dtype == MIM_F64) mim_panic("index must be an integer scalar");
+    if (i->rank != 0 || IS_FLOAT(i->dtype)) mim_panic("index must be an integer scalar");
     int64_t k = geti(i, 0);
     if (k < 0 || k >= xs->len) {
         char buf[128];
@@ -3123,7 +3209,7 @@ static mim_val *copy_whole(mim_val *a) {
 /* a scalar index into the leading axis */
 static int64_t check_index_dim(mim_val *xs, mim_val *i) {
     need(i, "index");
-    if (i->rank != 0 || i->dtype == MIM_F64 || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
+    if (i->rank != 0 || IS_FLOAT(i->dtype) || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
     int64_t k = geti(i, 0), d = dim_of(xs, 0);
     if (k < 0 || k >= d) {
         char buf[128];
@@ -3153,7 +3239,7 @@ static int64_t multi_offset(mim_val *xs, mim_val *t, int *nidx, int64_t *cell) {
     int64_t off = 0, stride = xs->len;
     for (int k = 0; k < n; k++) {
         mim_val *ik = h[k];
-        if (ik->rank != 0 || ik->dtype == MIM_F64 || IS_HANDLES(ik)) mim_panic("index must be an integer scalar");
+        if (ik->rank != 0 || IS_FLOAT(ik->dtype) || IS_HANDLES(ik)) mim_panic("index must be an integer scalar");
         int64_t d = dim_of(xs, k), v = geti(ik, 0);
         if (v < 0 || v >= d) {
             char buf[160];
@@ -3188,11 +3274,33 @@ void mim_index_fail(mim_val *xs, int64_t i) {
  * reference; `v` stays the caller's. Anything that cannot be converted is
  * returned as it is, for the usual error at its use. */
 mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
-    if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL)) {
+    /* f32 and i32 lists: from any list of numbers (rounded to f32; i32
+     * stops the program on a value it cannot hold, or a fraction) */
+    if (v && v->rank >= 1 && (dtype == MIM_F32 || dtype == MIM_I32) && v->dtype != dtype && !IS_HANDLES(v) && v->dtype != MIM_CHAR) {
+        int64_t n = v->len;
+        mim_val *r = alloc(dtype, v->rank, n);
+        if (v->rank >= 2) set_shape(r, v->rank, SHAPE(v));
+        for (int64_t k = 0; k < n; k++) {
+            if (dtype == MIM_F32) {
+                ((float *)r->data)[k] = (float)getf(v, k);
+            } else {
+                double x = getf(v, k);
+                if (x != (double)(int32_t)x) {
+                    mim_release(r);
+                    char buf[128];
+                    snprintf(buf, sizeof buf, "an i32 cannot hold %.17g", x);
+                    mim_panic(buf);
+                }
+                ((int32_t *)r->data)[k] = (int32_t)x;
+            }
+        }
+        return r;
+    }
+    if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL && v->dtype != MIM_I32 && v->dtype != MIM_F32)) {
         mim_retain(v);
         return v;
     }
-    if (dtype != MIM_F64 && !(dtype == MIM_I64 && v->dtype == MIM_BOOL)) {
+    if (dtype != MIM_F64 && !(dtype == MIM_I64 && (v->dtype == MIM_BOOL || v->dtype == MIM_I32))) {
         mim_retain(v);
         return v;
     }
@@ -3200,11 +3308,33 @@ mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
     mim_val *r = alloc(dtype, v->rank, n);
     if (v->rank >= 2) set_shape(r, v->rank, SHAPE(v));
     for (int64_t k = 0; k < n; k++) {
-        double x = v->dtype == MIM_I64 ? (double)((int64_t *)v->data)[k] : (double)((uint8_t *)v->data)[k];
-        if (dtype == MIM_F64) ((double *)r->data)[k] = x;
-        else ((int64_t *)r->data)[k] = (int64_t)x;
+        if (dtype == MIM_F64) ((double *)r->data)[k] = getf(v, k);
+        else ((int64_t *)r->data)[k] = geti(v, k);
     }
     return r;
+}
+
+/* A scalar as f32 or i32 (a `let x: f32 = …` or an f32 field): rounded to
+ * f32; i32 stops the program on a value it cannot hold. */
+mim_val *mim_scalar_as(mim_val *v, int32_t dtype) {
+    need(v, "a number");
+    if (v->rank != 0 || IS_HANDLES(v) || v->dtype == MIM_CHAR) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "expected a number, found %s", dtname(v));
+        mim_panic(buf);
+    }
+    if (v->dtype == dtype) {
+        mim_retain(v);
+        return v;
+    }
+    if (dtype == MIM_F32) return mim_float32(getf(v, 0));
+    double x = getf(v, 0);
+    if (x != (double)(int32_t)x) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "an i32 cannot hold %.17g", x);
+        mim_panic(buf);
+    }
+    return mim_int32((int64_t)x);
 }
 
 /* A vector of `n` elements stored as `dtype`, for a list the compiler keeps
@@ -3312,17 +3442,17 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         return;
     }
     int newdt = xs->dtype;
-    if (v->dtype == MIM_F64 && xs->dtype != MIM_F64) newdt = MIM_F64;
+    if (IS_FLOAT(v->dtype) && !IS_FLOAT(xs->dtype)) newdt = MIM_F64;
     if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
         mim_val *c = alloc_like(newdt, xs);
         for (int64_t j = 0; j < xs->len; j++) {
-            if (newdt == MIM_F64) setf(c, j, getf(xs, j));
+            if (IS_FLOAT(newdt)) setf(c, j, getf(xs, j));
             else seti(c, j, geti(xs, j));
         }
         mim_release(xs);
         *slot = xs = c;
     }
-    if (xs->dtype == MIM_F64) setf(xs, k, getf(v, 0));
+    if (IS_FLOAT(xs->dtype)) setf(xs, k, getf(v, 0));
     else seti(xs, k, geti(v, 0));
 }
 
@@ -3354,7 +3484,7 @@ int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
 
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
     if (type_ok(v, ty)) return;
-    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function", "[u8]"};
+    static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function", "[u8]", "f32 scalar", "i32 scalar", "[f32]", "[i32]"};
     char buf[256];
     snprintf(buf, sizeof buf, "type error: %s expected %s, found %s", what, names[ty], dtname(v));
     mim_panic(buf);
@@ -3365,8 +3495,8 @@ static int type_ok(mim_val *v, int32_t ty) {
     if (v) {
         int s = v->rank == 0;
         switch (ty) {
-        case TY_INT: ok = s && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
-        case TY_FLOAT: ok = s && (v->dtype == MIM_F64 || v->dtype == MIM_I64 || v->dtype == MIM_BOOL); break;
+        case TY_INT: ok = s && (v->dtype == MIM_I64 || v->dtype == MIM_BOOL || v->dtype == MIM_I32); break;
+        case TY_FLOAT: ok = s && (v->dtype == MIM_F64 || v->dtype == MIM_I64 || v->dtype == MIM_BOOL || v->dtype == MIM_F32 || v->dtype == MIM_I32); break;
         case TY_BOOL: ok = s && v->dtype == MIM_BOOL; break;
         case TY_CHAR: ok = s && v->dtype == MIM_CHAR; break;
         case TY_STR: ok = !s && v->dtype == MIM_CHAR; break;
@@ -3375,6 +3505,10 @@ static int type_ok(mim_val *v, int32_t ty) {
         case TY_BOOLVEC: ok = !s && v->dtype == MIM_BOOL; break;
         case TY_FN: ok = v->dtype == MIM_FN; break;
         case TY_BYTES: ok = !s && v->dtype == MIM_U8; break;
+        case TY_F32: ok = s && v->dtype == MIM_F32; break;
+        case TY_I32: ok = s && v->dtype == MIM_I32; break;
+        case TY_F32VEC: ok = !s && v->dtype == MIM_F32; break;
+        case TY_I32VEC: ok = !s && v->dtype == MIM_I32; break;
         }
     }
     return ok;

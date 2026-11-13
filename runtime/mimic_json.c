@@ -917,6 +917,8 @@ static void jenc_elems(sbuf *b, const mim_val *v, int64_t from, int64_t n, int i
         case MIM_BOXED: jenc(b, ((mim_val *const *)v->data)[i], indent, depth + 1); continue;
         case MIM_I64: sb_i64(b, geti(v, i)); continue;
         case MIM_F64: jenc_num(b, getf(v, i)); continue;
+        case MIM_I32: sb_i64(b, geti(v, i)); continue;
+        case MIM_F32: { sbuf t = {0}; fmt_elem(&t, v, i); sb_put(b, t.p, t.n); free(t.p); continue; } /* shortest f32 text */
         case MIM_BOOL: sb_str(b, geti(v, i) ? "true" : "false"); continue;
         default: break;
         }
@@ -1069,6 +1071,8 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
             return;
         }
         case MIM_F64: jenc_num(b, getf(v, 0)); return;
+        case MIM_I32: sb_i64(b, geti(v, 0)); return;
+        case MIM_F32: { sbuf t = {0}; fmt_elem(&t, v, 0); sb_put(b, t.p, t.n); free(t.p); return; }
         case MIM_BOOL: sb_str(b, geti(v, 0) ? "true" : "false"); return;
         case MIM_CHAR: {
             char c = (char)geti(v, 0);

@@ -114,7 +114,7 @@ static mim_val *impl_eprint(mim_val *v) {
 static mim_val *impl_exit(mim_val *code) {
     fflush(stdout);
     fflush(stderr);
-    exit((int)(code && code->rank == 0 && code->dtype != MIM_F64 ? geti(code, 0) : 1));
+    exit((int)(code && code->rank == 0 && !IS_FLOAT(code->dtype) ? geti(code, 0) : 1));
     return NULL;
 }
 
@@ -456,7 +456,7 @@ static mim_val *impl_clock(void) {
 }
 
 static mim_val *impl_sleep(mim_val *d) {
-    int64_t ns = d && d->rank == 0 ? (d->dtype == MIM_F64 ? (int64_t)getf(d, 0) : geti(d, 0)) : 0;
+    int64_t ns = d && d->rank == 0 ? (IS_FLOAT(d->dtype) ? (int64_t)getf(d, 0) : geti(d, 0)) : 0;
     if (ns <= 0) return NULL;
 #if MIM_GREEN
     if (t_co) { /* a coroutine waits on the event loop's timer */
@@ -1052,7 +1052,7 @@ static void need_bytes(const mim_val *b, const char *fn) {
 /* [72 105] → bytes; every element must be 0 … 255 */
 mim_val *mim_std_bytes_from(mim_val *xs) {
     need(xs, "bytes::from");
-    if (xs->rank != 1 || IS_HANDLES(xs) || xs->dtype == MIM_F64) mim_panic("bytes::from: expected a list of integers");
+    if (xs->rank != 1 || IS_HANDLES(xs) || IS_FLOAT(xs->dtype)) mim_panic("bytes::from: expected a list of integers");
     mim_val *r = alloc(MIM_U8, 1, xs->len);
     for (int64_t i = 0; i < xs->len; i++) {
         int64_t v = geti(xs, i);

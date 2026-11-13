@@ -389,14 +389,23 @@ Array literals can hold strings, records or other arrays: `["ada" "bob"]`, `[u, 
 ## Types (annotations)
 
 The annotation types are:
-* scalar C dtypes: `i8 … i64`, `u8 … u64`, `isize`, `usize`, `f32`, `f64`, `bool`;
+* numbers: `i64`, `f64`, `i32`, `f32`, `bool` (and C's `i8`, `i16`, `u8 … u64`, `isize`, `usize`, which are `i64` in Mimic code);
 * `str`;
-* arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`;
+* arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`, and the compact `[f32]`, `[i32]`, `[u8]`;
 * records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
 * tuples: `(i64, str)`;
 * maps: `[str: i64]`;
 * types from other modules by path: `http::Response`, `time::DateTime`;
 * function types: `fn(i64) -> i64`.
+
+### 32-bit numbers: `f32` and `i32`
+
+`f32` and `i32` (and lists of them, `[f32]`, `[i32]`) take 4 bytes a number instead of 8. They are real types: `f32` arithmetic rounds every result to an f32, and `i32` arithmetic wraps around, as in C. An annotation converts: `let xs: [f32] = ⍳ 5 * 0.1` rounds each number to an f32, and a value an `i32` cannot hold stops the program.
+
+* **Mixing.** Floats beat integers. Between two widths of the same kind, a list keeps its own type against a single value: `xs * 0.5` on an `[f32]` is an `[f32]`, and `ys + 1` on an `[i32]` is an `[i32]`. Otherwise the wider type wins: an `f32` times an `f64` is an `f64`.
+* **Division.** `/` of integers gives an `f64`, as always; `div` keeps an `i32`.
+* **Sums.** `+/` of an `[f32]` adds in f32, and of an `[i32]` wraps.
+* **The other C widths** (`i8`, `i16`, `u16`, `u32`, `u64`, `isize`, `usize`) are still `i64` in Mimic code; they keep their meaning for C functions.
 
 ### Generics
 
