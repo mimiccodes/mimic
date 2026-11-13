@@ -70,5 +70,16 @@ mimic glyphs                # glyph ↔ word ↔ ASCII digraph for everything
 | `--emit-ir`, `--emit-net` | Write the LLVM IR or the interaction nets next to the binary |
 | `--emit-header` | Write a C header for `extern "C" fn` exports |
 | `--no-net` | Compile everything as plain native code |
+| `--strict-math` | No fused multiply-add (see below) |
+
+### Floating point: fused multiply-add
+
+Like C compilers, Mimic lets the CPU compute `a * b + c` as one *fused
+multiply-add* when both operations sit in the same expression. That is
+faster, and slightly more accurate since there's one rounding instead of two. The cost
+is that a result can differ in its last bits between a CPU that has the
+instruction and one that does not. Nothing is ever reordered: `(a + b) + c`
+stays exactly that. When you need the same bits on every machine (golden
+files, simulations compared across platforms), build with `--strict-math`.
 
 That's the tour. For every detail, see the reference in [`docs/`](../docs/).

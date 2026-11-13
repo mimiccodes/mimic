@@ -54,6 +54,10 @@ struct ProfileArgs {
     /// the oldest model of the family (apple-m1, x86-64-v2), runs on all of them
     #[arg(long, value_name = "CPU")]
     cpu: Option<String>,
+    /// No fused multiply-add: `a * b + c` rounds twice, giving bit-identical
+    /// results on every CPU. By default Mimic fuses them, like C compilers
+    #[arg(long)]
+    strict_math: bool,
 }
 
 /// `default_release`: `build` produces the fastest binary unless told otherwise;
@@ -63,6 +67,7 @@ fn profile_of(input: &Input, args: ProfileArgs, default_release: bool) -> Profil
     let mut p = Profile::for_input(input, release);
     p.net = !args.no_net;
     p.cpu = args.cpu;
+    p.strict_math = args.strict_math;
     p
 }
 

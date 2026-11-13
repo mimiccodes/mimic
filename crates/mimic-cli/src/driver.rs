@@ -49,6 +49,8 @@ impl Input {
 
 pub struct Profile {
     pub release: bool,
+    /// `--strict-math`: no fused multiply-adds (bit-identical on every CPU).
+    pub strict_math: bool,
     /// Compile pure functions to interaction nets (default on).
     pub net: bool,
     pub opt: u8,
@@ -66,7 +68,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -864,6 +866,7 @@ fn codegen_and_link(
             cpu: cpu.clone(),
             features: features.clone(),
             abi: abi.clone(),
+            strict_math: profile.strict_math,
         },
         &obj,
         emit_ir.then_some(ir.as_path()),

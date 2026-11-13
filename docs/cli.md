@@ -10,7 +10,7 @@
 | `mimic run --terminal [file.mim]`, `mimic run --window [file.mim]` | Show a `ui` program in the terminal, or in a native window, instead of the browser (sets `MIMIC_UI`). |
 | `mimic run --web [file.mim] [--port 8080]` | Build a `ui` program as a web page (WebAssembly) and serve it at `http://localhost:8080/`. |
 | `mimic build --web [file.mim]` | Write the web page: `<name>-web/index.html` and `app.wasm`, ready for any static web server. |
-| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--cpu CPU] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively. |
+| `mimic build [file.mim] [--debug\|--release] [--target T] [--all-targets] [--emit-ir] [--emit-net] [--no-net] [--cpu CPU] [--strict-math] [--emit-json]` | Compile. A binary produces `target/<profile>/<name>`; a library produces `lib<name>.a`. `--emit-net` writes the generated interaction nets; `--no-net` compiles everything natively; `--strict-math` turns off fused multiply-add (on by default, as in C compilers) for bit-identical float results on every CPU. |
 | `mimic check [file.mim] [--emit-json] [--fix]` | Parse, resolve and check everything without generating code. `--emit-json` prints the result as JSON for editors and agents; `--fix` applies the machine-applicable fixes. See [diagnostics.md](diagnostics.md). |
 | `mimic explain [code] [--emit-json]` | Explain an error code (`mimic explain E0401`), or list them all. |
 | `mimic mod init` | Create `mod.mim`. |

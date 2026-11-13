@@ -61,6 +61,10 @@ pub struct Settings {
     pub features: Option<String>,
     /// Target ABI name (`lp64d`, `ilp32f`, `elfv2`…), as Clang chooses it.
     pub abi: Option<String>,
+    /// No fused multiply-add: `a * b + c` rounds twice, the same on every
+    /// CPU (`--strict-math`). Off by default: like C compilers, Mimic fuses
+    /// them within an expression (faster; can differ in the last bits).
+    pub strict_math: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -213,6 +217,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         futures: Vec::new(),
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
+        contract: !settings.strict_math,
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -378,6 +383,8 @@ struct Cg<'ctx, 'p> {
     lazies: Vec<(String, *const Expr)>,
     /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
     opt_level: u8,
+    /// Float `+ - ×` may fuse into multiply-adds (Settings::strict_math off).
+    contract: bool,
     /// This thread's heap (`mim_heap()`), fetched once at the top of each
     /// function that allocates or frees inline.
     heaps: std::cell::RefCell<Vec<(FunctionValue<'ctx>, PointerValue<'ctx>)>>,
@@ -3058,6 +3065,17 @@ impl<'ctx> Cg<'ctx, '_> {
         }
     }
 
+    /// A float `+ - ×` that may fuse with its neighbours into a multiply-add
+    /// (unless --strict-math): what C compilers do within an expression.
+    pub(crate) fn contracted(&self, v: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        if self.contract
+            && let Some(i) = inkwell::values::BasicValue::as_instruction_value(&v)
+        {
+            let _ = i.set_fast_math_flags(inkwell::values::FastMathFlags::AllowContract);
+        }
+        v
+    }
+
     fn scalar_binary(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
         use BinOp::*;
         let bld = &self.b;
@@ -3075,9 +3093,9 @@ impl<'ctx> Cg<'ctx, '_> {
             let y = self.to_f64(b)?;
             let cmp = |p: FloatPredicate| -> R<V<'ctx>> { Ok(V::B(bld.build_float_compare(p, x, y, "").s()?)) };
             return match op {
-                Add => Ok(V::F(bld.build_float_add(x, y, "").s()?)),
-                Sub => Ok(V::F(bld.build_float_sub(x, y, "").s()?)),
-                Mul => Ok(V::F(bld.build_float_mul(x, y, "").s()?)),
+                Add => Ok(V::F(self.contracted(bld.build_float_add(x, y, "").s()?))),
+                Sub => Ok(V::F(self.contracted(bld.build_float_sub(x, y, "").s()?))),
+                Mul => Ok(V::F(self.contracted(bld.build_float_mul(x, y, "").s()?))),
                 Div => Ok(V::F(bld.build_float_div(x, y, "").s()?)),
                 Mod => Ok(V::F(bld.build_float_rem(x, y, "").s()?)),
                 IntDiv => {

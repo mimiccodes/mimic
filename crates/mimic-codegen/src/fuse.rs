@@ -490,7 +490,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let a = acc.into_float_value();
             let x = self.to_f64(v)?;
             return Ok(match prim {
-                Prim::Product => b.build_float_mul(a, x, "").s()?.into(),
+                Prim::Product => self.contracted(b.build_float_mul(a, x, "").s()?).into(),
                 Prim::Maximum => {
                     let c = b.build_float_compare(FloatPredicate::OGT, x, a, "").s()?;
                     b.build_select(c, x, a, "").s()?
@@ -499,7 +499,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     let c = b.build_float_compare(FloatPredicate::OLT, x, a, "").s()?;
                     b.build_select(c, x, a, "").s()?
                 }
-                _ => b.build_float_add(a, x, "").s()?.into(),
+                _ => self.contracted(b.build_float_add(a, x, "").s()?).into(),
             });
         }
         let a = acc.into_int_value();
