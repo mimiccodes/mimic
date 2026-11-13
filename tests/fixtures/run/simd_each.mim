@@ -1,0 +1,41 @@
+module main
+
+// xs ¨ f with f run on several elements at once (SIMD lanes): lanes leave a
+// loop at different rounds, calls happen only for the lanes that make them,
+// and lengths that are not a multiple of the lane count end one by one
+
+fn steps(n: i64, k: i64) -> i64 {
+    if n == 1 { k } else if n % 2 == 0 { steps(n div 2, k + 1) } else { steps(3 * n + 1, k + 1) }
+}
+
+fn escape(cr: f64, ci: f64, zr: f64, zi: f64, k: i64) -> i64 {
+    if k == 100 {
+        k
+    } else if zr * zr + zi * zi > 4.0 {
+        k
+    } else {
+        escape(cr, ci, zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, k + 1)
+    }
+}
+
+fn half_until(x: f64, limit: f64) -> f64 {
+    if x < limit { x } else { half_until(x * 0.5, limit) }
+}
+
+fn main() {
+    let n = 1003
+    let s = (⍳ n + 1) ¨ (x => steps(x, 0))
+    print(s ↑ 9)
+    print(+/ s)
+    let w = 41
+    let e = ⍳ (w * w) ¨ (p => escape(-2.0 + 2.5 * (p % w) / w, -1.25 + 2.5 * (p div w) / w, 0.0, 0.0, 0))
+    print(+/ e)
+    print(e ↑ 12)
+    // only odd elements loop
+    let o = ⍳ 21 ¨ (i => if i % 2 == 1 { steps(i, 0) } else { -1 })
+    print(o)
+    let h = ⍳ 13 ¨ (i => half_until(i * 1000.0, 3.0))
+    print(h)
+    let m = 7
+    print(⍳ 19 ¨ (i => (i div m) * 100 + i % m))
+}

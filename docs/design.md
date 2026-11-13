@@ -74,6 +74,15 @@ Mimic has **no parallelism annotations**: no `parallel`, `spawn` or `async`. Wha
 * **Panics.** If several threads panic, only the first one reports.
 * **At exit.** In release builds (no leak check) the values `main` still holds when it ends are not freed one by one: the process exits right after, and the system takes the memory back at once. Nothing is lost: releasing a value only ever frees memory. Debug builds free everything and check for leaks.
 
+## SIMD across elements (F5)
+
+`xs ¨ f`, where `f` (a named function or a lambda, and what it calls) is pure and works on `f64`, `f32`, `i64`, `i32` and truth values, also gets a *vector version* (`crates/mimic-codegen/src/simd.rs`) that computes 8 elements at once, in the lanes of vectors, as ISPC does:
+* An `if` computes both sides for every lane and picks per lane; nothing in such code can fail, so a side a lane does not take is harmless. Calls see the condition: a call gets the lanes that take it as a mask, and the other lanes do not run it.
+* A function calling itself last is a loop: each lane either finishes, keeping its result, or goes round again with new parameters; the loop runs while any lane goes round.
+* The kernel runs groups of 8 through the vector version and the remaining elements one by one through the scalar function. Arithmetic is the scalar code's, lane by lane, so the results are the same. Integer `div` and `%` qualify by a number written in the program, or by a value the lambda captures (checked once: 0 or -1 runs everything one by one, and the scalar code reports a division by zero as always).
+
+With 8 lanes (several vector registers each, so their chains of operations overlap), mandelbrot on one core goes from 2.65 s to 1.75 s, about 0.7× C.
+
 ## GPU kernels
 
 A fused map (see kernel fusion) that the GPU computes *exactly* as the CPU does is also compiled to a Metal kernel (`crates/mimic-codegen/src/gpu.rs`); the runtime (`runtime/mimic_gpu.c`) runs it on the GPU when that pays off. No annotation: like threads, it is the compiler's and runtime's call.

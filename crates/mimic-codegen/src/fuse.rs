@@ -59,7 +59,8 @@ pub(crate) enum Node {
     /// `heavy`: `f` can reach recursion, so one element may be a lot of
     /// work however few elements there are (see `timed_apply`).
     /// `msl`: the function for a GPU kernel (gpufn.rs), when there is one.
-    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool, msl: Option<std::rc::Rc<super::gpufn::MslFn>> },
+    /// `simd`: its vector version (simd.rs), when there is one.
+    Apply { f: String, arg: Box<Node>, caps: Vec<usize>, pt: Ty, rt: Ty, depth: bool, heavy: bool, msl: Option<std::rc::Rc<super::gpufn::MslFn>>, simd: Option<(String, Vec<usize>)> },
     /// `⌽ xs`: element `last - index` of the inner computation (slot: last)
     Rev(usize, Box<Node>),
     /// `xs ↑ n`, `xs ↓ n`: element `index + offset` (slot: offset)
@@ -286,7 +287,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let heavy = self.reaches_recursion(called);
                         let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
                         let msl = self.gpu_wanted().then(|| self.msl_lambda(&args[1], &caps)).flatten().map(std::rc::Rc::new);
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy, msl })
+                        // (the captures it divides by: as slots)
+                        let simd = if self.opt_level >= 2 { self.simd_lambda(&args[1], &caps).map(|(f, g)| (f.get_name().to_str().unwrap().to_string(), g.iter().map(|k| slots[*k]).collect())) } else { None };
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy, msl, simd })
                     }
                     ExprKind::Path(path) => {
                         let fid = self.resolve_fn(path)?;
@@ -296,7 +299,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let spec = self.spec(&k)?;
                         let heavy = self.reaches_recursion(vec![k.clone()]);
                         let msl = self.gpu_wanted().then(|| self.msl_named(&k)).flatten().map(std::rc::Rc::new);
-                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy, msl })
+                        let simd = if self.opt_level >= 2 { self.simd_named(&k, 0).map(|f| (f.get_name().to_str().unwrap().to_string(), Vec::new())) } else { None };
+                        Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy, msl, simd })
                     }
                     _ => Err("internal compiler error: not a fusible ¨".into()),
                 }
@@ -570,8 +574,149 @@ impl<'ctx> Cg<'ctx, '_> {
         })
     }
 
+    /// The kernel of `xs ¨ f` with a vector version of `f` (simd.rs): W
+    /// elements at a time through it, the rest one by one.
+    fn emit_simd_kernel(&mut self, root: &Node, plan: &Plan<'ctx>, el: El) -> R<Option<FunctionValue<'ctx>>> {
+        let Node::Apply { arg, caps, pt, rt, simd: Some((vname, guards)), depth: false, .. } = root else { return Ok(None) };
+        let guards = guards.clone();
+        let Some(vf) = self.module.get_function(vname) else { return Ok(None) };
+        let (arg, caps, pt, rt) = (arg.as_ref().clone(), caps.clone(), *pt, *rt);
+        let w = super::simd::lanes() as u64;
+        self.lambdas += 1;
+        let i64t = self.ctx.i64_type();
+        let ft = self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false);
+        let f = self.module.add_function(&format!("_mimic_kernel_{}", self.lambdas), ft, Some(Linkage::Internal));
+        let kinds: Vec<BasicTypeEnum<'ctx>> = plan.slots.iter().map(|v| v.get_type()).collect();
+        let nslots = kinds.len();
+        let root = root.clone();
+        self.in_new_fn(f, |cg| {
+            let ctxp = f.get_nth_param(0).unwrap().into_pointer_value();
+            let lo = f.get_nth_param(1).unwrap().into_int_value();
+            let hi = f.get_nth_param(2).unwrap().into_int_value();
+            let arr = i64t.array_type((nslots + 3) as u32);
+            let load = |cg: &Self, k: usize, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
+                let p = unsafe { cg.b.build_in_bounds_gep(arr, ctxp, &[i64t.const_zero(), i64t.const_int(k as u64, false)], "").s()? };
+                if t.is_int_type() && t.into_int_type().get_bit_width() == 1 {
+                    let w = cg.b.build_load(i64t, p, "").s()?.into_int_value();
+                    return Ok(cg.b.build_int_truncate(w, cg.ctx.bool_type(), "").s()?.into());
+                }
+                cg.b.build_load(t, p, "").s()
+            };
+            let mut slots = Vec::new();
+            for (k, t) in kinds.iter().enumerate() {
+                slots.push(load(cg, k, *t)?);
+            }
+            let out: BasicValueEnum = load(cg, nslots, cg.ptr.into())?;
+            let mask = {
+                let b1 = cg.ctx.bool_type().const_int(1, false);
+                inkwell::types::VectorType::const_vector(&vec![b1; w as usize])
+            };
+            // W at a time
+            let entry = cg.b.get_insert_block().unwrap();
+            let vhead = cg.ctx.append_basic_block(f, "vhead");
+            let vbody = cg.ctx.append_basic_block(f, "vbody");
+            let shead = cg.ctx.append_basic_block(f, "shead");
+            let sbody = cg.ctx.append_basic_block(f, "sbody");
+            let done = cg.ctx.append_basic_block(f, "done");
+            // a divisor the scalar code would check (0) or overflow on (-1):
+            // everything one by one
+            let mut ok = cg.ctx.bool_type().const_int(1, false);
+            for g in &guards {
+                let v = slots[*g].into_int_value();
+                let v = if v.get_type().get_bit_width() < 64 { cg.b.build_int_s_extend(v, i64t, "").s()? } else { v };
+                let nz = cg.b.build_int_compare(IntPredicate::NE, v, i64t.const_zero(), "").s()?;
+                let nm = cg.b.build_int_compare(IntPredicate::NE, v, i64t.const_all_ones(), "").s()?;
+                ok = cg.b.build_and(ok, nz, "").s()?;
+                ok = cg.b.build_and(ok, nm, "").s()?;
+            }
+            let pre = cg.ctx.append_basic_block(f, "vpre");
+            cg.b.build_conditional_branch(ok, pre, shead).s()?;
+            cg.b.position_at_end(pre);
+            cg.b.build_unconditional_branch(vhead).s()?;
+            cg.b.position_at_end(vhead);
+            let iv = cg.b.build_phi(i64t, "i").s()?;
+            iv.add_incoming(&[(&lo, pre)]);
+            let i = iv.as_basic_value().into_int_value();
+            let end = cg.b.build_int_add(i, i64t.const_int(w, false), "").s()?;
+            let fits = cg.b.build_int_compare(IntPredicate::SLE, end, hi, "").s()?;
+            cg.b.build_conditional_branch(fits, vbody, shead).s()?;
+            cg.b.position_at_end(vbody);
+            let vt = cg.vty_of(pt).ok_or("internal compiler error: simd parameter")?;
+            let mut xv = vt.get_undef();
+            for j in 0..w {
+                let ij = cg.b.build_int_add(i, i64t.const_int(j, false), "").s()?;
+                let x = cg.eval_node(&arg, ij, &slots)?;
+                let x = cg.lane_value(x, pt)?;
+                xv = cg.b.build_insert_element(xv, x, cg.ctx.i32_type().const_int(j, false), "").s()?;
+            }
+            let mut args: Vec<BasicMetadataValueEnum> = vec![xv.into()];
+            for c in &caps {
+                args.push(slots[*c].into());
+            }
+            args.push(mask.into());
+            let r = cg.b.build_call(vf, &args, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: simd result")?.into_vector_value();
+            for j in 0..w {
+                let ij = cg.b.build_int_add(i, i64t.const_int(j, false), "").s()?;
+                let x = cg.b.build_extract_element(r, cg.ctx.i32_type().const_int(j, false), "").s()?;
+                let v = cg.val_of(x, rt, false);
+                cg.store_elem(out, el, ij, v)?;
+            }
+            let vlatch = cg.b.get_insert_block().unwrap();
+            cg.b.build_unconditional_branch(vhead).s()?;
+            iv.add_incoming(&[(&end, vlatch)]);
+            // the rest, one by one
+            cg.b.position_at_end(shead);
+            let jv = cg.b.build_phi(i64t, "j").s()?;
+            jv.add_incoming(&[(&i, vhead), (&lo, entry)]);
+            let j = jv.as_basic_value().into_int_value();
+            let more = cg.b.build_int_compare(IntPredicate::SLT, j, hi, "").s()?;
+            cg.b.build_conditional_branch(more, sbody, done).s()?;
+            cg.b.position_at_end(sbody);
+            let v = cg.eval_node(&root, j, &slots)?;
+            cg.store_elem(out, el, j, v)?;
+            let j1 = cg.b.build_int_add(j, i64t.const_int(1, false), "").s()?;
+            let slatch = cg.b.get_insert_block().unwrap();
+            cg.b.build_unconditional_branch(shead).s()?;
+            jv.add_incoming(&[(&j1, slatch)]);
+            cg.b.position_at_end(done);
+            cg.b.build_return(None).s()?;
+            Ok(())
+        })?;
+        Ok(Some(f))
+    }
+
+    /// An element as a lane of a vector of type `t` (as Apply converts it).
+    fn lane_value(&self, x: V<'ctx>, t: Ty) -> R<BasicValueEnum<'ctx>> {
+        Ok(match t {
+            Ty::F64 => self.to_f64(x)?.into(),
+            Ty::Bool => self.truth(x)?.into(),
+            Ty::F32 | Ty::I32 => {
+                let n = self.narrow_to(x, t, "argument")?;
+                self.basic(n)
+            }
+            _ => self.to_i64(x)?.into(),
+        })
+    }
+
+    fn vty_of(&self, t: Ty) -> Option<inkwell::types::VectorType<'ctx>> {
+        let w = super::simd::lanes();
+        Some(match t {
+            Ty::F64 => self.ctx.f64_type().vec_type(w),
+            Ty::F32 => self.ctx.f32_type().vec_type(w),
+            Ty::I64 => self.ctx.i64_type().vec_type(w),
+            Ty::I32 => self.ctx.i32_type().vec_type(w),
+            Ty::Bool => self.ctx.bool_type().vec_type(w),
+            _ => return None,
+        })
+    }
+
     /// Generate `void kernel(ptr ctx, i64 lo, i64 hi)`.
     fn emit_kernel(&mut self, root: &Node, plan: &Plan<'ctx>, mode: Mode) -> R<FunctionValue<'ctx>> {
+        if let Mode::Map(el) = mode
+            && let Some(k) = self.emit_simd_kernel(root, plan, el)?
+        {
+            return Ok(k);
+        }
         self.lambdas += 1;
         let i64t = self.ctx.i64_type();
         let ft = self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false);

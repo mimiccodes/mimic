@@ -45,6 +45,7 @@ mod owned;
 mod fuse;
 mod gpu;
 mod gpufn;
+mod simd;
 pub mod tonet;
 
 pub struct Settings {

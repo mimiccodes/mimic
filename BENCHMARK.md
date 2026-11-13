@@ -103,12 +103,15 @@ programs; the ratio is to C.
 |---|---|---|---|---|---|
 | fib | 0.537 s | 1.07× | 1.15× | 1.01× | **0.15×** |
 | json | 1.048 s | 0.59× | 1.75× | **0.85×** | **0.68×** |
-| mandelbrot | 2.422 s | 1.22× | 1.32× | 1.09× | **0.12×** |
+| mandelbrot | 2.727 s | 1.16× | 1.23× | **0.71×** | **0.10×** |
 | nbody | 0.174 s | 1.26× | 1.45× | 1.00× | 1.00× |
 | prefix_sum | 0.429 s | 2.44× | 1.04× | **0.97×** | **0.66×** |
 | records | 0.042 s | 3.40× | 3.38× | 2.24× | **1.00×** |
 | sum_of_squares | 0.124 s | 1.70× | 2.58× | 1.00× | **0.24×** |
 | tree | 1.444 s | 1.16× | 1.36× | **0.57×** | **0.12×** |
+
+mandelbrot's one-core time is with SIMD across elements (8 points at once,
+see design.md); C, Rust and Go do one point at a time.
 
 All of these are f64 or i64 programs, so the GPU takes no part (Apple
 GPUs have no f64). An f32 Mandelbrot of 4M points: 0.30 s on all CPU
