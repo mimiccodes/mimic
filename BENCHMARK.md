@@ -93,6 +93,42 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Small lists and records in registers (nbody 8.6× → 1.09× C)
+
+Apple M3 Pro, 12 cores, 2026-11-13. Best of 5 runs; the ratio is to C.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib(38) | 0.527 s | 1.09× | 1.14× | 1.23× | **0.21×** |
+| mandelbrot | 2.414 s | 1.15× | 1.22× | 1.18× | **0.12×** |
+| matmul 1024² | 0.778 s | 1.03× | 2.41× | **0.09×** | **0.08×** |
+| nbody, 1M steps | 0.172 s | 1.27× | 1.49× | **1.09×** | **1.09×** |
+| prefix sum, 100M | 0.408 s | 2.49× | 1.07× | 1.45× | **0.69×** |
+| sort 10M integers | 4.370 s | 0.15× | 0.74× | **0.08×** | **0.03×** |
+| sum of squares, 100M | 0.122 s | 1.61× | 2.45× | 2.40× | **0.36×** |
+
+nbody now runs as fast as C on one core and faster than Rust and Go, with
+the program unchanged. What got it there:
+
+* **Lists of known length.** A list of numbers whose length the compiler
+  can see (a literal, `⍳ 5`, elementwise results, up to 8 elements) has
+  that length in its type, and functions are specialised on it. Such
+  lists live in registers: no heap, no header, indexing checked against a
+  constant.
+* **Shaped and flat records.** A record built from such lists remembers
+  their lengths. When all its fields are numbers or such lists, the record
+  itself is a plain struct in registers; `Sys` (6 × 5 doubles) never
+  touches the heap.
+* **`evolve` as a loop.** With a step that keeps the state's type, the
+  loop is compiled in place and calls the step as a typed function.
+* **Full unrolling of short loops** of a known length (after inlining):
+  indices become constants, as in C's `for (i = 0; i < 5; i++)`.
+* Along the way: a value's static type now says how it is stored (a record
+  field declared `[f64]` holds floats), indexing is one compare against
+  the header, and allocation and freeing of short vectors are inline.
+
+fib(38) also improved (1.90× → 1.23×) from the inline allocator.
+
 ### Smaller overheads (nbody 16.6× → 8.6× C)
 
 Same machine, load average about 7:

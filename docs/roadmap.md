@@ -78,7 +78,8 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | E3 (rest), E4 (rest), E5 | Event loop on Windows (IOCP), io_uring, decoding unions, interfaces (`view(state)`, design in [ui.md](ui.md)) | |
 | F (first part) | Typed `¨` kernels: `¨` with pure numeric functions fused into the parallel loops (lambdas may capture numbers and numeric arrays); direct indexing of numeric vectors ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
 | F (benchmarks) | `bench/` suite in Mimic, C, Rust and Go (7 benchmarks); radix sort; typed scans; `math` module; direct field access; adaptive `¨` ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
-| F | Performance (unboxed records, RC elision, fusion through `↑`/`↓`/`⌽`/`⌿`, LTO, SIMD, scheduling, GPU) | |
+| F (static lengths) | Lists of known length (≤ 8) in registers, shaped and flat records, `evolve` compiled as a loop, short loops unrolled; inline allocator; storage follows the static type. nbody 8.6× → 1.09× C ([BENCHMARK.md](../BENCHMARK.md)) | ✅ |
+| F | Performance (RC elision and reuse, fusion through `↑`/`↓`/`⌽`/`⌿`, LTO, SIMD, scheduling, GPU) | |
 | G | `test`, `fmt`, registry, incremental builds, DWARF, benchmark CI including Rust | |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
