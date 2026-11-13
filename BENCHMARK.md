@@ -94,6 +94,26 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### All benchmarks (after F, 2026-11-13 evening)
+
+Apple M3 Pro, 12 cores, `bench/run.py`, load average 5 to 7 from other
+programs; the ratio is to C.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.537 s | 1.07× | 1.15× | 1.01× | **0.15×** |
+| json | 1.048 s | 0.59× | 1.75× | **0.85×** | **0.68×** |
+| mandelbrot | 2.422 s | 1.22× | 1.32× | 1.09× | **0.12×** |
+| nbody | 0.174 s | 1.26× | 1.45× | 1.00× | 1.00× |
+| prefix_sum | 0.429 s | 2.44× | 1.04× | **0.97×** | **0.66×** |
+| records | 0.042 s | 3.40× | 3.38× | 2.24× | **1.00×** |
+| sum_of_squares | 0.124 s | 1.70× | 2.58× | 1.00× | **0.24×** |
+| tree | 1.444 s | 1.16× | 1.36× | **0.57×** | **0.12×** |
+
+All of these are f64 or i64 programs, so the GPU takes no part (Apple
+GPUs have no f64). An f32 Mandelbrot of 4M points: 0.30 s on all CPU
+cores, 0.15 s with the GPU (kernel 18 ms).
+
 ### All benchmarks (after F3)
 
 Apple M3 Pro, 12 cores, 2026-11-13, best of 5 runs; the ratio is to C.
@@ -137,7 +157,8 @@ so in principle each step builds a new list of new records. Apple M3 Pro,
 | `¨` over numbers without boxing them | 0.407 s (9.0×) | 0.212 s (4.7×) |
 | `¨` over a list of records fused into the loop around it | 0.270 s (5.9×) | 0.116 s (2.5×) |
 | `with` checks for the only reference inline | 0.189 s (4.6×) | 0.087 s (2.1×) |
-| chains `xs ¨ f ¨ g ¨ …` fused: each record through every step while it is at hand | **0.185 s (3.9×)** | **0.077 s (1.6×)** |
+| chains `xs ¨ f ¨ g ¨ …` fused: each record through every step while it is at hand | 0.185 s (3.9×) | 0.077 s (1.6×) |
+| `xs ¨ f` making records fused (no `⍳` list, no boxed call, in parallel); nothing freed one by one at exit; a moved-out local costs no release call | **0.094 s (2.2×)** | **0.042 s (1.0×)** |
 
 * **Raw number fields:** numbers in records and variants are stored in
   the object itself (8 bytes), not as a boxed value per field (the
@@ -158,6 +179,13 @@ record goes through all five steps while it is in the cache (updated in
 place, the list's elements handed over). Rust (3.3×) and Go (3.4×) are
 close; what is left is making a million separate records (C has one
 array of structs).
+
+Making the records is now one fused parallel pass too, and in release
+builds the records `main` holds at the end are not freed one by one (the
+process exits next; debug builds still free all and check for leaks):
+that freeing was two thirds of the time. All cores now match C (0.042 s);
+one core is 2.2× C, the cost of separate records with headers and
+reference counts against one array of structs.
 
 ### http: a hello-world server (faster than hyper on one core)
 

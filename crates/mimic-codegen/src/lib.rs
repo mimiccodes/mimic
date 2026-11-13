@@ -2183,10 +2183,14 @@ impl<'ctx> Cg<'ctx, '_> {
     fn release_scope(&self, scope: &[Local<'ctx>]) -> R<()> {
         for l in scope.iter().rev() {
             if l.owned {
-                // (inline: a value that moved away left a null, which
-                // LLVM sees and drops the release entirely)
                 let cur = self.b.build_load(self.ptr, l.slot, "").s()?;
-                self.release(cur.into_pointer_value())?;
+                if l.moves {
+                    // (inline: a value that moved away left a null, which
+                    // LLVM sees and drops the release entirely)
+                    self.release(cur.into_pointer_value())?;
+                } else {
+                    self.call_rt("mim_release", &[cur.into()])?;
+                }
             }
         }
         Ok(())
