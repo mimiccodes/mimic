@@ -93,6 +93,34 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Fork-join (F6): independent calls on all cores
+
+Apple M3 Pro, 12 cores, 2026-11-13, best of 5 runs; the machine was busy
+(load average about 10 from other programs), so all-core times are on the
+slow side.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.590 s | 1.04× | 1.15× | 1.02× | **0.18×** |
+| mandelbrot | 2.968 s | 1.02× | 1.07× | 1.01× | **0.11×** |
+| matmul | 0.871 s | 1.14× | 2.69× | 0.09× | **0.08×** |
+| nbody | 0.209 s | 1.23× | 1.56× | 1.01× | 0.95× |
+| prefix_sum | 0.552 s | 2.16× | 0.97× | 0.82× | **0.54×** |
+| sort | 4.842 s | 0.15× | 0.74× | 0.07× | **0.03×** |
+| sum_of_squares | 0.132 s | 1.62× | 2.63× | 1.04× | **0.23×** |
+| tree | 1.578 s | 1.18× | 1.32× | **0.54×** | **0.15×** |
+
+tree went from 0.96× / 0.74× to **0.54× / 0.15×**:
+
+* `Node(make(d - 1), make(d - 1))` and `1 + check(l) + check(r)` fork and
+  join: the big tree is now built and counted on all cores;
+* small blocks are carved from per-thread 256 KB chunks with a shared pool,
+  so threads never wait on `malloc`;
+* values of 8-byte elements no longer carry a NUL byte: a two-field node is
+  a 56-byte block instead of 112 (memory 474 MB → 238 MB);
+* freeing a large value shares its subtrees out to the same pool;
+* `match` borrows the fields it binds instead of retaining them.
+
 ### tree: allocation-heavy code (0.96× C)
 
 Build and count binary trees: 64 trees of depth 16, then one of depth 22
