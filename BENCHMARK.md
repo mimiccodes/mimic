@@ -93,6 +93,36 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Single core within 10% of C everywhere except fib
+
+Apple M3 Pro, 12 cores, 2026-11-13. Best of 5 runs; the ratio is to C.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib(38) | 0.512 s | 1.13× | 1.16× | 1.27× | **0.19×** |
+| mandelbrot | 2.407 s | 1.15× | 1.22× | 1.09× | **0.11×** |
+| matmul 1024² | 0.779 s | 1.00× | 2.40× | **0.09×** | **0.08×** |
+| nbody, 1M steps | 0.172 s | 1.27× | 1.48× | **1.02×** | **1.03×** |
+| prefix sum, 100M | 0.410 s | 2.48× | 1.05× | **0.98×** | **0.68×** |
+| sort 10M integers | 4.396 s | 0.14× | 0.74× | **0.06×** | **0.03×** |
+| sum of squares, 100M | 0.119 s | 1.64× | 2.53× | **1.01×** | **0.21×** |
+
+Mimic is now at least as fast as Rust and Go on every benchmark but fib,
+and within a few percent of C on one core on all but fib and mandelbrot.
+
+* **32-bit kernel indices.** When the program states a list's length and
+  it fits in 32 bits (`⍳ 100000000`), a kernel computes with its index as a
+  visibly small number, so LLVM works in 32-bit SIMD lanes, as C does
+  (sum of squares 2.40× → 1.01×).
+* **One-pass scans on one thread.** A scan running on one thread (or one
+  chunk) skips the chunk-totals pass (prefix sum 1.45× → 0.98×).
+* **Fused multiply-add by default.** Like C compilers, `a * b + c` in one
+  expression may become one fused multiply-add; `--strict-math` turns it
+  off for bit-identical results on every CPU (mandelbrot 1.18× → 1.09×).
+* **fib** is the remaining gap: native recursion carries a depth counter
+  so very deep recursion can move to the interaction-net runtime instead
+  of overflowing the stack (net-layer work, F7).
+
 ### Small lists and records in registers (nbody 8.6× → 1.09× C)
 
 Apple M3 Pro, 12 cores, 2026-11-13. Best of 5 runs; the ratio is to C.
