@@ -44,9 +44,8 @@ typedef struct mim_val {
     int32_t dtype;
     int32_t rank;   /* 0 = scalar, 1 = vector (higher ranks: M4) */
     int64_t len;    /* element count */
-    void *data;     /* points at inl: header and elements are one allocation */
     const mim_desc *desc; /* MIM_OBJ only */
-    int64_t inl[];
+    _Alignas(8) unsigned char data[]; /* the elements: header and elements are one allocation */
 } mim_val;
 
 typedef mim_val *(*mim_fn1)(mim_val *);

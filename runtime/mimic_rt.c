@@ -69,9 +69,9 @@ typedef struct mim_val {
     int32_t dtype;
     int32_t rank;
     int64_t len;
-    void *data; /* points at `inl` (one allocation per value) */
     const mim_desc *desc; /* MIM_OBJ only */
-    int64_t inl[];
+    /* the elements, right after the header (one allocation per value) */
+    _Alignas(8) unsigned char data[];
 } mim_val;
 
 #define IS_HANDLES(v) ((v)->dtype == MIM_BOXED || (v)->dtype == MIM_OBJ || (v)->dtype == MIM_FN || (v)->dtype == MIM_MAP)
@@ -731,7 +731,6 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
     v->dtype = dtype;
     v->rank = rank;
     v->len = len;
-    v->data = v->inl;
     v->desc = NULL;
     if (elsize(dtype) == 1) ((char *)v->data)[bytes - 1] = 0;
     padded_count *lc = live_of(h);
@@ -2220,7 +2219,7 @@ static dgemm_fn blas_dgemm(void) {
 static void *dense(const mim_val *v, int as_f64, int *owned) {
     int native = as_f64 ? v->dtype == MIM_F64 : v->dtype == MIM_I64;
     *owned = !native;
-    if (native) return v->data;
+    if (native) return (void *)v->data;
     void *buf = malloc((size_t)(v->len ? v->len : 1) * 8);
     for (int64_t i = 0; i < v->len; i++) {
         if (as_f64) ((double *)buf)[i] = getf(v, i);

@@ -832,7 +832,8 @@ impl<'ctx> Cg<'ctx, '_> {
     /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
     fn val_ty(&self) -> inkwell::types::StructType<'ctx> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
-        self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into(), self.ptr.into()], false)
+        // rc, dtype, rank, len, desc; the elements follow (mim_val in mimic_rt.c)
+        self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false)
     }
 
     fn heap_ty(&self) -> inkwell::types::StructType<'ctx> {
@@ -900,8 +901,7 @@ impl<'ctx> Cg<'ctx, '_> {
             b.build_store(fld(2).s()?, i32t.const_int(1, false)).s()?;
             b.build_store(fld(3).s()?, n).s()?;
             let data = unsafe { b.build_in_bounds_gep(vt, v, &[i32t.const_int(1, false)], "data").s()? };
-            b.build_store(fld(4).s()?, data).s()?;
-            b.build_store(fld(5).s()?, self.ptr.const_null()).s()?;
+            b.build_store(fld(4).s()?, self.ptr.const_null()).s()?;
             // the NUL after 1-byte elements (an 8-byte element vector has
             // none: index n × es of a 1-byte vector is its last byte)
             let nul = self.ctx.append_basic_block(f, "nul");
@@ -2932,7 +2932,7 @@ impl<'ctx> Cg<'ctx, '_> {
             let vt = self.val_ty();
             self.b.build_store(self.b.build_struct_gep(vt, r, 2, "").s()?, i32t.const_zero()).s()?; // rank 0
             let d = self.desc(t, variant);
-            self.b.build_store(self.b.build_struct_gep(vt, r, 5, "").s()?, d).s()?;
+            self.b.build_store(self.b.build_struct_gep(vt, r, 4, "").s()?, d).s()?;
             let fields = unsafe { self.b.build_in_bounds_gep(vt, r, &[i32t.const_int(1, false)], "fields").s()? };
             for (i, v) in vals.into_iter().enumerate() {
                 if let Some(el) = self.raw_field(t, variant, i) {
@@ -3266,7 +3266,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(ok);
         // the descriptor: { type_name, variant, tag (i32), … } (a tuple has
         // none: the runtime path reports it)
-        let d = self.b.build_load(self.ptr, self.b.build_struct_gep(vt, p, 5, "").s()?, "desc").s()?.into_pointer_value();
+        let d = self.b.build_load(self.ptr, self.b.build_struct_gep(vt, p, 4, "").s()?, "desc").s()?.into_pointer_value();
         let has = self.b.build_is_not_null(d, "").s()?;
         let ok2 = self.ctx.append_basic_block(f, "obj_desc");
         self.b.build_conditional_branch(has, ok2, bad).s()?;
@@ -3713,7 +3713,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// header, and for a record also its fields, which follow the header.
     fn live_bytes(&self, t: Ty) -> u64 {
         let pb = self.size.get_bit_width() as u64 / 8;
-        let header = (24 + 2 * pb).div_ceil(8) * 8;
+        let header = (24 + pb).div_ceil(8) * 8;
         match t {
             Ty::Obj(id) => match &self.p.types[types::obj_tid(id)].decl.kind {
                 mimic_syntax::ast::TypeKind::Record(fs) => header + pb * fs.len() as u64,
