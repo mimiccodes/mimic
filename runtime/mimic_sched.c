@@ -193,6 +193,7 @@ struct mim_co {
     pthread_mutex_t m;
     pthread_cond_t c;
     int done, detached;
+    int refs; /* who still uses this struct: the finisher, and the joiner unless detached */
     mim_co *joiner;
 };
 
@@ -295,19 +296,25 @@ void mim_co_entry(mim_co *co) {
     __builtin_unreachable();
 }
 
+/* the struct goes when its last user lets go: never while another thread
+ * may still be inside pthread_mutex_unlock on it (winpthreads touches the
+ * mutex after releasing it, so "lock, unlock, destroy" in the joiner could
+ * free it under the finisher: a lost wake-up, a rare hang) */
+static void co_drop(mim_co *co) {
+    if (__atomic_sub_fetch(&co->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    pthread_mutex_destroy(&co->m);
+    pthread_cond_destroy(&co->c);
+    free(co);
+}
+
 static void co_finish(mim_co *co) {
     co_stack_free(co);
     pthread_mutex_lock(&co->m);
     co->done = 1;
     mim_co *j = co->joiner;
-    int detached = co->detached;
     pthread_cond_broadcast(&co->c);
     pthread_mutex_unlock(&co->m);
-    if (detached) {
-        pthread_mutex_destroy(&co->m);
-        pthread_cond_destroy(&co->c);
-        free(co);
-    }
+    co_drop(co);
     if (j) co_ready(j);
 }
 
@@ -752,6 +759,7 @@ static mim_co *co_spawn(void (*fn)(void *), void *arg, int detached) {
     co->fn = fn;
     co->arg = arg;
     co->detached = detached;
+    co->refs = detached ? 1 : 2;
     co_stack_new(co);
     pthread_mutex_init(&co->m, NULL);
     pthread_cond_init(&co->c, NULL);
@@ -779,11 +787,7 @@ static void co_join(mim_co *co) {
         while (!co->done) pthread_cond_wait(&co->c, &co->m);
         pthread_mutex_unlock(&co->m);
     }
-    pthread_mutex_lock(&co->m); /* co_finish may still be unlocking */
-    pthread_mutex_unlock(&co->m);
-    pthread_mutex_destroy(&co->m);
-    pthread_cond_destroy(&co->c);
-    free(co);
+    co_drop(co);
 }
 
 static void wait_park(mim_co *co, void *arg) {
