@@ -271,6 +271,6 @@ Notice what you did not write: no locks, no threads, no `async`. The server runs
 
 Each connection is a **task**, not a thread. A task that waits for a message, a socket or a timer steps aside, and its thread runs other tasks meanwhile. A few threads, one per core, carry all of them. The chat room above serves thousands of people as easily as two, with the same code.
 
-The details, and how to switch this off, are in the [standard library reference](../docs/std.md#the-event-loop).
+The details, and how to switch this off, are in the [standard library reference](../std.md#the-event-loop).
 
 Back to the [index](index.md).

@@ -230,6 +230,6 @@ mimic build --web todo.mim        # writes todo-web/: index.html and app.wasm
 
 The `todo-web` folder works on any static web host. Your `view` and `update` run in the visitor's browser, and nothing else changes in your code. Inside a page there is no network access. Jobs run straight after the message that started them, and `print` writes to the browser's console.
 
-The full list of elements and settings is in the [standard library reference](../docs/std.md#interfaces-the-ui-module).
+The full list of elements and settings is in the [standard library reference](../std.md#interfaces-the-ui-module).
 
 Back to the [index](index.md).

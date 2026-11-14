@@ -232,6 +232,6 @@ How maps behave:
 * **Order.** Maps keep their keys in insertion order.
 * **Lookups.** Indexing `m[k]` with a missing key stops the program. Use `get` when a key may be absent.
 
-See the full list in the [standard library reference](../docs/std.md).
+See the full list in the [standard library reference](../std.md).
 
 Next: [errors without exceptions](07-errors.md).

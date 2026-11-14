@@ -49,7 +49,7 @@ def main():
     ap.add_argument("--mimic", default=str(ROOT / "target" / "debug" / "mimic"))
     ap.add_argument("files", nargs="*")
     a = ap.parse_args()
-    files = [pathlib.Path(f) for f in a.files] or sorted((ROOT / "tutorial").glob("*.md"))
+    files = [pathlib.Path(f) for f in a.files] or sorted((ROOT / "docs" / "tutorial").glob("*.md"))
     failures = 0
     total = 0
     for path in files:

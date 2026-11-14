@@ -162,7 +162,7 @@ mimic check --fix
 mimic check --emit-json
 ```
 
-The format is described in [docs/diagnostics.md](../docs/diagnostics.md).
+The format is described in [docs/diagnostics.md](../diagnostics.md).
 
 ## Glyphs at a glance
 
@@ -238,4 +238,4 @@ map the GPU can do there, and `MIMIC_GPU_DEBUG=1` to see which kernels ran:
 MIMIC_GPU=1 MIMIC_GPU_DEBUG=1 ./target/release/app
 ```
 
-That's the tour. For every detail, see the reference in [`docs/`](../docs/).
+That's the tour. For every detail, see the reference in [`docs/`](../).

@@ -357,6 +357,6 @@ failed: true, said something: true
 
 Because the standard modules are used by path, names like `args`, `env`, `read` or `parent` stay free for your own variables and functions. Even if you name a module of your own `fs` or `time`, your module wins inside your program.
 
-The full list of functions is in the [standard library reference](../docs/std.md).
+The full list of functions is in the [standard library reference](../std.md).
 
 Back to the [index](index.md).

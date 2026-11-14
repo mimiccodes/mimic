@@ -41,4 +41,4 @@ The chapters build on each other, so read them in order the first time. Every ex
 | 19 | [Tasks and channels](19-tasks-and-channels.md) | Background tasks, `chan::new[T]()`, a worker, a WebSocket chat room |
 | 20 | [Interfaces](20-interfaces.md) | `view(state)`, `update(state, message)`, `ui::run` in the browser, a to-do list |
 
-For the complete rules, see the reference in [`docs/`](../docs/): [syntax](../docs/syntax.md), [standard library](../docs/std.md), [FFI](../docs/ffi.md), [targets](../docs/targets.md) and [CLI](../docs/cli.md).
+For the complete rules, see the reference in [`docs/`](../): [syntax](../syntax.md), [standard library](../std.md), [FFI](../ffi.md), [targets](../targets.md) and [CLI](../cli.md).

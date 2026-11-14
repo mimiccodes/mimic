@@ -142,7 +142,7 @@ true
 | `ordered` | Logging and printing: in order, but nothing else depends on it |
 | `sync` | Anything that changes shared state. This is the default. |
 
-The word is a promise, like `trusted`. If a function marked `concurrent` secretly writes files, runs may race. Leave it out when unsure. The full rules are in [the FFI reference](../docs/ffi.md#what-c-functions-do-effects).
+The word is a promise, like `trusted`. If a function marked `concurrent` secretly writes files, runs may race. Leave it out when unsure. The full rules are in [the FFI reference](../ffi.md#what-c-functions-do-effects).
 
 ## Calling Mimic from C
 
@@ -167,6 +167,6 @@ mimic cc hello.c -o hello
 mimic cc --target=aarch64-linux-musl hello.c -o hello-arm   # a static Linux ARM binary
 ```
 
-The full details are in the [FFI reference](../docs/ffi.md).
+The full details are in the [FFI reference](../ffi.md).
 
 Next: [building for other platforms](13-targets.md).

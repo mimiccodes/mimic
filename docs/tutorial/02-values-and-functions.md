@@ -91,7 +91,7 @@ hello, Ada!
 Notes:
 * **Annotations are optional.** Parameter and return types document intent and are checked, but you can leave them out. Mimic infers types and compiles a specialized copy of each function for every combination of argument types it is called with.
 * **`{…}` inside a string** inserts any expression: `"{name}"`, `"{a + b}"`.
-* **Math.** `math::sqrt` comes from the standard `math` module, along with `math::sin`, `math::pow`, `math::pi()` and the rest ([reference](../docs/std.md)).
+* **Math.** `math::sqrt` comes from the standard `math` module, along with `math::sin`, `math::pow`, `math::pi()` and the rest ([reference](../std.md)).
 
 ## Named and default arguments
 
