@@ -94,6 +94,59 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### Linux and Windows in CI (2026-11-14)
+
+The bench workflow on GitHub's 4-core runners, commit 240d7d8, best of 5
+runs; the ratio is to C (below 1.0 is faster than C). The two runners have
+different CPUs, so compare each row with its own C, not across systems.
+
+**Linux x86_64** (AMD EPYC 9V74, Zen 4 with AVX-512):
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.091 s | 1.15× | 2.16× | 1.24× | **0.58×** |
+| http | 0.224 s | 2.24× | 22.62× | 1.77× | 1.60× |
+| json | 0.240 s | 0.89× | 1.90× | 1.04× | **0.95×** |
+| mandelbrot | 0.490 s | 1.16× | 1.12× | **0.31×** | **0.12×** |
+| matmul | 0.160 s | 1.00× | 3.88× | **0.39×** | **0.23×** |
+| nbody | 0.088 s | 1.06× | 1.57× | **0.60×** | **0.60×** |
+| prefix_sum | 0.364 s | 1.08× | 1.07× | 1.00× | **0.61×** |
+| records | 0.021 s | 4.32× | 2.93× | 3.95× | 2.14× |
+| sort | 0.705 s | 0.27× | 1.14× | **0.25×** | **0.16×** |
+| sum_of_squares | 0.014 s | 2.66× | 6.03× | 1.01× | **0.56×** |
+| tree | 0.468 s | 1.36× | 1.03× | **0.63×** | **0.45×** |
+| ui | — | — | — | 0.084 s | 0.056 s |
+
+**Windows x86_64** (AMD Zen 3, AVX2, no AVX-512; Windows Server 2025):
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.127 s | 0.94× | 1.86× | 1.18× | 1.37× |
+| http | — | 0.962 s | 12.236 s | 0.761 s | 0.819 s |
+| json | 0.593 s | 0.59× | 1.02× | **0.56×** | **0.50×** |
+| mandelbrot | 0.585 s | 1.13× | 1.15× | 1.07× | **0.50×** |
+| matmul | 0.160 s | 0.88× | 4.48× | **0.51×** | **0.33×** |
+| nbody | 0.106 s | 1.10× | 1.62× | **0.86×** | **0.86×** |
+| prefix_sum | 0.188 s | 2.21× | 1.16× | 1.05× | 1.42× |
+| records | 0.022 s | 3.91× | 3.03× | 3.72× | 2.37× |
+| sort | 1.803 s | 0.12× | 0.50× | **0.08×** | **0.06×** |
+| sum_of_squares | 0.035 s | 1.79× | 2.96× | 2.52× | 1.36× |
+| tree | 1.064 s | 1.13× | 0.66× | **0.33×** | **0.22×** |
+| ui | — | — | — | 0.124 s | 0.082 s |
+
+http has no C row on Windows (the C server is POSIX-only); the times are
+the server's for 400,000 requests.
+
+Windows is behind Linux in four places, to look into:
+* **fib, prefix_sum on all cores** are slower than on one core: starting
+  and joining parallel work costs more on Windows (threads, not the Linux
+  scheduler's cheap wake-ups).
+* **mandelbrot on one core** (1.07× vs 0.31× on Linux) does not get the
+  across-elements SIMD speed-up, although CI finds 2660 AVX instructions in
+  the SIMD fixture's Windows build.
+* **sum_of_squares** (2.52× on one core vs 1.01× on Linux) is a fused
+  kernel that should run at memory speed on both.
+
 ### All benchmarks (after F, 2026-11-13 evening)
 
 Apple M3 Pro, 12 cores, `bench/run.py`, load average 5 to 7 from other

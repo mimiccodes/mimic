@@ -1,0 +1,126 @@
+# Where does a benchmark's time go on GitHub's Windows and Linux machines?
+# Builds mimic and runs tools/speed-probe.py (Mimic next to C, 1, 2 and all
+# threads, process start-up, the CPU code generation chose). Run by hand.
+name: speed probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      benches:
+        description: benchmarks (bench/ names)
+        default: fib mandelbrot prefix_sum sum_of_squares
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 23.1.4
+  TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            platform: windows-x86_64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+    name: probe (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustc --version
+
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deps="$HOME/.mimic/deps"
+          mkdir -p "$deps"
+          gh release download "$TAG" -p "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -D "$deps"
+          tar -xJf "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -C "$deps"
+          rm "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
+            echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
+          else
+            ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
+          fi
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Probe
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "CPU: $(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" | tr -d '\r')"
+            export PATH="/c/Program Files/LLVM/bin:$PATH"
+          else
+            echo "CPU: $(lscpu | sed -n 's/^Model name: *//p')"
+            export PATH="$PWD/.llvm/bin:$PATH"
+          fi
+          python tools/speed-probe.py ${{ inputs.benches }} | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # chat_room for Windows on Arm, for the stress job below
+      - name: Cross-build chat_room (aarch64-windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p stress
+          for p in release debug; do
+            exe=$(target/release/mimic build --$p --target aarch64-windows --emit-json tests/fixtures/run/chat_room.mim | python -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
+            cp "$exe" stress/chat_room_$p.exe
+          done
+          cp tests/fixtures/run/chat_room.out stress/
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: stress-arm64
+          path: stress
+          retention-days: 3
+
+  # chat_room hung once on Windows on Arm (CI, 7c9fb20): run it many times
+  # there, with and without the event loop, to see how often and where
+  stress:
+    needs: probe
+    if: ${{ !cancelled() }}
+    name: stress (windows-arm64)
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: stress-arm64
+          path: stress
+      - name: Run chat_room 300 times per mode
+        run: |
+          cd stress
+          want=$(tr -d '\r' < chat_room.out)
+          for mode in default MIMIC_NO_EACH_LOOP MIMIC_NO_EVENT_LOOP; do
+            for p in release debug; do
+              fails=0; hangs=0
+              for i in $(seq 300); do
+                if [ $mode = default ]; then out=$(timeout 20 ./chat_room_$p.exe 2>&1); rc=$?
+                else out=$(env $mode=1 timeout 20 ./chat_room_$p.exe 2>&1); rc=$?; fi
+                out=$(printf '%s' "$out" | tr -d '\r')
+                [ $rc = 124 ] && hangs=$((hangs + 1))
+                [ "$out" = "$want" ] || fails=$((fails + 1))
+              done
+              echo "- chat_room $p, $mode: $fails of 300 wrong, $hangs hung" | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+          done

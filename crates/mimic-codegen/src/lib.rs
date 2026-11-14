@@ -155,6 +155,9 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if let Some(f) = &settings.features {
         features = f.clone();
     }
+    if std::env::var_os("MIMIC_DEBUG_CPU").is_some() {
+        eprintln!("mimic: code for {} cpu={} features={}", triple.as_str().to_string_lossy(), if cpu.is_empty() { "(default)" } else { &cpu }, features);
+    }
     let level = match settings.opt_level {
         0 => OptimizationLevel::None,
         1 => OptimizationLevel::Less,

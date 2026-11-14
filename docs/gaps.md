@@ -41,7 +41,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Reading memory C returns | ✅ (`memcpy` into a `[u8]` array, see ffi.md) |
 | `mimic check --fix` applies the `c::name` suggestion | ✅ |
 
-## Tools (the Workbench, 0.3; Windows speed, 0.2.9)
+## Tools (the Workbench, 0.3) and Windows speed (0.2.9)
 
 | Gap | Today | Version |
 |---|---|---|
@@ -54,7 +54,8 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.5, 0.3.6 |
 | A terminal editor (`mimic edit`) | None | 0.3.7 |
 | A REPL and a profiler | None | 0.3.8 |
-| CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | Measured on Linux and macOS only | 0.2.9 |
+| CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
+| Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | Measured, not fixed | 0.2.9 |
 
 ## Not gaps: other names, or left out on purpose
 

@@ -199,7 +199,7 @@ def main() -> int:
     for name, t in rows:
         cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
         lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'mimic-all')} |")
-    (HERE / "results.md").write_text("\n".join(lines) + "\n")
+    (HERE / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[6:]))
     if a.history:
         record(Path(a.history), cpu, a.runs, load, rows)
@@ -241,7 +241,7 @@ def record(path: Path, cpu: str, runs: int, load: float, rows) -> None:
                     slower.append(f"  {name} ({k}): {old[k]:.3f} s -> {t[k]:.3f} s (+{(t[k] / old[k] - 1) * 100:.0f}%)")
         print(f"\ncompared with {last['date']} ({last['commit']}):")
         print("\n".join(slower) if slower else "  no Mimic time is more than 10% slower")
-    with path.open("a") as f:
+    with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
 

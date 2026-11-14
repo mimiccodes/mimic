@@ -8,6 +8,8 @@
  * Tuning (environment):
  *   MIMIC_THREADS     worker count (default: online CPUs; 1 = sequential)
  *   MIMIC_PAR_GRAIN   elements per chunk (default 16384)
+ *   MIMIC_NO_EACH_LOOP  `¨` over waiting functions uses the cores, not a
+ *                       task per element on the event loop (for debugging)
  */
 #include <math.h>
 #include <stddef.h>

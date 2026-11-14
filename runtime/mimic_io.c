@@ -2223,7 +2223,9 @@ static void loop_job_main(void *p) {
  * wait for all; 0 when there is no event loop (the caller uses the cores) */
 static int run_on_loop(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx) {
 #if MIM_GREEN
-    if (!green_on()) return 0;
+    static int off = -1;
+    if (off < 0) off = getenv("MIMIC_NO_EACH_LOOP") != NULL;
+    if (off || !green_on()) return 0;
     loop_job *jobs = (loop_job *)malloc(sizeof(loop_job) * (size_t)n);
     mim_co **cos = (mim_co **)malloc(sizeof(mim_co *) * (size_t)n);
     if (!jobs || !cos) mim_panic("out of memory");
