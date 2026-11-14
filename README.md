@@ -48,6 +48,8 @@ The roadmap is in [docs/design.md](docs/design.md).
 | [docs/net.md](docs/net.md) | the interaction-net runtime and `.mnet` format |
 | [BENCHMARK.md](BENCHMARK.md) | how speed is measured, current numbers, targets |
 | [docs/roadmap.md](docs/roadmap.md) | what's done, what's next, and the syntax plan for loops, UI and networking |
+| [docs/versions.md](docs/versions.md) | the versions up to 1.0 (self-hosted, every LLVM target) and how releases are made |
+| [CHANGELOG.md](CHANGELOG.md) | what changed in each version |
 
 ## Example project
 

@@ -18,6 +18,8 @@ URL=https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION
 LLVM_SHA256=819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2
 WASI_SDK=34
 WASI_SHA256=9d813544eeebe38b7b8f2244ed591de46b6db812c6dd1a257ff9f0d2a905a2be
+LLVM_MINGW=20261020
+LLVM_MINGW_SHA256=55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
@@ -101,6 +103,37 @@ if [ ! -d "$WASI_OUT/lib/wasm32-wasip1" ]; then
     rm -rf "$DEPS/wasi-extract"
 fi
 echo "wasi: $WASI_OUT"
+
+# ---- mingw-w64 (the C library of the *-windows-gnu targets), from llvm-mingw --
+# Only the Windows side is kept: the C headers, and for x86_64 and aarch64
+# the CRT objects, import libraries (UCRT), static winpthreads and
+# compiler-rt's builtins. (The tarball's host tools are not used.)
+MINGW_TXZ=$DEPS/llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz
+fetch "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz" "$MINGW_TXZ" "$LLVM_MINGW_SHA256"
+MINGW_OUT=$DEPS/mingw-sysroot-$LLVM_MINGW
+if [ ! -f "$MINGW_OUT/lib/x86_64-w64-mingw32/crt2.o" ]; then
+    rm -rf "$MINGW_OUT" "$DEPS/mingw-extract"
+    mkdir -p "$DEPS/mingw-extract" "$MINGW_OUT/lib"
+    tar -xJf "$MINGW_TXZ" -C "$DEPS/mingw-extract"
+    top=$DEPS/mingw-extract/$(ls "$DEPS/mingw-extract")
+    # C headers (no C++, IDL sources or driver kit)
+    cp -R "$top/generic-w64-mingw32/include" "$MINGW_OUT/include"
+    rm -rf "$MINGW_OUT/include/c++" "$MINGW_OUT/include/ddk"
+    find "$MINGW_OUT/include" -name '*.idl' -exec rm -f {} +
+    for a in x86_64 aarch64; do
+        cp -R "$top/$a-w64-mingw32/lib" "$MINGW_OUT/lib/$a-w64-mingw32"
+        # static linking only; no C++ runtime
+        rm -f "$MINGW_OUT"/lib/$a-w64-mingw32/libc++* "$MINGW_OUT"/lib/$a-w64-mingw32/libunwind* \
+            "$MINGW_OUT"/lib/$a-w64-mingw32/libomp* "$MINGW_OUT"/lib/$a-w64-mingw32/*.dll.a \
+            "$MINGW_OUT"/lib/$a-w64-mingw32/*.la
+        rm -rf "$MINGW_OUT"/lib/$a-w64-mingw32/cmake "$MINGW_OUT"/lib/$a-w64-mingw32/pkgconfig
+    done
+    cp "$top"/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a \
+        "$top"/lib/clang/*/lib/windows/libclang_rt.builtins-aarch64.a "$MINGW_OUT/lib/"
+    cp "$top/LICENSE.TXT" "$MINGW_OUT/LICENSE.TXT"
+    rm -rf "$DEPS/mingw-extract"
+fi
+echo "mingw-w64: $MINGW_OUT"
 
 # the LLVM this repository builds against (.cargo/config.toml): keep a static
 # build from tools/build-llvm.sh if one is linked, else use $LLVM_PREFIX

@@ -25,7 +25,7 @@ use targets::Target;
 #[derive(Parser)]
 #[command(
     name = "mimic",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MIMIC_COMMIT"), ", LLVM ", env!("MIMIC_LLVM_VERSION"), ")"),
     about = "MIMIC (https://mimic.codes/) :: A Compiled, Array-based, Massively Parallel, Memory-safe Programming Language by Harcorp Industries (https://harcorp.ai)",
     long_about = "MIMIC (https://mimic.codes/) :: A Compiled, Array-based, Massively Parallel, Memory-safe\n\
                   Programming Language by Harcorp Industries (https://harcorp.ai)\n\n\

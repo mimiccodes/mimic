@@ -9,6 +9,9 @@ pub static MUSL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/musl.tar.gz")
 pub static COMPILER_RT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compiler-rt.tar.gz"));
 /// wasi-libc from wasi-sdk 34 (`wasi-sysroot/{include,lib}/wasm32-wasip1…`).
 pub static WASI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wasi.tar.gz"));
+/// mingw-w64 from llvm-mingw (`mingw-sysroot/{include,lib/<arch>-w64-mingw32}`):
+/// the C library of the Windows targets (UCRT), with static winpthreads.
+pub static MINGW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mingw.tar.gz"));
 /// Clang's resource headers (`include/…`): stddef.h, stdarg.h, intrinsics.
 pub static CLANG_INCLUDE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clang-include.tar.gz"));
 
