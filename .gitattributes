@@ -1,0 +1,5 @@
+# The same bytes on every OS: sources, expected outputs and scripts keep
+# Unix line endings, also in a Windows checkout.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
