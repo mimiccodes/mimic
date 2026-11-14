@@ -63,6 +63,8 @@ static int gpu_ready(void) {
             g_gpu.device = create();
             if (g_gpu.device) g_gpu.queue = G0(void *, g_gpu.device, "newCommandQueue");
         }
+        if (g_gpu.mode != 0 && getenv("MIMIC_GPU_DEBUG"))
+            fprintf(stderr, "mimic: %s\n", g_gpu.queue ? "Metal GPU ready" : "no Metal GPU on this machine: running on the CPU cores");
         __atomic_store_n(&g_gpu.state, g_gpu.queue ? 1 : -1, __ATOMIC_RELEASE);
     }
     gpu_unlock();

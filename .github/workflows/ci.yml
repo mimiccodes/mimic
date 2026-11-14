@@ -72,6 +72,19 @@ jobs:
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
 
+      # Was the GPU really used? Without a Metal device the runtime runs the
+      # same kernels on the CPU (same results), so passing tests prove nothing
+      # about it; this reports what the runner had.
+      - name: GPU (Metal)
+        if: runner.os == 'macOS'
+        run: |
+          for f in gpu_map gpu_each; do
+            MIMIC_GPU=1 MIMIC_GPU_DEBUG=1 target/release/mimic run --release tests/fixtures/run/$f.mim > /tmp/$f.out 2> /tmp/$f.err
+            diff -q /tmp/$f.out tests/fixtures/run/$f.out
+            ran=$(grep -c "GPU kernel .*: ran" /tmp/$f.err || true)
+            echo "$f: $(grep -m1 -E "Metal GPU ready|no Metal GPU" /tmp/$f.err), $ran kernel(s) ran on the GPU" | tee -a $GITHUB_STEP_SUMMARY
+          done
+
       - name: Diagnostics (on failure)
         if: failure()
         run: |
