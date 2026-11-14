@@ -55,7 +55,7 @@ fi
 # ---- LLD (static libraries, standalone build against the installed LLVM) ----
 LLD_OUT=$DEPS/lld-$LLVM_VERSION
 # (an LLVM built by tools/build-llvm.sh includes LLD already)
-if [ -f "$LLVM_PREFIX/lib/liblldELF.a" ]; then
+if [ -f "$LLVM_PREFIX/lib/liblldELF.a" ] || [ -f "$LLVM_PREFIX/lib/lldELF.lib" ]; then
     LLD_OUT=$LLVM_PREFIX
 elif [ ! -f "$LLD_OUT/lib/liblldELF.a" ]; then
     B=$DEPS/build-lld
@@ -114,7 +114,8 @@ MINGW_OUT=$DEPS/mingw-sysroot-$LLVM_MINGW
 if [ ! -f "$MINGW_OUT/lib/x86_64-w64-mingw32/crt2.o" ]; then
     rm -rf "$MINGW_OUT" "$DEPS/mingw-extract"
     mkdir -p "$DEPS/mingw-extract" "$MINGW_OUT/lib"
-    tar -xJf "$MINGW_TXZ" -C "$DEPS/mingw-extract"
+    # (not its host tools, whose symbolic links Windows cannot always make)
+    tar -xJf "$MINGW_TXZ" -C "$DEPS/mingw-extract" --exclude='*/bin/*' --exclude='*/share/*' --exclude='*/python/*' 
     top=$DEPS/mingw-extract/$(ls "$DEPS/mingw-extract")
     # C headers (no C++, IDL sources or driver kit)
     cp -R "$top/generic-w64-mingw32/include" "$MINGW_OUT/include"
@@ -138,7 +139,7 @@ echo "mingw-w64: $MINGW_OUT"
 # the LLVM this repository builds against (.cargo/config.toml): keep a static
 # build from tools/build-llvm.sh if one is linked, else use $LLVM_PREFIX
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-if [ ! -e "$REPO/.llvm" ]; then
+if [ ! -e "$REPO/.llvm" ] && [ -z "${LLVM_SYS_231_PREFIX:-}" ]; then
     ln -sfn "$LLVM_PREFIX" "$REPO/.llvm"
     echo "linked .llvm -> $LLVM_PREFIX"
 fi

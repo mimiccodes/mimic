@@ -204,12 +204,23 @@ fn tool_link(name: &str) -> Option<PathBuf> {
     if std::fs::read_link(&link).ok().as_deref() == Some(me.as_path()) {
         return Some(link);
     }
+    // Windows: a hard link (no symlinks without privileges); the same file
+    // when its size and time match this executable's
+    #[cfg(not(unix))]
+    if let (Ok(a), Ok(b)) = (std::fs::metadata(&link), std::fs::metadata(&me))
+        && a.len() == b.len()
+        && a.modified().ok() == b.modified().ok()
+    {
+        return Some(link);
+    }
     std::fs::create_dir_all(&dir).ok()?;
     let tmp = dir.join(format!(".{name}.{}", std::process::id()));
     #[cfg(unix)]
     std::os::unix::fs::symlink(&me, &tmp).ok()?;
     #[cfg(not(unix))]
-    std::fs::copy(&me, &tmp).ok()?;
+    if std::fs::hard_link(&me, &tmp).is_err() {
+        std::fs::copy(&me, &tmp).ok()?;
+    }
     std::fs::rename(&tmp, &link).ok()?;
     Some(link)
 }

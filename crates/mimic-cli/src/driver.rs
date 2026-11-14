@@ -933,6 +933,7 @@ fn codegen_and_link(
         program,
         &mimic_codegen::Settings {
             triple: target.llvm.clone(),
+            native: target.name.is_none(),
             opt_level: profile.opt,
             leak_check: profile.leak_check,
             emit_main: is_exe,

@@ -10,6 +10,15 @@ const LLVM_VERSION: &str = "23.1.4";
 const WASI_SDK: &str = "34";
 const LLVM_MINGW: &str = "20261020";
 
+/// A static library's file name: `libX.a`, or `X.lib` with MSVC.
+fn lib_file(name: &str) -> String {
+    if msvc() { format!("{name}.lib") } else { format!("lib{name}.a") }
+}
+
+fn msvc() -> bool {
+    std::env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|e| e == "msvc")
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=src/shim.cpp");
     println!("cargo:rerun-if-changed=src/stub.cpp");
@@ -20,10 +29,14 @@ fn main() {
     let llvm = PathBuf::from(std::env::var("LLVM_SYS_231_PREFIX").unwrap_or_else(|_| "/opt/homebrew/opt/llvm".into()));
     let deps = std::env::var("MIMIC_DEPS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".mimic/deps"));
+        .unwrap_or_else(|_| {
+            let order = if cfg!(windows) { ["USERPROFILE", "HOME"] } else { ["HOME", "USERPROFILE"] };
+            let home = order.iter().find_map(|v| std::env::var(v).ok()).unwrap_or_default();
+            PathBuf::from(home).join(".mimic").join("deps")
+        });
     // LLD: part of the LLVM install when it was built by tools/build-llvm.sh,
     // otherwise the standalone build from tools/deps.sh
-    let lld = if llvm.join("lib/liblldELF.a").is_file() { llvm.clone() } else { deps.join(format!("lld-{LLVM_VERSION}")) };
+    let lld = if llvm.join("lib").join(lib_file("lldELF")).is_file() { llvm.clone() } else { deps.join(format!("lld-{LLVM_VERSION}")) };
     println!("cargo:rustc-env=MIMIC_LLVM_PREFIX={}", llvm.display());
     println!("cargo:rustc-env=MIMIC_LLVM_MAJOR={}", LLVM_VERSION.split('.').next().unwrap());
     let driver = deps.join(format!("llvm-project-{LLVM_VERSION}.src/clang/tools/driver"));
@@ -32,9 +45,9 @@ fn main() {
 
     bundle(&deps, &llvm);
 
-    let ready = lld.join("lib/liblldELF.a").is_file()
+    let ready = lld.join("lib").join(lib_file("lldELF")).is_file()
         && driver.join("driver.cpp").is_file()
-        && llvm.join("lib/libclangDriver.a").is_file();
+        && llvm.join("lib").join(lib_file("clangDriver")).is_file();
     if !ready {
         println!(
             "cargo:warning=embedded LLD/Clang not available (missing {} or {}); run tools/deps.sh. Building stubs.",
@@ -53,6 +66,10 @@ fn main() {
         .flag_if_supported("-fno-rtti")
         .flag_if_supported("-fno-exceptions")
         .flag_if_supported("-funwind-tables")
+        // MSVC: LLVM is built without RTTI, and its headers want these
+        .flag_if_supported("/GR-")
+        .flag_if_supported("/Zc:__cplusplus")
+        .flag_if_supported("/permissive-")
         .include(llvm.join("include"))
         .include(lld.join("include"))
         .file("src/shim.cpp");
@@ -74,10 +91,16 @@ fn main() {
     for l in clang_libs(&llvm.join("lib")) {
         println!("cargo:rustc-link-lib=static={l}");
     }
-    if cfg!(target_os = "macos") {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os == "macos" {
         println!("cargo:rustc-link-lib=dylib=c++");
         // the clang driver asks xcselect for the active SDK
         println!("cargo:rustc-link-lib=dylib=xcselect");
+    } else if os == "windows" {
+        // the C++ runtime comes with MSVC; the system libraries LLVM, Clang and LLD use
+        for l in ["version", "psapi", "shell32", "ole32", "oleaut32", "uuid", "advapi32", "ws2_32", "ntdll"] {
+            println!("cargo:rustc-link-lib=dylib={l}");
+        }
     } else {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
@@ -95,9 +118,13 @@ fn clang_libs(dir: &Path) -> Vec<String> {
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with("libclang") && n.ends_with(".a") && n.as_bytes().get(8).is_some_and(u8::is_ascii_uppercase))
+        // libclangX.a, or clangX.lib with MSVC
+        .filter_map(|n| {
+            let base = if msvc() { n.strip_suffix(".lib")? } else { n.strip_prefix("lib")?.strip_suffix(".a")? };
+            Some(base.to_string())
+        })
+        .filter(|n| n.starts_with("clang") && n.as_bytes().get(5).is_some_and(u8::is_ascii_uppercase))
         .filter(|n| !SKIP.iter().any(|s| n.contains(s)))
-        .map(|n| n.trim_start_matches("lib").trim_end_matches(".a").to_string())
         .collect();
     v.sort();
     v

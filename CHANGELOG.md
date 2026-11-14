@@ -13,8 +13,11 @@ Next: 0.1.1 (release builds); work on 0.2.0 (Windows) has started.
 - Networking on Windows: TCP, UDP, HTTP, WebSockets and the browser UI through Winsock; TLS (`https://`, `tls::`, `serve_tls`) through Schannel, checked against Windows' trust store; `tls::self_signed` keys through BCrypt.
 - `os::shell` uses the system shell: `/bin/sh -c`, or `cmd.exe /c` on Windows.
 - CI builds the golden programs for Windows on Linux and runs them on a Windows machine (`tools/build-fixtures.sh`, `tools/run-fixtures.sh`).
+- `mimic` builds on Windows (MSVC Rust, a Windows LLVM from the llvm workflow); native builds there target MinGW (`x86_64-windows-gnu`) with this machine's CPU features. CI builds it and runs the golden programs it makes.
 
 ### Fixed
+- Windows: each socket call ran once, not twice (binding, sending and receiving failed or repeated); `os::pid()` is the process id; listening ports are claimed exclusively; Winsock errors read as words.
+- `time::sleep` never returns early, also where the clock wakes a little early (WASI hosts).
 - The C version of the HTTP benchmark runs on Linux (epoll).
 - Linux: C code (the runtime, imported headers) is compiled by the embedded Clang; the system compiler only links. Header import failed with GCC.
 - Linux: a runtime function clashed with a glibc maths function (`jnl`).

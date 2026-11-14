@@ -213,6 +213,9 @@ fn libc_cache() -> PathBuf {
     mimic_project::packages::cache_dir().join("libc")
 }
 
+/// The file that reads as empty and swallows writes.
+const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
 fn tool_output(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
@@ -469,7 +472,7 @@ pub fn clang_defaults(triple: &str) -> Option<(String, String, Option<String>)> 
         Err(_) => {
             let out = Command::new(self_exe())
                 .env(mimic_toolchain::RAW_CC_ENV, "1")
-                .args(["cc", &format!("--target={triple}"), "-###", "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
+                .args(["cc", &format!("--target={triple}"), "-###", "-c", "-x", "c", NULL_DEVICE, "-o", NULL_DEVICE])
                 .output()
                 .ok()?;
             let all = String::from_utf8_lossy(&out.stderr).into_owned();

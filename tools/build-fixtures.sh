@@ -10,7 +10,14 @@ mimic=${MIMIC:-target/release/mimic}
 mkdir -p "$dir/debug" "$dir/release"
 # the target's OS word (windows, linux, …): <name>.<os>.out is the expected
 # output where it differs, and not-yet-<os>.txt lists what cannot run yet
-os=$(case "$target" in *windows*) echo windows ;; *linux*) echo linux ;; *apple* | *macos*) echo macos ;; *) echo other ;; esac)
+what=$target
+[ "$target" = native ] && what=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$what" in
+*windows* | mingw* | msys* | cygwin*) os=windows ;;
+*linux*) os=linux ;;
+*apple* | *macos* | darwin*) os=macos ;;
+*) os=other ;;
+esac
 skip=" $(grep -v '^#' "tests/fixtures/run/not-yet-$os.txt" 2>/dev/null | tr '\n' ' ') "
 skipped=0
 for f in tests/fixtures/run/*.mim; do

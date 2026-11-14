@@ -11,7 +11,9 @@ pub fn mimic_home() -> PathBuf {
     if let Some(h) = std::env::var_os("MIMIC_HOME") {
         return PathBuf::from(h);
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_else(|| ".".into());
+    // Windows: the user's profile folder (HOME, when set, is a Unix shell's)
+    let order = if cfg!(windows) { ["USERPROFILE", "HOME"] } else { ["HOME", "USERPROFILE"] };
+    let home = order.iter().find_map(std::env::var_os).unwrap_or_else(|| ".".into());
     PathBuf::from(home).join(".mimic")
 }
 

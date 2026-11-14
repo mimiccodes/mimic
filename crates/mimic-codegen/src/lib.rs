@@ -52,6 +52,9 @@ pub mod tonet;
 pub struct Settings {
     /// LLVM target triple; `None` = host.
     pub triple: Option<String>,
+    /// A build for this machine: its CPU and features are the defaults (also
+    /// with a triple, as on Windows, where the host triple is MinGW's).
+    pub native: bool,
     pub opt_level: u8,
     /// Emit the runtime leak check at exit (debug builds).
     pub leak_check: bool,
@@ -138,14 +141,14 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         None => TargetMachine::get_default_triple(),
     };
     let target = Target::from_triple(&triple).s()?;
-    let (mut cpu, mut features) = if settings.triple.is_none() {
+    let (mut cpu, mut features) = if settings.native {
         (TargetMachine::get_host_cpu_name().to_string(), TargetMachine::get_host_cpu_features().to_string())
     } else {
         (String::new(), String::new()) // LLVM's default CPU for the triple
     };
     if let Some(c) = &settings.cpu {
         cpu = c.clone();
-        if settings.features.is_none() && settings.triple.is_none() {
+        if settings.features.is_none() && settings.native {
             features.clear(); // an explicit CPU replaces the host's feature list
         }
     }

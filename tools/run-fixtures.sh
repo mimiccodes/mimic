@@ -14,6 +14,9 @@ set -u
 dir=$(cd "$1" && pwd) # absolute: each program runs in a temporary directory
 fail=0
 total=0
+# a program that hangs fails on its own instead of stopping the whole run
+limit=""
+command -v timeout >/dev/null && limit="timeout 120"
 for want in "$dir"/*.out; do
     name=$(basename "$want" .out)
     for run in "debug|" "release|" "debug|MIMIC_THREADS=8 MIMIC_PAR_GRAIN=1" "release|MIMIC_THREADS=1 MIMIC_GPU=1"; do
@@ -30,7 +33,7 @@ for want in "$dir"/*.out; do
             continue
         fi
         tmp=$(mktemp -d)
-        got=$(cd "$tmp" && env $envs TMPDIR="$tmp" TMP="$tmp" TEMP="$tmp" "$exe" </dev/null 2>"$tmp.err"; echo "exit $?")
+        got=$(cd "$tmp" && env $envs TMPDIR="$tmp" TMP="$tmp" TEMP="$tmp" $limit "$exe" </dev/null 2>"$tmp.err"; echo "exit $?")
         rm -rf "$tmp"
         expected=$(cat "$want"; echo "exit 0")
         if [ "$got" != "$expected" ] || grep -q leak "$tmp.err"; then

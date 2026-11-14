@@ -27,6 +27,14 @@ pub struct Target {
 
 impl Target {
     pub fn host() -> Target {
+        // Windows: the MinGW environment mimic bundles, whatever C runtime
+        // mimic itself was built with (LLVM's own default there is MSVC)
+        if cfg!(windows)
+            && let Ok(mut t) = Target::parse(&format!("{}-windows-gnu", std::env::consts::ARCH))
+        {
+            t.name = None;
+            return t;
+        }
         let os = match std::env::consts::OS {
             "macos" => "macosx",
             o => o,

@@ -458,6 +458,13 @@ static mim_val *impl_clock(void) {
     return mim_int((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec);
 }
 
+
+static int64_t monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
 static mim_val *impl_sleep(mim_val *d) {
     int64_t ns = d && d->rank == 0 ? (IS_FLOAT(d->dtype) ? (int64_t)getf(d, 0) : geti(d, 0)) : 0;
     if (ns <= 0) return NULL;
@@ -467,8 +474,13 @@ static mim_val *impl_sleep(mim_val *d) {
         return NULL;
     }
 #endif
-    struct timespec ts = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)};
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    /* never less than asked for: some clocks (WASI hosts, coarse system
+     * timers) wake a little early, so sleep again for what is left */
+    int64_t until = monotonic_ns() + ns;
+    for (int64_t left = ns; left > 0; left = until - monotonic_ns()) {
+        struct timespec ts = {(time_t)(left / 1000000000), (long)(left % 1000000000)};
+        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+        }
     }
     return NULL;
 }

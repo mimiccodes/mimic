@@ -96,7 +96,15 @@ static void ws_start(void) {
     while (started != 2) Sleep(0);
 }
 
-#define WS_CHECK(r) ((r) == SOCKET_ERROR ? (errno = ws_errno(), -1) : (r))
+/* a Winsock result as a POSIX one (each call evaluated once) */
+static int ws_check(int r) {
+    if (r == SOCKET_ERROR) {
+        errno = ws_errno();
+        return -1;
+    }
+    return r;
+}
+#define WS_CHECK(r) ws_check(r)
 static int mw_socket(int af, int type, int proto) {
     ws_start();
     SOCKET s = socket(af, type, proto);

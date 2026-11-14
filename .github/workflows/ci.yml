@@ -1,5 +1,6 @@
-# Build mimic and run every test on Linux and macOS (and the golden programs
-# on Windows, built on Linux), on every push to main
+# Build mimic and run every test on Linux and macOS, build mimic on Windows
+# and run the golden programs there (built on Windows, and built on Linux),
+# on every push to main
 # and every pull request. The LLVM it links comes from the llvm workflow's
 # release download.
 name: ci
@@ -125,3 +126,54 @@ jobs:
       - name: Run
         shell: bash
         run: tools/run-fixtures.sh winfix
+
+  # mimic itself on Windows (MSVC Rust, the llvm workflow's Windows LLVM):
+  # it builds the golden programs for its own machine, which then run there.
+  windows-native:
+    name: test (windows-x86_64)
+    runs-on: windows-2025
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustc --version
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deps="$USERPROFILE/.mimic/deps"
+          mkdir -p "$deps"
+          gh release download "$TAG" -p "llvm-$LLVM_VERSION-windows-x86_64.tar.xz" -D "$deps"
+          tar -xJf "$deps/llvm-$LLVM_VERSION-windows-x86_64.tar.xz" -C "$deps"
+          rm "$deps/llvm-$LLVM_VERSION-windows-x86_64.tar.xz"
+          "$deps/llvm-$LLVM_VERSION/bin/llvm-config" --version
+          echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
+          echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX="$USERPROFILE/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$USERPROFILE/.mimic/deps" tools/deps.sh
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Smoke
+        run: |
+          target/release/mimic --version
+          target/release/mimic run tests/fixtures/run/basics.mim
+
+      - name: Golden programs (built here, for this machine)
+        run: |
+          tools/build-fixtures.sh native natfix
+          tools/run-fixtures.sh natfix
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: cargo test --release --no-fail-fast

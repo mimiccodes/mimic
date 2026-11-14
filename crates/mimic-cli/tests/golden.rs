@@ -352,16 +352,14 @@ fn wasi_fixtures() {
         std::fs::create_dir_all(&tmp).unwrap();
         let mut run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         for _ in 0..2 {
-            use std::os::unix::process::ExitStatusExt;
-            let Some(sig) = run.status.signal() else { break };
+            let Some(sig) = signal_of(run.status) else { break };
             eprintln!("{stem}: node died from signal {sig} (engine fault); retrying");
             run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         }
         let status = run.status;
         let mut probe = String::new();
         {
-            use std::os::unix::process::ExitStatusExt;
-            if status.signal().is_some() {
+            if signal_of(status).is_some() {
                 // still crashing: which engine settings avoid it (diagnostics)
                 let sh = |c: &str| std::process::Command::new("sh").arg("-c").arg(c).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
                 probe.push_str(&format!("ulimit -s: {}; node: {}\n", sh("ulimit -s"), sh("node --version")));
@@ -969,4 +967,18 @@ fn fmt_command() {
     let run = mimic().arg("run").arg(&f).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout), "14\n");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The signal that ended a process (Unix; never on Windows).
+fn signal_of(s: std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        s.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = s;
+        None
+    }
 }
