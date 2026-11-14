@@ -24,10 +24,10 @@ fn get_when_up(url: str, tries: i64) -> Result[http::Response, str] {
 }
 
 fn main() {
-    let port = 20000 + os::pid() % 20000
+    let port = 20000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let base = "http://127.0.0.1:{port}"
     let s = server(port)
-    match get_when_up(base + "/", 100) {
+    match get_when_up(base + "/", 250) {
         Ok(r) => print((r.status, r.body, get(r.headers, "content-type"))),
         Err(e) => print("no server: {e}"),
     }

@@ -41,7 +41,7 @@ fn reply(sock: ws::Socket) -> str {
 }
 
 fn main() {
-    let port = 30000 + os::pid() % 20000
+    let port = 26000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let s = app(port)
     let page = match when_up("http://127.0.0.1:{port}/", 100) {
         Ok(r) => r,

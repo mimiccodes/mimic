@@ -29,9 +29,9 @@ fn connect_when_up(url: str, tries: i64) -> Result[ws::Socket, str] {
 }
 
 fn main() {
-    let port = 30000 + os::pid() % 20000
+    let port = 26000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let s = server(port)
-    let sock = match connect_when_up("ws://127.0.0.1:{port}/chat", 100) {
+    let sock = match connect_when_up("ws://127.0.0.1:{port}/chat", 250) {
         Ok(x) => x,
         Err(e) => {
             print("no WebSocket: {e}")

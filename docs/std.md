@@ -53,10 +53,34 @@ A spec that is not one is a compile error (E0213).
 | `push(xs, x)` | A new list with `x` appended |
 | `put(xs, i, x)` | A new list with element `i` replaced by `x` (for maps: a new map with key `i` set) |
 | `concat(xs, ys)` | `xs` followed by `ys` |
-| `sort(xs)` | Ascending, stable; numbers or strings |
+| `sort(xs)` | Ascending, stable; numbers or strings. `⌽ sort(xs)` for descending. |
+| `sort_by(xs, key, descending: false)` | Ordered by `key(x)`; equal keys keep their order |
 | `contains(xs, x)` | `bool` |
+| `unique(xs)` | The distinct elements, in order of first appearance |
+| `zip(a, b)` | `[(a0, b0) (a1, b1) …]`, as long as the shorter list |
+| `enumerate(xs)` | `[(0, x0) (1, x1) …]` |
+| `any(mask)`, `all(mask)` | Is any (every) element of a list of bools true: `any(xs > 2)` |
+| `count(xs, f)` | How many elements `f` says yes to |
+| `group_by(xs, f)` | A map from each `f(x)` to its elements, in order |
+| `flatten(xss)` | One list from a list of lists |
+| `min_by(xs, f)`, `max_by(xs, f)` | `Option`: the element with the smallest (largest) `f(x)` |
+| `clamp(x, lo, hi)` | `x` kept between `lo` and `hi`; elementwise on lists |
+| `to_map(pairs)` | A map from `[(key, value) …]`; a later key wins |
+| `assert(ok, message)` | Stops the program with `message` (default `"assertion failed"`) unless `ok` |
+| `panic(message)` | Stops the program with `message` (exit status 101) |
 
 Lists are values. `push` and `concat` return new lists and leave the original unchanged.
+
+### Sets: `set`
+
+A set is a map from each element to `true`, so lookups are fast and the order of first appearance is kept.
+
+| Function | Result |
+|---|---|
+| `set::of(xs)` | A set of the elements of `xs` |
+| `set::has(s, x)`, `set::size(s)`, `set::items(s)` | Membership, the number of elements, the elements as a list |
+| `set::add(s, x)`, `set::remove(s, x)` | A new set with `x` added or removed |
+| `set::union(a, b)`, `set::intersection(a, b)`, `set::difference(a, b)` | New sets |
 
 ## Maps
 
@@ -121,6 +145,8 @@ Failures come back as values, never as crashes. Error messages name the operatio
 | `fs::read_bytes(path)` | `Result[[u8], str]` | concurrent |
 | `fs::size(path)` | `Result[i64, str]` | concurrent |
 | `fs::list_dir(path)` | `Result[[str], str]`: sorted names, without `.` and `..` | concurrent |
+| `fs::walk(path)` | `Result[[str], str]`: every file below `path`, its subdirectories too, as sorted paths relative to it with `/` | concurrent |
+| `fs::modified(path)` | `Result[i64, str]`: when the file last changed, in ns since 1970 (like `time::now()`) | concurrent |
 | `fs::exists(path)`, `fs::is_file(path)`, `fs::is_dir(path)` | `bool` | concurrent |
 | `fs::current_dir()`, `fs::temp_dir()` | `str` | concurrent |
 | `fs::write(path, text)`, `fs::append(path, text)` | `Result[i64, str]`: bytes written | sync |
@@ -216,6 +242,7 @@ Colours and other effects are ANSI codes in strings: `"\x1b[1;32mgreen\x1b[0m"`.
 |---|---|---|
 | `os::args()` | `[str]`: the command-line arguments, without the program name (`mimic run file.mim -- a b`) | concurrent |
 | `os::env(name)` | `Option[str]` | concurrent |
+| `os::env_all()` | Every environment variable: a map from name to value, sorted by name | concurrent |
 | `os::pid()` | This process's id | concurrent |
 | `os::set_env(name, value)` | `Result[bool, str]` | sync |
 | `os::run(program, arguments)` | `Result[os::Output, str]`: `program` is looked up through `PATH`; `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely | sync |
@@ -238,6 +265,7 @@ Instants and durations are both `i64` nanoseconds, so duration literals mix free
 | `time::utc(t)` | `time::DateTime { year, month, day, hour, minute, second, nanosecond, weekday, utc_offset }`; weekday 1 = Monday … 7 = Sunday | pure |
 | `time::timestamp(y, mo, d, h, mi, s)` | The instant of a UTC date and time | pure |
 | `time::format(t)` | ISO 8601 / RFC 3339 in UTC: `2026-11-12T14:30:05Z`, with `.250` milliseconds when present | pure |
+| `time::format(t, pattern)` | By a pattern, in UTC: `%Y` `%m` `%d` `%H` `%M` `%S`, `%f` milliseconds, `%j` day of the year, `%a`/`%A` weekday, `%b`/`%B` month, `%y`, `%I` and `%p` (12-hour clock), `%%`. `time::format(t, "%d %b %Y")` is `14 Nov 2026`. | pure |
 
 The calendar is the proleptic Gregorian one, correct for any year, before 1970 included.
 
@@ -248,6 +276,8 @@ The calendar is the proleptic Gregorian one, correct for any year, before 1970 i
 | `random::float()` | A float in `[0, 1)` |
 | `random::int(lo, hi)` | An integer in `[lo, hi)`, without bias |
 | `random::seed(n)` | Make the sequence repeatable (per thread) |
+| `random::choice(xs)` | `Option`: one element at random, `None` for no elements |
+| `random::shuffle(xs)` | The elements in a random order |
 
 The generator is xoshiro256**, seeded from the operating system's entropy. Each thread has its own. Drawing a number changes the generator's state, so random draws run in order and never in parallel. It is not for cryptography.
 

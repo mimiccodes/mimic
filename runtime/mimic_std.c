@@ -1203,3 +1203,88 @@ mim_val *mim_std_format(mim_val *v, mim_val *specv) {
     free(body.p);
     return r;
 }
+
+/* ==== collections (0.2.7) ================================================== */
+
+/* sort_index(keys): the positions of `keys` in ascending order, stable (equal
+ * keys keep their order); for sort_by, min_by, max_by */
+mim_val *mim_std_sort_index(mim_val *keys) {
+    need(keys, "sort_by");
+    if (keys->rank != 1) mim_panic("sort_by: the keys must form a list");
+    int64_t n = keys->len;
+    mim_val **k = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
+    int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1)), *out = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1));
+    for (int64_t i = 0; i < n; i++) {
+        k[i] = scalar_at(keys, i);
+        idx[i] = i;
+    }
+    for (int64_t w = 1; w < n; w *= 2) { /* bottom-up merge sort: stable */
+        for (int64_t lo = 0; lo < n; lo += 2 * w) {
+            int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
+            int64_t i = lo, j = mid, o = lo;
+            while (i < mid && j < hi) out[o++] = cmp_vals(k[idx[j]], k[idx[i]]) < 0 ? idx[j++] : idx[i++];
+            while (i < mid) out[o++] = idx[i++];
+            while (j < hi) out[o++] = idx[j++];
+        }
+        int64_t *t = idx;
+        idx = out;
+        out = t;
+    }
+    mim_val *r = alloc(MIM_I64, 1, n);
+    memcpy(r->data, idx, sizeof(int64_t) * (size_t)n);
+    for (int64_t i = 0; i < n; i++) mim_release(k[i]);
+    free(k);
+    free(idx);
+    free(out);
+    return r;
+}
+
+/* group(keys, xs): a map from each key (in order of first appearance) to the
+ * elements of xs with that key; for group_by */
+mim_val *mim_std_group(mim_val *keys, mim_val *xs) {
+    need(keys, "group_by");
+    need(xs, "group_by");
+    if (keys->rank != 1 || xs->rank != 1 || keys->len != xs->len) mim_panic("group_by: expected a list");
+    int64_t n = keys->len, groups = 0;
+    mim_val *ids = map_alloc(n);
+    int64_t *gid = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1));
+    int64_t *count = (int64_t *)calloc((size_t)(n + 1), sizeof(int64_t));
+    mim_val **gkey = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
+    for (int64_t i = 0; i < n; i++) {
+        mim_val *k = scalar_at(keys, i);
+        int64_t e = map_find(ids, k, NULL);
+        if (e < 0) {
+            gkey[groups] = k;
+            mim_retain(k);
+            map_put_raw(ids, k, mim_int(groups));
+            gid[i] = groups++;
+        } else {
+            gid[i] = geti(((mim_val **)ids->data)[2 * e + 1], 0);
+            mim_release(k);
+        }
+        count[gid[i]]++;
+    }
+    mim_val ***elems = (mim_val ***)malloc(sizeof(mim_val **) * (size_t)(groups + 1));
+    int64_t *fill = (int64_t *)calloc((size_t)(groups + 1), sizeof(int64_t));
+    for (int64_t g = 0; g < groups; g++) elems[g] = (mim_val **)malloc(sizeof(mim_val *) * (size_t)count[g]);
+    for (int64_t i = 0; i < n; i++) elems[gid[i]][fill[gid[i]]++] = scalar_at(xs, i);
+    mim_val *r = map_alloc(groups);
+    for (int64_t g = 0; g < groups; g++) {
+        map_put_raw(r, gkey[g], list_take(count[g], elems[g]));
+        free(elems[g]);
+    }
+    mim_release(ids);
+    free(elems);
+    free(fill);
+    free(gid);
+    free(count);
+    free(gkey);
+    return r;
+}
+
+/* panic(message): stop the program with a message (status 101) */
+mim_val *mim_std_panic(mim_val *message) {
+    fflush(stdout);
+    mim_panic(str_arg(message, "panic"));
+    return NULL;
+}

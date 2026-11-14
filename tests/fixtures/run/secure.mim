@@ -42,7 +42,7 @@ fn main() {
     let id = tls::identity(cert, key) else { return }
     print(tls::identity(cert, "not a key"))
 
-    let port = 30000 + os::pid() % 20000
+    let port = 26000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let s = https_server(port, id)
     time::sleep(100ms)
     // nobody trusts a self-signed certificate by default

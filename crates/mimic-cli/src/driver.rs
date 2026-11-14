@@ -138,6 +138,90 @@ pub extern \"mimic\" {
     fn text_pad_end(s: str, width: i64, fill: str) -> str
     fn is_int_base(s: str, base: i64) -> bool
     fn to_int_base(s: str, base: i64) -> i64
+    fn sort_index(keys: any) -> [i64]
+    fn group(keys: any, xs: any) -> any
+}
+
+// Stopping: `panic(\"why\")` ends the program with a message (status 101).
+pub extern \"mimic\" sync {
+    fn panic(message: str)
+}
+
+// Stop with `message` unless `ok` holds.
+pub fn assert(ok: bool, message: str = \"assertion failed\") {
+    if not ok { panic(message) }
+}
+
+// ---- collections -------------------------------------------------------------
+
+// The distinct elements of `xs`, in order of first appearance.
+pub fn unique(xs) { keys(map_of(xs, xs)) }
+
+// `xs` ordered by `key(x)`; equal keys keep their order. `descending: true`
+// for the largest first.
+pub fn sort_by(xs, key, descending: bool = false) {
+    let picked = sort_index(xs ¨ key) ¨ (i => xs[i])
+    if descending { ⌽ picked } else { picked }
+}
+
+// Pairs of elements at the same position, as long as the shorter list.
+pub fn zip(a, b) {
+    let n = (≢ a) ⌊ (≢ b)
+    ⍳ n ¨ (i => (a[i], b[i]))
+}
+
+// Each element with its position: [(0, x0) (1, x1) …].
+pub fn enumerate(xs) { ⍳ (≢ xs) ¨ (i => (i, xs[i])) }
+
+// Is any (or every) element of a list of bools true? `any(xs > 2)`.
+pub fn any(mask) { (+/ mask) > 0 }
+pub fn all(mask) { (+/ mask) == (≢ mask) }
+
+// How many elements `f` says yes to.
+pub fn count(xs, f) { +/ (xs ¨ f) }
+
+// A map from each `f(x)` to the elements with that value, in order.
+pub fn group_by(xs, f) { group(xs ¨ f, xs) }
+
+// One list from a list of lists.
+pub fn flatten(xss) {
+    if (≢ xss) == 0 { [] } else { xss ▷ gather(concat) }
+}
+
+// The element with the smallest (largest) `f(x)`, or `None` for no elements.
+pub fn min_by(xs, f) {
+    if (≢ xs) == 0 { None } else { Some(xs[sort_index(xs ¨ f)[0]]) }
+}
+pub fn max_by(xs, f) {
+    if (≢ xs) == 0 { None } else {
+        let order = sort_index(xs ¨ f)
+        Some(xs[order[(≢ order) - 1]])
+    }
+}
+
+// `x` kept between `lo` and `hi` (elementwise on lists).
+pub fn clamp(x, lo, hi) { (lo ⌈ x) ⌊ hi }
+
+// A map from a list of (key, value) pairs; a later key wins.
+pub fn to_map(pairs) { map_of(pairs ¨ (p => p.0), pairs ¨ (p => p.1)) }
+
+// Sets: a map from each element to true, so `has` is fast and order is kept.
+pub module set {
+    pub fn of(xs) { map_of(xs, xs ¨ (x => true)) }
+    pub fn has(s, x) { super::has(s, x) }
+    pub fn add(s, x) { put(s, x, true) }
+    pub fn remove(s, x) { super::remove(s, x) }
+    pub fn items(s) { keys(s) }
+    pub fn size(s) { ≢ keys(s) }
+    pub fn union(a, b) { of(concat(keys(a), keys(b))) }
+    pub fn intersection(a, b) {
+        let xs = keys(a)
+        of(xs ⌿ (xs ¨ (x => super::has(b, x))))
+    }
+    pub fn difference(a, b) {
+        let xs = keys(a)
+        of(xs ⌿ (xs ¨ (x => not super::has(b, x))))
+    }
 }
 
 // `s` widened to `width` characters with `fill` in front (or after).
@@ -194,6 +278,10 @@ pub module fs {
 
     pub extern \"mimic\" concurrent {
         fn read_bytes(path: str) -> Result[[u8], str]
+        // every file below `path`, as paths relative to it, sorted
+        fn walk(path: str) -> Result[[str], str]
+        // when the file last changed (ns since 1970, like time::now)
+        fn modified(path: str) -> Result[i64, str]
     }
 
     pub extern \"mimic\" sync {
@@ -273,6 +361,8 @@ pub module os {
     pub extern \"mimic\" concurrent {
         fn args() -> [str]
         fn env(name: str) -> Option[str]
+        // every environment variable: a map from name to value
+        fn env_all() -> any
         fn pid() -> i64
     }
 
@@ -309,8 +399,14 @@ pub module time {
 
     pub extern \"mimic\" pure {
         fn utc(t: i64) -> DateTime
-        fn format(t: i64) -> str
+        fn format_iso(t: i64) -> str
+        fn format_pattern(t: i64, pattern: str) -> str
         fn timestamp(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64
+    }
+
+    // ISO 8601 in UTC, or by a pattern: %Y %m %d %H %M %S %f (ms) %j %a %A %b %B %y %I %p %%
+    pub fn format(t: i64, pattern: str = \"\") -> str {
+        if pattern == \"\" { format_iso(t) } else { format_pattern(t, pattern) }
     }
 }
 
@@ -320,7 +416,16 @@ pub module random {
         fn float() -> f64
         fn int(lo: i64, hi: i64) -> i64
         fn seed(n: i64)
+        fn permutation(n: i64) -> [i64]
     }
+
+    // One element at random, or `None` for no elements.
+    pub fn choice(xs) {
+        if (≢ xs) == 0 { None } else { Some(xs[int(0, ≢ xs)]) }
+    }
+
+    // The elements in a random order.
+    pub fn shuffle(xs) { permutation(≢ xs) ¨ (i => xs[i]) }
 }
 
 // JSON text ↔ values: `json::encode(user)`, `json::decode[User](text)`,

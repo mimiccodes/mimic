@@ -20,30 +20,13 @@ Closed: `io::write`, `io::flush`, `io::read_char`, `io::read_bytes`; the `term` 
 
 Closed: `char_code`, `char_of`; format specs in interpolation (`{x:.2}`, `{n:>5}`, `{n:05}`, `{n:#x}`, `{n:,}`, `{x:.1%}`) and `format(x, spec)`; `parse_int(text, base)`; `pad_start`, `pad_end`; `words`; `slice`.
 
-## Collections (0.2.7)
+## Collections ✅ (0.2.7)
 
-| Gap | Today |
-|---|---|
-| `unique(xs)` | None |
-| `sort_by(xs, key)`, sorting descending | `sort` ascending only |
-| `zip(a, b)`, indices with values (`enumerate`) | `⍳ ≢ xs` gives the indices |
-| `any(mask)`, `all(mask)` | `gather` with `or` / `and` |
-| `count(xs, f)`, `group_by(xs, f)`, `flatten` | None |
-| `min_by` / `max_by` | `⌈/` and `⌊/` on numbers |
-| `clamp(x, lo, hi)` | `lo ⌈ x ⌊ hi` |
-| Sets: `set::of(xs)`, membership, union, intersection | Maps with dummy values |
-| A map from a list of pairs | `map_of(keys, values)` takes two lists |
+Closed: `unique`, `sort_by` (with `descending`), `zip`, `enumerate`, `any`, `all`, `count`, `group_by`, `flatten`, `min_by`, `max_by`, `clamp`, `to_map`, the `set` module. Golden test `collections`.
 
-## Programs and the system (0.2.7)
+## Programs and the system ✅ (0.2.7)
 
-| Gap | Today |
-|---|---|
-| `panic(message)` and `assert(cond)` in ordinary code | `expect` exists in tests only |
-| `os::env_all()` | One variable at a time |
-| `fs::walk(dir)`: a directory tree | `fs::list_dir`, one level |
-| File times and metadata: `fs::modified(path)` | `fs::size`, `fs::is_file`, `fs::is_dir` |
-| `time::format(t, pattern)` | One fixed format |
-| `random::choice`, `random::shuffle` | `random::int`, then index |
+Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::format(t, pattern)`, `random::choice`, `random::shuffle`.
 
 ## C interop (0.2.8)
 

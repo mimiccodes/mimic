@@ -2002,3 +2002,204 @@ mim_val *mim_std_os_on_interrupt(mim_val *handler) {
 #endif
     return NULL;
 }
+
+/* ==== collections and the system (0.2.7) =================================== */
+
+/* random::permutation(n): 0..n-1 in a random order (Fisher–Yates) */
+mim_val *mim_std_random_permutation(mim_val *count) {
+    int64_t n = geti(count, 0);
+    if (n < 0) mim_panic("random::shuffle: the count cannot be negative");
+    mim_val *r = alloc(MIM_I64, 1, n);
+    int64_t *p = (int64_t *)r->data;
+    for (int64_t i = 0; i < n; i++) p[i] = i;
+    for (int64_t i = n - 1; i > 0; i--) {
+        uint64_t span = (uint64_t)i + 1, limit = UINT64_MAX - UINT64_MAX % span, x;
+        do x = rng_next(); while (x >= limit);
+        int64_t j = (int64_t)(x % span), t = p[i];
+        p[i] = p[j];
+        p[j] = t;
+    }
+    return r;
+}
+
+/* os::env_all(): every environment variable, as a map sorted by name */
+#if !defined(_WIN32)
+extern char **environ;
+#endif
+static int cmp_env(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+
+mim_val *mim_std_os_env_all(void) {
+    char **vars = NULL;
+    int64_t n = 0;
+#if defined(_WIN32)
+    /* the environment as UTF-8 (the C runtime's copy uses the local code page) */
+    wchar_t *block = GetEnvironmentStringsW();
+    for (wchar_t *w = block; w && *w; w += wcslen(w) + 1) {
+        if (*w == L'=') continue; /* per-drive current directories */
+        int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+        char *s = (char *)malloc(len > 0 ? (size_t)len : 1);
+        if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w, -1, s, len, NULL, NULL);
+        else s[0] = 0;
+        vars = (char **)realloc(vars, sizeof(char *) * (size_t)(n + 1));
+        vars[n++] = s;
+    }
+    if (block) FreeEnvironmentStringsW(block);
+#else
+    for (char **e = environ; e && *e; e++) {
+        vars = (char **)realloc(vars, sizeof(char *) * (size_t)(n + 1));
+        vars[n++] = strdup(*e);
+    }
+#endif
+    qsort(vars, (size_t)n, sizeof(char *), cmp_env);
+    mim_val **ks = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1)), **vs = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        char *eq = strchr(vars[i], '=');
+        if (eq && eq != vars[i]) {
+            ks[k] = mim_str(vars[i], (int64_t)(eq - vars[i]));
+            vs[k] = mim_from_cstr(eq + 1);
+            k++;
+        }
+        free(vars[i]);
+    }
+    free(vars);
+    mim_val *kl = k ? mim_array_lit(k, ks) : alloc(MIM_BOXED, 1, 0), *vl = k ? mim_array_lit(k, vs) : alloc(MIM_BOXED, 1, 0);
+    for (int64_t i = 0; i < k; i++) {
+        mim_release(ks[i]);
+        mim_release(vs[i]);
+    }
+    free(ks);
+    free(vs);
+    mim_val *m = mim_std_map_of(kl, vl);
+    mim_release(kl);
+    mim_release(vl);
+    return m;
+}
+
+/* fs::walk(dir): every file under dir, its subdirectories too, as paths
+ * relative to dir with `/`, sorted */
+typedef struct {
+    char **p;
+    int64_t n, cap;
+} pathlist;
+
+static int walk_into(const char *root, const char *rel, pathlist *out, int depth) {
+    if (depth > 64) return 1; /* a loop of links */
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s%s%s", root, rel[0] ? "/" : "", rel);
+    DIR *d = opendir(dir);
+    if (!d) return depth > 0; /* an unreadable subdirectory is skipped */
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char sub[4096], full[4096];
+        snprintf(sub, sizeof sub, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
+        snprintf(full, sizeof full, "%s/%s", root, sub);
+        struct stat st;
+        if (!stat_of(full, &st)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            walk_into(root, sub, out, depth + 1);
+        } else {
+            if (out->n == out->cap) out->p = (char **)realloc(out->p, sizeof(char *) * (size_t)(out->cap = out->cap ? out->cap * 2 : 64));
+            out->p[out->n++] = strdup(sub);
+        }
+    }
+    closedir(d);
+    return 1;
+}
+
+mim_val *mim_std_fs_walk(mim_val *path) {
+    const char *root = io_path(path, "walk");
+    pathlist l = {0};
+    if (!walk_into(root, "", &l, 0)) {
+        char buf[600];
+        snprintf(buf, sizeof buf, "cannot walk %s: %s", root, strerror(errno));
+        return err_of(buf);
+    }
+    qsort(l.p, (size_t)l.n, sizeof(char *), cmp_cstr);
+    mim_val *r;
+    if (l.n == 0) {
+        r = alloc(MIM_BOXED, 1, 0);
+    } else {
+        mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)l.n);
+        for (int64_t i = 0; i < l.n; i++) tmp[i] = mim_from_cstr(l.p[i]);
+        r = mim_array_lit(l.n, tmp);
+        for (int64_t i = 0; i < l.n; i++) mim_release(tmp[i]);
+        free(tmp);
+    }
+    for (int64_t i = 0; i < l.n; i++) free(l.p[i]);
+    free(l.p);
+    return ok_of(r);
+}
+
+/* fs::modified(path): when the file last changed, in ns since the epoch */
+mim_val *mim_std_fs_modified(mim_val *path) {
+    const char *p = io_path(path, "modified");
+    struct stat st;
+    if (!stat_of(p, &st)) {
+        char buf[600];
+        snprintf(buf, sizeof buf, "cannot read %s: %s", p, strerror(errno));
+        return err_of(buf);
+    }
+    int64_t ns = 0;
+#if defined(__APPLE__)
+    ns = st.st_mtimespec.tv_nsec;
+#elif defined(__linux__) || defined(__wasi__)
+    ns = st.st_mtim.tv_nsec;
+#endif
+    return ok_of(mim_int((int64_t)st.st_mtime * 1000000000 + ns));
+}
+
+/* time::format(t, pattern), in UTC: %Y year, %m month, %d day, %H hour,
+ * %M minute, %S second, %f milliseconds, %j day of the year, %a %A weekday,
+ * %b %B month name, %y two-digit year, %I %p 12-hour clock, %% a percent */
+mim_val *mim_std_time_format_pattern(mim_val *t, mim_val *pattern) {
+    static const char *days[] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
+    static const char *months[] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
+    const char *s = io_path(pattern, "time::format");
+    int64_t n = pattern->len;
+    mim_val *pv = date_parts(geti(t, 0), 0);
+    int64_t *v = (int64_t *)pv->data;
+    sbuf b = {0};
+    for (int64_t i = 0; i < n; i++) {
+        if (s[i] != '%' || i + 1 >= n) {
+            sb_put(&b, s + i, 1);
+            continue;
+        }
+        char c = s[++i], tmp[32];
+        tmp[0] = 0;
+        switch (c) {
+        case 'Y': snprintf(tmp, sizeof tmp, "%04lld", (long long)v[0]); break;
+        case 'y': snprintf(tmp, sizeof tmp, "%02lld", (long long)(v[0] % 100)); break;
+        case 'm': snprintf(tmp, sizeof tmp, "%02lld", (long long)v[1]); break;
+        case 'd': snprintf(tmp, sizeof tmp, "%02lld", (long long)v[2]); break;
+        case 'H': snprintf(tmp, sizeof tmp, "%02lld", (long long)v[3]); break;
+        case 'I': snprintf(tmp, sizeof tmp, "%02lld", (long long)((v[3] + 11) % 12 + 1)); break;
+        case 'p': snprintf(tmp, sizeof tmp, "%s", v[3] < 12 ? "AM" : "PM"); break;
+        case 'M': snprintf(tmp, sizeof tmp, "%02lld", (long long)v[4]); break;
+        case 'S': snprintf(tmp, sizeof tmp, "%02lld", (long long)v[5]); break;
+        case 'f': snprintf(tmp, sizeof tmp, "%03lld", (long long)(v[6] / 1000000)); break;
+        case 'j': snprintf(tmp, sizeof tmp, "%03lld", (long long)(days_from_civil(v[0], v[1], v[2]) - days_from_civil(v[0], 1, 1) + 1)); break;
+        case 'a': snprintf(tmp, sizeof tmp, "%.3s", days[v[7] - 1]); break;
+        case 'A': snprintf(tmp, sizeof tmp, "%s", days[v[7] - 1]); break;
+        case 'b': snprintf(tmp, sizeof tmp, "%.3s", months[v[1] - 1]); break;
+        case 'B': snprintf(tmp, sizeof tmp, "%s", months[v[1] - 1]); break;
+        case '%': snprintf(tmp, sizeof tmp, "%%"); break;
+        default: {
+            mim_release(pv);
+            free(b.p);
+            char buf[96];
+            snprintf(buf, sizeof buf, "time::format: `%%%c` is not a pattern code (codes: %%Y %%m %%d %%H %%M %%S %%f %%j %%a %%A %%b %%B %%y %%I %%p %%%%)", c);
+            mim_panic(buf);
+        }
+        }
+        sb_str(&b, tmp);
+    }
+    mim_release(pv);
+    mim_val *r = mim_str(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return r;
+}
+
+/* time::format(t) without a pattern: ISO 8601 (the prelude's format calls it) */
+mim_val *mim_std_time_format_iso(mim_val *t) { return impl_format_time(t); }

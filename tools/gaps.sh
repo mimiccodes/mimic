@@ -79,6 +79,8 @@ check group_by        '    print(group_by([1 2 3], x => x % 2))'
 check flatten         '    print(flatten([[1 2] [3]]))'
 check clamp           '    print(clamp(15, 0, 10))'
 check sets            '    print(set::of([1 2 2]))'
+check to_map          '    print(to_map([("a", 1)]))'
+check min_max_by      '    print(min_by([3 1 2], x => x))'
 echo "== programs and the system"
 check panic           '    panic("stop")'
 check assert          '    assert(1 == 1)'

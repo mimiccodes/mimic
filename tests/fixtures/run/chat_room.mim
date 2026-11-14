@@ -83,11 +83,11 @@ fn text_of(r: Result[ws::Message, str]) -> str {
 }
 
 fn main() {
-    let port = 30000 + os::pid() % 20000
+    let port = 26000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let (ev_tx, ev_rx) = chan::new[Event]()
     let room = hub(ev_rx, [])
     let s = server(port, ev_tx)
-    let ada = match connect_when_up("ws://127.0.0.1:{port}/", 100) {
+    let ada = match connect_when_up("ws://127.0.0.1:{port}/", 250) {
         Ok(x) => x,
         Err(e) => {
             print("no WebSocket: {e}")

@@ -54,7 +54,7 @@ fn wait_for(sock: ws::Socket, needle: str, tries: i64) -> bool {
 }
 
 fn main() {
-    let port = 30000 + os::pid() % 20000
+    let port = 26000 + os::pid() % 6000          // below the ports the OS hands out (32768+)
     let (news_tx, news_rx) = chan::new[Msg]()
     let s = app(port, news_rx)
     let page = match when_up("http://127.0.0.1:{port}/", 100) {

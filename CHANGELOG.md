@@ -12,6 +12,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - Importing a C header failed when it declared a name Mimic uses itself (`div` in `stdlib.h`, a field `type`, a function `sum`). Under `c::` (below) they keep their C spelling; a wrapper that cannot be written in Mimic is left out instead of failing the import.
 
 ### Added
+- Collections: `unique`, `sort_by` (stable, `descending: true`), `zip`, `enumerate`, `any`, `all`, `count`, `group_by`, `flatten`, `min_by`, `max_by`, `clamp`, `to_map`, and a `set` module (`set::of`, `has`, `add`, `remove`, `union`, `intersection`, `difference`).
+- `panic(message)` and `assert(ok, message)` in ordinary code; `os::env_all()`; `fs::walk(dir)` and `fs::modified(path)`; `time::format(t, pattern)` (`%Y-%m-%d %H:%M`); `random::choice` and `random::shuffle`.
 - Terminal programs without C: `io::write` (no newline), `io::flush`, `io::read_char`, `io::read_bytes`; the `term` module (`raw`, `read_key`, `size`, `is_terminal`, `clear`, `move_to`, `show_cursor`, `alternate_screen`, undone when the program ends), on Windows too (ANSI codes are switched on); `os::on_interrupt` for Ctrl-C.
 - Formats in interpolation, as in Python and Rust: `"{x:.2}"`, `"{n:>8}"`, `"{n:06}"`, `"{n:#x}"`, `"{n:,}"`, `"{x:.1%}"`; `format(x, spec)`. A bad format is a compile error.
 - `char_code`, `char_of`, `pad_start`, `pad_end`, `words`, `slice`, `parse_int(text, base)`.
