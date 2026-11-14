@@ -84,6 +84,17 @@ def main():
             t = {k: best(mexe, {"MIMIC_THREADS": str(k)}) for k in sorted({1, 2, nproc})}
             rows.append((name, cpu, c, t, vector_counts(mexe)))
             print(f"{name:<15} cpu={cpu:<24} C {c:.3f} s | " + " | ".join(f"{k} thr {v:.3f} s ({v / c:.2f}x)" for k, v in t.items()) + f" | {rows[-1][4]}", flush=True)
+        # prefix_sum's parts: chunk size, and the reduce pass alone
+        if "prefix_sum" in a.benches:
+            red = d / "reduce"
+            red.mkdir()
+            (red / "main.mim").write_text("module main\n\nfn main() {\n    print(⍳ 100000000 % 1000 ▷ +/)\n}\n")
+            rexe, _ = mimic_build(a.mimic, red / "main.mim", d)
+            pexe = d / ("prefix_sum_mim" + EXE)
+            for k in (1, nproc):
+                print(f"reduce only     {k} thr {best(rexe, {'MIMIC_THREADS': str(k)}):.3f} s")
+            for g in (16384, 262144, 4194304):
+                print(f"prefix_sum      grain {g:>7}: " + " | ".join(f"{k} thr {best(pexe, {'MIMIC_THREADS': str(k), 'MIMIC_PAR_GRAIN': str(g)}):.3f} s" for k in (1, 2, nproc)))
         # all threads without the event loop: does it cost the parallel code?
         for name in a.benches:
             if name not in ("fib", "prefix_sum"):
