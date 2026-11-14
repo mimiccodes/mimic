@@ -25,6 +25,8 @@ Mimic follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
    * attaches the binaries, checksums and changelog section to a GitHub release.
 5. **Before every tag:** the owner approves it.
 
+**Released so far:** 0.1.0, then **0.2.0** (2026-11-14). 0.2.0 brings parts of the plan forward: the release builds of 0.1.1 (Linux x86_64, macOS arm64 and Windows x86_64, with install scripts in place of a `curl … | sh` installer; the Linux build needs glibc 2.39 or newer), and Windows from 0.2.0–0.2.4 (cross builds, networking and TLS, `mimic` itself on Windows). Still open from those steps: the older-glibc Linux build, the IOCP event loop and Windows arm64.
+
 ---
 
 ## 0.1 — Foundations

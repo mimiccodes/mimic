@@ -4,7 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
-Next: 0.1.1 (release builds); work on 0.2.0 (Windows) has started.
+## 0.2.0 — 2026-11-14
+
+Downloadable builds for Linux, macOS and Windows; Windows as a target and as a host; static Linux and Windows programs proven in CI.
 
 ### Added
 - `mimic --version` shows the commit and the LLVM version.
