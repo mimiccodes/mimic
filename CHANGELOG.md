@@ -9,7 +9,8 @@ Next: 0.1.1 (release builds); work on 0.2.0 (Windows) has started.
 ### Added
 - `mimic --version` shows the commit and the LLVM version.
 - `MIMIC_GPU_DEBUG=1` reports whether a Metal GPU was found.
-- Windows programs from any machine: `--target x86_64-windows` (and `aarch64-windows`) builds `.exe` files with the bundled mingw-w64 (UCRT); `mimic cc` compiles and links C for Windows too. Threads, implicit futures, files, time and processes work; networking comes in 0.2.1.
+- Windows programs from any machine: `--target x86_64-windows` (and `aarch64-windows`) builds `.exe` files with the bundled mingw-w64 (UCRT); `mimic cc` compiles and links C for Windows too. Threads, implicit futures, files, time and processes work.
+- Networking on Windows: TCP, UDP, HTTP, WebSockets and the browser UI through Winsock; TLS (`https://`, `tls::`, `serve_tls`) through Schannel, checked against Windows' trust store; `tls::self_signed` keys through BCrypt.
 - `os::shell` uses the system shell: `/bin/sh -c`, or `cmd.exe /c` on Windows.
 - CI builds the golden programs for Windows on Linux and runs them on a Windows machine (`tools/build-fixtures.sh`, `tools/run-fixtures.sh`).
 

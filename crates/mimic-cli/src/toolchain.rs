@@ -395,7 +395,7 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             // the C runtime, threads, and the Windows DLLs the runtime uses;
             // mingw's libraries refer to each other, so they go in a group
             c.arg("--start-group");
-            c.args(["-lmingw32", "-lmingwex", "-lucrt", "-lpthread", "-lkernel32", "-luser32", "-lws2_32", "-ladvapi32", "-lbcrypt", "-lshell32", "-lntdll", "-lsynchronization"]);
+            c.args(["-lmingw32", "-lmingwex", "-lucrt", "-lpthread", "-lkernel32", "-luser32", "-lws2_32", "-ladvapi32", "-lbcrypt", "-lsecur32", "-lcrypt32", "-lncrypt", "-lshell32", "-lntdll", "-lsynchronization"]);
             c.arg(m.builtins());
             c.arg("--end-group");
             c.arg(lib.join("crtend.o"));

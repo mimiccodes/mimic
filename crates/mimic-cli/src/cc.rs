@@ -92,7 +92,7 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
                     pre.push(path(&lib.join("crt2.o")));
                     pre.push(path(&lib.join("crtbegin.o")));
                     post.push(format!("-L{}", lib.display()));
-                    for l in ["mingw32", "mingwex", "ucrt", "pthread", "kernel32", "user32", "ws2_32", "advapi32", "bcrypt", "shell32", "ntdll", "mingw32", "mingwex", "ucrt"] {
+                    for l in ["mingw32", "mingwex", "ucrt", "pthread", "kernel32", "user32", "ws2_32", "advapi32", "bcrypt", "secur32", "crypt32", "ncrypt", "shell32", "ntdll", "mingw32", "mingwex", "ucrt"] {
                         post.push(format!("-l{l}"));
                     }
                     post.push(path(&m.builtins()));

@@ -22,7 +22,19 @@
 #define MIM_THREADS 0
 #elif defined(_WIN32)
 #define MIM_THREADS 1
+#include <winsock2.h> /* before windows.h, which would bring the old winsock.h */
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <bcrypt.h>
+/* what the C library on Windows lacks */
+#define gmtime_r(t, tm) (gmtime_s((tm), (t)) == 0 ? (tm) : NULL)
+#define localtime_r(t, tm) (localtime_s((tm), (t)) == 0 ? (tm) : NULL)
+static void *memmem(const void *h, size_t hn, const void *n, size_t nn) {
+    if (nn == 0) return (void *)h;
+    for (const char *p = (const char *)h; hn >= nn; p++, hn--)
+        if (*p == *(const char *)n && memcmp(p, n, nn) == 0) return (void *)p;
+    return NULL;
+}
 #include <pthread.h> /* winpthreads (mingw-w64): futures, the net reducer */
 #include <unistd.h>
 #else

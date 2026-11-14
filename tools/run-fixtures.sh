@@ -11,7 +11,7 @@
 # debug on 8 threads one element per chunk (leak check on), release on one
 # thread with the GPU forced on.
 set -u
-dir=$1
+dir=$(cd "$1" && pwd) # absolute: each program runs in a temporary directory
 fail=0
 total=0
 for want in "$dir"/*.out; do

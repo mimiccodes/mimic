@@ -579,11 +579,29 @@ static void rng_seed(uint64_t seed) {
     rng_ready = 1;
 }
 
+/* random bytes from the operating system; 0 when it gives none */
+__attribute__((unused)) static int os_random(void *p, size_t n) {
+#if defined(_WIN32)
+    return BCryptGenRandom(NULL, (PUCHAR)p, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#elif defined(__APPLE__)
+    arc4random_buf(p, n);
+    return 1;
+#else
+    size_t got = 0;
+    while (got < n) {
+        size_t k = n - got > 256 ? 256 : n - got;
+        if (getentropy((char *)p + got, k) != 0) return 0;
+        got += k;
+    }
+    return 1;
+#endif
+}
+
 static uint64_t rng_next(void) {
     if (!rng_ready) {
         uint64_t seed = 0;
 #if defined(_WIN32)
-        seed = (uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)&seed;
+        if (!os_random(&seed, sizeof seed)) seed = (uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)&seed;
 #elif defined(__APPLE__)
         arc4random_buf(&seed, sizeof seed); /* every Apple platform's libc */
 #else

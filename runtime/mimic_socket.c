@@ -27,8 +27,117 @@ static mim_val *field_of(mim_val *o, const mim_desc *d, int64_t i, const char *w
     return ((mim_val **)o->data)[i];
 }
 
-#if defined(_WIN32) || defined(__wasi__)
+#if defined(__wasi__)
 #define MIM_NO_SOCKETS 1
+#endif
+
+#if defined(_WIN32) && !defined(MIM_NO_SOCKETS)
+/* Winsock under the POSIX names the rest of this file uses: sockets are
+ * ints, failures set errno (mapped from WSAGetLastError) and strerror gives
+ * the same messages as on Linux and macOS. */
+static int ws_errno(void) {
+    switch (WSAGetLastError()) {
+    case WSAEINTR: return EINTR;
+    case WSAEWOULDBLOCK: return EWOULDBLOCK;
+    case WSAETIMEDOUT: return EAGAIN; /* a receive timeout, as on Unix */
+    case WSAEINPROGRESS: return EINPROGRESS;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAECONNRESET: return ECONNRESET;
+    case WSAECONNABORTED: return ECONNABORTED;
+    case WSAEADDRINUSE: return EADDRINUSE;
+    case WSAEADDRNOTAVAIL: return EADDRNOTAVAIL;
+    case WSAENETUNREACH: return ENETUNREACH;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAENOTCONN: return ENOTCONN;
+    case WSAEACCES: return EACCES;
+    case WSAEMSGSIZE: return EMSGSIZE;
+    case WSAESHUTDOWN: return EPIPE;
+    default: return EIO;
+    }
+}
+
+static const char *ws_strerror(int e) {
+    switch (e) {
+    case EINTR: return "Interrupted system call";
+    case EWOULDBLOCK: return "Resource temporarily unavailable";
+    case EINPROGRESS: return "Operation now in progress";
+    case ECONNREFUSED: return "Connection refused";
+    case ECONNRESET: return "Connection reset by peer";
+    case ECONNABORTED: return "Software caused connection abort";
+    case EADDRINUSE: return "Address already in use";
+    case EADDRNOTAVAIL: return "Can't assign requested address";
+    case ENETUNREACH: return "Network is unreachable";
+    case EHOSTUNREACH: return "No route to host";
+    case ENOTCONN: return "Socket is not connected";
+    case EPIPE: return "Broken pipe";
+    case EMSGSIZE: return "Message too long";
+    default: return strerror(e);
+    }
+}
+
+static void ws_start(void) {
+    static volatile LONG started = 0;
+    if (InterlockedCompareExchange(&started, 1, 0) == 0) {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+        started = 2;
+    }
+    while (started != 2) Sleep(0);
+}
+
+#define WS_CHECK(r) ((r) == SOCKET_ERROR ? (errno = ws_errno(), -1) : (r))
+static int mw_socket(int af, int type, int proto) {
+    ws_start();
+    SOCKET s = socket(af, type, proto);
+    if (s == INVALID_SOCKET) {
+        errno = ws_errno();
+        return -1;
+    }
+    return (int)s;
+}
+static int mw_accept(int fd, struct sockaddr *a, socklen_t *l) {
+    SOCKET s = accept((SOCKET)fd, a, l);
+    if (s == INVALID_SOCKET) {
+        errno = ws_errno();
+        return -1;
+    }
+    return (int)s;
+}
+static int mw_connect(int fd, const struct sockaddr *a, socklen_t l) { return WS_CHECK(connect((SOCKET)fd, a, l)); }
+static int mw_bind(int fd, const struct sockaddr *a, socklen_t l) { return WS_CHECK(bind((SOCKET)fd, a, l)); }
+static int mw_listen(int fd, int n) { return WS_CHECK(listen((SOCKET)fd, n)); }
+static int mw_close(int fd) { return WS_CHECK(closesocket((SOCKET)fd)); }
+static int mw_shutdown(int fd, int how) { return WS_CHECK(shutdown((SOCKET)fd, how)); }
+static int mw_setsockopt(int fd, int lv, int name, const void *v, socklen_t n) { return WS_CHECK(setsockopt((SOCKET)fd, lv, name, (const char *)v, n)); }
+static int mw_getsockopt(int fd, int lv, int name, void *v, socklen_t *n) { return WS_CHECK(getsockopt((SOCKET)fd, lv, name, (char *)v, n)); }
+static int mw_getsockname(int fd, struct sockaddr *a, socklen_t *l) { return WS_CHECK(getsockname((SOCKET)fd, a, l)); }
+static int mw_getaddrinfo(const char *h, const char *p, const struct addrinfo *hi, struct addrinfo **r) {
+    ws_start();
+    return getaddrinfo(h, p, hi, r);
+}
+static ssize_t mrecv(int fd, void *buf, size_t n) { return WS_CHECK(recv((SOCKET)fd, (char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), 0)); }
+static ssize_t msend(int fd, const void *buf, size_t n, int flags) {
+    return WS_CHECK(send((SOCKET)fd, (const char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), flags));
+}
+static ssize_t mrecvfrom(int fd, void *buf, size_t n, struct sockaddr *from, socklen_t *fl) {
+    return WS_CHECK(recvfrom((SOCKET)fd, (char *)buf, (int)n, 0, from, fl));
+}
+static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr *to, socklen_t tl) {
+    return WS_CHECK(sendto((SOCKET)fd, (const char *)buf, (int)n, 0, to, tl));
+}
+#define socket mw_socket
+#define accept mw_accept
+#define connect mw_connect
+#define bind mw_bind
+#define listen mw_listen
+#define close mw_close
+#define shutdown mw_shutdown
+#define setsockopt mw_setsockopt
+#define getsockopt mw_getsockopt
+#define getsockname mw_getsockname
+#define getaddrinfo mw_getaddrinfo
+#define strerror ws_strerror
+#define SHUT_WR SD_SEND
 #endif
 
 #ifdef MIM_NO_SOCKETS
@@ -78,11 +187,13 @@ mim_val *mim_std_http_serve_requests(mim_val *p, mim_val *h, mim_val *n) { (void
 
 #else
 
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#endif
 
 #ifdef MSG_NOSIGNAL
 #define MIM_SEND_FLAGS MSG_NOSIGNAL
@@ -100,7 +211,11 @@ static void sock_setup(int fd) {
 }
 
 static void sock_timeout(int fd, int seconds) {
+#ifdef _WIN32
+    DWORD tv = (DWORD)seconds * 1000; /* milliseconds on Windows */
+#else
     struct timeval tv = {seconds, 0};
+#endif
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
@@ -313,19 +428,8 @@ static void conn_close(mconn *c) {
 
 /* ---- DER and PEM: just enough to write keys and certificates ---------- */
 
-/* random bytes from the operating system */
-__attribute__((unused)) static void arc4random_buf_or_urandom(void *p, size_t n) {
-#if defined(__APPLE__)
-    arc4random_buf(p, n);
-#else
-    size_t got = 0;
-    while (got < n) {
-        size_t k = n - got > 256 ? 256 : n - got;
-        if (getentropy((char *)p + got, k) != 0) break;
-        got += k;
-    }
-#endif
-}
+/* random bytes from the operating system (os_random in mimic_io.c) */
+__attribute__((unused)) static void arc4random_buf_or_urandom(void *p, size_t n) { (void)os_random(p, n); }
 
 typedef struct {
     uint8_t *p;
@@ -1076,6 +1180,517 @@ static void tls_close(void *t) {
     os.free(t);
 }
 
+#elif defined(_WIN32)
+
+/* Windows: Schannel, the system's TLS. Certificates and host names are
+ * checked against Windows' own trust store; `trust` sessions check the
+ * chain against only the given certificates. A server identity's key is
+ * imported into the system's key storage (Schannel works in another
+ * process and cannot use a key held only here) under a name of its own,
+ * and deleted when the program exits. */
+#define SECURITY_WIN32
+#include <security.h>
+#include <schannel.h>
+#include <wincrypt.h>
+#include <ncrypt.h>
+
+typedef struct {
+    int fd;
+    CredHandle cred;
+    int own_cred; /* clients own their credentials; servers share the identity's */
+    CtxtHandle ctx;
+    int have_ctx;
+    int server;
+    SecPkgContext_StreamSizes sizes;
+    char *in; /* received, not yet decrypted */
+    size_t in_n, in_cap;
+    char *plain; /* decrypted, not yet returned */
+    size_t plain_n, plain_off, plain_cap;
+    int eof;
+} sc_session;
+
+typedef struct {
+    CredHandle cred;
+    PCCERT_CONTEXT cert;
+} sc_identity;
+
+static void sc_status(SECURITY_STATUS rc, char *buf, size_t n) {
+    char sys[300] = "";
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, (DWORD)rc, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), sys, sizeof sys, NULL);
+    size_t L = strlen(sys);
+    while (L && (sys[L - 1] == '\n' || sys[L - 1] == '\r' || sys[L - 1] == '.' || sys[L - 1] == ' ')) sys[--L] = 0;
+    if (L) snprintf(buf, n, "%s", sys);
+    else snprintf(buf, n, "error 0x%08lx", (unsigned long)rc);
+}
+
+static int sc_recv_more(sc_session *s) {
+    if (s->in_cap - s->in_n < 4096) {
+        s->in_cap = s->in_cap * 2 + 16384;
+        s->in = (char *)realloc(s->in, s->in_cap);
+    }
+    ssize_t r;
+    while ((r = mrecv(s->fd, s->in + s->in_n, s->in_cap - s->in_n)) < 0 && errno == EINTR) {
+    }
+    if (r <= 0) return 0;
+    s->in_n += (size_t)r;
+    return 1;
+}
+
+static void sc_free_out(SecBuffer *b, int n) {
+    for (int i = 0; i < n; i++)
+        if (b[i].pvBuffer) FreeContextBuffer(b[i].pvBuffer);
+}
+
+static int sc_handshake(sc_session *s, const wchar_t *host, char *err, size_t errn) {
+    const DWORD cflags = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM |
+                         ISC_REQ_EXTENDED_ERROR;
+    const DWORD sflags = ASC_REQ_SEQUENCE_DETECT | ASC_REQ_REPLAY_DETECT | ASC_REQ_CONFIDENTIALITY | ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_STREAM |
+                         ASC_REQ_EXTENDED_ERROR;
+    SECURITY_STATUS rc = SEC_I_CONTINUE_NEEDED;
+    DWORD attr;
+    if (!s->server) { /* the client speaks first */
+        SecBuffer ob[1] = {{0, SECBUFFER_TOKEN, NULL}};
+        SecBufferDesc od = {SECBUFFER_VERSION, 1, ob};
+        rc = InitializeSecurityContextW(&s->cred, NULL, (SEC_WCHAR *)host, cflags, 0, 0, NULL, 0, &s->ctx, &od, &attr, NULL);
+        if (rc != SEC_I_CONTINUE_NEEDED) {
+            sc_status(rc, err, errn);
+            return 0;
+        }
+        s->have_ctx = 1;
+        int sent = ob[0].cbBuffer ? send_all(s->fd, (const char *)ob[0].pvBuffer, ob[0].cbBuffer) : 0;
+        sc_free_out(ob, 1);
+        if (sent != 0) {
+            snprintf(err, errn, "the connection closed during the handshake");
+            return 0;
+        }
+    }
+    for (;;) {
+        if (s->in_n == 0 || rc == SEC_E_INCOMPLETE_MESSAGE) {
+            if (!sc_recv_more(s)) {
+                snprintf(err, errn, "the connection closed during the handshake");
+                return 0;
+            }
+        }
+        SecBuffer ib[2] = {{(ULONG)s->in_n, SECBUFFER_TOKEN, s->in}, {0, SECBUFFER_EMPTY, NULL}};
+        SecBufferDesc id = {SECBUFFER_VERSION, 2, ib};
+        SecBuffer ob[3] = {{0, SECBUFFER_TOKEN, NULL}, {0, SECBUFFER_ALERT, NULL}, {0, SECBUFFER_EMPTY, NULL}};
+        SecBufferDesc od = {SECBUFFER_VERSION, 3, ob};
+        if (s->server)
+            rc = AcceptSecurityContext(&s->cred, s->have_ctx ? &s->ctx : NULL, &id, sflags, 0, &s->ctx, &od, &attr, NULL);
+        else
+            rc = InitializeSecurityContextW(&s->cred, &s->ctx, (SEC_WCHAR *)host, cflags, 0, 0, &id, 0, NULL, &od, &attr, NULL);
+        if (rc == SEC_E_OK || rc == SEC_I_CONTINUE_NEEDED) s->have_ctx = 1;
+        if (rc == SEC_E_INCOMPLETE_MESSAGE) {
+            sc_free_out(ob, 3);
+            continue;
+        }
+        /* a token to send (also the alert of a failure) */
+        int sent = ob[0].cbBuffer && ob[0].pvBuffer ? send_all(s->fd, (const char *)ob[0].pvBuffer, ob[0].cbBuffer) : 0;
+        sc_free_out(ob, 3);
+        if (rc != SEC_E_OK && rc != SEC_I_CONTINUE_NEEDED) {
+            sc_status(rc, err, errn);
+            return 0;
+        }
+        if (sent != 0) {
+            snprintf(err, errn, "the connection closed during the handshake");
+            return 0;
+        }
+        if (ib[1].BufferType == SECBUFFER_EXTRA && ib[1].cbBuffer) {
+            memmove(s->in, s->in + s->in_n - ib[1].cbBuffer, ib[1].cbBuffer);
+            s->in_n = ib[1].cbBuffer;
+        } else {
+            s->in_n = 0;
+        }
+        if (rc == SEC_E_OK) break;
+    }
+    if (QueryContextAttributesW(&s->ctx, SECPKG_ATTR_STREAM_SIZES, &s->sizes) != SEC_E_OK) {
+        snprintf(err, errn, "TLS: no stream sizes");
+        return 0;
+    }
+    return 1;
+}
+
+static void sc_free(sc_session *s) {
+    if (s->have_ctx) DeleteSecurityContext(&s->ctx);
+    if (s->own_cred) FreeCredentialsHandle(&s->cred);
+    free(s->in);
+    free(s->plain);
+    free(s);
+}
+
+/* the certificates of every PEM block labelled CERTIFICATE, into a memory store */
+static HCERTSTORE sc_pem_store(const char *pem, size_t n, PCCERT_CONTEXT *first) {
+    HCERTSTORE st = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, NULL);
+    if (!st) return NULL;
+    static const char begin[] = "-----BEGIN CERTIFICATE-----", end[] = "-----END CERTIFICATE-----";
+    int count = 0;
+    const char *p = pem, *stop = pem + n;
+    while (p < stop) {
+        const char *b = memmem(p, (size_t)(stop - p), begin, sizeof begin - 1);
+        if (!b) break;
+        const char *e = memmem(b, (size_t)(stop - b), end, sizeof end - 1);
+        if (!e) break;
+        e += sizeof end - 1;
+        DWORD dn = 0;
+        if (CryptStringToBinaryA(b, (DWORD)(e - b), CRYPT_STRING_BASE64HEADER, NULL, &dn, NULL, NULL)) {
+            BYTE *der = (BYTE *)malloc(dn);
+            if (CryptStringToBinaryA(b, (DWORD)(e - b), CRYPT_STRING_BASE64HEADER, der, &dn, NULL, NULL)) {
+                PCCERT_CONTEXT added = NULL;
+                if (CertAddEncodedCertificateToStore(st, X509_ASN_ENCODING, der, dn, CERT_STORE_ADD_ALWAYS, first && !count ? &added : NULL)) {
+                    if (first && !count) *first = added;
+                    count++;
+                }
+            }
+            free(der);
+        }
+        p = e;
+    }
+    if (!count) {
+        CertCloseStore(st, 0);
+        return NULL;
+    }
+    return st;
+}
+
+static void *tls_trust_load(const char *pem, size_t n, char *err, size_t errn) {
+    HCERTSTORE st = sc_pem_store(pem, n, NULL);
+    if (!st) snprintf(err, errn, "no certificate found in the trusted certificate text (expected PEM)");
+    return st;
+}
+
+static void tls_trust_free(void *t) {
+    if (t) CertCloseStore((HCERTSTORE)t, 0);
+}
+
+/* the peer's certificate chain checked against only `trust`, for `host` */
+static int sc_check_trust(sc_session *s, HCERTSTORE trust, const wchar_t *host, char *err, size_t errn) {
+    PCCERT_CONTEXT peer = NULL;
+    if (QueryContextAttributesW(&s->ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &peer) != SEC_E_OK || !peer) {
+        snprintf(err, errn, "the server sent no certificate");
+        return 0;
+    }
+    CERT_CHAIN_ENGINE_CONFIG cfg;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.cbSize = sizeof cfg;
+    cfg.hExclusiveRoot = trust;
+    HCERTCHAINENGINE engine = NULL;
+    PCCERT_CHAIN_CONTEXT chain = NULL;
+    int ok = 0;
+    if (CertCreateCertificateChainEngine(&cfg, &engine)) {
+        CERT_CHAIN_PARA cp;
+        memset(&cp, 0, sizeof cp);
+        cp.cbSize = sizeof cp;
+        if (CertGetCertificateChain(engine, peer, NULL, peer->hCertStore, &cp, 0, NULL, &chain)) {
+            SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl;
+            memset(&ssl, 0, sizeof ssl);
+            ssl.cbSize = sizeof ssl;
+            ssl.dwAuthType = AUTHTYPE_SERVER;
+            ssl.pwszServerName = (WCHAR *)host;
+            CERT_CHAIN_POLICY_PARA pp;
+            memset(&pp, 0, sizeof pp);
+            pp.cbSize = sizeof pp;
+            pp.pvExtraPolicyPara = &ssl;
+            CERT_CHAIN_POLICY_STATUS ps;
+            memset(&ps, 0, sizeof ps);
+            ps.cbSize = sizeof ps;
+            if (CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &pp, &ps) && ps.dwError == 0) ok = 1;
+            else sc_status((SECURITY_STATUS)ps.dwError, err, errn);
+            CertFreeCertificateChain(chain);
+        } else {
+            snprintf(err, errn, "the server's certificate chain could not be built");
+        }
+        CertFreeCertificateChainEngine(engine);
+    } else {
+        snprintf(err, errn, "TLS: cannot check the certificate");
+    }
+    CertFreeCertificateContext(peer);
+    return ok;
+}
+
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn) {
+    sc_session *s = (sc_session *)calloc(1, sizeof *s);
+    s->fd = fd;
+    SCHANNEL_CRED c;
+    memset(&c, 0, sizeof c);
+    c.dwVersion = SCHANNEL_CRED_VERSION;
+    c.dwFlags = SCH_USE_STRONG_CRYPTO | SCH_CRED_NO_DEFAULT_CREDS | (trust ? SCH_CRED_MANUAL_CRED_VALIDATION : SCH_CRED_AUTO_CRED_VALIDATION);
+    SECURITY_STATUS rc = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)UNISP_NAME_W, SECPKG_CRED_OUTBOUND, NULL, &c, NULL, NULL, &s->cred, NULL);
+    if (rc != SEC_E_OK) {
+        char why[300];
+        sc_status(rc, why, sizeof why);
+        snprintf(err, errn, "TLS is not available: %s", why);
+        free(s);
+        return NULL;
+    }
+    s->own_cred = 1;
+    wchar_t *whost = win_wide(host);
+    char why[400] = "";
+    int ok = sc_handshake(s, whost, why, sizeof why) && (!trust || sc_check_trust(s, (HCERTSTORE)trust, whost, why, sizeof why));
+    free(whost);
+    if (!ok) {
+        snprintf(err, errn, "TLS with %s failed: %s", host, why);
+        sc_free(s);
+        return NULL;
+    }
+    return s;
+}
+
+static void *tls_open(int fd, const char *host, char *err, size_t errn) { return tls_open_trusting(fd, host, NULL, err, errn); }
+
+/* keys imported for server identities: deleted from the key storage at exit */
+static NCRYPT_KEY_HANDLE sc_keys[64];
+static int sc_nkeys = 0;
+static pthread_mutex_t sc_keys_lock = PTHREAD_MUTEX_INITIALIZER;
+static void sc_delete_keys(void) {
+    for (int i = 0; i < sc_nkeys; i++) NCryptDeleteKey(sc_keys[i], 0);
+    sc_nkeys = 0;
+}
+
+/* a minimal DER reader for the key formats */
+static int sc_der(const uint8_t *p, size_t n, size_t *i, uint8_t *tag, size_t *start, size_t *len) {
+    if (*i + 2 > n) return 0;
+    *tag = p[*i];
+    size_t l = p[*i + 1], j = *i + 2;
+    if (l & 0x80) {
+        size_t k = l & 0x7f;
+        if (k == 0 || k > 3 || j + k > n) return 0;
+        l = 0;
+        for (size_t m = 0; m < k; m++) l = l << 8 | p[j + m];
+        j += k;
+    }
+    if (j + l > n) return 0;
+    *start = j;
+    *len = l;
+    *i = j + l;
+    return 1;
+}
+
+/* the private key in PEM as PKCS#8 DER (malloc'd): PKCS#8 as it is, SEC1
+ * ("EC PRIVATE KEY") and PKCS#1 ("RSA PRIVATE KEY") wrapped */
+static uint8_t *sc_pkcs8(const char *pem, size_t n, size_t *outn) {
+    const char *labels[3] = {"-----BEGIN PRIVATE KEY-----", "-----BEGIN EC PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"};
+    int kind = -1;
+    const char *b = NULL;
+    for (int k = 0; k < 3 && kind < 0; k++)
+        if ((b = memmem(pem, n, labels[k], strlen(labels[k])))) kind = k;
+    if (kind < 0) return NULL;
+    DWORD dn = 0;
+    if (!CryptStringToBinaryA(b, (DWORD)(pem + n - b), CRYPT_STRING_BASE64HEADER, NULL, &dn, NULL, NULL)) return NULL;
+    uint8_t *der = (uint8_t *)malloc(dn);
+    if (!CryptStringToBinaryA(b, (DWORD)(pem + n - b), CRYPT_STRING_BASE64HEADER, der, &dn, NULL, NULL)) {
+        free(der);
+        return NULL;
+    }
+    if (kind == 0) {
+        *outn = dn;
+        return der;
+    }
+    static const uint8_t ver0[] = {0x02, 0x01, 0x00};
+    static const uint8_t rsa_alg[] = {0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00};
+    static const uint8_t ec_oid[] = {0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01};
+    dbuf body = {0}, alg = {0}, out = {0};
+    db_put(&body, ver0, sizeof ver0);
+    if (kind == 2) {
+        db_put(&body, rsa_alg, sizeof rsa_alg);
+    } else {
+        /* the curve: [0] inside the SEC1 key */
+        size_t i = 0, st, ln, j, cs, cl;
+        uint8_t tag;
+        const uint8_t *curve = NULL;
+        size_t curven = 0;
+        if (sc_der(der, dn, &i, &tag, &st, &ln) && tag == 0x30) {
+            j = st;
+            while (j < st + ln && sc_der(der, st + ln, &j, &tag, &cs, &cl))
+                if (tag == 0xa0) {
+                    curve = der + cs;
+                    curven = cl;
+                }
+        }
+        if (!curve) {
+            free(der);
+            free(body.p);
+            return NULL;
+        }
+        db_put(&alg, ec_oid, sizeof ec_oid);
+        db_put(&alg, curve, curven);
+        db_tlv(&body, 0x30, alg.p, alg.n);
+    }
+    db_tlv(&body, 0x04, der, dn);
+    db_tlv(&out, 0x30, body.p, body.n);
+    free(der);
+    free(body.p);
+    free(alg.p);
+    *outn = out.n;
+    return out.p;
+}
+
+static void *tls_identity_load(const char *cert, size_t cn, const char *key, size_t kn, char *err, size_t errn) {
+    PCCERT_CONTEXT leaf = NULL;
+    HCERTSTORE st = sc_pem_store(cert, cn, &leaf);
+    if (!st || !leaf) {
+        if (st) CertCloseStore(st, 0);
+        snprintf(err, errn, "tls::identity: no certificate found in the certificate text (expected PEM)");
+        return NULL;
+    }
+    size_t pn = 0;
+    uint8_t *p8 = sc_pkcs8(key, kn, &pn);
+    if (!p8) {
+        CertFreeCertificateContext(leaf);
+        CertCloseStore(st, 0);
+        snprintf(err, errn, "tls::identity: no private key found in the key text (expected PEM)");
+        return NULL;
+    }
+    NCRYPT_PROV_HANDLE prov = 0;
+    NCRYPT_KEY_HANDLE k = 0;
+    static volatile LONG counter = 0;
+    wchar_t name[80];
+    swprintf(name, 80, L"mimic-%lu-%ld", (unsigned long)GetCurrentProcessId(), (long)InterlockedIncrement(&counter));
+    SECURITY_STATUS rc = NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0);
+    if (rc == ERROR_SUCCESS) {
+        NCryptBuffer nb = {(ULONG)((wcslen(name) + 1) * sizeof(wchar_t)), NCRYPTBUFFER_PKCS_KEY_NAME, name};
+        NCryptBufferDesc nd = {NCRYPTBUFFER_VERSION, 1, &nb};
+        rc = NCryptImportKey(prov, 0, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, &nd, &k, p8, (DWORD)pn, NCRYPT_OVERWRITE_KEY_FLAG);
+    }
+    free(p8);
+    if (rc != ERROR_SUCCESS) {
+        char why[300];
+        sc_status(rc, why, sizeof why);
+        if (prov) NCryptFreeObject(prov);
+        CertFreeCertificateContext(leaf);
+        CertCloseStore(st, 0);
+        snprintf(err, errn, "tls::identity: cannot import the key: %s", why);
+        return NULL;
+    }
+    pthread_mutex_lock(&sc_keys_lock);
+    if (sc_nkeys == 0) atexit(sc_delete_keys);
+    if (sc_nkeys < 64) sc_keys[sc_nkeys++] = k;
+    pthread_mutex_unlock(&sc_keys_lock);
+    NCryptFreeObject(prov);
+    CRYPT_KEY_PROV_INFO pi;
+    memset(&pi, 0, sizeof pi);
+    pi.pwszContainerName = name;
+    pi.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
+    CertSetCertificateContextProperty(leaf, CERT_KEY_PROV_INFO_PROP_ID, 0, &pi);
+    sc_identity *id = (sc_identity *)calloc(1, sizeof *id);
+    id->cert = leaf;
+    SCHANNEL_CRED c;
+    memset(&c, 0, sizeof c);
+    c.dwVersion = SCHANNEL_CRED_VERSION;
+    c.cCreds = 1;
+    c.paCred = &id->cert;
+    c.dwFlags = SCH_USE_STRONG_CRYPTO;
+    rc = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)UNISP_NAME_W, SECPKG_CRED_INBOUND, NULL, &c, NULL, NULL, &id->cred, NULL);
+    CertCloseStore(st, 0);
+    if (rc != SEC_E_OK) {
+        char why[300];
+        sc_status(rc, why, sizeof why);
+        snprintf(err, errn, "tls::identity: %s", why);
+        CertFreeCertificateContext(leaf);
+        free(id);
+        return NULL;
+    }
+    return id;
+}
+
+static void *tls_accept_on(int fd, void *identity, char *err, size_t errn) {
+    sc_identity *id = (sc_identity *)identity;
+    sc_session *s = (sc_session *)calloc(1, sizeof *s);
+    s->fd = fd;
+    s->server = 1;
+    s->cred = id->cred;
+    char why[400] = "";
+    if (!sc_handshake(s, NULL, why, sizeof why)) {
+        snprintf(err, errn, "TLS with the client failed: %s", why);
+        sc_free(s);
+        return NULL;
+    }
+    return s;
+}
+
+static ssize_t tls_read(void *t, void *buf, size_t n) {
+    sc_session *s = (sc_session *)t;
+    for (;;) {
+        if (s->plain_off < s->plain_n) {
+            size_t k = s->plain_n - s->plain_off < n ? s->plain_n - s->plain_off : n;
+            memcpy(buf, s->plain + s->plain_off, k);
+            s->plain_off += k;
+            return (ssize_t)k;
+        }
+        if (s->eof) return 0;
+        if (s->in_n > 0) {
+            SecBuffer b[4] = {{(ULONG)s->in_n, SECBUFFER_DATA, s->in}, {0, SECBUFFER_EMPTY, NULL}, {0, SECBUFFER_EMPTY, NULL}, {0, SECBUFFER_EMPTY, NULL}};
+            SecBufferDesc d = {SECBUFFER_VERSION, 4, b};
+            SECURITY_STATUS rc = DecryptMessage(&s->ctx, &d, 0, NULL);
+            if (rc == SEC_E_OK || rc == SEC_I_CONTEXT_EXPIRED || rc == SEC_I_RENEGOTIATE) {
+                s->plain_n = s->plain_off = 0;
+                for (int i = 0; i < 4; i++)
+                    if (b[i].BufferType == SECBUFFER_DATA && b[i].cbBuffer) {
+                        if (s->plain_cap < b[i].cbBuffer) {
+                            s->plain_cap = b[i].cbBuffer;
+                            s->plain = (char *)realloc(s->plain, s->plain_cap);
+                        }
+                        memcpy(s->plain, b[i].pvBuffer, b[i].cbBuffer);
+                        s->plain_n = b[i].cbBuffer;
+                    }
+                size_t extra = 0;
+                for (int i = 0; i < 4; i++)
+                    if (b[i].BufferType == SECBUFFER_EXTRA) extra = b[i].cbBuffer;
+                if (extra) memmove(s->in, s->in + s->in_n - extra, extra);
+                s->in_n = extra;
+                if (rc != SEC_E_OK) s->eof = 1; /* closed (renegotiation is not offered) */
+                continue;
+            }
+            if (rc != SEC_E_INCOMPLETE_MESSAGE) {
+                s->eof = 1;
+                continue;
+            }
+        }
+        if (!sc_recv_more(s)) s->eof = 1;
+    }
+}
+
+static int tls_write_all(void *t, const char *p, size_t n) {
+    sc_session *s = (sc_session *)t;
+    size_t hdr = s->sizes.cbHeader, max = s->sizes.cbMaximumMessage, trl = s->sizes.cbTrailer;
+    char *buf = (char *)malloc(hdr + max + trl);
+    while (n > 0) {
+        size_t k = n < max ? n : max;
+        memcpy(buf + hdr, p, k);
+        SecBuffer b[4] = {{(ULONG)hdr, SECBUFFER_STREAM_HEADER, buf}, {(ULONG)k, SECBUFFER_DATA, buf + hdr}, {(ULONG)trl, SECBUFFER_STREAM_TRAILER, buf + hdr + k}, {0, SECBUFFER_EMPTY, NULL}};
+        SecBufferDesc d = {SECBUFFER_VERSION, 4, b};
+        if (EncryptMessage(&s->ctx, 0, &d, 0) != SEC_E_OK || send_all(s->fd, buf, b[0].cbBuffer + b[1].cbBuffer + b[2].cbBuffer) != 0) {
+            free(buf);
+            return -1;
+        }
+        p += k;
+        n -= k;
+    }
+    free(buf);
+    return 0;
+}
+
+static void tls_close(void *t) {
+    sc_session *s = (sc_session *)t;
+    if (s->have_ctx) { /* close_notify */
+        DWORD type = SCHANNEL_SHUTDOWN;
+        SecBuffer cb = {sizeof type, SECBUFFER_TOKEN, &type};
+        SecBufferDesc cd = {SECBUFFER_VERSION, 1, &cb};
+        if (ApplyControlToken(&s->ctx, &cd) == SEC_E_OK) {
+            SecBuffer ob[1] = {{0, SECBUFFER_TOKEN, NULL}};
+            SecBufferDesc od = {SECBUFFER_VERSION, 1, ob};
+            DWORD attr;
+            SECURITY_STATUS rc;
+            if (s->server)
+                rc = AcceptSecurityContext(&s->cred, &s->ctx, NULL, ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_STREAM, 0, NULL, &od, &attr, NULL);
+            else
+                rc = InitializeSecurityContextW(&s->cred, &s->ctx, NULL, ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM, 0, 0, NULL, 0, NULL, &od, &attr, NULL);
+            if ((rc == SEC_E_OK || rc == SEC_I_CONTEXT_EXPIRED) && ob[0].cbBuffer) (void)send_all(s->fd, (const char *)ob[0].pvBuffer, ob[0].cbBuffer);
+            sc_free_out(ob, 1);
+        }
+    }
+    sc_free(s);
+}
+
 #else
 
 static void *tls_open(int fd, const char *host, char *err, size_t errn) {
@@ -1268,6 +1883,71 @@ static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
 }
 
 static void ec_free(void *key) { ek.pkey_free(key); }
+
+#elif defined(_WIN32)
+
+/* Windows: BCrypt (ECDSA P-256, SHA-256) */
+static BCRYPT_ALG_HANDLE ec_alg(void) {
+    static BCRYPT_ALG_HANDLE alg = NULL;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    if (!alg && BCryptOpenAlgorithmProvider(&alg, BCRYPT_ECDSA_P256_ALGORITHM, NULL, 0) != 0) alg = NULL;
+    pthread_mutex_unlock(&lock);
+    return alg;
+}
+
+static void *ec_keygen(uint8_t pub[65], uint8_t priv[32], char *err, size_t errn) {
+    BCRYPT_ALG_HANDLE alg = ec_alg();
+    BCRYPT_KEY_HANDLE k = NULL;
+    if (!alg || BCryptGenerateKeyPair(alg, &k, 256, 0) != 0 || BCryptFinalizeKeyPair(k, 0) != 0) {
+        snprintf(err, errn, "tls::self_signed: cannot make a P-256 key");
+        if (k) BCryptDestroyKey(k);
+        return NULL;
+    }
+    uint8_t blob[sizeof(BCRYPT_ECCKEY_BLOB) + 96];
+    ULONG got = 0;
+    if (BCryptExportKey(k, NULL, BCRYPT_ECCPRIVATE_BLOB, blob, sizeof blob, &got, 0) != 0 || got != sizeof blob) {
+        snprintf(err, errn, "tls::self_signed: cannot export the key");
+        BCryptDestroyKey(k);
+        return NULL;
+    }
+    pub[0] = 4; /* uncompressed point: X | Y */
+    memcpy(pub + 1, blob + sizeof(BCRYPT_ECCKEY_BLOB), 64);
+    memcpy(priv, blob + sizeof(BCRYPT_ECCKEY_BLOB) + 64, 32);
+    return k;
+}
+
+/* one DER INTEGER from a 32-byte big-endian number */
+static void ec_der_int(dbuf *b, const uint8_t *v) {
+    size_t i = 0;
+    while (i < 31 && v[i] == 0) i++;
+    uint8_t tmp[33];
+    size_t n = 0;
+    if (v[i] & 0x80) tmp[n++] = 0;
+    memcpy(tmp + n, v + i, 32 - i);
+    db_tlv(b, 0x02, tmp, n + 32 - i);
+}
+
+static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
+    BCRYPT_ALG_HANDLE sha = NULL;
+    BCRYPT_HASH_HANDLE h = NULL;
+    uint8_t digest[32], rs[64];
+    ULONG got = 0;
+    int ok = BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 && BCryptCreateHash(sha, &h, NULL, 0, NULL, 0, 0) == 0 &&
+             BCryptHashData(h, (PUCHAR)msg, (ULONG)n, 0) == 0 && BCryptFinishHash(h, digest, 32, 0) == 0;
+    if (h) BCryptDestroyHash(h);
+    if (sha) BCryptCloseAlgorithmProvider(sha, 0);
+    ok = ok && BCryptSignHash((BCRYPT_KEY_HANDLE)key, NULL, digest, 32, rs, 64, &got, 0) == 0 && got == 64;
+    if (!ok) return 0;
+    dbuf ints = {0};
+    ec_der_int(&ints, rs);
+    ec_der_int(&ints, rs + 32);
+    db_tlv(sig, 0x30, ints.p, ints.n);
+    free(ints.p);
+    return 1;
+}
+
+static void ec_free(void *key) { BCryptDestroyKey((BCRYPT_KEY_HANDLE)key); }
 
 #else
 
@@ -2354,10 +3034,18 @@ mim_val *mim_std_udp_receive_within(mim_val *s, mim_val *timeout) {
     int fd = udp_fd(s, "udp::receive_within");
     int64_t ns = timeout && timeout->rank == 0 ? (timeout->dtype == MIM_F64 ? (int64_t)getf(timeout, 0) : geti(timeout, 0)) : 0;
     if (ns < 1000) ns = 1000; /* 0 would mean "wait forever" to the socket */
+#ifdef _WIN32
+    DWORD tv = (DWORD)(ns / 1000000);
+    if (tv == 0) tv = 1;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    mim_val *r = mim_std_udp_receive(s);
+    DWORD none = 0;
+#else
     struct timeval tv = {(time_t)(ns / 1000000000), (int)(ns % 1000000000 / 1000)};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     mim_val *r = mim_std_udp_receive(s);
     struct timeval none = {0, 0};
+#endif
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
     return r;
 }
