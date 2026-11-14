@@ -8,7 +8,7 @@ order: 16
 
 Real programs read their arguments, open files and talk to the terminal. In Mimic these operations have one thing in common: they have **side effects**. The compiler tracks this. A function that touches the outside world, even indirectly, never runs in parallel and never runs out of order, while everything around it stays parallel.
 
-None of these operations crash on failure. They return `Option` or `Result` ([chapter 7](07-errors.mdx)).
+None of these operations crash on failure. They return `Option` or `Result` ([chapter 7](07-errors.md)).
 
 They live in a few standard **modules**, used by path from any file, with no import:
 
@@ -21,7 +21,7 @@ They live in a few standard **modules**, used by path from any file, with no imp
 | `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
 | `time` | clocks and dates | `time::now`, `time::clock`, `time::sleep`, `time::utc` |
 | `random` | random numbers | `random::int`, `random::float`, `random::seed` |
-| `http`, `ws`, `tcp`, `udp` | the network | [chapter 17](17-networking.mdx) |
+| `http`, `ws`, `tcp`, `udp` | the network | [chapter 17](17-networking.md) |
 
 The module name says where a function comes from, and short names like `read` or `int` can't collide with yours. If you use one often, `use fs::read` brings in the short name. `print` and the string, list and map functions stay global, because almost every program uses them.
 
@@ -359,4 +359,4 @@ Because the standard modules are used by path, names like `args`, `env`, `read` 
 
 The full list of functions is in the [standard library reference](../docs/std.md).
 
-Back to the [index](index.mdx).
+Back to the [index](index.md).

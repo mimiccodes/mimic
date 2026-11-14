@@ -10,7 +10,7 @@ Mimic has no shared mutable state: values never change, and no two pieces of cod
 
 ## Tasks
 
-A task is something you already know: a `let` whose function only has overlapping effects starts in the background as an implicit future ([chapter 10](10-parallel-by-default.mdx)). Channel operations are overlapping effects, so a function that loops over a channel is a task as soon as you `let` it.
+A task is something you already know: a `let` whose function only has overlapping effects starts in the background as an implicit future ([chapter 10](10-parallel-by-default.md)). Channel operations are overlapping effects, so a function that loops over a channel is a task as soon as you `let` it.
 
 A task never outlives the function that started it. When the function finishes, through its last line or through any `return`, it first waits for every task it started and has not waited for yet. So no task is ever forgotten half-way. It also means that if a task never ends, the function never ends either. A server task started with `http::serve(port, handle)` runs forever, so its function returns only when the program is stopped. A server that should stop uses `http::serve_requests(port, handle, n)`, which ends after `n` requests.
 
@@ -273,4 +273,4 @@ Each connection is a **task**, not a thread. A task that waits for a message, a 
 
 The details, and how to switch this off, are in the [standard library reference](../docs/std.md#the-event-loop).
 
-Back to the [index](index.mdx).
+Back to the [index](index.md).

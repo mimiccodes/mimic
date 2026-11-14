@@ -841,6 +841,35 @@ fn c_unions() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// 3000 WebSocket connections open at the same time against one server
+/// (0.2.2): each client holds its connection for half a second, so this
+/// passes in seconds only when they all wait at once on the event loop
+/// (`¨` over a function that waits: a task per element), on every OS.
+#[test]
+fn websocket_scale() {
+    let start = 12000 + (std::process::id() as u16 % 6000) + 500;
+    let port = (start..start + 1000).find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok()).expect("a free port");
+    let dir = std::env::temp_dir().join(format!("mimic-golden-wsscale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("scale.mim");
+    std::fs::write(
+        &src,
+        format!(
+            "module main\n\nfn echo(sock: ws::Socket) -> i64 {{\n    match ws::receive(sock) {{\n        Ok(ws::Text(t)) => {{\n            ws::send(sock, t)\n            1\n        }}\n        _ => 0,\n    }}\n}}\n\n\
+             fn client(port: i64, i: i64) -> i64 {{\n    match ws::connect(\"ws://127.0.0.1:{{port}}/\") {{\n        Ok(s) => {{\n            time::sleep(500ms)\n            ws::send(s, \"hi {{i}}\")\n\
+                         let back = match ws::receive(s) {{\n                Ok(ws::Text(t)) => if t == \"hi {{i}}\" {{ 1 }} else {{ 0 }},\n                _ => 0,\n            }}\n            ws::close(s)\n            back\n        }}\n        Err(e) => 0,\n    }}\n}}\n\n\
+             fn server(port: i64, n: i64) -> Result[i64, str] {{ ws::serve_connections(port, echo, n) }}\n\n\
+             fn main() {{\n    let n = 3000\n    let port = {port}\n    let served = server(port, n)\n    time::sleep(300ms)\n    let start = time::clock()\n\
+                 let ok = +/ (⍳ n ¨ (i => client(port, i)))\n    print(\"{{ok}} of {{n}} echoed\")\n    print(served)\n    print((time::clock() - start) < 30s)\n}}\n"
+        ),
+    )
+    .unwrap();
+    let out = mimic().args(["run", "--release"]).arg(&src).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3000 of 3000 echoed\nOk(3000)\ntrue\n", "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
 /// linked against the Mimic library (the runtime starts itself).
 #[test]
@@ -878,6 +907,53 @@ fn export_to_c() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let run = std::process::Command::new(proj.join("main_c")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "5.0 499500 10\nhello, C\n");
+
+    // the same library shared (.dll, .so, .dylib): linked against, and loaded at run time
+    let out = mimic().current_dir(&proj).args(["build", "--shared", "--emit-json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(v["artifacts"][0]["kind"], "shared-library", "{v}");
+    let (shared, link_with) = if cfg!(windows) {
+        ("mm.dll", "target/release/libmm.dll.a")
+    } else if cfg!(target_os = "macos") {
+        ("libmm.dylib", "target/release/libmm.dylib")
+    } else {
+        ("libmm.so", "target/release/libmm.so")
+    };
+    assert!(v["artifacts"][0]["path"].as_str().unwrap().ends_with(shared), "{v}");
+    let mut cc = mimic();
+    cc.current_dir(&proj).args(["cc", "main.c", "-Itarget/release", link_with, "-o", "main_shared"]);
+    if !cfg!(windows) {
+        cc.arg("-Wl,-rpath,target/release");
+    }
+    let out = cc.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut run = std::process::Command::new(proj.join("main_shared"));
+    run.current_dir(&proj);
+    if cfg!(windows) {
+        // Windows finds DLLs on PATH
+        run.env("PATH", format!("{};{}", proj.join("target/release").display(), std::env::var("PATH").unwrap_or_default()));
+    }
+    let run = run.output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "5.0 499500 10\nhello, C\n", "{}", String::from_utf8_lossy(&run.stderr));
+    // only the `extern "C" fn`s are exported
+    std::fs::write(
+        proj.join("load.c"),
+        "#include <stdio.h>\n#ifdef _WIN32\n#include <windows.h>\n#define OPEN(p) LoadLibraryA(p)\n#define SYM(h, n) (void *)GetProcAddress(h, n)\n\
+         #else\n#include <dlfcn.h>\n#define OPEN(p) dlopen(p, RTLD_NOW)\n#define SYM(h, n) dlsym(h, n)\n#endif\n\
+         int main(int argc, char **argv) {\n  void *h = OPEN(argv[1]);\n  if (!h) { puts(\"no library\"); return 1; }\n\
+           long long (*sum_to)(long long) = (long long (*)(long long))SYM(h, \"mm_sum_to\");\n\
+           printf(\"%lld %d\\n\", sum_to ? sum_to(10) : -1LL, SYM(h, \"mim_rt_init\") == 0);\n  return 0;\n}\n",
+    )
+    .unwrap();
+    let mut cc = mimic();
+    cc.current_dir(&proj).args(["cc", "load.c", "-o", "load_c"]);
+    if cfg!(target_os = "linux") {
+        cc.arg("-ldl");
+    }
+    let out = cc.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let run = std::process::Command::new(proj.join("load_c")).arg(proj.join("target/release").join(shared)).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "45 1\n", "{}", String::from_utf8_lossy(&run.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1017,7 +1093,7 @@ new Function('fs', 'path', 'page', 'events', 'return (async () => {' + js.replac
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
         let page = v["artifacts"][0]["path"].as_str().unwrap_or_else(|| panic!("{v}")).to_string();
         let run = Command::new("node").arg(&driver).arg(&page).arg(f.with_extension("events")).output().unwrap();
-        let got = String::from_utf8_lossy(&run.stdout).to_string();
+        let got = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
         let want = std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
         if got != want {
             failures.push(format!("{}\n--- want\n{want}--- got\n{got}--- stderr\n{}", f.display(), String::from_utf8_lossy(&run.stderr)));
@@ -1026,13 +1102,14 @@ new Function('fs', 'path', 'page', 'events', 'return (async () => {' + js.replac
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Native windows (macOS): each tests/fixtures/window/*.mim is driven by its
-/// .steps through the real controls (MIMIC_UI_TEST) and prints its views;
-/// that must match its .out. It opens windows on the screen, so it only runs
-/// with MIMIC_TEST_WINDOWS=1.
+/// Native windows (AppKit, Win32, GTK 3): each tests/fixtures/window/*.mim is
+/// driven by its .steps through the real controls (MIMIC_UI_TEST) and prints
+/// its views; that must match its .out on every system. It opens windows on
+/// the screen, so it only runs with MIMIC_TEST_WINDOWS=1 (CI: Linux under a
+/// virtual display).
 #[test]
 fn windows() {
-    if !cfg!(target_os = "macos") || std::env::var_os("MIMIC_TEST_WINDOWS").is_none() {
+    if std::env::var_os("MIMIC_TEST_WINDOWS").is_none() {
         eprintln!("skipping: set MIMIC_TEST_WINDOWS=1 to open test windows");
         return;
     }

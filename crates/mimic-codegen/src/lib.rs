@@ -1519,6 +1519,19 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(self.b.build_call(f, args, "").s()?.try_as_basic_value().basic())
     }
 
+    /// How `xs ¨ f` runs: 0 in order; 1 pure (spread over the cores); 2
+    /// effects that may overlap, such as waiting on the network (a task per
+    /// element on the event loop, so thousands can wait at once).
+    fn each_mode(&self, f: &Expr) -> i32 {
+        if self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, f) {
+            1
+        } else if self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, f) {
+            2
+        } else {
+            0
+        }
+    }
+
     fn call_rt_ptr(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> R<V<'ctx>> {
         let v = self.call_rt(name, args)?.ok_or("runtime call returned void")?.into_pointer_value();
         Ok(V::P(v, true))
@@ -2666,7 +2679,9 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// A descriptor `{ name, code, arity, pure }` for a function value.
-    fn fn_desc(&mut self, name: &str, code: FunctionValue<'ctx>, arity: usize, pure: bool) -> PointerValue<'ctx> {
+    /// A function value's descriptor; `mode`: 0 effects in order, 1 pure, 2
+    /// effects that may overlap (see `each_mode`).
+    fn fn_desc(&mut self, name: &str, code: FunctionValue<'ctx>, arity: usize, mode: u32) -> PointerValue<'ctx> {
         let i32t = self.ctx.i32_type();
         let st = self.ctx.struct_type(&[self.ptr.into(), self.ptr.into(), i32t.into(), i32t.into()], false);
         let nm = self.global_cstr(name);
@@ -2674,7 +2689,7 @@ impl<'ctx> Cg<'ctx, '_> {
             nm.into(),
             self.fn_addr(code).into(),
             i32t.const_int(arity as u64, false).into(),
-            i32t.const_int(pure as u64, false).into(),
+            i32t.const_int(mode as u64, false).into(),
         ]);
         let g = self.module.add_global(st, None, "fndesc");
         g.set_linkage(Linkage::Internal);
@@ -2763,10 +2778,10 @@ impl<'ctx> Cg<'ctx, '_> {
             Ok(())
         })?;
         // `¨` runs in parallel when the function is pure or its effects may overlap
-        let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, e);
-        let desc = self.fn_desc("lambda", code, params.len(), pure);
+        let mode = self.each_mode(e) as u32;
+        let desc = self.fn_desc("lambda", code, params.len(), mode);
         // pure only if the functions it captures are: checked when it is made
-        let effects_desc = if pure && !caps.is_empty() { Some(self.fn_desc("lambda", code, params.len(), false)) } else { None };
+        let effects_desc = if mode > 0 && !caps.is_empty() { Some(self.fn_desc("lambda", code, params.len(), 0)) } else { None };
         let mut env = Vec::new();
         for (name, _) in &caps {
             let l = self.lookup(name).ok_or("internal error: captured variable")?;
@@ -2818,7 +2833,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     Ok(())
                 })?;
                 let name = self.p.fn_path(fid).join("::");
-                let d = self.fn_desc(&name, code, n, self.purity.overlap[fid]);
+                let mode = if self.purity.fns[fid] { 1 } else if self.purity.overlap[fid] { 2 } else { 0 };
+                let d = self.fn_desc(&name, code, n, mode);
                 self.fn_descs.insert(key, d);
                 d
             }
@@ -2848,7 +2864,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     cg.b.build_return(Some(&r)).s()?;
                     Ok(())
                 })?;
-                let d = self.fn_desc(&format!("({op:?})"), code, 2, true);
+                let d = self.fn_desc(&format!("({op:?})"), code, 2, 1);
                 self.fn_descs.insert(key, d);
                 d
             }
@@ -5008,9 +5024,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         };
                         if let Some((target, rt, depth)) = typed {
                             let t = self.raw_thunk(target, et, rt, depth)?;
-                            let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
+                            let pure = self.each_mode(&args[1]);
                             let dt = if el == El::F64 { 1 } else { 0 };
-                            let r = self.call_rt_ptr("mim_each_raw", &[self.basic(a).into(), self.fn_addr(t).into(), self.i32c(dt), self.i32c(pure as i32)])?;
+                            let r = self.call_rt_ptr("mim_each_raw", &[self.basic(a).into(), self.fn_addr(t).into(), self.i32c(dt), self.i32c(pure)])?;
                             self.drop_tmp(a)?;
                             return self.as_ty(r, ty, "primitive result");
                         }
@@ -5029,24 +5045,24 @@ impl<'ctx> Cg<'ctx, '_> {
                             // element: the elements are handed over (in place)
                             if matches!(a, V::P(_, true)) && self.consumed(&k) == [true] {
                                 let f = self.thunk_with(&k, kind, true)?;
-                                let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
-                                let r = self.call_rt_ptr("mim_each_own", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?;
+                                let pure = self.each_mode(&args[1]);
+                                let r = self.call_rt_ptr("mim_each_own", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure)])?;
                                 return self.as_ty(r, ty, "primitive result");
                             }
                             self.thunk(&k, kind)?
                         }
                     };
-                    let pure = self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, &args[1]);
+                    let pure = self.each_mode(&args[1]);
                     if memo {
                         // this call site's kept rows (released at exit)
                         let g = self.module.add_global(self.ptr, None, "screen_rows");
                         g.set_linkage(Linkage::Internal);
                         g.set_initializer(&self.ptr.const_null());
-                        let r = self.call_rt_ptr("mim_each_memo", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32), self.gaddr(g).into()])?;
+                        let r = self.call_rt_ptr("mim_each_memo", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure), self.gaddr(g).into()])?;
                         self.drop_tmp(a)?;
                         return self.as_ty(r, ty, "primitive result");
                     }
-                    self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure as i32)])?
+                    self.call_rt_ptr("mim_each", &[self.basic(a).into(), self.fn_addr(f).into(), self.i32c(pure)])?
                 } else if prim.arity() == 2 {
                     let b = self.expr(&args[1])?;
                     let b = self.boxed(b)?;

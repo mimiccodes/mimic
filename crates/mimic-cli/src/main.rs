@@ -208,6 +208,9 @@ enum Cmd {
         /// Write a C header for the `extern "C" fn`s (target/<profile>/<name>.h)
         #[arg(long)]
         emit_header: bool,
+        /// A library project as a shared library (.dll, .so, .dylib) exporting its `extern "C" fn`s
+        #[arg(long)]
+        shared: bool,
         /// Print the result as JSON on stdout (see docs/diagnostics.md)
         #[arg(long)]
         emit_json: bool,
@@ -430,11 +433,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
         }
-        Cmd::Build { file, profile, web, target, all_targets, emit_ir, emit_net, emit_header, emit_json } => {
+        Cmd::Build { file, profile, web, target, all_targets, emit_ir, emit_net, emit_header, shared, emit_json } => {
             let built = (|| -> Result<Vec<serde_json::Value>, Report> {
                 let input = driver::input_from(file.as_deref())?;
                 let mut prof = profile_of(&input, profile.clone(), true);
                 prof.emit_header = emit_header;
+                prof.shared = shared;
                 let mut targets = vec![match &target {
                     _ if web => Target::parse("wasm32-wasi")?,
                     Some(t) => Target::parse(t)?,

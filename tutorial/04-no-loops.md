@@ -41,7 +41,7 @@ fn double(x: i64) -> i64 { x * 2 }
 ["a!" "bb!" "ccc!"]
 ```
 
-`x => x * x` is a **lambda**, an unnamed function (see [chapter 8](08-functions-as-values.mdx)). When the function is pure, meaning it doesn't print or call C, `¨` runs it on all cores.
+`x => x * x` is a **lambda**, an unnamed function (see [chapter 8](08-functions-as-values.md)). When the function is pure, meaning it doesn't print or call C, `¨` runs it on all cores.
 
 ## gather: combine everything
 
@@ -180,6 +180,6 @@ fn steps(n: i64, count: i64) -> i64 {
 111
 ```
 
-Pure recursive functions are also parallel. In `fib(n - 1) + fib(n - 2)`, both calls run at the same time ([chapter 10](10-parallel-by-default.mdx)).
+Pure recursive functions are also parallel. In `fib(n - 1) + fib(n - 2)`, both calls run at the same time ([chapter 10](10-parallel-by-default.md)).
 
-Next: [records, unions and match](05-records-unions-match.mdx).
+Next: [records, unions and match](05-records-unions-match.md).

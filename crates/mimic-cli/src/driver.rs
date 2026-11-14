@@ -66,6 +66,9 @@ pub struct Profile {
     pub emit_header: bool,
     /// `mimic test`: a binary that runs the tests (with src/test.mim).
     pub tests: bool,
+    /// `--shared`: a library as a shared library (.dll, .so, .dylib)
+    /// exporting its `extern "C" fn`s, instead of a static archive.
+    pub shared: bool,
 }
 
 impl Profile {
@@ -75,7 +78,7 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false }
     }
     pub fn name(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
@@ -857,6 +860,8 @@ pub struct Artifact {
 pub enum ArtifactKind {
     Executable,
     StaticLibrary,
+    /// A `.dll`, `.so` or `.dylib` exporting the `extern "C" fn`s (`--shared`).
+    SharedLibrary,
     /// LLVM can generate code for the target, but `mimic` has no C library
     /// for it yet: the program's object file, without the runtime.
     Object,
@@ -869,6 +874,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Executable => "executable",
             ArtifactKind::StaticLibrary => "static library",
+            ArtifactKind::SharedLibrary => "shared library",
             ArtifactKind::Object => "object file",
             ArtifactKind::Assembly => "assembly",
         }
@@ -877,6 +883,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Executable => "executable",
             ArtifactKind::StaticLibrary => "static-library",
+            ArtifactKind::SharedLibrary => "shared-library",
             ArtifactKind::Object => "object",
             ArtifactKind::Assembly => "assembly",
         }
@@ -1283,12 +1290,18 @@ fn codegen_and_link(
     }
     // unchanged since the last build (sources, the C declarations they
     // import, C sources, flags, target, this compiler): the program is there
-    let out = if is_exe { dir.join(format!("{name}{}", target.exe_suffix())) } else { dir.join(format!("lib{name}.a")) };
+    let out = if is_exe {
+        dir.join(format!("{name}{}", target.exe_suffix()))
+    } else if profile.shared {
+        dir.join(toolchain::shared_name(target, &name))
+    } else {
+        dir.join(format!("lib{name}.a"))
+    };
     let stamp = dir.join(format!("{name}.stamp"));
     let key = build_key(input, program, profile, target, &cpu, &features, &abi);
     let header_ok = !profile.emit_header || dir.join(format!("{name}.h")).exists();
     if !emit_ir && !emit_net && header_ok && out.exists() && obj.exists() && fs::read_to_string(&stamp).is_ok_and(|k| k == key) {
-        let kind = if is_exe { ArtifactKind::Executable } else { ArtifactKind::StaticLibrary };
+        let kind = if is_exe { ArtifactKind::Executable } else if profile.shared { ArtifactKind::SharedLibrary } else { ArtifactKind::StaticLibrary };
         return Ok(Artifact { path: out, kind, note: None });
     }
     let _ = fs::remove_file(&stamp);
@@ -1348,12 +1361,36 @@ fn codegen_and_link(
         let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })
     } else {
-        // library: static archive of the program object + runtime
-        let lib = dir.join(format!("lib{name}.a"));
-        let _ = fs::remove_file(&lib);
         let mut members = vec![obj, rt];
         members.extend(parts);
         members.extend(c_objects);
+        if profile.shared {
+            // a shared library exporting the `extern "C" fn`s, and nothing else
+            let exports: Vec<String> = program
+                .fns
+                .iter()
+                .filter_map(|f| match &f.kind {
+                    mimic_check::FnKind::User(d) if d.export_c && program.mods[f.module].package == program.root_package => Some(d.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            if exports.is_empty() {
+                return Err("a shared library exports the project's `extern \"C\" fn`s, and it has none".into());
+            }
+            members.extend(toolchain::static_tls(&tc).map(|t| t.lib));
+            let mut job = LinkJob { objects: &members, output: &out, search: Vec::new(), libs: Vec::new(), debug: !profile.release };
+            if let Input::Project(p) = input {
+                job.search = p.manifest.ffi_search.iter().map(|s| p.root.join(s)).collect();
+                job.libs = p.manifest.ffi_link.clone();
+            }
+            let _ = fs::remove_file(&out);
+            run_tool(toolchain::link_shared(&tc, target, &job, &exports, &dir)?, "linking the shared library")?;
+            let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
+            return Ok(Artifact { path: out, kind: ArtifactKind::SharedLibrary, note: None });
+        }
+        // library: static archive of the program object + runtime
+        let lib = dir.join(format!("lib{name}.a"));
+        let _ = fs::remove_file(&lib);
         toolchain::archive(&tc, target, &lib, &members)?;
         let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: lib, kind: ArtifactKind::StaticLibrary, note: None })
@@ -1387,7 +1424,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
     let compiler = exe.map(|m| format!("{}:{:?}", m.len(), m.modified().ok())).unwrap_or_default();
     text.push_str(&format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
         profile.release,
         profile.net,
         profile.opt,
@@ -1395,6 +1432,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
         profile.strict_math,
         profile.fast_math,
         profile.tests,
+        profile.shared,
         profile.emit_header,
         target.name(),
         target.llvm,

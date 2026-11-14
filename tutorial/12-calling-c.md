@@ -156,6 +156,8 @@ extern "C" fn mean(xs: ptr[f64], n: usize) -> f64 { … }
 mimic build --emit-header      # → target/release/<name>.h
 ```
 
+`--shared` builds a shared library instead of a static one (`lib<name>.dylib`, `lib<name>.so`, or `<name>.dll` on Windows), exporting only the `extern "C"` functions, to load from C, Python, C# or anything else that calls C.
+
 ## Compiling C with mimic
 
 `mimic` contains a complete C compiler, which also cross-compiles:
@@ -167,4 +169,4 @@ mimic cc --target=aarch64-linux-musl hello.c -o hello-arm   # a static Linux ARM
 
 The full details are in the [FFI reference](../docs/ffi.md).
 
-Next: [building for other platforms](13-targets.mdx).
+Next: [building for other platforms](13-targets.md).

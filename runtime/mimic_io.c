@@ -2203,3 +2203,42 @@ mim_val *mim_std_time_format_pattern(mim_val *t, mim_val *pattern) {
 
 /* time::format(t) without a pattern: ISO 8601 (the prelude's format calls it) */
 mim_val *mim_std_time_format_iso(mim_val *t) { return impl_format_time(t); }
+
+/* ==== ¨ over functions that wait: a task per element (0.2.2) =============== */
+
+typedef struct {
+    void (*range)(void *, int64_t, int64_t);
+    void *ctx;
+    int64_t i;
+} loop_job;
+
+#if MIM_GREEN
+static void loop_job_main(void *p) {
+    loop_job *j = (loop_job *)p;
+    j->range(j->ctx, j->i, j->i + 1);
+}
+#endif
+
+/* run range(ctx, i, i + 1) for every i as a coroutine on the event loop and
+ * wait for all; 0 when there is no event loop (the caller uses the cores) */
+static int run_on_loop(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx) {
+#if MIM_GREEN
+    if (!green_on()) return 0;
+    loop_job *jobs = (loop_job *)malloc(sizeof(loop_job) * (size_t)n);
+    mim_co **cos = (mim_co **)malloc(sizeof(mim_co *) * (size_t)n);
+    if (!jobs || !cos) mim_panic("out of memory");
+    for (int64_t i = 0; i < n; i++) {
+        jobs[i] = (loop_job){range, ctx, i};
+        cos[i] = co_spawn(loop_job_main, &jobs[i], 0);
+    }
+    for (int64_t i = 0; i < n; i++) co_join(cos[i]);
+    free(cos);
+    free(jobs);
+    return 1;
+#else
+    (void)n;
+    (void)range;
+    (void)ctx;
+    return 0;
+#endif
+}

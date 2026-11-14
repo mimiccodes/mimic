@@ -113,4 +113,4 @@ fn main() {
 [0 1 2 3 4]
 ```
 
-Use whichever you like, and mix them freely. The [next chapter](02-values-and-functions.mdx) covers values and functions, and [chapter 3](03-arrays-and-glyphs.mdx) explains glyphs properly.
+Use whichever you like, and mix them freely. The [next chapter](02-values-and-functions.md) covers values and functions, and [chapter 3](03-arrays-and-glyphs.md) explains glyphs properly.

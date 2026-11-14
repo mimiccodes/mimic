@@ -210,4 +210,4 @@ fn main() {
 * **Run-time checks.** Matrices are checked when the program runs, not when it compiles. A function parameter annotated `[f64]` means a vector, and passing a matrix to it is an error.
 * **List functions refuse matrices.** `push`, `concat`, `sort`, `gather` and `trail` work on lists. Flatten a matrix into a vector first with `m ▷ reshape([count])`, where `count` is its number of elements (`⍴ m ▷ ×/`).
 
-Back to the [index](index.mdx).
+Back to the [index](index.md).

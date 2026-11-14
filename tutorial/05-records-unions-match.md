@@ -228,4 +228,4 @@ fn main() {
 State { count: 10, label: "clicks" }
 ```
 
-Next: [strings, lists and maps](06-strings-lists-maps.mdx).
+Next: [strings, lists and maps](06-strings-lists-maps.md).

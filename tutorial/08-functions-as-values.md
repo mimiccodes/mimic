@@ -146,4 +146,4 @@ Values are immutable, so a closure always sees the values it captured. A lambda 
 
 The compiler records whether each function value is **pure**, meaning it never prints, calls C or does other input or output. `xs ¨ f` with a pure `f` runs on all cores, and you get this without writing anything.
 
-Next: [generics](09-generics.mdx).
+Next: [generics](09-generics.md).

@@ -450,6 +450,74 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
     }
 }
 
+/// The file name of the shared library `name` for `target`.
+pub fn shared_name(target: &Target, name: &str) -> String {
+    if target.os == "windows" {
+        format!("{name}.dll")
+    } else if target.is_apple() {
+        format!("lib{name}.dylib")
+    } else {
+        format!("lib{name}.so")
+    }
+}
+
+/// The command that links `job` into a shared library exporting only
+/// `exports` (C symbol names). Export lists are written into `dir`. On
+/// Windows an import library `lib<name>.dll.a` is written next to the DLL.
+pub fn link_shared(tc: &Toolchain, target: &Target, job: &LinkJob, exports: &[String], dir: &Path) -> Result<Command, String> {
+    let write = |file: &str, text: String| -> Result<PathBuf, String> {
+        let path = dir.join(file);
+        std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        Ok(path)
+    };
+    let stem = job.output.file_stem().and_then(|s| s.to_str()).unwrap_or("lib").to_string();
+    let file = job.output.file_name().and_then(|s| s.to_str()).unwrap_or("lib").to_string();
+    match tc {
+        Toolchain::Embedded(Sysroot::Darwin { .. }) => {
+            let list = write("exports.list", exports.iter().map(|e| format!("_{e}\n")).collect())?;
+            let mut c = link(tc, target, job);
+            c.arg("-dylib").arg("-install_name").arg(format!("@rpath/{file}")).arg("-exported_symbols_list").arg(list);
+            Ok(c)
+        }
+        Toolchain::Embedded(Sysroot::Mingw(m)) => {
+            let def = write(&format!("{stem}.def"), format!("LIBRARY {file}\nEXPORTS\n{}", exports.iter().map(|e| format!("    {e}\n")).collect::<String>()))?;
+            let implib = job.output.with_file_name(format!("lib{stem}.dll.a"));
+            let lib = m.lib();
+            let mut c = Command::new(self_exe());
+            c.arg("ld.lld").args(["-m", m.emulation()]).arg("--shared").args(["--subsystem", "console"]).arg("--gc-sections");
+            c.arg("-o").arg(job.output).arg(format!("--out-implib={}", implib.display()));
+            c.arg(lib.join("dllcrt2.o")).arg(lib.join("crtbegin.o")).args(job.objects).arg(def);
+            c.arg(format!("-L{}", lib.display()));
+            for s in &job.search {
+                c.arg(format!("-L{}", s.display()));
+            }
+            for l in &job.libs {
+                c.arg(format!("-l{l}"));
+            }
+            c.arg("--start-group");
+            c.args(["-lmingw32", "-lmingwex", "-lucrt", "-lpthread", "-lkernel32", "-luser32", "-lws2_32", "-ladvapi32", "-lbcrypt", "-lsecur32", "-lcrypt32", "-lncrypt", "-lshell32", "-lntdll", "-lsynchronization"]);
+            c.arg(m.builtins());
+            c.arg("--end-group");
+            c.arg(lib.join("crtend.o"));
+            Ok(c)
+        }
+        Toolchain::System if target.is_apple() => {
+            let list = write("exports.list", exports.iter().map(|e| format!("_{e}\n")).collect())?;
+            let mut c = link(tc, target, job);
+            c.arg("-dynamiclib").arg(format!("-Wl,-install_name,@rpath/{file}")).arg(format!("-Wl,-exported_symbols_list,{}", list.display()));
+            Ok(c)
+        }
+        Toolchain::System => {
+            let script = write("exports.map", format!("{{\n  global:\n{}  local: *;\n}};\n", exports.iter().map(|e| format!("    {e};\n")).collect::<String>()))?;
+            let mut c = link(tc, target, job);
+            c.arg("-shared").arg(format!("-Wl,--version-script={}", script.display())).arg("-lpthread");
+            Ok(c)
+        }
+        Toolchain::Embedded(Sysroot::Musl { .. }) => Err("shared libraries need a dynamic C library; static Linux targets (musl) build static libraries only: drop --shared, or build for the host".into()),
+        Toolchain::Embedded(Sysroot::Wasi { .. }) => Err("WebAssembly has no shared libraries: drop --shared".into()),
+    }
+}
+
 /// Write a static library (`.a`) containing `objects`.
 pub fn archive(tc: &Toolchain, target: &Target, output: &Path, objects: &[PathBuf]) -> Result<(), String> {
     if mimic_toolchain::EMBEDDED {

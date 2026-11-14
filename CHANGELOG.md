@@ -13,6 +13,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - Importing a C header failed when it declared a name Mimic uses itself (`div` in `stdlib.h`, a field `type`, a function `sum`). Under `c::` (below) they keep their C spelling; a wrapper that cannot be written in Mimic is left out instead of failing the import.
 
 ### Added
+- Native windows on Windows and Linux: `ui::run(…, show: "window")` (`mimic run --window`) uses Win32 controls on Windows and GTK 3 on Linux (loaded when the window opens, so programs do not depend on it), as AppKit on macOS. The same window test runs on all three in CI, Linux under a virtual display.
+- Shared libraries: `mimic build --shared` builds a library project as `lib<name>.dylib`, `lib<name>.so` or `<name>.dll` (with the import library `lib<name>.dll.a`), exporting only its `extern "C" fn`s, for any language that calls C. Cross builds too (`--target x86_64-windows`).
+- `¨` over a function that waits on the network or sleeps runs every element as a task on the event loop instead of a core's worth at a time: 3000 WebSocket clients each holding a connection for half a second finish in about a second (was two minutes). Programs raise their open-file limit at start, so thousands of sockets fit.
 - Speed checked on Windows: CI counts AVX2/AVX-512 instructions in a native Windows build of the SIMD fixture, and the benchmark workflow runs on Windows too (`bench/run.py` works there).
 - C unions: a record with one field per member (`c::Num { f: 2.5 }`), by value, in structs and through pointers; the member set is the one C sees.
 - C structs: array fields are lists; `c::T { … }` leaves fields out as zero (`c::Termios {}`); plain-data structs through pointers are records (`const`: copied in; otherwise copied in and returned, in a tuple with the result), so `c::tcgetattr(0, c::Termios {})` works. Records exist for every C struct the code names.

@@ -89,7 +89,7 @@ typedef struct {
     const char *name;
     mim_code code;
     int32_t arity;
-    int32_t pure;
+    int32_t pure; /* 0 effects in order, 1 pure, 2 effects that may overlap */
 } mim_fn_desc;
 
 typedef struct mim_val {
@@ -999,8 +999,29 @@ static void win_start(int32_t *argc, char ***argv) {
 }
 #endif
 
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <sys/resource.h>
+/* As many open files as the system allows this process (macOS starts at
+ * 256): a server or a client with thousands of connections needs them. */
+static void raise_open_files(void) {
+    struct rlimit r;
+    if (getrlimit(RLIMIT_NOFILE, &r) != 0 || r.rlim_cur >= r.rlim_max) return;
+    rlim_t want = r.rlim_max;
+#ifdef __APPLE__
+    if (want > 24576 || want == RLIM_INFINITY) want = 24576; /* OPEN_MAX rules on macOS */
+#endif
+    for (; want > r.rlim_cur; want /= 2) {
+        struct rlimit n = {want, r.rlim_max};
+        if (setrlimit(RLIMIT_NOFILE, &n) == 0) return;
+    }
+}
+#endif
+
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+#if !defined(_WIN32) && !defined(__wasi__)
+    raise_open_files();
+#endif
 #ifdef _WIN32
     win_start(&argc, &argv);
 #endif
@@ -2627,6 +2648,12 @@ static mim_val *list_take(int64_t n, mim_val **xs);
 
 /* `pure` functions (no print / FFI, transitively — decided by the compiler)
  * run in parallel; impure ones run in order on the calling thread. */
+/* `pure` of the ¨ entry points: 0 in order; 1 a pure function (spread over
+ * the cores); 2 effects that may overlap, such as waiting on the network:
+ * each element is a task of its own on the event loop, so thousands can wait
+ * at once (on the cores when there is no event loop). In mimic_io.c. */
+static int run_on_loop(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx);
+
 mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     need(xs, "¨ (each)");
     if (xs->rank == 0) return f(xs);
@@ -2634,7 +2661,8 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     if (n == 0) return alloc(MIM_I64, 1, 0);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_ctx c = {xs, f, tmp};
-    if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
+    if (pure == 2 && n > 1 && run_on_loop(n, each_range, &c)) {
+    } else if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
     else each_range(&c, 0, n);
     /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
     int64_t units = 0;
@@ -2765,7 +2793,7 @@ mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
 mim_val *mim_each_fn_memo(mim_val *xs, mim_val *f, void **site) {
     need(xs, "¨ (each)");
     need(f, "¨ (each)");
-    if (xs->dtype != MIM_BOXED || xs->rank != 1 || xs->len == 0 || f->dtype != MIM_FN || !FN_DESC(f)->pure) return mim_each_fn(xs, f);
+    if (xs->dtype != MIM_BOXED || xs->rank != 1 || xs->len == 0 || f->dtype != MIM_FN || FN_DESC(f)->pure != 1) return mim_each_fn(xs, f);
     return each_memo_run(xs, NULL, f, 1, site);
 }
 
@@ -2836,7 +2864,8 @@ mim_val *mim_each_raw(mim_val *xs, mim_fn_raw f, int32_t dt, int32_t pure) {
     if (n == 0) return alloc(MIM_I64, 1, 0);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_raw_ctx c = {(const int64_t *)xs->data, f, tmp};
-    if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
+    if (pure == 2 && n > 1 && run_on_loop(n, each_raw_range, &c)) {
+    } else if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
     else each_raw_range(&c, 0, n);
     int64_t units = 0;
     for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
@@ -2878,7 +2907,8 @@ mim_val *mim_each_own(mim_val *xs, mim_fn1 f, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_ctx c = {xs, f, tmp};
     mim_task run = take ? each_own_range : each_lend_range;
-    if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
+    if (pure == 2 && n > 1 && run_on_loop(n, run, &c)) {
+    } else if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
     else run(&c, 0, n);
     if (take) {
         free_block(&t_heap, xs); /* the block only: its elements were given away */
@@ -2925,7 +2955,9 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
     if (n == 0) return alloc(MIM_I64, 1, 0);
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_fn_ctx c = {xs, f, tmp, 0};
-    if (f->dtype == MIM_FN && FN_DESC(f)->pure && n > 1 && g_nthreads > 1 && !t_in_parallel) {
+    if (f->dtype == MIM_FN && FN_DESC(f)->pure == 2 && n > 1 && run_on_loop(n, each_fn_range, &c)) {
+        /* effects that may overlap (waiting): a task per element */
+    } else if (f->dtype == MIM_FN && FN_DESC(f)->pure && n > 1 && g_nthreads > 1 && !t_in_parallel) {
         /* Waking the threads costs tens of microseconds: time the first
          * element, and share out the rest only when it is worth that. */
         struct timespec a, b;

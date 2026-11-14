@@ -143,7 +143,7 @@ Things to notice:
 
 `update` is pure, so it cannot fetch a page or wait a second. Instead it returns a **step**: the next state, and maybe a **job**. A job is a function the runtime runs on its own, so the tab keeps working meanwhile. When the job finishes, the message it returns arrives like a click.
 
-Use `ui::run_live` for this. Its `update` returns `ui::stay(state)` (nothing else to do) or `ui::then(state, job)`. **Subscriptions** bring in messages nobody clicked: `ui::every(1s, Tick)` sends `Tick` every second, and `ui::listen(receiver)` sends whatever arrives through a channel ([chapter 19](19-tasks-and-channels.mdx)).
+Use `ui::run_live` for this. Its `update` returns `ui::stay(state)` (nothing else to do) or `ui::then(state, job)`. **Subscriptions** bring in messages nobody clicked: `ui::every(1s, Tick)` sends `Tick` every second, and `ui::listen(receiver)` sends whatever arrives through a channel ([chapter 19](19-tasks-and-channels.md)).
 
 ```mimic
 module main
@@ -188,13 +188,13 @@ Click "Roll a die" and the clock keeps ticking while the roll takes its time. Jo
 
 ## In a window
 
-On a Mac the same program can open a window of its own, with the system's real buttons, text boxes and check boxes:
+The same program can open a window of its own, with the system's real buttons, text boxes and check boxes, on macOS, Windows and Linux:
 
 ```sh
 mimic run --window todo.mim
 ```
 
-Nothing in the program changes. Clicks and typing reach `update` as messages, as they do in the browser. Closing the window ends `ui::run`. (Windows and Linux windows come later. There, use the browser or the terminal.)
+Nothing in the program changes. Clicks and typing reach `update` as messages, as they do in the browser. Closing the window ends `ui::run`. On Linux the window uses GTK 3, which most desktops already have (`apt install libgtk-3-0` otherwise).
 
 ## In a terminal
 
@@ -232,4 +232,4 @@ The `todo-web` folder works on any static web host. Your `view` and `update` run
 
 The full list of elements and settings is in the [standard library reference](../docs/std.md#interfaces-the-ui-module).
 
-Back to the [index](index.mdx).
+Back to the [index](index.md).

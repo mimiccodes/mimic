@@ -63,4 +63,4 @@ mimic build --cpu apple-m3           # a specific CPU
 mimic build --target x86_64-linux-musl --cpu x86-64-v3
 ```
 
-Next: [tooling](14-tooling.mdx).
+Next: [tooling](14-tooling.md).

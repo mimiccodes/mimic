@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check (or refresh) the tutorial: every ```mimic run``` block is compiled and
 run with the current `mimic`, and its stdout must equal the ```output``` block
-that follows it. Prose is also checked for characters MDX would treat as code
-(`{`, `}`, `<` outside backticks).
+that follows it. Prose is also checked for `<` outside backticks, which
+Markdown would read as an HTML tag.
 
     tools/check-tutorial.py            # check; exit 1 on any mismatch
     tools/check-tutorial.py --update   # rewrite the output blocks from real runs
@@ -20,7 +20,7 @@ BLOCK = re.compile(r"```mimic run\n(.*?)```\n\n```output\n(.*?)```", re.S)
 
 
 def prose_problems(text):
-    """MDX parses `{…}` as expressions and `<x` as JSX outside code."""
+    """Markdown reads `<x` outside code as an HTML tag."""
     out = []
     in_fence = False
     for n, line in enumerate(text.splitlines(), 1):
@@ -30,8 +30,8 @@ def prose_problems(text):
         if in_fence or line.startswith("---") or line.startswith("import "):
             continue
         bare = re.sub(r"`[^`]*`", "", line)
-        if re.search(r"[{}]|<(?=[A-Za-z/!])", bare):
-            out.append(f"line {n}: `{{`, `}}` or `<` outside backticks: {line.strip()}")
+        if re.search(r"<(?=[A-Za-z/!])", bare):
+            out.append(f"line {n}: `<` outside backticks: {line.strip()}")
     return out
 
 
@@ -49,7 +49,7 @@ def main():
     ap.add_argument("--mimic", default=str(ROOT / "target" / "debug" / "mimic"))
     ap.add_argument("files", nargs="*")
     a = ap.parse_args()
-    files = [pathlib.Path(f) for f in a.files] or sorted((ROOT / "tutorial").glob("*.mdx"))
+    files = [pathlib.Path(f) for f in a.files] or sorted((ROOT / "tutorial").glob("*.md"))
     failures = 0
     total = 0
     for path in files:

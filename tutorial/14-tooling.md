@@ -175,10 +175,11 @@ mimic glyphs                # glyph ↔ word ↔ ASCII digraph for everything
 | Flag | Effect |
 |---|---|
 | `--debug` / `--release` | Debug: fast to compile, extra checks. Release: fastest code. `build` defaults to release, `run` to debug. |
-| `--target <triple>` | Cross-compile ([chapter 13](13-targets.mdx)) |
+| `--target <triple>` | Cross-compile ([chapter 13](13-targets.md)) |
 | `--cpu <name>` | Tune for a CPU, or `portable` |
 | `--emit-ir`, `--emit-net` | Write the LLVM IR or the interaction nets next to the binary |
 | `--emit-header` | Write a C header for `extern "C" fn` exports |
+| `--shared` | A library as a shared library (`.dylib`, `.so`, `.dll`) exporting its `extern "C" fn`s |
 | `--no-net` | Compile everything as plain native code |
 | `--strict-math` | No fused multiply-add (see below) |
 | `--fast-math` | Faster floats: sums may be regrouped and vectorised (see below) |

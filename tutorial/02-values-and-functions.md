@@ -186,4 +186,4 @@ fn main() {
 1250000000
 ```
 
-Next: [arrays and glyphs](03-arrays-and-glyphs.mdx).
+Next: [arrays and glyphs](03-arrays-and-glyphs.md).

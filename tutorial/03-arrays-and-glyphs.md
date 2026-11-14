@@ -48,7 +48,7 @@ Primitives are built-in array operations. Each has a **glyph** and a **word**:
 | `⌈` `⌊` | `max` `min` | larger or smaller of two values |
 | `∣` | `abs` | absolute value |
 | `¨` | `each` | apply a function to every element |
-| `⥊` `⍉` `⊠` | `reshape` `transpose` `matmul` | matrices ([chapter 15](15-multidimensional-arrays.mdx)) |
+| `⥊` `⍉` `⊠` | `reshape` `transpose` `matmul` | matrices ([chapter 15](15-multidimensional-arrays.md)) |
 
 ```mimic run
 module main
@@ -189,6 +189,6 @@ fn main() {
 
 Here `step` works on six numbers in registers and the four steps allocate nothing. As soon as such a value meets code that takes a list of any length (printing it, storing it in a longer list, passing it to C), it becomes an ordinary list once, at that point.
 
-Arrays with more than one dimension are covered in the [arrays in depth](15-multidimensional-arrays.mdx) chapter.
+Arrays with more than one dimension are covered in the [arrays in depth](15-multidimensional-arrays.md) chapter.
 
-Next: [no loops](04-no-loops.mdx).
+Next: [no loops](04-no-loops.md).

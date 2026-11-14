@@ -23,7 +23,7 @@ fn main() {
 }
 ```
 
-Several requests written one after another are **in flight at the same time**: each `let` starts its request, and the program waits only where a result is used ([chapter 10](10-parallel-by-default.mdx)):
+Several requests written one after another are **in flight at the same time**: each `let` starts its request, and the program waits only where a result is used ([chapter 10](10-parallel-by-default.md)):
 
 ```mimic
 let news = http::fetch("http://news.example/")
@@ -299,4 +299,4 @@ error: timed out
 
 `echo` runs as a task of its own while `main` talks to it. It answers to whatever address each packet came from.
 
-Next: the full list of networking functions is in the [standard library reference](../docs/std.md#networking). Back to the [index](index.mdx).
+Next: the full list of networking functions is in the [standard library reference](../docs/std.md#networking). Back to the [index](index.md).

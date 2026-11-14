@@ -151,4 +151,4 @@ fn f(p: Pair[i64]) { … }
 * **Speed.** Mimic compiles a separate, fully typed copy of a function for each set of argument types it is used with. `or_else` on `Option[i64]` compiles to a function that returns a plain machine integer, exactly as if you had written it for `i64` by hand.
 * **Size.** All instances of a generic type share one memory layout, so `Option[i64]` and `Option[str]` don't multiply your binary's size.
 
-Next: [parallel by default](10-parallel-by-default.mdx).
+Next: [parallel by default](10-parallel-by-default.md).

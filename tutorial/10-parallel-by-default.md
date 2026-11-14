@@ -18,7 +18,7 @@ Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compil
 | `gather`, `trail`, `arms` | the function or body is pure |
 | `f(a) + g(b)`, `Node(make(d - 1), make(d - 1))`, `let a = f(x)` `let b = f(y)` | `f` and `g` are pure and can recurse: independent calls run at the same time |
 | `let x = f(…)` where `f` only reads, sleeps or fetches | always: `f` starts at once and the program waits only where `x` is used |
-| C functions | when their `extern` block says `pure` or `concurrent` ([chapter 12](12-calling-c.mdx)) |
+| C functions | when their `extern` block says `pure` or `concurrent` ([chapter 12](12-calling-c.md)) |
 
 **Pure** means the code never prints, never calls C and never does other input or output. The compiler works this out itself; you never annotate it.
 
@@ -115,4 +115,4 @@ mimic build --no-net       # compile everything as plain native code, to compare
 
 Benchmarks live in `BENCHMARK.md` at the root of the Mimic repository.
 
-Next: [projects and modules](11-projects-and-modules.mdx).
+Next: [projects and modules](11-projects-and-modules.md).

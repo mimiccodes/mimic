@@ -314,6 +314,21 @@ mimic cc main.c -Itarget/release target/release/libmm.a -o main
 
 On Linux with glibc, add `-lm -lpthread` when the system C compiler links: the runtime uses the maths library and threads, which glibc keeps in separate libraries.
 
+**A shared library.** `--shared` builds a library that other programs load at run time, in any language that can call C (Python's `ctypes`, C#, Go, Rust, …):
+
+```sh
+mimic build --shared --emit-header
+# macOS:   target/release/libmm.dylib     (install name @rpath/libmm.dylib)
+# Linux:   target/release/libmm.so
+# Windows: target/release/mm.dll + libmm.dll.a (the import library to link against)
+```
+
+```sh
+mimic cc main.c -Itarget/release target/release/libmm.dylib -Wl,-rpath,target/release -o main
+```
+
+Only the `extern "C" fn`s are exported; the runtime inside stays private, and starts itself on the first call, as in a static library. `--target` picks another system (`--target x86_64-windows` builds a DLL from macOS or Linux). Static Linux targets (`*-linux-musl`) and WebAssembly have no shared libraries.
+
 **What the exported signature may use:**
 * Parameters and the result use C types: integers, `f32`/`f64`, `bool`, `c_char`, `cstr` (a string, copied in) and `cptr`.
 * Arrays cannot be received from C yet.

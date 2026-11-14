@@ -101,4 +101,4 @@ mimic uninstall money
 
 `mod.mim` is generated: `check`, `build` and `run` keep it current. It lists every module and function, with signature hashes, plus the exact revision of each dependency. Commit it with your code. `mimic mod list` prints it in readable form.
 
-Next: [calling C](12-calling-c.mdx).
+Next: [calling C](12-calling-c.md).

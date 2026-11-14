@@ -123,4 +123,4 @@ mimic panic: index 5 out of bounds for length 3
 
 Use `Option` and `Result` for things that can legitimately go wrong, like user input, files and the network. Leave panics for broken assumptions.
 
-Next: [functions as values](08-functions-as-values.mdx).
+Next: [functions as values](08-functions-as-values.md).

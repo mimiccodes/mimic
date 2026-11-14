@@ -155,4 +155,4 @@ Ok(1)
 
 The full mapping between Mimic values and JSON is in the [standard library reference](../docs/std.md#json-json-text--values-pure).
 
-Back to the [index](index.mdx).
+Back to the [index](index.md).

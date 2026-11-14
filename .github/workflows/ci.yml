@@ -118,6 +118,20 @@ jobs:
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
 
+      # ui::run in a native window, driven through the real controls: GTK 3
+      # under a virtual display on Linux, AppKit on macOS
+      - name: Native windows
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq xvfb libgtk-3-0t64 || sudo apt-get install -y -qq xvfb libgtk-3-0
+            MIMIC_TEST_WINDOWS=1 xvfb-run -a cargo test --release --test golden windows -- --exact
+          else
+            MIMIC_TEST_WINDOWS=1 cargo test --release --test golden windows -- --exact
+          fi
+
       # Was the GPU really used? Without a Metal device the runtime runs the
       # same kernels on the CPU (same results), so passing tests prove nothing
       # about it; this reports what the runner had.
@@ -266,3 +280,8 @@ jobs:
       - name: Test
         if: ${{ !cancelled() }}
         run: cargo test --release --no-fail-fast
+
+      - name: Native windows (Win32)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: MIMIC_TEST_WINDOWS=1 cargo test --release --test golden windows -- --exact

@@ -118,7 +118,7 @@ ff  0b11111111  000255  +255
 
 ## Parsing
 
-`parse_int` and `parse_float` return an `Option`, which is `Some(value)` or `None` ([chapter 7](07-errors.mdx)):
+`parse_int` and `parse_float` return an `Option`, which is `Some(value)` or `None` ([chapter 7](07-errors.md)):
 
 ```mimic run
 module main
@@ -234,4 +234,4 @@ How maps behave:
 
 See the full list in the [standard library reference](../docs/std.md).
 
-Next: [errors without exceptions](07-errors.mdx).
+Next: [errors without exceptions](07-errors.md).
