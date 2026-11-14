@@ -97,6 +97,7 @@ check c_enum          '    print(c::GREEN)' "$c"
 check c_global        '    print(c::counter)' "$c"
 check c_stdout        '    c::fflush(c::stdout)' "$c"
 check c_array_field   '    print(c::use_buf(c::Buf { data: [0 0 0 0 0 0 0 0], len: 0 }))' "$c"
+echo "== later (unions: version 0.10)"
 check c_union         '    let n = c::Num { i: 1 }' "$c"
 echo
 echo "$missing of $total checks missing (docs/gaps.md)"

@@ -112,7 +112,7 @@ How the import works:
 
   | Skipped | Reason |
   |---|---|
-  | Functions that take unions by value, or structs with array, union or function-pointer fields | Rest of B2 |
+  | Functions that take unions by value, or structs with union or function-pointer fields | Unions come with version 0.10 |
   | `long double` | No Mimic type |
   | `static inline` functions | No symbol to link |
   | Reserved `_names` | |
@@ -220,6 +220,35 @@ fn main() {
 
 **Why only in `trusted` imports:** the generated Mimic function hides the `unsafe` C call. In an untrusted import, these functions are not generated.
 
+**Arrays in structs.** A field such as `char data[8]` or `cc_t c_cc[NCCS]` is a list in the record: `[i64]` (or `[f64]` for floating-point elements).
+
+**Records with fields left out.** `c::Termios {}` is a record of zeros, like `struct termios t = {0};` in C, and `c::Buf { len: 2 }` sets only `len`. This works for every C struct the code names, whether or not a function passes it.
+
+**Structs through pointers.** When a struct holds only numbers and arrays of numbers (no pointers), a pointer to it crosses as the record itself:
+* `const struct box *` (C only reads it): pass a record; it is copied in.
+* `struct box *` (C may write it): pass a record; it is copied in, and the function returns it again, as C left it. With a result of its own, the function returns both, as a tuple.
+
+```mimic
+trusted extern "C" include "termios.h"
+
+let (rc, t) = c::tcgetattr(0, c::Termios {})        // C fills t
+let raw = c::cfmakeraw(t)                           // in and out
+c::tcsetattr(0, c::TCSANOW, raw)                    // const: in only
+```
+
+Structs that contain pointers (`FILE`, most library handles) stay opaque `cptr` handles, as before. A struct passed through `...` (varargs, such as `ioctl`) cannot be a record; use `term::size()` for the terminal size.
+
+**Reading memory C returns.** Declare the copy you need with an array destination; C then writes straight into a Mimic array:
+
+```mimic
+extern "C" {
+    fn memcpy(dst: ptr[u8], src: cptr, n: usize) -> cptr
+}
+
+let mut buf = bytes::from([0 0 0 0])
+unsafe { c::memcpy(buf, address, 4) }        // buf now holds the 4 bytes at `address`
+```
+
 **ABI conformance.** `tests/abi` passes struct shapes whose rules differ between platforms. It covers:
 * a 1-byte struct;
 * float and double HFAs, which go in vector registers on arm64;
@@ -313,7 +342,7 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 
 ## Planned work (Phase B of the roadmap)
 
-* **B2 (rest):** unions; array fields; reading and writing structs through pointers.
+* **B2 (rest):** unions (version 0.10). Array fields and structs through pointers are done.
 * **B4 (rest):** callbacks that C keeps after the call returns (`pthread_create`, `signal`).
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
 * **B6 (rest):** receiving arrays from C (`ptr[T]` with a length), shared libraries (`.so`/`.dylib`/`.dll`).

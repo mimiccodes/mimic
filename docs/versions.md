@@ -167,7 +167,7 @@ Everything 1.0 promises, frozen.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.10.0** | **The rest of the language:** sized integers (`i8`, `i16`, `u16`, `u32`, `u64`), decoding unions, and the gaps listed in the roadmap. | Every feature in the language reference has fixtures |
+| **0.10.0** | **The rest of the language:** sized integers (`i8`, `i16`, `u16`, `u32`, `u64`), decoding unions, C unions as records (by value, in structs, through pointers), and the gaps listed in the roadmap. | Every feature in the language reference has fixtures |
 | **0.10.1** | **Tools complete:**<ul><li>The Workbench (0.3) reviewed against the finished language: every rule, fix, manual page and MCP tool up to date.</li><li>`--json` for every command; inferred types per span (`--types`).</li></ul> | Every command, rule and MCP tool has fixtures; the manual covers the frozen language |
 | **0.10.2** | **Packages:**<ul><li>The registry.</li><li>Versioned dependency resolution, lockfiles, workspaces.</li></ul> | A project depends on registry packages by version range |
 | **0.10.3** | **Incremental compilation:** per module, with stable symbols. | Changing one module rebuilds only it and its dependents |

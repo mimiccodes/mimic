@@ -949,6 +949,8 @@ fn import_headers(
     // their C, emitted only for the ones the program uses (a getter may name
     // a function of a library the program does not link)
     let mut getter_c: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    // per namespace: C record → its fields' zero values (`c::T { … }` fills the rest)
+    let mut zeros: BTreeMap<String, std::collections::HashMap<String, Vec<(String, String)>>> = BTreeMap::new();
     for item in items.iter() {
         if let Item::Extern(b) = item
             && b.abi == "C"
@@ -960,14 +962,19 @@ fn import_headers(
     // wrappers are generated, since a wrapper refers to its C function, and a
     // header can declare functions of libraries the program does not link
     let mut referenced: HashSet<(String, String)> = HashSet::new();
+    // names used without a namespace (a C constant written `SEEK_END` gets a
+    // declaration below, only so the checker can say to write `c::SEEK_END`)
+    let mut bare: HashSet<String> = HashSet::new();
     for item in items.iter() {
         if let Item::Fn(f) = item {
-            f.body.walk(&mut |e| {
-                if let mimic_syntax::ast::ExprKind::Path(p) = &e.kind
-                    && p.len() == 2
-                {
+            f.body.walk(&mut |e| match &e.kind {
+                mimic_syntax::ast::ExprKind::Path(p) | mimic_syntax::ast::ExprKind::Record { path: p, .. } if p.len() == 2 => {
                     referenced.insert((p[0].clone(), p[1].clone()));
                 }
+                mimic_syntax::ast::ExprKind::Path(p) if p.len() == 1 => {
+                    bare.insert(p[0].clone());
+                }
+                _ => {}
             });
         }
     }
@@ -980,9 +987,37 @@ fn import_headers(
                 for (header, span) in b.includes.clone() {
                     match crate::cimport::import(&header, dirs, target) {
                         Ok(imp) => {
+                            // trusted: a function that takes plain structs by
+                            // pointer is the record-taking wrapper, not the
+                            // opaque-pointer extern
+                            let wrapped: HashSet<&str> = if b.trusted { imp.struct_fns.iter().map(|f| f.name.as_str()).collect() } else { HashSet::new() };
                             for f in imp.extern_fns(true, b.effect, span) {
+                                if wrapped.contains(f.name.as_str()) && referenced.contains(&(ns.clone(), f.name.clone())) {
+                                    continue;
+                                }
                                 if taken.insert(f.name.clone()) {
                                     b.fns.push(f);
+                                }
+                            }
+                            zeros.entry(ns.clone()).or_default().extend(imp.zeros.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            // the C records the code names (`c::Termios { … }`), with the
+                            // records nested in them
+                            {
+                                let by_name: std::collections::HashMap<String, &String> =
+                                    imp.records.values().map(|d| (d.split_whitespace().nth(2).unwrap_or("").to_string(), d)).collect();
+                                let mut want: Vec<String> =
+                                    referenced.iter().filter(|(n, t)| n == &ns && by_name.contains_key(t)).map(|(_, t)| t.clone()).collect();
+                                while let Some(t) = want.pop() {
+                                    if !taken.insert(t.clone()) {
+                                        continue;
+                                    }
+                                    let decl = by_name[&t];
+                                    generated.entry(ns.clone()).or_default().push_str(&format!("{}\n", decl.replacen("PUB ", "pub ", 1)));
+                                    for word in decl.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                                        if word != t && by_name.contains_key(word) {
+                                            want.push(word.to_string());
+                                        }
+                                    }
                                 }
                             }
                             let consts = constants.entry(ns.clone()).or_default();
@@ -1085,6 +1120,19 @@ fn import_headers(
                     e.kind = ExprKind::Call { callee: Box::new(callee), args: Vec::new() };
                 }
             }
+            // `c::Termios { … }`: the fields left out are zero, as `= {0}` in C
+            ExprKind::Record { path, fields } if path.len() == 2 => {
+                if let Some(zs) = zeros.get(&path[0]).and_then(|m| m.get(&path[1])) {
+                    for (f, z) in zs {
+                        if !fields.iter().any(|(g, _, _)| g == f)
+                            && let Ok(mut v) = mimic_syntax::parser::parse_expr(&z.replace("@NS@", &path[0]))
+                        {
+                            v.walk_mut(&mut |x| x.span = e.span);
+                            fields.push((f.clone(), v, e.span));
+                        }
+                    }
+                }
+            }
             // `c::errno()` written out: undo the call added to its callee
             ExprKind::Call { callee, args } if args.is_empty() => {
                 if let ExprKind::Call { callee: inner, args: a } = &callee.kind
@@ -1098,7 +1146,7 @@ fn import_headers(
             _ => {}
         }
     };
-    if !constants.is_empty() || !getters.is_empty() {
+    if !constants.is_empty() || !getters.is_empty() || !zeros.is_empty() {
         for item in items.iter_mut() {
             if let Item::Fn(f) = item {
                 f.body.walk_mut(&mut |e| rewrite(e));
@@ -1119,9 +1167,33 @@ fn import_headers(
             wrappers.push(format!("{include}\n{line}\n"));
         }
     }
+    // C constants written without their namespace: declared (never used)
+    // so the error for them carries the note and the fix `c::NAME`
+    for (ns, consts) in &constants {
+        for name in &bare {
+            if let Some(c) = consts.get(name)
+                && !taken.get(ns).is_some_and(|t| t.contains(name))
+            {
+                let ty = match c {
+                    crate::cimport::CConst::Int(_) => "i64",
+                    crate::cimport::CConst::Float(_) => "f64",
+                    crate::cimport::CConst::Str(_) => "str",
+                };
+                let lit = match c {
+                    crate::cimport::CConst::Int(_) => "0",
+                    crate::cimport::CConst::Float(_) => "0.0",
+                    crate::cimport::CConst::Str(_) => "\"\"",
+                };
+                generated.entry(ns.clone()).or_default().push_str(&format!("pub fn {name}() -> {ty} {{ {lit} }}\n"));
+            }
+        }
+    }
     for (ns, code) in generated {
         if code.is_empty() {
             continue;
+        }
+        if std::env::var_os("MIMIC_DEBUG_CIMPORT").is_some() {
+            eprintln!("== generated for {ns}::\n{code}");
         }
         match mimic_syntax::parser::parse_file(&format!("module generated\n{code}")) {
             Ok(f) => {

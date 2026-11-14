@@ -730,6 +730,61 @@ fn c_constants() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Structs with array fields, `c::T { … }` with fields left out (zero, as
+/// `= {0}`), plain structs through pointers (`const`: copied in; otherwise
+/// copied in and back out, in a tuple with the result), termios, and
+/// `mimic check --fix` adding `c::` to old code.
+#[test]
+fn c_struct_pointers() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cptr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "ka"]).status().unwrap().success());
+    let proj = dir.join("ka");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/ka.h"),
+        "struct buf { char data[4]; int len; };\nstruct pt { double xy[2]; };\nstruct box { struct pt corner; int tags[3]; };\n\
+         int sum_buf(struct buf b);\nstruct buf make_buf(int n);\nvoid fill_box(struct box *b);\ndouble box_area(const struct box *b);\n\
+         int scale(struct pt *p, double k);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("c/ka.c"),
+        "#include \"ka.h\"\nint sum_buf(struct buf b) { int s = 0; for (int i = 0; i < 4; i++) s += b.data[i]; return s + b.len; }\n\
+         struct buf make_buf(int n) { struct buf b = {{1, 2, 3, 4}, n}; return b; }\n\
+         void fill_box(struct box *b) { b->corner.xy[0] = 3; b->corner.xy[1] = 4; b->tags[2] = 9; }\n\
+         double box_area(const struct box *b) { return b->corner.xy[0] * b->corner.xy[1]; }\n\
+         int scale(struct pt *p, double k) { p->xy[0] *= k; p->xy[1] *= k; return 7; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/ka.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"ka.h\"\ntrusted extern \"C\" include \"termios.h\"\n\n\
+         fn main() {\n    print(c::sum_buf(c::Buf { data: [1 2 3 4], len: 10 }))\n    print(c::make_buf(5))\n    print(c::Buf { len: 2 })\n\
+             let b = c::fill_box(c::Box {})\n    print(b)\n    print(c::box_area(b))\n\
+             let (rc, p) = c::scale(c::Pt { xy: [1.0 2.0] }, 3.0)\n    print((rc, p))\n\
+             let (got, t) = c::tcgetattr(0, c::Termios {})\n    print((got == 0 or got == ¯1, ≢ t.c_cc == c::NCCS))\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").stdin(std::process::Stdio::null()).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "20\nBuf { data: [1 2 3 4], len: 5 }\nBuf { data: [0 0 0 0], len: 2 }\nBox { corner: Pt { xy: [3.0 4.0] }, tags: [0 0 9] }\n12.0\n(7, Pt { xy: [3.0 6.0] })\n(true, true)\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // old code without `c::`: `mimic check --fix` adds it, functions and constants alike
+    let old = dir.join("old.mim");
+    std::fs::write(&old, "module main\n\ntrusted extern \"C\" include \"math.h\"\ntrusted extern \"C\" include \"stdio.h\"\n\nfn main() {\n    print(floor(2.7) + sqrt(4.0))\n    print(SEEK_END)\n}\n").unwrap();
+    assert!(mimic().args(["check", "--fix"]).arg(&old).status().unwrap().success());
+    let fixed = std::fs::read_to_string(&old).unwrap();
+    assert!(fixed.contains("c::floor(2.7) + c::sqrt(4.0)") && fixed.contains("print(c::SEEK_END)"), "{fixed}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
 /// linked against the Mimic library (the runtime starts itself).
 #[test]

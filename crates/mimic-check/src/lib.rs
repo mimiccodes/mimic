@@ -171,7 +171,10 @@ impl ResolveError {
             // only offer the edit when the span is exactly the path's text
             let text = p.files.get(file).and_then(|f| f.src.get(span.start..span.end)).unwrap_or("");
             let first_seg = fixed.split("::").count();
-            if text.split("::").count() == first_seg && !text.contains(['(', ' ', '{']) {
+            if self.note.is_some() && fixed.ends_with(&format!("::{text}")) && !text.contains(['(', ' ', '{', ':']) {
+                // a C name without its namespace: adding `c::` is certainly right
+                d = d.fix(format!("write `{fixed}`"), span, fixed.clone(), Applicability::MachineApplicable);
+            } else if text.split("::").count() == first_seg && !text.contains(['(', ' ', '{']) {
                 d = d.fix(format!("did you mean `{fixed}`?"), span, fixed.clone(), Applicability::MaybeIncorrect);
             } else {
                 d = d.help(format!("did you mean `{fixed}`?"));
@@ -1262,7 +1265,8 @@ impl Checker<'_> {
                     ),
                     Ok(Resolved::Fn(_)) => {}
                     Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} used as a value", self.p.describe(r)), e.span)),
-                    Err(_) if path.len() == 1 => {
+                    // (a C name without its namespace keeps its own note and fix)
+                    Err(m) if path.len() == 1 && m.note.is_none() => {
                         let mut names: Vec<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
                         names.extend(self.p.visible_names(self.module));
                         let d = Diag::new(&C::UNRESOLVED_NAME, format!("cannot find variable `{}` in this scope", path[0]), e.span)

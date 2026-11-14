@@ -86,7 +86,8 @@ How the import works:
 ## Structs, varargs and callbacks
 
 When the header is imported with `trusted`:
-* **Structs by value.** A C `struct vec2` becomes a Mimic record `c::Vec2`, and you pass and receive it as one.
+* **Structs by value.** A C `struct vec2` becomes a Mimic record `c::Vec2`, and you pass and receive it as one. Array fields are lists. `c::Vec2 {}` is all zeros, like `= {0}` in C, and you can set only some fields.
+* **Structs through pointers.** A plain struct passed by pointer is passed as a record. If C may change it, the function gives it back too: `let (rc, t) = c::tcgetattr(0, c::Termios {})`.
 * **Varargs.** Variadic functions like `printf` work. Pass integers to `%lld`, because Mimic integers are 64-bit.
 * **Callbacks.** A C parameter that takes a function pointer accepts any Mimic function: a named function, a lambda or a closure. C must call it before the call returns; C may not keep it for later.
 

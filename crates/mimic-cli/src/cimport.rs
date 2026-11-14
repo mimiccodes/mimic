@@ -63,6 +63,9 @@ pub struct Imported {
     pub globals: Vec<String>,
     /// C for the getters (empty when there are none).
     pub globals_c: String,
+    /// Record name (`Termios`) → each field with its zero value (Mimic
+    /// text): `c::Termios { … }` fills in the fields it leaves out.
+    pub zeros: std::collections::BTreeMap<String, Vec<(String, String)>>,
 }
 
 /// The value of a C constant.
@@ -119,7 +122,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v15|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v18|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -414,11 +417,11 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             }
             continue;
         }
-        if ctx.struct_name(&ret_c).is_some() || parms.iter().any(|(_, d)| ctx.struct_name(d).is_some()) {
-            if variadic {
-                out.skipped.push(skip("varargs together with structs by value"));
-                continue;
-            }
+        let by_value = ctx.struct_name(&ret_c).is_some() || parms.iter().any(|(_, d)| ctx.struct_name(d).is_some());
+        let by_pointer = parms.iter().any(|(_, d)| ctx.struct_ptr(d).is_some());
+        if (by_value || by_pointer) && !variadic {
+            // (a function that only takes struct pointers also stays a plain
+            // extern below, with opaque pointers, for untrusted imports)
             let ret_q = ftype.split('(').next().unwrap_or("").trim();
             match ctx.wrap(name, (ret_q, &ret_c), &parms) {
                 Ok((f, used)) => {
@@ -429,6 +432,11 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
                 }
                 Err(why) => out.skipped.push(skip(&why)),
             }
+            if by_value {
+                continue;
+            }
+        } else if by_value {
+            out.skipped.push(skip("varargs together with structs by value"));
             continue;
         }
         let ret = match ret_c.as_str() {
@@ -459,6 +467,17 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             continue;
         }
         out.fns.push(CFn { name: name.to_string(), params, ret, variadic, link_name: None });
+    }
+    // every struct that can cross is a record `c::Name` (with its zero
+    // values, for `c::Name { … }` with fields left out)
+    let mut names: Vec<&String> = records.keys().collect();
+    names.sort();
+    for n in names {
+        if n.starts_with('_') || ctx.flatten(n, 0).is_err() {
+            continue;
+        }
+        out.records.entry(n.clone()).or_insert_with(|| ctx.record_decl(n));
+        out.zeros.entry(camel(n)).or_insert_with(|| ctx.zeros(n));
     }
     out
 }
@@ -668,6 +687,18 @@ impl StructCtx<'_> {
                 }
                 continue;
             }
+            // `char data[8]`: one leaf per element (`data[0]` … `data[7]`)
+            if let Some((elem, len)) = array_of(&t) {
+                let elem = (self.resolve)(&elem);
+                let leaf = self
+                    .flatten_leaf(&elem)
+                    .filter(|_| self.struct_name(&elem).is_none())
+                    .ok_or_else(|| format!("field `{f}` of struct `{n}` (`{ty}`) cannot cross to Mimic yet"))?;
+                for k in 0..len {
+                    out.push((vec![format!("{f}[{k}]")], leaf));
+                }
+                continue;
+            }
             let base = t.trim_start_matches("const ").trim_start_matches("volatile ").trim();
             let leaf = if base.ends_with('*') {
                 Leaf::Ptr
@@ -711,9 +742,15 @@ impl StructCtx<'_> {
                 let t = (self.resolve)(ty);
                 let mt = match self.struct_name(&t) {
                     Some(inner) => camel(&inner),
-                    None => match self.flatten_leaf(&t) {
-                        Some(l) => l.mimic().to_string(),
-                        None => "i64".into(),
+                    None => match array_of(&t) {
+                        Some((elem, _)) => match self.flatten_leaf(&(self.resolve)(&elem)) {
+                            Some(Leaf::Float) => "[f64]".into(),
+                            _ => "[i64]".into(),
+                        },
+                        None => match self.flatten_leaf(&t) {
+                            Some(l) => l.mimic().to_string(),
+                            None => "i64".into(),
+                        },
                     },
                 };
                 format!("{f}: {mt}")
@@ -737,7 +774,31 @@ impl StructCtx<'_> {
         })
     }
 
-    /// The C wrapper and the Mimic function for one struct-taking/returning function.
+    /// `struct T *` / `const struct T *` → (T, read-only?), when T is plain
+    /// data (numbers and arrays of numbers, no pointers): such a pointer
+    /// crosses as the record itself, copied in and, unless `const`, out again.
+    /// Other struct pointers (`FILE *`) stay opaque handles.
+    fn struct_ptr(&self, t: &str) -> Option<(String, bool)> {
+        let t = t.trim();
+        let base = t.strip_suffix('*')?.trim();
+        if base.contains('*') || base.contains('(') {
+            return None;
+        }
+        let constant = base.starts_with("const ");
+        let n = self.struct_name(base)?;
+        self.plain(&n).then_some((n, constant))
+    }
+
+    /// Numbers and arrays of numbers only (no pointers inside).
+    fn plain(&self, n: &str) -> bool {
+        self.flatten(n, 0).is_ok_and(|ls| ls.iter().all(|(_, l)| *l != Leaf::Ptr))
+    }
+
+    /// The C wrapper and the Mimic function for a function that takes or
+    /// returns structs by value, or takes plain-data structs by pointer.
+    /// The wrapper takes struct arguments as their leaves; results (a struct
+    /// returned, structs written through pointers) come back through two
+    /// arrays, `ri` (integers and pointers) and `rf` (floats), in leaf order.
     fn wrap(&self, name: &str, (ret_q, ret_c): (&str, &str), parms: &[(String, String)]) -> Result<(StructFn, Vec<String>), String> {
         let mut used = Vec::new();
         let mut c_params: Vec<String> = Vec::new(); // wrapper parameter list
@@ -747,29 +808,39 @@ impl StructCtx<'_> {
         let mut call_args: Vec<String> = Vec::new(); // Mimic call arguments
         let mut m_params: Vec<String> = Vec::new(); // Mimic function parameters
         let ret_struct = self.struct_name(ret_c);
-        if ret_struct.is_some() {
-            c_params.push("long long *ri".into());
-            c_params.push("double *rf".into());
-            ext_params.push("ri: ptr[i64]".into());
-            ext_params.push("rf: ptr[f64]".into());
-            call_args.push("ri".into());
-            call_args.push("rf".into());
+        // structs that come back: (C expression, struct name)
+        let mut outs: Vec<(String, String)> = Vec::new();
+        if let Some(sn) = &ret_struct {
+            self.closure(sn, &mut used);
+            outs.push(("r".into(), sn.clone()));
         }
+        let struct_arg = |a: &str, sn: &str, c_params: &mut Vec<String>, c_setup: &mut String, ext_params: &mut Vec<String>, call_args: &mut Vec<String>| -> Result<(), String> {
+            c_setup.push_str(&format!("{} {a}; __builtin_memset(&{a}, 0, sizeof {a}); ", self.records[sn].spelling));
+            for (k, (path, leaf)) in self.flatten(sn, 0)?.into_iter().enumerate() {
+                let p = format!("{a}_{k}");
+                c_params.push(format!("{} {p}", leaf.c()));
+                let cast = if leaf == Leaf::Ptr { "(void *)" } else { "" };
+                c_setup.push_str(&format!("{a}.{} = {cast}{p}; ", path.join(".")));
+                ext_params.push(format!("{p}: {}", leaf.ffi()));
+                call_args.push(format!("{a}.{}", path.join(".")));
+            }
+            Ok(())
+        };
         for (i, (q, d)) in parms.iter().enumerate() {
             let a = format!("a{i}");
             if let Some(sn) = self.struct_name(d) {
                 self.closure(&sn, &mut used);
-                c_setup.push_str(&format!("{} {a}; ", self.records[&sn].spelling));
-                for (k, (path, leaf)) in self.flatten(&sn, 0)?.into_iter().enumerate() {
-                    let p = format!("{a}_{k}");
-                    c_params.push(format!("{} {p}", leaf.c()));
-                    let cast = if leaf == Leaf::Ptr { "(void *)" } else { "" };
-                    c_setup.push_str(&format!("{a}.{} = {cast}{p}; ", path.join(".")));
-                    ext_params.push(format!("{p}: {}", leaf.ffi()));
-                    call_args.push(format!("{a}.{}", path.join(".")));
-                }
+                struct_arg(&a, &sn, &mut c_params, &mut c_setup, &mut ext_params, &mut call_args)?;
                 c_args.push(a.clone());
                 m_params.push(format!("{a}: {}", camel(&sn)));
+            } else if let Some((sn, read_only)) = self.struct_ptr(d) {
+                self.closure(&sn, &mut used);
+                struct_arg(&a, &sn, &mut c_params, &mut c_setup, &mut ext_params, &mut call_args)?;
+                c_args.push(format!("&{a}"));
+                m_params.push(format!("{a}: {}", camel(&sn)));
+                if !read_only {
+                    outs.push((a.clone(), sn.clone())); // written by C: comes back
+                }
             } else {
                 let ffi = map_type(q, Some(d), self.model, false)?;
                 c_params.push(format!("{q} {a}"));
@@ -790,86 +861,180 @@ impl StructCtx<'_> {
                 m_params.push(format!("{a}: {mt}"));
             }
         }
-        let call = format!("{name}({})", c_args.join(", "));
         let w = format!("mimicw_{name}");
-        let (c_ret, c_body, ext_ret, m_ret, m_body) = match &ret_struct {
-            Some(sn) => {
-                self.closure(sn, &mut used);
-                let leaves = self.flatten(sn, 0)?;
-                let mut stores = String::new();
-                let (mut ni, mut nf) = (0, 0);
-                let mut idx = Vec::new();
-                for (path, leaf) in &leaves {
-                    let f = path.join(".");
-                    match leaf {
-                        Leaf::Float => {
-                            stores.push_str(&format!("rf[{nf}] = r.{f}; "));
-                            idx.push(format!("rf[{nf}]"));
-                            nf += 1;
-                        }
-                        Leaf::Ptr => {
-                            stores.push_str(&format!("ri[{ni}] = (long long)(__INTPTR_TYPE__)r.{f}; "));
-                            idx.push(format!("ri[{ni}]"));
-                            ni += 1;
-                        }
-                        Leaf::Int | Leaf::Bool => {
-                            stores.push_str(&format!("ri[{ni}] = (long long)r.{f}; "));
-                            idx.push(if *leaf == Leaf::Bool { format!("ri[{ni}] != 0") } else { format!("ri[{ni}]") });
-                            ni += 1;
-                        }
+        let call = format!("{name}({})", c_args.join(", "));
+        // results through ri/rf, in order: the struct returned, then the
+        // structs written through pointers
+        let (mut ni, mut nf) = (0usize, 0usize);
+        let mut stores = String::new();
+        let mut lits = Vec::new();
+        for (expr, sn) in &outs {
+            let (si, sf) = (ni, nf);
+            for (path, leaf) in self.flatten(sn, 0)? {
+                let f = path.join(".");
+                match leaf {
+                    Leaf::Float => {
+                        stores.push_str(&format!("rf[{nf}] = {expr}.{f}; "));
+                        nf += 1;
+                    }
+                    Leaf::Ptr => {
+                        stores.push_str(&format!("ri[{ni}] = (long long)(__INTPTR_TYPE__){expr}.{f}; "));
+                        ni += 1;
+                    }
+                    Leaf::Int | Leaf::Bool => {
+                        stores.push_str(&format!("ri[{ni}] = (long long){expr}.{f}; "));
+                        ni += 1;
                     }
                 }
-                let lit = self.literal(sn, &mut idx.into_iter())?;
-                let zeros = |n: usize, z: &str| vec![z; n.max(1)].join(" ");
-                let body = format!(
-                    "    let mut ri = [{}]\n    let mut rf = [{}]\n    unsafe {{ {w}({}) }}\n    {lit}",
-                    zeros(ni, "0"),
-                    zeros(nf, "0.0"),
-                    call_args.join(", ")
-                );
-                ("void".to_string(), format!("{} r = {call}; {stores}", self.records[sn].spelling), String::new(), format!(" -> {}", camel(sn)), body)
             }
-            None => {
-                let (er, mr) = match ret_c.trim() {
-                    "void" => (String::new(), String::new()),
-                    r => {
-                        let ffi = map_type(r, None, self.model, true)?;
-                        let mt = match ffi.as_str() {
-                            "cstr" => "str",
-                            "f32" | "f64" => "f64",
-                            "bool" => "bool",
-                            _ => "i64",
-                        };
-                        (format!(" -> {ffi}"), format!(" -> {mt}"))
-                    }
-                };
-                let c_body = if ret_c.trim() == "void" { format!("{call};") } else { format!("return {call};") };
-                (ret_q.to_string(), c_body, er, mr, format!("    unsafe {{ {w}({}) }}", call_args.join(", ")))
-            }
+            let mut cur = (si, sf);
+            lits.push(self.literal(sn, &mut cur)?);
+        }
+        let bufs = !outs.is_empty();
+        if bufs {
+            c_params.insert(0, "double *rf".into());
+            c_params.insert(0, "long long *ri".into());
+            ext_params.insert(0, "rf: ptr[f64]".into());
+            ext_params.insert(0, "ri: ptr[i64]".into());
+            call_args.insert(0, "rf".into());
+            call_args.insert(0, "ri".into());
+        }
+        // the plain result, when the function returns a number or text
+        let scalar_ret = ret_struct.is_none() && ret_c.trim() != "void";
+        let (ext_ret, m_scalar) = if scalar_ret {
+            let ffi = map_type(ret_c, None, self.model, true)?;
+            let mt = match ffi.as_str() {
+                "cstr" => "str",
+                "f32" | "f64" => "f64",
+                "bool" => "bool",
+                _ => "i64",
+            };
+            (format!(" -> {ffi}"), Some(mt.to_string()))
+        } else {
+            (String::new(), None)
         };
+        let (c_ret, c_body) = match (&ret_struct, scalar_ret) {
+            (Some(sn), _) => ("void".to_string(), format!("{} r = {call}; {stores}", self.records[sn].spelling)),
+            (None, true) => (ret_q.to_string(), format!("{ret_q} r = {call}; {stores}return r;")),
+            (None, false) => ("void".to_string(), format!("{call}; {stores}")),
+        };
+        // the Mimic result: the plain result and/or the structs, as a tuple
+        // when there are several
+        let mut results: Vec<(String, String)> = Vec::new(); // (expression, type)
+        if let Some(mt) = &m_scalar {
+            results.push(("r".into(), mt.clone()));
+        }
+        for ((_, sn), lit) in outs.iter().zip(&lits) {
+            results.push((lit.clone(), camel(sn)));
+        }
+        let m_ret = match results.len() {
+            0 => String::new(),
+            1 => format!(" -> {}", results[0].1),
+            _ => format!(" -> ({})", results.iter().map(|r| r.1.clone()).collect::<Vec<_>>().join(", ")),
+        };
+        let zeros = |n: usize, z: &str| vec![z; n.max(1)].join(" ");
+        let mut body = String::new();
+        if bufs {
+            body.push_str(&format!("    let mut ri = [{}]\n    let mut rf = [{}]\n", zeros(ni, "0"), zeros(nf, "0.0")));
+        }
+        let invoke = format!("unsafe {{ {w}({}) }}", call_args.join(", "));
+        if scalar_ret {
+            body.push_str(&format!("    let r = {invoke}\n"));
+        } else {
+            body.push_str(&format!("    {invoke}\n"));
+        }
+        match results.len() {
+            0 => {}
+            1 => body.push_str(&format!("    {}", results[0].0)),
+            _ => body.push_str(&format!("    ({})", results.iter().map(|r| r.0.clone()).collect::<Vec<_>>().join(", "))),
+        }
         let c = format!("{c_ret} {w}({}) {{ {c_setup}{c_body} }}\n", if c_params.is_empty() { "void".into() } else { c_params.join(", ") });
         let mimic = format!(
-            "extern \"C\" {{ fn {w}({}){ext_ret} }}\nPUB fn {name}({}){m_ret} {{\n{m_body}\n}}\n",
+            "extern \"C\" {{ fn {w}({}){ext_ret} }}\nPUB fn {name}({}){m_ret} {{\n{body}\n}}\n",
             ext_params.join(", "),
             m_params.join(", ")
         );
         Ok((StructFn { name: name.to_string(), mimic, c, uses: used.clone() }, used))
     }
 
-    /// A record literal for struct `n`, taking leaf values in order.
-    fn literal(&self, n: &str, vals: &mut dyn Iterator<Item = String>) -> Result<String, String> {
+    /// A record literal for struct `n` from the result arrays `ri` and `rf`,
+    /// starting at the cursor (integers, floats), in leaf order.
+    fn literal(&self, n: &str, cur: &mut (usize, usize)) -> Result<String, String> {
         let r = &self.records[n];
         let mut parts = Vec::new();
         for (f, ty, _) in &r.fields {
             let t = (self.resolve)(ty);
-            let v = match self.struct_name(&t) {
-                Some(inner) => self.literal(&inner, vals)?,
-                None => vals.next().ok_or("internal: struct leaves out of step")?,
+            let v = if let Some(inner) = self.struct_name(&t) {
+                self.literal(&inner, cur)?
+            } else if let Some((elem, len)) = array_of(&t) {
+                match self.flatten_leaf(&(self.resolve)(&elem)) {
+                    Some(Leaf::Float) => {
+                        let v = format!("((rf ↓ {}) ↑ {len})", cur.1);
+                        cur.1 += len;
+                        v
+                    }
+                    _ => {
+                        let v = format!("((ri ↓ {}) ↑ {len})", cur.0);
+                        cur.0 += len;
+                        v
+                    }
+                }
+            } else {
+                match self.flatten_leaf(&t) {
+                    Some(Leaf::Float) => {
+                        cur.1 += 1;
+                        format!("rf[{}]", cur.1 - 1)
+                    }
+                    Some(Leaf::Bool) => {
+                        cur.0 += 1;
+                        format!("ri[{}] != 0", cur.0 - 1)
+                    }
+                    _ => {
+                        cur.0 += 1;
+                        format!("ri[{}]", cur.0 - 1)
+                    }
+                }
             };
             parts.push(format!("{f}: {v}"));
         }
         Ok(format!("{} {{ {} }}", camel(n), parts.join(", ")))
     }
+
+    /// Each field of struct `n` with its zero value, as Mimic text: what
+    /// `c::T { … }` fills in for the fields it leaves out (`= {0}` in C).
+    fn zeros(&self, n: &str) -> Vec<(String, String)> {
+        let r = &self.records[n];
+        r.fields
+            .iter()
+            .map(|(f, ty, _)| {
+                let t = (self.resolve)(ty);
+                let z = if let Some(inner) = self.struct_name(&t) {
+                    let inner_z: Vec<String> = self.zeros(&inner).into_iter().map(|(g, v)| format!("{g}: {v}")).collect();
+                    // `@NS@`: the namespace, filled in where the literal is used
+                    format!("@NS@::{} {{ {} }}", camel(&inner), inner_z.join(", "))
+                } else if let Some((elem, len)) = array_of(&t) {
+                    let z = if self.flatten_leaf(&(self.resolve)(&elem)) == Some(Leaf::Float) { "0.0" } else { "0" };
+                    format!("[{}]", vec![z; len].join(" "))
+                } else {
+                    match self.flatten_leaf(&t) {
+                        Some(Leaf::Float) => "0.0".into(),
+                        Some(Leaf::Bool) => "false".into(),
+                        _ => "0".into(),
+                    }
+                };
+                (f.clone(), z)
+            })
+            .collect()
+    }
+}
+
+/// `char[8]` → (`char`, 8): a one-dimensional array type.
+fn array_of(t: &str) -> Option<(String, usize)> {
+    let t = t.trim();
+    let open = t.find('[')?;
+    let len: usize = t[open + 1..].strip_suffix(']')?.trim().parse().ok()?;
+    let elem = t[..open].trim();
+    (!elem.is_empty() && !t[open + 1..].contains('[') && len > 0 && len <= 4096).then(|| (elem.to_string(), len))
 }
 
 /// A C type (as Clang spells it) → a Mimic FFI type, or why it cannot be one yet.
@@ -945,6 +1110,7 @@ fn to_cache(i: &Imported) -> Value {
         }).collect::<Vec<_>>(),
         "globals": i.globals,
         "globals_c": i.globals_c,
+        "zeros": i.zeros,
     })
 }
 
@@ -995,6 +1161,14 @@ fn from_cache(v: &Value) -> Imported {
             .collect(),
         globals: v["globals"].as_array().into_iter().flatten().map(s).collect(),
         globals_c: s(&v["globals_c"]),
+        zeros: v["zeros"]
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, fs)| (k.clone(), fs.as_array().into_iter().flatten().map(|p| (s(&p[0]), s(&p[1]))).collect()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
