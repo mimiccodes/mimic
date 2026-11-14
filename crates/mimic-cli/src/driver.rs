@@ -1255,10 +1255,15 @@ fn codegen_and_link(
     let ir = dir.join(format!("{name}.ll"));
     let net = dir.join(format!("{name}.mnet"));
     let is_exe = input.is_bin() || profile.tests;
-    // cross targets: the same CPU/features/ABI as Clang uses for the C side
+    // cross targets: the same CPU/features/ABI as Clang uses for the C side.
+    // Not the host: on Windows it has a triple too (the MinGW environment),
+    // and Clang's default for that, plain x86-64, would hide this machine's
+    // CPU (no AVX2, no FMA: Windows programs ran at 2003 speed)
+    let cross = target.name.is_some();
     let (mut cpu, mut features, abi) = match &target.llvm {
         Some(t) => match toolchain::clang_defaults(t) {
-            Some((c, f, a)) => (Some(c), Some(f), a),
+            Some((c, f, a)) if cross => (Some(c), Some(f), a),
+            Some((_, _, a)) => (None, None, a), /* the host: its own CPU (Settings::native) */
             None => (None, None, None),
         },
         None => (None, None, None),

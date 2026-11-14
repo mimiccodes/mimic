@@ -449,7 +449,15 @@ static void fj_idle(int misses) {
 #endif
     } else {
 #if MIM_THREADS && defined(_WIN32)
-        Sleep(0);
+        /* a real nap, as nanosleep below: Sleep(0) returns at once when no
+         * other thread waits, so idle workers spun on the core (or the
+         * hyper-thread) the working ones need; Sleep(1) sleeps 1-15 ms */
+        static _Thread_local HANDLE nap;
+        if (!nap) nap = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        LARGE_INTEGER due;
+        due.QuadPart = -200; /* 20 µs, in 100 ns units, relative */
+        if (nap && SetWaitableTimer(nap, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(nap, INFINITE);
+        else SwitchToThread();
 #elif MIM_THREADS
         struct timespec ts = {0, 20000}; /* 20 µs */
         nanosleep(&ts, NULL);

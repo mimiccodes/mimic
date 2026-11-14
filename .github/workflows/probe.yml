@@ -72,6 +72,8 @@ jobs:
             export PATH="$PWD/.llvm/bin:$PATH"
           fi
           python tools/speed-probe.py ${{ inputs.benches }} | tee -a "$GITHUB_STEP_SUMMARY"
+          target/release/mimic cc -O2 tools/probe-faults.c -o faults$([ "$RUNNER_OS" = Windows ] && echo .exe)
+          ./faults | tee -a "$GITHUB_STEP_SUMMARY"
 
       # chat_room for Windows on Arm, for the stress job below
       - name: Cross-build chat_room (aarch64-windows)
@@ -109,6 +111,7 @@ jobs:
           path: stress
       - name: Run chat_room 300 times per mode
         run: |
+          set +e  # count failures instead of stopping at the first
           cd stress
           want=$(tr -d '\r' < chat_room.out)
           for mode in default MIMIC_NO_EACH_LOOP MIMIC_NO_EVENT_LOOP; do

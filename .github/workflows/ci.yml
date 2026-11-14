@@ -269,8 +269,15 @@ jobs:
       - name: SIMD check
         run: |
           cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" | tr -d '\r')
-          exe=$(target/release/mimic build --release --emit-json tests/fixtures/run/simd_each.mim | python -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
+          # (a copy in a new place: a fresh build, so code generation runs)
+          mkdir -p simdcheck && cp tests/fixtures/run/simd_each.mim simdcheck/
+          exe=$(MIMIC_DEBUG_CPU=1 target/release/mimic build --release --emit-json simdcheck/simd_each.mim 2> codegen.txt | python -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
           "$exe" | diff - tests/fixtures/run/simd_each.out
+          # code generation must have used this machine's CPU, not the
+          # x86-64 baseline (instruction counts below include the C runtime)
+          gen=$(grep -o 'cpu=[^ ]*' codegen.txt | head -1)
+          echo "- Windows code generation: $gen, AVX2 $(grep -c '+avx2' codegen.txt)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -q '+avx2' codegen.txt && ! grep -q 'cpu=x86-64 ' codegen.txt
           "/c/Program Files/LLVM/bin/llvm-objdump" -d "$exe" > simd.s
           ymm=$(grep -c -E '%ymm' simd.s || true)
           zmm=$(grep -c -E '%zmm' simd.s || true)
