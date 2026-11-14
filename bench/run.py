@@ -58,7 +58,10 @@ def build(lang: str, src: Path, name: str) -> Path | None:
         r = run([mimic_exe(), "build", str(src), "--emit-json"])
         return Path(json.loads(r.stdout)["artifacts"][0]["path"])
     if lang == "c":
-        run([mimic_exe(), "cc", "-O3", "-mcpu=native", str(src), "-o", str(exe)])
+        # this CPU's features: x86 names the CPU with -march, arm64 with -mcpu
+        cpu = "-march=native" if platform.machine() in ("x86_64", "AMD64") else "-mcpu=native"
+        libs = ["-lm"] if sys.platform.startswith("linux") else []  # glibc keeps maths apart
+        run([mimic_exe(), "cc", "-O3", cpu, str(src), "-o", str(exe)] + libs)
     elif lang == "rust" and src.is_dir():
         # a cargo project (crates such as serde_json, from the local cache)
         if not shutil.which("cargo"):
