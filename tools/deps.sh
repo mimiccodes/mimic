@@ -23,7 +23,9 @@ LLVM_MINGW_SHA256=55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae3
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
-sha256() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" | cut -d' ' -f1; }
+sha256() { # (a pipe hides a missing tool's failure: pick one that runs)
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 fetch() { # url file sha256
     if [ ! -f "$2" ]; then
         echo "downloading $1"

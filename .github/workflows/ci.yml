@@ -169,6 +169,8 @@ jobs:
       - name: Smoke
         run: |
           target/release/mimic --version
+          # the embedded Clang is there (a build without deps.sh's parts has stubs)
+          target/release/mimic cc --version
           target/release/mimic run tests/fixtures/run/basics.mim
 
       - name: Golden programs (built here, for this machine)
