@@ -12,6 +12,9 @@
 #include <fcntl.h>
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <direct.h> /* _mkdir, _getcwd, _chdir */
+#include <io.h>
 #endif
 
 
@@ -429,10 +432,10 @@ static mim_val *impl_stem(mim_val *path) {
 #include <TargetConditionals.h>
 #endif
 /* platforms without child processes: WASI, and Apple's tvOS / watchOS */
-#if defined(_WIN32) || defined(__wasi__) || (defined(__APPLE__) && (TARGET_OS_TV || TARGET_OS_WATCH))
+#if defined(__wasi__) || (defined(__APPLE__) && (TARGET_OS_TV || TARGET_OS_WATCH))
 #define MIM_NO_SPAWN 1
 #endif
-#ifndef MIM_NO_SPAWN
+#if !defined(MIM_NO_SPAWN) && !defined(_WIN32)
 #include <spawn.h>
 #include <poll.h>
 #include <sys/wait.h>
@@ -630,11 +633,137 @@ static mim_val *impl_pid(void) {
 #endif
 }
 
+#ifdef _WIN32
+/* UTF-8 → a new UTF-16 string (free it) */
+static wchar_t *win_wide(const char *s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    wchar_t *w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(n > 0 ? n : 1));
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    else w[0] = 0;
+    return w;
+}
+
+/* one argument quoted the way Windows programs split their command line
+ * (CommandLineToArgvW / the C runtime): quotes around anything with spaces
+ * or quotes, backslashes doubled only before a quote */
+static void win_quote(sbuf *b, const char *a) {
+    if (*a && !strpbrk(a, " \t\n\v\"")) {
+        sb_put(b, a, strlen(a));
+        return;
+    }
+    sb_put(b, "\"", 1);
+    for (const char *p = a;; p++) {
+        size_t bs = 0;
+        while (*p == '\\') {
+            p++;
+            bs++;
+        }
+        if (!*p) {
+            for (size_t i = 0; i < bs * 2; i++) sb_put(b, "\\", 1);
+            break;
+        }
+        size_t k = *p == '"' ? bs * 2 + 1 : bs;
+        for (size_t i = 0; i < k; i++) sb_put(b, "\\", 1);
+        sb_put(b, p, 1);
+    }
+    sb_put(b, "\"", 1);
+}
+
+typedef struct { HANDLE h; sbuf out; } win_reader;
+
+static void *win_read_all(void *arg) {
+    win_reader *r = (win_reader *)arg;
+    char buf[65536];
+    DWORD got;
+    while (ReadFile(r->h, buf, sizeof buf, &got, NULL) && got > 0) sb_put(&r->out, buf, got);
+    return NULL;
+}
+
+/* Run a command line (UTF-8); stdin is empty, stdout and stderr captured.
+ * [status stdout stderr] */
+static mim_val *win_run(const char *what, const char *cmdline) {
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+    HANDLE out_r, out_w, err_r, err_w;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0) || !CreatePipe(&err_r, &err_w, &sa, 0)) {
+        io_fail_msg("cannot run: no pipes");
+        return alloc(MIM_BOXED, 1, 0);
+    }
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = out_w;
+    si.hStdError = err_w;
+    PROCESS_INFORMATION pi;
+    wchar_t *wcmd = win_wide(cmdline);
+    fflush(stdout);
+    fflush(stderr);
+    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    DWORD launch_err = GetLastError();
+    free(wcmd);
+    CloseHandle(out_w);
+    CloseHandle(err_w);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) {
+        CloseHandle(out_r);
+        CloseHandle(err_r);
+        char msg[512];
+        char sys[400] = "";
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, launch_err, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), sys, sizeof sys, NULL);
+        size_t L = strlen(sys);
+        while (L && (sys[L - 1] == '\n' || sys[L - 1] == '\r' || sys[L - 1] == '.')) sys[--L] = 0;
+        snprintf(msg, sizeof msg, "cannot run %s: %s", what, sys);
+        io_fail_msg(msg);
+        return alloc(MIM_BOXED, 1, 0);
+    }
+    /* read both pipes together so a full one never blocks the child */
+    win_reader re = {err_r, {0}};
+    pthread_t th;
+    int threaded = pthread_create(&th, NULL, win_read_all, &re) == 0;
+    win_reader ro = {out_r, {0}};
+    win_read_all(&ro);
+    if (threaded) pthread_join(th, NULL);
+    else win_read_all(&re);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(out_r);
+    CloseHandle(err_r);
+    mim_val *parts[3] = {mim_int((int64_t)code), mim_str(ro.out.p ? ro.out.p : "", (int64_t)ro.out.n), mim_str(re.out.p ? re.out.p : "", (int64_t)re.out.n)};
+    free(ro.out.p);
+    free(re.out.p);
+    mim_val *r = mim_array_lit(3, parts);
+    for (int k = 0; k < 3; k++) mim_release(parts[k]);
+    return r;
+}
+#endif
+
 /* run a program (looked up in PATH) with arguments; stdin is empty.
  * [status stdout stderr]; a signal gives status 128 + signal number */
 static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
     io_clear();
-#ifdef MIM_NO_SPAWN
+#if defined(_WIN32)
+    const char *prog = io_path(program, "run");
+    need(argv_list, "run");
+    int64_t n = argv_list->rank == 1 ? argv_list->len : 0;
+    if (n && argv_list->dtype != MIM_BOXED) mim_panic("run: the arguments must be a list of str");
+    sbuf cmd = {0};
+    win_quote(&cmd, prog);
+    for (int64_t i = 0; i < n; i++) {
+        sb_put(&cmd, " ", 1);
+        win_quote(&cmd, io_path(((mim_val **)argv_list->data)[i], "run"));
+    }
+    sb_put(&cmd, "", 1);
+    mim_val *r = win_run(prog, cmd.p);
+    free(cmd.p);
+    return r;
+#elif defined(MIM_NO_SPAWN)
     (void)program;
     (void)argv_list;
     io_fail_msg("running programs is not supported on this platform");
@@ -720,7 +849,7 @@ typedef struct mim_future {
     int32_t n;
     mim_val **args;
     mim_val *result;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_t th;
 #endif
 #if MIM_GREEN
@@ -800,7 +929,7 @@ void *mim_spawn(mim_val *f, int32_t n, mim_val **args) {
         return fu;
     }
 #endif
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setstacksize(&a, (size_t)32 << 20);
@@ -823,7 +952,7 @@ mim_val *mim_await(void *h) {
     if (fu->co) co_join(fu->co);
     else
 #endif
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     if (fu->started) pthread_join(fu->th, NULL);
 #endif
     if (!fu->started && !fu->done) {
@@ -851,7 +980,7 @@ static void detach_run(void *p) {
     __atomic_fetch_sub(&g_detached_running, 1, __ATOMIC_ACQ_REL);
 }
 
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
 static void *detach_thread(void *p) {
     detach_run(p);
     free_list_drain(); /* this thread ends now */
@@ -869,7 +998,7 @@ mim_val *mim_std_ui_detach(mim_val *f) {
         return NULL;
     }
 #endif
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_t t;
     pthread_attr_t a;
     pthread_attr_init(&a);
@@ -985,9 +1114,39 @@ mim_val *mim_std_os_set_env(mim_val *name, mim_val *value) { return io_result(im
 mim_val *mim_std_os_exit(mim_val *code) { return impl_exit(code); }
 mim_val *mim_std_os_pid(void) { return impl_pid(); }
 
+static mim_val *output_of(mim_val *parts);
+
 /* run a program: Ok(Output { status, stdout, stderr }) */
-mim_val *mim_std_os_run(mim_val *program, mim_val *args) {
-    mim_val *parts = impl_io_run(program, args);
+mim_val *mim_std_os_run(mim_val *program, mim_val *args) { return output_of(impl_io_run(program, args)); }
+
+/* a command line through the system shell: /bin/sh -c, or cmd.exe on Windows */
+mim_val *mim_std_os_shell(mim_val *command) {
+#ifdef _WIN32
+    io_clear();
+    const char *c = io_path(command, "shell");
+    sbuf cmd = {0};
+    const char *pre = "cmd.exe /d /s /c \"";
+    sb_put(&cmd, pre, strlen(pre));
+    sb_put(&cmd, c, strlen(c));
+    sb_put(&cmd, "\"", 2); /* (and the terminating zero) */
+    mim_val *parts = win_run("cmd.exe", cmd.p);
+    free(cmd.p);
+    return output_of(parts);
+#else
+    mim_val *sh = mim_str("/bin/sh", 7);
+    mim_val *items[2] = {mim_str("-c", 2), command};
+    mim_retain(command);
+    mim_val *args = mim_array_lit(2, items);
+    mim_release(items[0]);
+    mim_release(items[1]);
+    mim_val *r = output_of(impl_io_run(sh, args));
+    mim_release(sh);
+    mim_release(args);
+    return r;
+#endif
+}
+
+static mim_val *output_of(mim_val *parts) {
     if (io_failed) {
         mim_release(parts);
         return err_of(io_err);
@@ -1207,7 +1366,7 @@ mim_val *mim_std_fs_write_bytes(mim_val *path, mim_val *b) {
 extern const mim_desc mim_desc_tuple, mim_desc_chan_Sender, mim_desc_chan_Receiver;
 
 typedef struct {
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_mutex_t m;
     pthread_cond_t c;     /* a value arrived (or closed) */
     pthread_cond_t space; /* a bounded channel has room again (or closed) */
@@ -1224,7 +1383,7 @@ typedef struct {
 
 static chan_t **ch_tab;
 static int64_t ch_n, ch_cap;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
 static pthread_mutex_t ch_tab_lock = PTHREAD_MUTEX_INITIALIZER;
 #define CH_LOCK(x) pthread_mutex_lock(x)
 #define CH_UNLOCK(x) pthread_mutex_unlock(x)
@@ -1250,7 +1409,7 @@ static chan_t *chan_of(mim_val *end, const char *what) {
 static mim_val *chan_make(int64_t limit) {
     chan_t *c = (chan_t *)calloc(1, sizeof(chan_t));
     c->limit = limit;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_mutex_init(&c->m, NULL);
     pthread_cond_init(&c->c, NULL);
     pthread_cond_init(&c->space, NULL);
@@ -1314,7 +1473,7 @@ static void co_list_wake(mim_co *co) {
  * Returns a coroutine to wake once the lock is released. */
 static void *chan_room(chan_t *c) {
     if (!c->limit) return NULL;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_cond_signal(&c->space);
 #endif
 #if MIM_GREEN
@@ -1350,7 +1509,7 @@ mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
             continue;
         }
 #endif
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
         pthread_cond_wait(&c->space, &c->m);
 #else
         /* without threads: deferred tasks may make room; a task cannot
@@ -1374,7 +1533,7 @@ mim_val *mim_std_chan_send(mim_val *tx, mim_val *v) {
     mim_retain(v);
     c->q[(c->head + c->n) % c->cap] = v;
     c->n++;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_cond_signal(&c->c);
 #endif
 #if MIM_GREEN
@@ -1420,7 +1579,7 @@ static mim_val *chan_take(chan_t *c) {
 mim_val *mim_std_chan_receive(mim_val *rx) {
     chan_t *c = chan_of(rx, "chan::receive");
     CH_LOCK(&c->m);
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
 #if MIM_GREEN
     while (t_co && c->n == 0 && !c->closed) {
         CH_UNLOCK(&c->m);
@@ -1458,7 +1617,7 @@ mim_val *mim_std_chan_close(mim_val *tx) {
     chan_t *c = chan_of(tx, "chan::close");
     CH_LOCK(&c->m);
     c->closed = 1;
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
     pthread_cond_broadcast(&c->c);
     pthread_cond_broadcast(&c->space);
 #endif

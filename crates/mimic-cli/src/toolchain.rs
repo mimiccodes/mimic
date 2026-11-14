@@ -26,6 +26,9 @@ pub enum Sysroot {
     Musl { triple: String, root: PathBuf, compiler_rt: PathBuf },
     /// WebAssembly with WASI (preview 1): wasi-libc, a `.wasm` command module.
     Wasi { root: PathBuf, compiler_rt: PathBuf },
+    /// Windows (x86_64, aarch64) with mingw-w64 and the UCRT: `.exe` files
+    /// that need only Windows' own DLLs.
+    Mingw(mimic_toolchain::mingw::Sysroot),
 }
 
 pub fn select(target: &Target) -> Result<Toolchain, String> {
@@ -127,7 +130,7 @@ pub fn support(target: &Target) -> Support {
     {
         return Support::Sdk;
     }
-    if is_wasi(target) {
+    if is_wasi(target) || is_mingw(target) {
         return Support::Bundled;
     }
     let os = if target.os.is_empty() { "unknown" } else { target.os.as_str() };
@@ -180,12 +183,24 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
         let compiler_rt = mimic_toolchain::compiler_rt::ensure(&cache, triple, &flags)?;
         return Ok(Some(Sysroot::Musl { triple: triple.clone(), root: musl.root, compiler_rt }));
     }
+    if is_mingw(target) {
+        let triple = target.llvm.clone().unwrap_or_default();
+        return Ok(Some(Sysroot::Mingw(mimic_toolchain::mingw::ensure(&libc_cache(), &triple)?)));
+    }
     if is_wasi(target) {
         let cache = libc_cache();
         let w = mimic_toolchain::wasi::ensure(&cache, &mimic_toolchain::resource_dir(&cache)?)?;
         return Ok(Some(Sysroot::Wasi { root: w.root, compiler_rt: w.compiler_rt }));
     }
     Ok(None)
+}
+
+/// Windows with the GNU environment on x86_64 or aarch64: what the bundled
+/// mingw-w64 covers.
+fn is_mingw(target: &Target) -> bool {
+    target.os == "windows"
+        && target.env.starts_with("gnu")
+        && target.llvm.as_deref().and_then(mimic_toolchain::mingw::arch).is_some()
 }
 
 /// WASI preview 1 on wasm32: what wasi-libc covers.
@@ -269,6 +284,9 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
                 }
                 Sysroot::Wasi { root, .. } => {
                     c.args(mimic_toolchain::wasi::cflags(root));
+                }
+                Sysroot::Mingw(m) => {
+                    c.args(m.cflags());
                 }
             }
             c
@@ -359,6 +377,28 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
                 c.arg(format!("-l{l}"));
             }
             c.arg("-lc").arg(compiler_rt);
+            c
+        }
+        Toolchain::Embedded(Sysroot::Mingw(m)) => {
+            let lib = m.lib();
+            let mut c = Command::new(self_exe());
+            c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console"]).arg("--gc-sections");
+            c.arg("-o").arg(job.output);
+            c.arg(lib.join("crt2.o")).arg(lib.join("crtbegin.o")).args(job.objects);
+            c.arg(format!("-L{}", lib.display()));
+            for s in &job.search {
+                c.arg(format!("-L{}", s.display()));
+            }
+            for l in &job.libs {
+                c.arg(format!("-l{l}"));
+            }
+            // the C runtime, threads, and the Windows DLLs the runtime uses;
+            // mingw's libraries refer to each other, so they go in a group
+            c.arg("--start-group");
+            c.args(["-lmingw32", "-lmingwex", "-lucrt", "-lpthread", "-lkernel32", "-luser32", "-lws2_32", "-ladvapi32", "-lbcrypt", "-lshell32", "-lntdll", "-lsynchronization"]);
+            c.arg(m.builtins());
+            c.arg("--end-group");
+            c.arg(lib.join("crtend.o"));
             c
         }
         Toolchain::System => {

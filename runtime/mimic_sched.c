@@ -692,7 +692,7 @@ static void mim_wait_readable(int fd) {
 #else /* no event loop: threads and blocking calls */
 
 static int green_on(void) { return 0; }
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
 static void co_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 #endif
 #if !defined(_WIN32) && !defined(__wasi__)

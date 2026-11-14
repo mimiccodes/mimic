@@ -9,9 +9,12 @@ Next: 0.1.1 (release builds); work on 0.2.0 (Windows) has started.
 ### Added
 - `mimic --version` shows the commit and the LLVM version.
 - `MIMIC_GPU_DEBUG=1` reports whether a Metal GPU was found.
-- The mingw-w64 C library (from llvm-mingw, UCRT) is bundled for Windows x86_64 and arm64 (in progress).
+- Windows programs from any machine: `--target x86_64-windows` (and `aarch64-windows`) builds `.exe` files with the bundled mingw-w64 (UCRT); `mimic cc` compiles and links C for Windows too. Threads, implicit futures, files, time and processes work; networking comes in 0.2.1.
+- `os::shell` uses the system shell: `/bin/sh -c`, or `cmd.exe /c` on Windows.
+- CI builds the golden programs for Windows on Linux and runs them on a Windows machine (`tools/build-fixtures.sh`, `tools/run-fixtures.sh`).
 
 ### Fixed
+- The C version of the HTTP benchmark runs on Linux (epoll).
 - Linux: C code (the runtime, imported headers) is compiled by the embedded Clang; the system compiler only links. Header import failed with GCC.
 - Linux: a runtime function clashed with a glibc maths function (`jnl`).
 - Linux: unused runtime code is dropped at link time, so raw `.mnet` programs link.

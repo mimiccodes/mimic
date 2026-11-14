@@ -178,7 +178,7 @@ How channels behave:
 | `os::pid()` | This process's id | concurrent |
 | `os::set_env(name, value)` | `Result[bool, str]` | sync |
 | `os::run(program, arguments)` | `Result[os::Output, str]`: `program` is looked up through `PATH`; `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely | sync |
-| `os::shell(command)` | `os::run("/bin/sh", ["-c" command])` | sync |
+| `os::shell(command)` | the command line through the system shell: `/bin/sh -c` (on Windows `cmd.exe /c`) | sync |
 | `os::exit(code)` | Leave the program now with that exit status | ordered |
 
 The child's standard input is empty. WebAssembly (WASI), tvOS and watchOS have no child processes, so there `os::run` returns `Err`.

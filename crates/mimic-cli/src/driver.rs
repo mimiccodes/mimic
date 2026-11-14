@@ -239,10 +239,10 @@ pub module os {
     pub extern \"mimic\" sync {
         fn set_env(name: str, value: str) -> Result[bool, str]
         fn run(program: str, arguments: [str]) -> Result[Output, str]
+        // Run a command line through the system shell: /bin/sh -c, or
+        // cmd.exe /c on Windows.
+        fn shell(command: str) -> Result[Output, str]
     }
-
-    // Run a command line through the system shell (/bin/sh -c).
-    pub fn shell(command: str) -> Result[Output, str] { run(\"/bin/sh\", [\"-c\" command]) }
 }
 
 // Clocks and dates. Instants and durations are i64 nanoseconds.

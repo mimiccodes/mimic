@@ -1,0 +1,10 @@
+# Fixtures that need what Windows programs do not have yet (built and run by
+# tools/build-fixtures.sh / run-fixtures.sh only on the other systems).
+# Networking (TCP, UDP, TLS, HTTP, WebSockets, the browser UI): version 0.2.1.
+chat_room
+datagrams
+secure
+ui_app
+ui_live
+web
+websocket_echo

@@ -1,4 +1,5 @@
-# Build mimic and run every test on Linux and macOS, on every push to main
+# Build mimic and run every test on Linux and macOS (and the golden programs
+# on Windows, built on Linux), on every push to main
 # and every pull request. The LLVM it links comes from the llvm workflow's
 # release download.
 name: ci
@@ -66,6 +67,18 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # Windows programs are cross-built here and run by the windows job
+      - name: Windows programs (cross-built)
+        if: runner.os == 'Linux'
+        run: tools/build-fixtures.sh x86_64-windows winfix
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: windows-x86_64-fixtures
+          path: winfix
+          retention-days: 3
+
       - name: Test
         run: cargo test --release --no-fail-fast
 
@@ -92,3 +105,23 @@ jobs:
             [ -f "$f" ] && { echo "== $f"; cat "$f"; echo; }
           done
           true
+
+  # The golden programs, cross-built for Windows by the Linux job, run on
+  # Windows with the same expected output.
+  windows:
+    name: run (windows-x86_64, built on Linux)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-fixtures
+          path: winfix
+
+      - name: Run
+        shell: bash
+        run: tools/run-fixtures.sh winfix

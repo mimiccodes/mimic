@@ -477,7 +477,7 @@ void mim_net_book_once(const uint64_t *words, const uint64_t *offsets, uint32_t 
         return;
     }
     while (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2) {
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
         sched_yield();
 #elif MIM_THREADS
         SwitchToThread();
@@ -963,7 +963,7 @@ static void net_work(TM *tm) {
                 __atomic_fetch_sub(&r->idle, 1, __ATOMIC_ACQ_REL);
                 break;
             }
-#if MIM_THREADS && !defined(_WIN32)
+#if MIM_THREADS
             sched_yield();
 #elif MIM_THREADS
             SwitchToThread();

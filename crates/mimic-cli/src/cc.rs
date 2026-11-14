@@ -83,6 +83,23 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
                     post.push("-lc".into());
                 }
             }
+            Ok(Toolchain::Embedded(Sysroot::Mingw(m))) => {
+                pre.extend(m.cflags());
+                if links(&user) && !user.iter().any(|a| a == "-shared") {
+                    // everything explicit, as `mimic build` links it
+                    let lib = m.lib();
+                    pre.extend(["-nostdlib".into(), "-static".into()]);
+                    pre.push(path(&lib.join("crt2.o")));
+                    pre.push(path(&lib.join("crtbegin.o")));
+                    post.push(format!("-L{}", lib.display()));
+                    for l in ["mingw32", "mingwex", "ucrt", "pthread", "kernel32", "user32", "ws2_32", "advapi32", "bcrypt", "shell32", "ntdll", "mingw32", "mingwex", "ucrt"] {
+                        post.push(format!("-l{l}"));
+                    }
+                    post.push(path(&m.builtins()));
+                    post.push("-lkernel32".into());
+                    post.push(path(&lib.join("crtend.o")));
+                }
+            }
             Ok(Toolchain::Embedded(Sysroot::Darwin { sdk, .. })) => {
                 if !user.iter().any(|a| a == "-isysroot" || a.starts_with("--sysroot")) {
                     pre.extend(["-isysroot".into(), path(&sdk)]);

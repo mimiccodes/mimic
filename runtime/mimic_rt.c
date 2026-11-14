@@ -23,6 +23,8 @@
 #elif defined(_WIN32)
 #define MIM_THREADS 1
 #include <windows.h>
+#include <pthread.h> /* winpthreads (mingw-w64): futures, the net reducer */
+#include <unistd.h>
 #else
 #define MIM_THREADS 1
 #include <pthread.h>
@@ -944,8 +946,39 @@ static int32_t g_argc;
 
 static int g_rt_state = 0; /* 0 = not started, 1 = starting, 2 = ready */
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <shellapi.h>
+/* Windows: bytes out as they are (no \n → \r\n), UTF-8 on the console, and
+ * the arguments as UTF-8 (the C runtime's argv uses the local code page). */
+static void win_start(int32_t *argc, char ***argv) {
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+    _setmode(_fileno(stdin), _O_BINARY);
+    SetConsoleOutputCP(CP_UTF8);
+    if (*argc <= 0) return;
+    int n = 0;
+    wchar_t **w = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (!w || n <= 0) return;
+    char **a = (char **)calloc((size_t)n + 1, sizeof(char *));
+    for (int i = 0; i < n; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, NULL, 0, NULL, NULL);
+        a[i] = (char *)malloc(len > 0 ? (size_t)len : 1);
+        if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, a[i], len, NULL, NULL);
+        else a[i][0] = 0;
+    }
+    LocalFree(w);
+    *argc = n;
+    *argv = a;
+}
+#endif
+
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+#ifdef _WIN32
+    win_start(&argc, &argv);
+#endif
     g_argc = argc;
     g_argv = argv;
     for (int64_t i = SMALL_INT_MIN; i <= SMALL_INT_MAX; i++) {
@@ -969,9 +1002,9 @@ void mim_rt_init(int32_t argc, char **argv) {
         g_nthreads = atoi(t);
     } else {
 #ifdef _WIN32
-        SYSTEM_INFO si;
-        GetSystemInfo(&si);
-        g_nthreads = (int)si.dwNumberOfProcessors;
+        /* every processor group (GetSystemInfo stops at 64) */
+        DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        g_nthreads = n > 0 ? (int)n : 1;
 #else
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         g_nthreads = n > 0 ? (int)n : 1;

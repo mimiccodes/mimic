@@ -31,7 +31,8 @@ fn main() {
         Ok(o) => print(o),
         Err(e) => print("cannot run programs: {e}"),
     }
-    match os::shell("echo out; echo err 1>&2; exit 3") {
+    // the same command line in sh and cmd.exe
+    match os::shell("echo out&& echo err 1>&2&& exit 3") {
         Ok(o) => print((o.status, trim(o.stdout), trim(o.stderr))),
         Err(e) => print("no shell: {e}"),
     }
