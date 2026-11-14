@@ -358,13 +358,31 @@ fn wasi_fixtures() {
             run = std::process::Command::new("node").arg("--no-warnings").arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
         }
         let status = run.status;
+        let mut probe = String::new();
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status.signal().is_some() {
+                // still crashing: which engine settings avoid it (diagnostics)
+                let sh = |c: &str| std::process::Command::new("sh").arg("-c").arg(c).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                probe.push_str(&format!("ulimit -s: {}; node: {}\n", sh("ulimit -s"), sh("node --version")));
+                for flags in [&["--liftoff-only"][..], &["--no-liftoff"], &["--stack-size=400"], &["--stack-size=4000"], &["--no-wasm-tier-up"], &["--no-wasm-lazy-compilation"]] {
+                    let r = std::process::Command::new("node").arg("--no-warnings").args(flags).arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
+                    let ok = String::from_utf8_lossy(&r.stdout) == std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
+                    probe.push_str(&format!("  node {flags:?}: {} ({})\n", if ok { "ok" } else { "differs" }, r.status));
+                    if !r.status.success() {
+                        let e = String::from_utf8_lossy(&r.stderr);
+                        probe.push_str(&format!("    {}\n", e.lines().rev().take(3).collect::<Vec<_>>().join(" | ")));
+                    }
+                }
+            }
+        }
         // a fixture may expect different output under WASI (no processes, …)
         let wasi_out = f.with_extension("wasi.out");
         let want = std::fs::read_to_string(if wasi_out.is_file() { wasi_out } else { f.with_extension("out") }).unwrap();
         let got = String::from_utf8_lossy(&run.stdout);
         if got != want {
             failures.push(format!(
-                "{stem} ({status}, {wasm})\n--- want\n{want}--- got\n{got}--- stderr\n{}",
+                "{stem} ({status}, {wasm})\n--- want\n{want}--- got\n{got}--- stderr\n{}{probe}",
                 String::from_utf8_lossy(&run.stderr)
             ));
         }
