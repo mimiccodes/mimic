@@ -75,14 +75,20 @@ Several things that look missing exist under another name, or are left out on pu
 | Reading memory C returns (`bytes::from_ptr(p, n)`) | Only `cstr` and arrays passed in |
 | `mimic check --fix` applies the `c::name` suggestion | Shown, not applied |
 
-## Tools (0.2.9)
+## Tools (the Workbench, 0.3; Windows speed, 0.2.9)
 
-| Gap | Today |
-|---|---|
-| Syntax highlighting for editors (a TextMate grammar for VS Code and others, and a tree-sitter grammar), with names under `c::` and `cpp::` in their own colour | None |
-| A language server: errors as you type, go to definition, hover with types | `mimic check --emit-json` |
-| `mimic check --fix` for every suggestion it shows | Some fixes only |
-| CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | Measured on Linux and macOS only |
+| Gap | Today | Version |
+|---|---|---|
+| A manual inside `mimic`: topics, functions, glyphs (`mimic man ⌿`), search, "coming from C or Python" pages | `mimic explain` for errors, `mimic doc --std` | 0.3.1 |
+| Syntax highlighting for editors (TextMate and tree-sitter grammars), names under `c::` and `cpp::` in their own colour | None | 0.3.2 |
+| A language server: errors as you type, glyph input, hover, go to definition | `mimic check --emit-json` | 0.3.2 |
+| `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.2 |
+| An MCP server for AI agents | None | 0.3.3 |
+| Seeing where code runs in parallel, and why not (`mimic why`) | None | 0.3.4 |
+| Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.5, 0.3.6 |
+| A terminal editor (`mimic edit`) | None | 0.3.7 |
+| A REPL and a profiler | None | 0.3.8 |
+| CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | Measured on Linux and macOS only | 0.2.9 |
 
 ## Not gaps: other names, or left out on purpose
 

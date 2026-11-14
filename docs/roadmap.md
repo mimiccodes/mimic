@@ -102,11 +102,12 @@ These run alongside the language milestones. Bootstrapping, a compiler written i
 | G | Registry, per-module incremental compilation (would need stable symbols across builds), benchmark CI including Rust, CI hosts; lists, strings and records shown as values in the debugger | |
 | G (CI) | GitHub Actions: LLVM built and published per platform, every push tested on Linux x86_64 and macOS arm64 (golden tests, tutorial), weekly benchmarks with a SIMD check | ✅ |
 | I1 | Windows (G6): the runtime on Win32 (threads, Winsock, an IOCP event loop, files, processes), bundled mingw-w64, PE linking; CI, tests and benchmarks on Windows runners | |
+| I1b | The Workbench (versions 0.3): one analysis engine with `mimic man` (the manual inside `mimic`), `mimic lsp` (editors, VS Code), `mimic mcp` (AI agents), `mimic why` (where code runs), `mimic audit` (quality, security, verification), `mimic edit` (a terminal editor), `mimic repl` and `mimic profile` | |
 | I2 | One device layer for GPUs: allocate, copy, launch, wait; kernels generated once as LLVM IR (Metal keeps its source path) | |
 | I3 | Vulkan (SPIR-V): NVIDIA, AMD and Intel GPUs on Linux and Windows; tested in CI with Mesa's software Vulkan; `--gpu auto` (every backend the target OS can use; the runtime picks what is present), `--gpu vulkan,cuda`, `--gpu none` | |
 | I4 | CUDA (NVPTX) and AMD ROCm (AMDGPU) | |
 | I5 | Heterogeneous placement and streaming: a cost model per operation (size, work per element, where the data is), data kept on the device across chains, arrays streamed through fused pipelines in cache-sized chunks with copies overlapping compute; `--cpu portable` binaries carrying several CPU levels (SSE/AVX2/AVX-512) chosen at start | |
-| I6 | Releases: tagged builds attach `mimic` binaries per platform | |
+| I6 | Releases: tagged builds attach `mimic` binaries per platform | ✅ |
 | H | Bootstrap: the compiler in Mimic, stage 2 reproduces itself | |
 
 ## Later milestones
