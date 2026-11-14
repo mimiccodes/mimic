@@ -9,7 +9,8 @@ dir=$2
 mimic=${MIMIC:-target/release/mimic}
 mkdir -p "$dir/debug" "$dir/release"
 # the target's OS word (windows, linux, …): <name>.<os>.out is the expected
-# output where it differs, and not-yet-<os>.txt lists what cannot run yet
+# output where it differs (<name>.musl.out for static Linux), and
+# not-yet-<os>.txt lists what cannot run yet
 what=$target
 [ "$target" = native ] && what=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$what" in
@@ -28,7 +29,10 @@ for f in tests/fixtures/run/*.mim; do
             python3 -c 'import json, sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
         cp "$exe" "$dir/$profile/"
     done
-    if [ -f "tests/fixtures/run/$name.$os.out" ]; then
+    # static Linux (musl) first: what static programs cannot do (load OpenSSL)
+    if [ "$os" = linux ] && [ "${target#*musl}" != "$target" ] && [ -f "tests/fixtures/run/$name.musl.out" ]; then
+        cp "tests/fixtures/run/$name.musl.out" "$dir/$name.out"
+    elif [ -f "tests/fixtures/run/$name.$os.out" ]; then
         cp "tests/fixtures/run/$name.$os.out" "$dir/$name.out"
     else
         cp "tests/fixtures/run/$name.out" "$dir/"

@@ -119,7 +119,7 @@ fn main() {
     let a = nap(300)                         // concurrent: both naps overlap
     let b = nap(300)
     print(a + b)
-    print(time::clock() - start < 450ms)           // about 300ms, not 600ms
+    print(time::clock() - start < 600ms)           // overlapped: one after the other takes 600ms
 }
 ```
 
