@@ -795,6 +795,52 @@ fn c_struct_pointers() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// C unions: a record with one field per member; from C every member is
+/// filled in, to C the members that are not zero are written (so the one
+/// set wins); by value, in structs, through pointers, with array members.
+#[test]
+fn c_unions() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cunion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "ku"]).status().unwrap().success());
+    let proj = dir.join("ku");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/ku.h"),
+        "union num { int i; float f; };\ntypedef union { long long whole; unsigned char bytes[8]; } word;\nstruct tagged { int kind; union num value; };\n\
+         int kind_of(union num n);\nunion num make_float(float x);\ndouble read(struct tagged t);\nvoid bump(struct tagged *t);\nlong long low_byte(word w);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("c/ku.c"),
+        "#include \"ku.h\"\nint kind_of(union num n) { return n.i; }\nunion num make_float(float x) { union num n; n.f = x; return n; }\n\
+         double read(struct tagged t) { return t.kind == 0 ? t.value.i : t.value.f; }\n\
+         void bump(struct tagged *t) { if (t->kind == 0) t->value.i += 1; else t->value.f += 1.0f; }\n\
+         long long low_byte(word w) { return w.bytes[0]; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/ku.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"ku.h\"\n\nfn main() {\n    print(c::kind_of(c::Num { i: 42 }))\n\
+             let n = c::make_float(2.5)\n    print((n.f, c::kind_of(n) == 1075838976))\n\
+             print(c::read(c::Tagged { kind: 0, value: c::Num { i: 7 } }))\n    print(c::read(c::Tagged { kind: 1, value: c::Num { f: 1.5 } }))\n\
+             let t = c::bump(c::Tagged { kind: 1, value: c::Num { f: 1.5 } })\n    print(t.value.f)\n\
+             print((c::low_byte(c::Word { whole: 258 }), c::low_byte(c::Word { bytes: [9 0 0 0 0 0 0 0] })))\n    print(c::Num {})\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "42\n(2.5, true)\n7.0\n1.5\n2.5\n(2, 9)\nNum { i: 0, f: 0.0 }\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
 /// linked against the Mimic library (the runtime starts itself).
 #[test]

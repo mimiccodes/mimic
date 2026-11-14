@@ -28,7 +28,7 @@ Closed: `unique`, `sort_by` (with `descending`), `zip`, `enumerate`, `any`, `all
 
 Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::format(t, pattern)`, `random::choice`, `random::shuffle`.
 
-## C interop ✅ (0.2.8, unions in 0.10)
+## C interop ✅ (0.2.8)
 
 | Gap | Today |
 |---|---|
@@ -36,7 +36,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | `enum` values: `c::GREEN` | ✅ |
 | Global variables: `c::stdout`, `c::stderr`, `c::errno` | ✅ (read through getters) |
 | Structs with array fields (`struct termios`, `struct sockaddr_un`) | ✅ (lists in the record) |
-| Unions | Opaque handles; version 0.10 |
+| Unions | ✅ (records; the member set is the one written) |
 | A struct filled in through a pointer (`tcgetattr(fd, &t)`) | ✅ (returned in a tuple; not through `...` varargs) |
 | Reading memory C returns | ✅ (`memcpy` into a `[u8]` array, see ffi.md) |
 | `mimic check --fix` applies the `c::name` suggestion | ✅ |

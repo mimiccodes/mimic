@@ -1,6 +1,7 @@
 # Build mimic and run every test on Linux, macOS and Windows; run the golden
 # programs as static Linux executables (x86_64 here, arm64 on an Arm runner)
-# and as Windows programs cross-built on Linux; on every push to main
+# and as Windows programs cross-built on Linux (x86_64, and arm64 on Windows
+# on Arm); on every push to main
 # and every pull request. The LLVM it links comes from the llvm workflow's
 # release download.
 name: ci
@@ -80,6 +81,18 @@ jobs:
           path: winfix
           retention-days: 3
 
+      # and for Windows on Arm, run by the windows-arm64 job
+      - name: Windows on Arm programs (cross-built)
+        if: runner.os == 'Linux'
+        run: tools/build-fixtures.sh aarch64-windows winarmfix
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: windows-arm64-fixtures
+          path: winarmfix
+          retention-days: 3
+
       # the static Linux programs `--target x86_64-linux` makes, run here;
       # the arm64 ones are cross-built here and run by the linux-arm64 job
       - name: Static Linux programs (x86_64-linux-musl)
@@ -145,6 +158,25 @@ jobs:
       - name: Run
         shell: bash
         run: tools/run-fixtures.sh winfix
+
+  # The Windows on Arm programs, cross-built by the Linux job, on Arm.
+  windows-arm64:
+    name: run (windows-arm64, built on Linux)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-arm64-fixtures
+          path: winarmfix
+
+      - name: Run
+        shell: bash
+        run: tools/run-fixtures.sh winarmfix
 
   # The static arm64 Linux programs, cross-built by the Linux job, on Arm.
   linux-arm64:

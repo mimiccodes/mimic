@@ -6,7 +6,7 @@
 #include <string.h>
 
 typedef struct { char *p; size_t n, cap; } buf;
-typedef struct { long id; char *name; double score; char **tags; long ntags; } item;
+typedef struct { long long id; char *name; double score; char **tags; long long ntags; } item;
 
 static void put(buf *b, const char *s, size_t n) {
     if (b->n + n + 1 > b->cap) {
@@ -27,13 +27,13 @@ static void put_str(buf *b, const char *s) {
     put(b, "\"", 1);
 }
 
-static void encode(buf *b, const item *xs, long n) {
+static void encode(buf *b, const item *xs, long long n) {
     char tmp[64];
     put(b, "[", 1);
-    for (long i = 0; i < n; i++) {
+    for (long long i = 0; i < n; i++) {
         if (i) put(b, ",", 1);
         puts_(b, "{\"id\":");
-        snprintf(tmp, sizeof tmp, "%ld", xs[i].id);
+        snprintf(tmp, sizeof tmp, "%lld", xs[i].id);
         puts_(b, tmp);
         puts_(b, ",\"name\":");
         put_str(b, xs[i].name);
@@ -41,7 +41,7 @@ static void encode(buf *b, const item *xs, long n) {
         snprintf(tmp, sizeof tmp, "%.17g", xs[i].score);
         puts_(b, tmp);
         puts_(b, ",\"tags\":[");
-        for (long k = 0; k < xs[i].ntags; k++) {
+        for (long long k = 0; k < xs[i].ntags; k++) {
             if (k) put(b, ",", 1);
             put_str(b, xs[i].tags[k]);
         }
@@ -78,9 +78,9 @@ static double num(parser *p) {
     return x;
 }
 
-static item *decode(const char *text, long *count) {
+static item *decode(const char *text, long long *count) {
     parser p = {text, 0};
-    long n = 0, cap = 16;
+    long long n = 0, cap = 16;
     item *xs = malloc(sizeof(item) * cap);
     expect(&p, '[');
     ws(&p);
@@ -91,11 +91,11 @@ static item *decode(const char *text, long *count) {
         for (;;) {
             char *key = str(&p);
             expect(&p, ':');
-            if (!strcmp(key, "id")) it.id = (long)num(&p);
+            if (!strcmp(key, "id")) it.id = (long long)num(&p);
             else if (!strcmp(key, "name")) it.name = str(&p);
             else if (!strcmp(key, "score")) it.score = num(&p);
             else if (!strcmp(key, "tags")) {
-                long tc = 4;
+                long long tc = 4;
                 it.tags = malloc(sizeof(char *) * tc);
                 expect(&p, '[');
                 ws(&p);
@@ -123,43 +123,43 @@ static item *decode(const char *text, long *count) {
     return xs;
 }
 
-static void free_items(item *xs, long n) {
-    for (long i = 0; i < n; i++) {
+static void free_items(item *xs, long long n) {
+    for (long long i = 0; i < n; i++) {
         free(xs[i].name);
-        for (long k = 0; k < xs[i].ntags; k++) free(xs[i].tags[k]);
+        for (long long k = 0; k < xs[i].ntags; k++) free(xs[i].tags[k]);
         free(xs[i].tags);
     }
     free(xs);
 }
 
 int main(void) {
-    long n = 300000;
+    long long n = 300000;
     item *xs = malloc(sizeof(item) * n);
     char tmp[32];
-    for (long i = 0; i < n; i++) {
-        snprintf(tmp, sizeof tmp, "item-%ld", i);
+    for (long long i = 0; i < n; i++) {
+        snprintf(tmp, sizeof tmp, "item-%lld", i);
         xs[i].id = i;
         xs[i].name = strdup(tmp);
         xs[i].score = i * 0.5;
         xs[i].ntags = 2;
         xs[i].tags = malloc(sizeof(char *) * 2);
         xs[i].tags[0] = strdup("red");
-        snprintf(tmp, sizeof tmp, "tag-%ld", i % 100);
+        snprintf(tmp, sizeof tmp, "tag-%lld", i % 100);
         xs[i].tags[1] = strdup(tmp);
     }
     buf b = {0};
     encode(&b, xs, n);
     put(&b, "", 1);
-    long m;
+    long long m;
     item *back = decode(b.p, &m);
-    long ids = 0, chars = 0, good = 0;
-    for (long i = 0; i < m; i++) {
+    long long ids = 0, chars = 0, good = 0;
+    for (long long i = 0; i < m; i++) {
         ids += back[i].id;
-        chars += (long)strlen(back[i].name);
-        for (long k = 0; k < back[i].ntags; k++) chars += (long)strlen(back[i].tags[k]);
+        chars += (long long)strlen(back[i].name);
+        for (long long k = 0; k < back[i].ntags; k++) chars += (long long)strlen(back[i].tags[k]);
         if (back[i].score == back[i].id * 0.5) good++;
     }
-    printf("%ld %ld %ld %ld\n", m, ids, chars, good);
+    printf("%lld %lld %lld %lld\n", m, ids, chars, good);
     free_items(xs, n);
     free_items(back, m);
     free(b.p);

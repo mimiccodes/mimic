@@ -14,6 +14,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Added
 - Speed checked on Windows: CI counts AVX2/AVX-512 instructions in a native Windows build of the SIMD fixture, and the benchmark workflow runs on Windows too (`bench/run.py` works there).
+- C unions: a record with one field per member (`c::Num { f: 2.5 }`), by value, in structs and through pointers; the member set is the one C sees.
 - C structs: array fields are lists; `c::T { … }` leaves fields out as zero (`c::Termios {}`); plain-data structs through pointers are records (`const`: copied in; otherwise copied in and returned, in a tuple with the result), so `c::tcgetattr(0, c::Termios {})` works. Records exist for every C struct the code names.
 - `mimic check --fix` adds a missing `c::` (functions and constants).
 - C constants and globals: `#define` constants and enum values (`c::SEEK_END`, `c::M_PI`, `c::TIOCGWINSZ`), computed by Clang and inlined; globals and expression macros (`c::stdout`, `c::errno`) read through generated getters; `#define` aliases of functions (`c::CreateFile`); C functions with uppercase names (the Windows API). Struct, callback and getter wrappers are generated only for the C names a program uses.

@@ -112,7 +112,7 @@ How the import works:
 
   | Skipped | Reason |
   |---|---|
-  | Functions that take unions by value, or structs with union or function-pointer fields | Unions come with version 0.10 |
+  | Structs with function-pointer fields | Pass the function as a callback parameter instead |
   | `long double` | No Mimic type |
   | `static inline` functions | No symbol to link |
   | Reserved `_names` | |
@@ -238,6 +238,8 @@ c::tcsetattr(0, c::TCSANOW, raw)                    // const: in only
 
 Structs that contain pointers (`FILE`, most library handles) stay opaque `cptr` handles, as before. A struct passed through `...` (varargs, such as `ioctl`) cannot be a record; use `term::size()` for the terminal size.
 
+**Unions.** A C union is a record with one field per member: `c::Num { f: 2.5 }`. Coming from C, every member is filled in (each reads the same memory). Going to C, the members that are not zero are written, so the one you set is the one C sees, and a union that came from C goes back as it was. Unions work by value, inside structs and through pointers.
+
 **Reading memory C returns.** Declare the copy you need with an array destination; C then writes straight into a Mimic array:
 
 ```mimic
@@ -342,7 +344,7 @@ Together with header import, vendoring a C library is two lines: add its `.c` fi
 
 ## Planned work (Phase B of the roadmap)
 
-* **B2 (rest):** unions (version 0.10). Array fields and structs through pointers are done.
+* **B2:** done: array fields, structs through pointers, unions.
 * **B4 (rest):** callbacks that C keeps after the call returns (`pthread_create`, `signal`).
 * **B5 (rest):** C memory adopted by Mimic (arrays over C buffers), reading through pointers, and stricter `unsafe` rules for `cptr`.
 * **B6 (rest):** receiving arrays from C (`ptr[T]` with a length), shared libraries (`.so`/`.dylib`/`.dll`).

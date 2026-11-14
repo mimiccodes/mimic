@@ -122,7 +122,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v18|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v19|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -285,7 +285,7 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
     };
     // complete struct definitions: name → (how C spells the type, fields)
     let mut records: HashMap<String, CRecord> = HashMap::new();
-    let mut anonymous: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    let mut anonymous: HashMap<String, (Vec<(String, String, bool)>, bool)> = HashMap::new();
     let fields_of = |n: &Value| -> Vec<(String, String, bool)> {
         n["inner"]
             .as_array()
@@ -300,14 +300,16 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             .collect()
     };
     for node in ast["inner"].as_array().into_iter().flatten() {
-        if node["kind"] == "RecordDecl" && node["tagUsed"] == "struct" && node["completeDefinition"].as_bool() == Some(true) {
+        let tag = node["tagUsed"].as_str().unwrap_or("");
+        if node["kind"] == "RecordDecl" && (tag == "struct" || tag == "union") && node["completeDefinition"].as_bool() == Some(true) {
+            let union = tag == "union";
             match node["name"].as_str() {
                 Some(n) => {
-                    records.insert(n.to_string(), CRecord { spelling: format!("struct {n}"), fields: fields_of(node) });
+                    records.insert(n.to_string(), CRecord { spelling: format!("{tag} {n}"), fields: fields_of(node), union });
                 }
                 None => {
                     if let Some(id) = node["id"].as_str() {
-                        anonymous.insert(id.to_string(), fields_of(node));
+                        anonymous.insert(id.to_string(), (fields_of(node), union));
                     }
                 }
             }
@@ -316,9 +318,9 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
         if node["kind"] == "TypedefDecl"
             && let Some(name) = node["name"].as_str()
             && let Some(id) = node["inner"][0]["ownedTagDecl"]["id"].as_str().or(node["inner"][0]["decl"]["id"].as_str())
-            && let Some(fields) = anonymous.get(id)
+            && let Some((fields, union)) = anonymous.get(id)
         {
-            records.insert(name.to_string(), CRecord { spelling: name.to_string(), fields: fields.clone() });
+            records.insert(name.to_string(), CRecord { spelling: name.to_string(), fields: fields.clone(), union: *union });
         }
     }
     let ctx = StructCtx { records: &records, model: m, resolve: &resolve };
@@ -608,6 +610,8 @@ struct CRecord {
     spelling: String,
     /// (field, its C type, is a bitfield)
     fields: Vec<(String, String, bool)>,
+    /// A union: the fields are members sharing the same memory.
+    union: bool,
 }
 
 /// A scalar leaf of a flattened struct.
@@ -664,12 +668,19 @@ impl StructCtx<'_> {
         if t.contains('*') {
             return None;
         }
-        let n = t.strip_prefix("struct ").unwrap_or(t).trim();
+        let n = t.strip_prefix("struct ").or_else(|| t.strip_prefix("union ")).unwrap_or(t).trim();
         self.records.contains_key(n).then(|| n.to_string())
     }
 
     /// The scalar leaves of struct `n`: (path of field names, kind).
     fn flatten(&self, n: &str, depth: usize) -> Result<Vec<(Vec<String>, Leaf)>, String> {
+        Ok(self.flatten_guarded(n, depth)?.into_iter().map(|(p, l, _)| (p, l)).collect())
+    }
+
+    /// The leaves with, for those inside a union, which union (its path) and
+    /// which member: going to C, a member is written only when it is not all
+    /// zero (so the one member set wins, and a union from C goes back as it was).
+    fn flatten_guarded(&self, n: &str, depth: usize) -> Result<Vec<(Vec<String>, Leaf, Option<(String, usize)>)>, String> {
         let r = self.records.get(n).ok_or_else(|| format!("struct `{n}` is not defined in the header"))?;
         if depth > 8 {
             return Err(format!("struct `{n}` nests too deeply"));
@@ -680,10 +691,18 @@ impl StructCtx<'_> {
                 return Err(format!("struct `{n}` has an anonymous member"));
             }
             let t = (self.resolve)(ty);
+            let mi = r.fields.iter().position(|x| &x.0 == f).unwrap_or(0);
+            let own = |inner: Option<(String, usize)>| -> Option<(String, usize)> {
+                match inner {
+                    Some((k, m)) => Some((format!("{f}.{k}"), m)), // a union further in
+                    None if r.union => Some((String::new(), mi)),
+                    None => None,
+                }
+            };
             if let Some(inner) = self.struct_name(&t) {
-                for (mut path, leaf) in self.flatten(&inner, depth + 1)? {
+                for (mut path, leaf, guard) in self.flatten_guarded(&inner, depth + 1)? {
                     path.insert(0, f.clone());
-                    out.push((path, leaf));
+                    out.push((path, leaf, own(guard)));
                 }
                 continue;
             }
@@ -695,7 +714,7 @@ impl StructCtx<'_> {
                     .filter(|_| self.struct_name(&elem).is_none())
                     .ok_or_else(|| format!("field `{f}` of struct `{n}` (`{ty}`) cannot cross to Mimic yet"))?;
                 for k in 0..len {
-                    out.push((vec![format!("{f}[{k}]")], leaf));
+                    out.push((vec![format!("{f}[{k}]")], leaf, own(None)));
                 }
                 continue;
             }
@@ -712,7 +731,7 @@ impl StructCtx<'_> {
                     None => return Err(format!("field `{f}` of struct `{n}` (`{ty}`) cannot cross to Mimic yet")),
                 }
             };
-            out.push((vec![f.clone()], leaf));
+            out.push((vec![f.clone()], leaf, own(None)));
         }
         Ok(out)
     }
@@ -816,13 +835,29 @@ impl StructCtx<'_> {
         }
         let struct_arg = |a: &str, sn: &str, c_params: &mut Vec<String>, c_setup: &mut String, ext_params: &mut Vec<String>, call_args: &mut Vec<String>| -> Result<(), String> {
             c_setup.push_str(&format!("{} {a}; __builtin_memset(&{a}, 0, sizeof {a}); ", self.records[sn].spelling));
-            for (k, (path, leaf)) in self.flatten(sn, 0)?.into_iter().enumerate() {
+            // union members: (union, member) → (its stores, its parameters)
+            let mut members: Vec<((String, usize), Vec<String>, Vec<String>)> = Vec::new();
+            for (k, (path, leaf, guard)) in self.flatten_guarded(sn, 0)?.into_iter().enumerate() {
                 let p = format!("{a}_{k}");
                 c_params.push(format!("{} {p}", leaf.c()));
                 let cast = if leaf == Leaf::Ptr { "(void *)" } else { "" };
-                c_setup.push_str(&format!("{a}.{} = {cast}{p}; ", path.join(".")));
+                let store = format!("{a}.{} = {cast}{p}; ", path.join("."));
+                match guard {
+                    None => c_setup.push_str(&store),
+                    Some(g) => match members.iter_mut().find(|m| m.0 == g) {
+                        Some(m) => {
+                            m.1.push(store);
+                            m.2.push(p.clone());
+                        }
+                        None => members.push((g, vec![store], vec![p.clone()])),
+                    },
+                }
                 ext_params.push(format!("{p}: {}", leaf.ffi()));
                 call_args.push(format!("{a}.{}", path.join(".")));
+            }
+            for (_, stores, ps) in members {
+                let set = ps.iter().map(|p| format!("{p} != 0")).collect::<Vec<_>>().join(" || ");
+                c_setup.push_str(&format!("if ({set}) {{ {}}} ", stores.concat()));
             }
             Ok(())
         };
