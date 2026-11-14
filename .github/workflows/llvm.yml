@@ -15,6 +15,7 @@ permissions:
   contents: write
 
 env:
+  MANYLINUX: quay.io/pypa/manylinux_2_28_x86_64
   LLVM_VERSION: 23.1.4
   LLVM_SHA256: 819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2
   TAG: deps-llvm-23.1.4
@@ -69,10 +70,27 @@ jobs:
           curl -fL --retry 3 -o "$T" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/llvm-project-$LLVM_VERSION.src.tar.xz"
           echo "$LLVM_SHA256  $T" | shasum -a 256 -c
 
-      - name: Build LLVM
-        if: runner.os != 'Windows'
+      - name: Build LLVM (macOS)
+        if: runner.os == 'macOS'
         run: |
-          JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu) NICE=0 GENERATOR=Ninja CLEAN=1 tools/build-llvm.sh
+          JOBS=$(sysctl -n hw.ncpu) NICE=0 GENERATOR=Ninja CLEAN=1 tools/build-llvm.sh
+          df -h ~
+
+      # Linux: inside manylinux_2_28 (glibc 2.28, GCC from gcc-toolset), so
+      # mimic built against it runs on Linux systems from 2018 on, not only
+      # on the runner's own glibc
+      - name: Build LLVM (Linux, glibc 2.28)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$HOME/.mimic:/root/.mimic" -v "$PWD:/src" -w /src \
+            -e JOBS=$(nproc) -e NICE=0 -e GENERATOR=Ninja -e CLEAN=1 \
+            "$MANYLINUX" bash -euc '
+              /opt/python/cp312-cp312/bin/pip install --quiet cmake ninja
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              gcc --version | head -1; ldd --version | head -1
+              tools/build-llvm.sh'
+          rm -f .llvm
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.mimic"
           df -h ~
 
       # Windows: the same configuration as tools/build-llvm.sh, with MSVC (the

@@ -17,6 +17,7 @@ permissions:
   contents: write
 
 env:
+  MANYLINUX: quay.io/pypa/manylinux_2_28_x86_64
   LLVM_VERSION: 23.1.4
   LLVM_TAG: deps-llvm-23.1.4
   CARGO_TERM_COLOR: always
@@ -63,15 +64,35 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
             echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
-          else
+          elif [ "$RUNNER_OS" = macOS ]; then
             ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
           fi
 
       - name: Other dependencies (tools/deps.sh)
+        if: runner.os != 'Linux'
         run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
 
       - name: Build
+        if: runner.os != 'Linux'
         run: cargo build --release
+
+      # Linux: built inside manylinux_2_28 (glibc 2.28, like the LLVM it
+      # links), so it runs on Linux systems from 2018 on
+      - name: Build (Linux, glibc 2.28)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$HOME/.mimic:/root/.mimic" -v "$PWD:/src" -w /src \
+            -e LLVM_SYS_231_PREFIX=/root/.mimic/deps/llvm-$LLVM_VERSION -e CARGO_TERM_COLOR \
+            "$MANYLINUX" bash -euc '
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
+              . "$HOME/.cargo/env"
+              LLVM_PREFIX=$LLVM_SYS_231_PREFIX MIMIC_DEPS=/root/.mimic/deps tools/deps.sh
+              cargo build --release'
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.mimic"
+          # the newest glibc symbol version it needs
+          need=$(objdump -T target/release/mimic | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
+          echo "needs $need"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$need" | sort -V | tail -1)" = GLIBC_2.28 ] || { echo "error: needs a glibc newer than 2.28" >&2; exit 1; }
 
       # the binary must work on its own: a project created, built and run
       # with nothing but `mimic` (and, on Linux and macOS, the system linker)
