@@ -385,7 +385,8 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
         Toolchain::Embedded(Sysroot::Mingw(m)) => {
             let lib = m.lib();
             let mut c = Command::new(self_exe());
-            c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console"]).arg("--gc-sections");
+            // an 8 MB main-thread stack, like Linux (Windows' default is 1 MB)
+            c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console", "--stack", "8388608"]).arg("--gc-sections");
             c.arg("-o").arg(job.output);
             c.arg(lib.join("crt2.o")).arg(lib.join("crtbegin.o")).args(job.objects);
             c.arg(format!("-L{}", lib.display()));

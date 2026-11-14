@@ -314,6 +314,12 @@ fn mimic_cc() {
 /// implementation, prints exactly what the native build prints.
 #[test]
 fn wasi_fixtures() {
+    // Node's WASI on Windows lacks parts of preview 1 (listing directories)
+    // and its engine faults there; WASI programs are checked on Linux and macOS
+    if cfg!(windows) {
+        eprintln!("skipping: Node's WASI is incomplete on Windows");
+        return;
+    }
     let Ok(node) = std::process::Command::new("node").arg("--version").output() else {
         eprintln!("skipping: node is not installed");
         return;
