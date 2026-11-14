@@ -60,6 +60,26 @@ true
 42!
 ```
 
+Escapes write characters you cannot type directly: `\n` (new line), `\t` (tab), `\r`, `\0`, `\\`, `\"`, `\{` and `\}`. Use `\x1b` for any ASCII character by two hex digits, and `\u{1F600}` for any Unicode character. ESC (`\x1b`) starts the terminal's colour and cursor codes:
+
+```mimic run
+module main
+
+fn main() {
+    let bold = "\x1b[1m"
+    let reset = "\x1b[0m"
+    print(≢ "{bold}hi{reset}")      // two codes of 4 bytes, and "hi"
+    print("caf\u{E9} \u{2192} \u{1F600}")
+}
+```
+
+```output
+10
+café → 😀
+```
+
+C's octal escapes such as `\033` do not exist; the compiler says to write `\x1b`.
+
 ## Parsing
 
 `parse_int` and `parse_float` return an `Option`, which is `Some(value)` or `None` ([chapter 7](07-errors.mdx)):

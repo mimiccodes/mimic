@@ -100,6 +100,7 @@ How the import works:
   | Typedefs | Resolved to what they stand for |
   | `struct vec2` by value (in a `trusted` import) | the record `Vec2`, see below |
 
+* **C names that Mimic reserves.** A C function, struct field or wrapper whose name is a Mimic keyword or the word form of a glyph gets a `_` after it: `div` from `stdlib.h` is `div_(17, 5)`, a field `type` is `t.type_`, a function `sum` is `sum_`. It still calls the C one. A declaration that cannot be written in Mimic at all is left out; the rest of the header still imports.
 * **Name clashes.** Names your module already defines win over imported ones: your functions, types, modules and hand-written externs. Each name is imported once, even if several headers declare it.
 * **What is skipped, for now.** These functions are left out. They are not an error, and the reason is recorded:
 

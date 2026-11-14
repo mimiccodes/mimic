@@ -188,6 +188,13 @@ struct Lexer<'a> {
     out: Vec<Token>,
 }
 
+/// Does `w` read as a plain name? Keywords (`div`, `match`, `type`, …) and
+/// the word forms of glyphs (`sum`, `take`, …) do not: names coming from
+/// elsewhere (C headers) that are one of those need another spelling.
+pub fn is_plain_name(w: &str) -> bool {
+    matches!(lex(w).as_deref(), Ok([Token { tok: Tok::Ident(n), .. }, Token { tok: Tok::Eof, .. }]) if n == w)
+}
+
 fn keyword(w: &str) -> Option<Tok> {
     Some(match w {
         "module" => Tok::Module,
@@ -587,10 +594,47 @@ impl<'a> Lexer<'a> {
                         'n' => '\n',
                         't' => '\t',
                         'r' => '\r',
+                        // `\0` alone is NUL; `\033` (C's octal) would silently mean NUL then "33"
+                        '0' if self.peek().is_some_and(|c| c.is_ascii_digit()) => {
+                            return Err(Diag::new(&C::UNKNOWN_ESCAPE, "octal escapes do not exist: write `\\x1b` (two hex digits) or `\\u{1b}`", self.here()));
+                        }
                         '0' => '\0',
                         '\\' => '\\',
                         '"' => '"',
-                        other => return Err(Diag::new(&C::UNKNOWN_ESCAPE, format!("unknown escape `\\{other}`"), self.here())),
+                        // `\x1b`: a character by two hex digits (ASCII, 00 to 7f)
+                        'x' => {
+                            let mut v = 0u32;
+                            for _ in 0..2 {
+                                let d = self.bump().and_then(|c| c.to_digit(16)).ok_or_else(|| {
+                                    Diag::new(&C::UNKNOWN_ESCAPE, "`\\x` takes two hex digits, as in `\\x1b`", self.here())
+                                })?;
+                                v = v * 16 + d;
+                            }
+                            if v > 0x7f {
+                                return Err(Diag::new(&C::UNKNOWN_ESCAPE, format!("`\\x{v:02x}` is not ASCII: write the character as `\\u{{{v:x}}}`"), self.here()));
+                            }
+                            char::from_u32(v).unwrap()
+                        }
+                        // `\u{1F600}`: any Unicode character by its code point
+                        'u' => {
+                            if self.bump() != Some('{') {
+                                return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\u` takes a code point in braces, as in `\\u{1F600}`", self.here()));
+                            }
+                            let mut v = 0u32;
+                            let mut n = 0;
+                            loop {
+                                match self.bump() {
+                                    Some('}') if n > 0 => break,
+                                    Some(c) if c.is_ascii_hexdigit() && n < 6 => {
+                                        v = v * 16 + c.to_digit(16).unwrap();
+                                        n += 1;
+                                    }
+                                    _ => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\u{…}` takes 1 to 6 hex digits, as in `\\u{1F600}`", self.here())),
+                                }
+                            }
+                            char::from_u32(v).ok_or_else(|| Diag::new(&C::UNKNOWN_ESCAPE, format!("`\\u{{{v:x}}}` is not a Unicode character"), self.here()))?
+                        }
+                        other => return Err(Diag::new(&C::UNKNOWN_ESCAPE, format!("unknown escape `\\{other}` (escapes: \\n \\t \\r \\0 \\\\ \\\" \\{{ \\}} \\x1b \\u{{1F600}})"), self.here())),
                     });
                 }
                 Some(c) => s.push(c),
@@ -612,6 +656,24 @@ mod tests {
 
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn plain_names() {
+        assert!(is_plain_name("printf") && is_plain_name("abs_2"));
+        for w in ["div", "match", "type", "with", "sum", "take", "not"] {
+            assert!(!is_plain_name(w), "{w}");
+        }
+    }
+
+    #[test]
+    fn string_escapes() {
+        assert_eq!(toks(r#""\x1b[0m""#), vec![Tok::Str("\u{1b}[0m".into()), Tok::Eof]);
+        assert_eq!(toks(r#""\u{48}\u{1F600}\x41\0""#), vec![Tok::Str("H\u{1F600}A\0".into()), Tok::Eof]);
+        // never silently misread: C's octal, short or non-ASCII \x, bad \u
+        for bad in [r#""\033""#, r#""\x9""#, r#""\xff""#, r#""\u{110000}""#, r#""\u41""#, r#""\u{}""#, r#""\q""#] {
+            assert!(lex(bad).is_err(), "{bad} should not lex");
+        }
     }
 
     #[test]

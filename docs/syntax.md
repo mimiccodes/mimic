@@ -287,6 +287,8 @@ if let Some(year) = get(born, "ada") { print(year) } else { print("unknown") }
 
 **Interpolation:** `"hi {u.name}, next year {u.age + 1}"`. Any expression can go inside `{ }`, and it is formatted the way `print` shows it. Write `\{` for a literal brace.
 
+**Escapes:** `\n` `\t` `\r` `\0` `\\` `\"` `\{` `\}`; `\x1b` for an ASCII character by two hex digits (00 to 7f); `\u{1F600}` for any Unicode character by its code point (1 to 6 hex digits). There are no octal escapes: `\033` is an error that suggests `\x1b`. Anything else after `\` is an error (E0105).
+
 **Raw strings** use single quotes: `'{"name": "Ada", "path": "C:\\dir"}'`. They have no interpolation and no escapes, which suits JSON, regular expressions and Windows paths. They end at the next `'` and cannot span lines.
 
 ## Tuples

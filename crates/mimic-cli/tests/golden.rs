@@ -649,6 +649,45 @@ fn c_structs_by_value() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// C names that are Mimic keywords or glyph words get a `_` (`div_`, a field
+/// `type_`); the rest of the header still imports (stdlib.h has `div`).
+#[test]
+fn c_reserved_names() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-creserved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "kw"]).status().unwrap().success());
+    let proj = dir.join("kw");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/kw.h"),
+        "struct token { int type; int match; };
+struct token next(int type);
+int sum(int a, int b);
+int take(int n);
+",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("c/kw.c"),
+        "#include \"kw.h\"\nstruct token next(int type) { struct token t = { type + 1, 7 }; return t; }\n\
+         int sum(int a, int b) { return a + b; }\nint take(int n) { return n * 2; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/kw.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"kw.h\"\ntrusted extern \"C\" include \"stdlib.h\"\n\n\
+         fn main() {\n    let t = next(4)\n    print((t.type_, t.match_))\n    print(sum_(2, 3))\n    print(take_(21))\n\
+             let d = div_(17, 5)\n    print((d.quot, d.rem))\n    print(abs(¯3))\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "(5, 7)\n5\n42\n(3, 2)\n3\n", "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
 /// linked against the Mimic library (the runtime starts itself).
 #[test]

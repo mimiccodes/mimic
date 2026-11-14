@@ -86,6 +86,12 @@ impl Imported {
     }
 }
 
+/// The Mimic spelling of a C name: the same, or with `_` after it when the C
+/// name is a Mimic keyword or glyph word (`div` → `div_`, `type` → `type_`).
+pub fn mimic_name(c: &str) -> String {
+    if mimic_syntax::lexer::is_plain_name(c) { c.to_string() } else { format!("{c}_") }
+}
+
 /// Where a header is found: a file next to the source or in `ffi.include`
 /// (`#include "…"`), else a system header (`#include <…>`).
 fn locate(header: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -102,7 +108,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v8|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v9|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -349,7 +355,10 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             out.skipped.push(skip(&why));
             continue;
         }
-        out.fns.push(CFn { name: name.to_string(), params, ret, variadic, link_name: None });
+        // a renamed function still links to the C one
+        let mname = mimic_name(name);
+        let link_name = (mname != name).then(|| name.to_string());
+        out.fns.push(CFn { name: mname, params, ret, variadic, link_name });
     }
     out
 }
@@ -472,7 +481,7 @@ fn callback_wrapper(name: &str, ret_q: &str, ret_c: &str, parms: &[(String, Stri
         if ret.is_some() { ret_q } else { "void" },
         if wparams.is_empty() { "void".into() } else { wparams.join(", ") }
     ));
-    Ok((CFn { name: name.to_string(), params: ffi, ret, variadic: false, link_name: Some(w) }, c))
+    Ok((CFn { name: mimic_name(name), params: ffi, ret, variadic: false, link_name: Some(w) }, c))
 }
 
 struct CRecord {
@@ -607,7 +616,7 @@ impl StructCtx<'_> {
                         None => "i64".into(),
                     },
                 };
-                format!("{f}: {mt}")
+                format!("{}: {mt}", mimic_name(f))
             })
             .collect();
         format!("PUB type {} = {{ {} }}", camel(n), fields.join(", "))
@@ -657,7 +666,8 @@ impl StructCtx<'_> {
                     let cast = if leaf == Leaf::Ptr { "(void *)" } else { "" };
                     c_setup.push_str(&format!("{a}.{} = {cast}{p}; ", path.join(".")));
                     ext_params.push(format!("{p}: {}", leaf.ffi()));
-                    call_args.push(format!("{a}.{}", path.join(".")));
+                    let mpath: Vec<String> = path.iter().map(|f| mimic_name(f)).collect();
+                    call_args.push(format!("{a}.{}", mpath.join(".")));
                 }
                 c_args.push(a.clone());
                 m_params.push(format!("{a}: {}", camel(&sn)));
@@ -740,11 +750,12 @@ impl StructCtx<'_> {
         };
         let c = format!("{c_ret} {w}({}) {{ {c_setup}{c_body} }}\n", if c_params.is_empty() { "void".into() } else { c_params.join(", ") });
         let mimic = format!(
-            "extern \"C\" {{ fn {w}({}){ext_ret} }}\nPUB fn {name}({}){m_ret} {{\n{m_body}\n}}\n",
+            "extern \"C\" {{ fn {w}({}){ext_ret} }}\nPUB fn {}({}){m_ret} {{\n{m_body}\n}}\n",
             ext_params.join(", "),
+            mimic_name(name),
             m_params.join(", ")
         );
-        Ok((StructFn { name: name.to_string(), mimic, c, uses: used.clone() }, used))
+        Ok((StructFn { name: mimic_name(name), mimic, c, uses: used.clone() }, used))
     }
 
     /// A record literal for struct `n`, taking leaf values in order.
@@ -757,7 +768,7 @@ impl StructCtx<'_> {
                 Some(inner) => self.literal(&inner, vals)?,
                 None => vals.next().ok_or("internal: struct leaves out of step")?,
             };
-            parts.push(format!("{f}: {v}"));
+            parts.push(format!("{}: {v}", mimic_name(f)));
         }
         Ok(format!("{} {{ {} }}", camel(n), parts.join(", ")))
     }

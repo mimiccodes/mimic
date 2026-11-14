@@ -65,6 +65,7 @@ How the import works:
 * **Your own headers.** Put them next to your source, or list their folders in `mim.mim` under `ffi { include = [...] }`.
 * **Your own C code.** List C files under `ffi { sources = [...] }`. They are compiled into your program for every target.
 * **Libraries to link.** Name them under `ffi { link = ["sqlite3"] }`.
+* **C names that are Mimic words.** A C name that Mimic uses itself, such as `div` in `stdlib.h` or a struct field called `type`, gets a `_` after it: `div_(17, 5)`, `t.type_`.
 
 ## Type mapping
 

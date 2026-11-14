@@ -825,6 +825,12 @@ fn import_headers(
                             let pubkw = if b.is_pub { "pub " } else { "" };
                             let mut c = String::new();
                             for f in &imp.struct_fns {
+                                // a wrapper that does not parse (a C name no
+                                // spelling fits) is left out, not the header
+                                let alone: String = f.uses.iter().map(|r| format!("{}\n", imp.records[r])).collect::<String>() + &f.mimic;
+                                if mimic_syntax::parser::parse_file(&format!("module generated\n{}", alone.replace("PUB ", ""))).is_err() {
+                                    continue;
+                                }
                                 if !taken.insert(f.name.clone()) {
                                     continue;
                                 }
