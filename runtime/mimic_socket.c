@@ -136,25 +136,42 @@ static int mw_getaddrinfo(const char *h, const char *p, const struct addrinfo *h
 }
 /* One Winsock call, non-blocking inside a coroutine: when it would block, the
  * coroutine parks until the socket is ready (its thread runs others
- * meanwhile), within the socket's own timeout. Outside coroutines, a plain
- * blocking call. */
+ * meanwhile), within the socket's own timeout.
+ *
+ * Windows has no per-call "don't wait" flag: non-blocking mode (FIONBIO) is
+ * the socket's. It used to be switched on for each call and off after, but
+ * two tasks use one socket at once (a WebSocket's reader and writer), so one
+ * could switch it off under the other, whose recv then blocked its whole
+ * scheduler thread: the tasks queued there never ran (a rare hang, found
+ * with MIMIC_DEBUG_WATCHDOG). Coroutines now leave the socket non-blocking.
+ * A plain thread that finds it so waits with WSAPoll, within the same
+ * timeout, so for it the call still blocks. */
 #if MIM_GREEN
+static int ws_poll_wait(int fd, int write, int64_t timeout_ns) {
+    WSAPOLLFD p;
+    p.fd = (SOCKET)fd;
+    p.events = write ? POLLWRNORM : POLLRDNORM;
+    p.revents = 0;
+    int ms = timeout_ns > 0 ? (int)((timeout_ns + 999999) / 1000000) : -1;
+    return WSAPoll(&p, 1, ms) > 0; /* 0: timed out */
+}
 #define WS_CO(call, fd, write, timeo)                                                    \
     do {                                                                                 \
-        if (!t_co) return WS_CHECK(call);                                                \
+        if (t_co) {                                                                      \
+            u_long on = 1;                                                               \
+            ioctlsocket((SOCKET)(fd), FIONBIO, &on); /* and it stays so */               \
+        }                                                                                \
         for (;;) {                                                                       \
-            u_long on = 1, off = 0;                                                      \
-            ioctlsocket((SOCKET)(fd), FIONBIO, &on);                                     \
             int r_ = (call);                                                             \
             int e_ = r_ == SOCKET_ERROR ? WSAGetLastError() : 0;                         \
-            ioctlsocket((SOCKET)(fd), FIONBIO, &off);                                    \
             if (r_ != SOCKET_ERROR) return r_;                                           \
             if (e_ != WSAEWOULDBLOCK) {                                                  \
                 WSASetLastError(e_);                                                     \
                 errno = ws_errno();                                                      \
                 return -1;                                                               \
             }                                                                            \
-            if (!co_wait_fd((fd), (write), sock_timeo((fd), (timeo)))) {                 \
+            int64_t to_ = sock_timeo((fd), (timeo));                                     \
+            if (!(t_co ? co_wait_fd((fd), (write), to_) : ws_poll_wait((fd), (write), to_))) { \
                 errno = EAGAIN; /* as a blocking socket reports its timeout */          \
                 return -1;                                                               \
             }                                                                            \
