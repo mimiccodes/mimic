@@ -39,8 +39,12 @@ ROOT = HERE.parent
 OUT = HERE / "target"
 
 
+WINDOWS = sys.platform == "win32"
+EXE = ".exe" if WINDOWS else ""
+
+
 def mimic_exe() -> str:
-    built = ROOT / "target" / "release" / "mimic"
+    built = ROOT / "target" / "release" / f"mimic{EXE}"
     return str(built) if built.exists() else "mimic"
 
 
@@ -53,7 +57,7 @@ def run(cmd, **kw):
 
 def build(lang: str, src: Path, name: str) -> Path | None:
     """The executable for one version, or None when its compiler is missing."""
-    exe = OUT / f"{name}-{lang}"
+    exe = OUT / f"{name}-{lang}{EXE}"
     if lang == "mimic":
         r = run([mimic_exe(), "build", str(src), "--emit-json"])
         return Path(json.loads(r.stdout)["artifacts"][0]["path"])
@@ -69,7 +73,7 @@ def build(lang: str, src: Path, name: str) -> Path | None:
         target = OUT / f"{name}-rust-cargo"
         run(["cargo", "build", "--release", "--offline", "--quiet"], cwd=src, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
         meta = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=src).stdout)
-        return target / "release" / meta["packages"][0]["targets"][0]["name"]
+        return target / "release" / (meta["packages"][0]["targets"][0]["name"] + EXE)
     elif lang == "rust":
         if not shutil.which("rustc"):
             return None
@@ -149,7 +153,7 @@ def main() -> int:
             if not shutil.which("go"):
                 print(f"  {b.name}: skipped (the load generator needs Go)")
                 continue
-            load = OUT / f"{b.name}-load"
+            load = OUT / f"{b.name}-load{EXE}"
             run(["go", "build", "-o", str(load), "."], cwd=b / "load", env={**os.environ, "GO111MODULE": "off"})
         timed = (lambda exe, env: time_server(exe, load, env, a.runs, expected)) if load else (lambda exe, env: time_runs(exe, env, a.runs, expected))
         for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("go", "main.go"), ("mimic", "main.mim")]:
@@ -157,6 +161,9 @@ def main() -> int:
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
                 src = b / "rust"
             if not src.exists():
+                continue
+            # the C HTTP server is written for epoll and kqueue
+            if WINDOWS and lang == "c" and load:
                 continue
             exe = build(lang, src, b.name)
             if exe is None:
@@ -171,7 +178,7 @@ def main() -> int:
         rows.append((b.name, times))
 
     c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
-    load = os.getloadavg()[0]
+    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     try:
         cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
     except OSError:

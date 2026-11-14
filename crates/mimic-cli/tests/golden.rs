@@ -760,13 +760,23 @@ fn c_struct_pointers() {
     .unwrap();
     let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
     std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/ka.c\"]\n    include = [\"c\"]")).unwrap();
+    // termios is a Unix header: the Windows run checks the rest
+    let (tio_inc, tio_use) = if cfg!(unix) {
+        (
+            "trusted extern \"C\" include \"termios.h\"\n",
+            "    let (got, t) = c::tcgetattr(0, c::Termios {})\n    print((got == 0 or got == ¯1, ≢ t.c_cc == c::NCCS))\n",
+        )
+    } else {
+        ("", "    print((true, true))\n")
+    };
     std::fs::write(
         proj.join("src/main.mim"),
-        "module main\n\ntrusted extern \"C\" include \"ka.h\"\ntrusted extern \"C\" include \"termios.h\"\n\n\
-         fn main() {\n    print(c::sum_buf(c::Buf { data: [1 2 3 4], len: 10 }))\n    print(c::make_buf(5))\n    print(c::Buf { len: 2 })\n\
-             let b = c::fill_box(c::Box {})\n    print(b)\n    print(c::box_area(b))\n\
-             let (rc, p) = c::scale(c::Pt { xy: [1.0 2.0] }, 3.0)\n    print((rc, p))\n\
-             let (got, t) = c::tcgetattr(0, c::Termios {})\n    print((got == 0 or got == ¯1, ≢ t.c_cc == c::NCCS))\n}\n",
+        format!(
+            "module main\n\ntrusted extern \"C\" include \"ka.h\"\n{tio_inc}\n\
+             fn main() {{\n    print(c::sum_buf(c::Buf {{ data: [1 2 3 4], len: 10 }}))\n    print(c::make_buf(5))\n    print(c::Buf {{ len: 2 }})\n\
+                 let b = c::fill_box(c::Box {{}})\n    print(b)\n    print(c::box_area(b))\n\
+                 let (rc, p) = c::scale(c::Pt {{ xy: [1.0 2.0] }}, 3.0)\n    print((rc, p))\n{tio_use}}}\n"
+        ),
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").stdin(std::process::Stdio::null()).output().unwrap();
@@ -1001,7 +1011,11 @@ fn windows() {
 #[test]
 fn http_keep_alive() {
     use std::io::{Read, Write};
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // a free port below the ones the OS hands out (32768+), so no outgoing
+    // connection of a parallel test takes it between this check and the
+    // server's bind (12000-18999: apart from the fixtures' 20000-31999)
+    let start = 12000 + std::process::id() as u16 % 6000;
+    let port = (start..start + 1000).find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok()).expect("a free port");
     let dir = std::env::temp_dir().join(format!("mimic-golden-keepalive-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

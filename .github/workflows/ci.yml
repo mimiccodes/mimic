@@ -217,6 +217,20 @@ jobs:
           tools/build-fixtures.sh native natfix
           tools/run-fixtures.sh natfix
 
+      # Is the Windows machine code vector code? As on Linux: count the AVX2
+      # and AVX-512 instructions in a release build of the SIMD fixture (the
+      # runner's LLVM has llvm-objdump).
+      - name: SIMD check
+        run: |
+          cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" | tr -d '\r')
+          exe=$(target/release/mimic build --release --emit-json tests/fixtures/run/simd_each.mim | python -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
+          "$exe" | diff - tests/fixtures/run/simd_each.out
+          "/c/Program Files/LLVM/bin/llvm-objdump" -d "$exe" > simd.s
+          ymm=$(grep -c -E '%ymm' simd.s || true)
+          zmm=$(grep -c -E '%zmm' simd.s || true)
+          echo "- Windows ($cpu): simd_each (release, native CPU) output correct; vector instructions: AVX ymm $ymm, AVX-512 zmm $zmm" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ $((ymm + zmm)) -gt 0 ]
+
       - name: Test
         if: ${{ !cancelled() }}
         run: cargo test --release --no-fail-fast
