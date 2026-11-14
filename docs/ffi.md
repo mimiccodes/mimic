@@ -275,6 +275,8 @@ int main(void) {
 mimic cc main.c -Itarget/release target/release/libmm.a -o main
 ```
 
+On Linux with glibc, add `-lm -lpthread` when the system C compiler links: the runtime uses the maths library and threads, which glibc keeps in separate libraries.
+
 **What the exported signature may use:**
 * Parameters and the result use C types: integers, `f32`/`f64`, `bool`, `c_char`, `cstr` (a string, copied in) and `cptr`.
 * Arrays cannot be received from C yet.

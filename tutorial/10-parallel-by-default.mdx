@@ -65,14 +65,14 @@ fn main() {
     let b = slow_read(path::join(dir, "b.txt"))   // starts now too
     print(a)                                     // waits here for a
     print(b)
-    print(time::clock() - start < 190ms)               // both sleeps overlapped (100ms, not 200ms)
+    print(time::clock() - start < 450ms)               // both sleeps overlapped (300ms, not 600ms)
 
     // ¨ runs them in parallel as well
     print(["a.txt" "b.txt"] ¨ (f => slow_read(path::join(dir, f))))
 }
 
 fn slow_read(path: str) -> Result[str, str] {
-    time::sleep(100ms)
+    time::sleep(300ms)
     fs::read(path)
 }
 ```

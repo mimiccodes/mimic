@@ -637,6 +637,11 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     let cpu = resolved.as_deref().or(if portable { Some("") } else { None });
     // the compiler flags (target, sysroot, minimum OS, CPU) are part of the key
     let mut flags: Vec<String> = vec!["-c".into(), if release { "-O3" } else { "-O1" }.into(), "-fPIC".into()];
+    if !target.is_apple() {
+        // a section per function, so the linker drops what a program does not
+        // use (Mach-O linkers do this by symbol without being asked)
+        flags.extend(["-ffunction-sections".into(), "-fdata-sections".into()]);
+    }
     match cpu {
         Some("native") | None if release && target.name.is_none() => {
             // native builds use every feature of this CPU (x86 names it with -march)

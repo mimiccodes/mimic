@@ -372,7 +372,9 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
                 c.arg(format!("-l{l}"));
             }
             if !target.is_apple() {
-                c.arg("-lm");
+                // drop runtime code the program never reaches (and with it
+                // references to what only Mimic programs define)
+                c.arg("-Wl,--gc-sections").arg("-lm");
             }
             if job.debug {
                 c.arg("-g");

@@ -653,7 +653,13 @@ fn export_to_c() {
         "#include <stdio.h>\n#include <stdlib.h>\n#include \"mm.h\"\nint main(void) {\n  printf(\"%.1f %lld %d%d\\n\", mm_hypot(3, 4), (long long)mm_sum_to(1000), mm_is_even(10), mm_is_even(7));\n  char *g = mm_greet(\"C\"); printf(\"%s\\n\", g); free(g); return 0;\n}\n",
     )
     .unwrap();
-    let out = mimic().current_dir(&proj).args(["cc", "main.c", "-Itarget/release", "target/release/libmm.a", "-o", "main_c"]).output().unwrap();
+    let mut cc = mimic();
+    cc.current_dir(&proj).args(["cc", "main.c", "-Itarget/release", "target/release/libmm.a", "-o", "main_c"]);
+    if cfg!(target_os = "linux") {
+        // glibc keeps maths and threads in their own libraries
+        cc.args(["-lm", "-lpthread"]);
+    }
+    let out = cc.output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let run = std::process::Command::new(proj.join("main_c")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout), "5.0 499500 10\nhello, C\n");

@@ -68,7 +68,10 @@ pub fn ensure(cache: &Path, triple: &str, cflags: &[String]) -> Result<PathBuf, 
     chosen.extend(generic.into_iter().filter(|p| !SKIP.contains(&stem(p).as_str()) && !replaced.contains(&stem(p))));
     chosen.extend(arch_files);
 
-    let work = dir.join("obj");
+    // a private work directory: other mimic processes may be building the
+    // same library right now (the finished archive is moved into place)
+    let work = dir.join(format!(".obj-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
     let mut args = cflags.to_vec();
     args.extend(
         ["-O2", "-std=c11", "-fno-builtin", "-fvisibility=hidden", "-fomit-frame-pointer", "-ffreestanding", "-w"]
@@ -82,15 +85,17 @@ pub fn ensure(cache: &Path, triple: &str, cflags: &[String]) -> Result<PathBuf, 
     // a few generic files do not apply to every target (e.g. x87 helpers on
     // non-x86); skip failures. An architecture file that does not assemble for
     // this CPU (ARMv7 assembly on ARMv6, …) falls back to the generic C file.
-    let mut failed = jobs::run(&jobs, true)?;
-    let fallback: Vec<Job> = failed
+    let mut failures = jobs::run(&jobs, true)?;
+    let fallback: Vec<Job> = failures
         .iter()
+        .map(|(p, _)| p)
         .filter(|p| p.parent() != Some(src.as_path()))
         .map(|p| src.join(format!("{}.c", stem(p))))
         .filter(|g| g.is_file() && !SKIP.contains(&stem(g).as_str()))
         .map(|g| Job { out: work.join(format!("{}.o", rel_name(&src, &g))), src: g, args: args.clone() })
         .collect();
-    failed.extend(jobs::run(&fallback, true)?);
+    failures.extend(jobs::run(&fallback, true)?);
+    let failed: Vec<PathBuf> = failures.iter().map(|(p, _)| p.clone()).collect();
     let mut objs: Vec<PathBuf> = jobs
         .iter()
         .chain(&fallback)
@@ -104,10 +109,20 @@ pub fn ensure(cache: &Path, triple: &str, cflags: &[String]) -> Result<PathBuf, 
     if objs.is_empty() {
         return Err(format!("could not build compiler-rt for {triple}"));
     }
-    crate::write_archive(&lib, crate::ArchiveKind::Gnu, &objs)?;
-    if !failed.is_empty() {
-        let names: Vec<String> = failed.iter().map(|p| rel_name(&src, p)).collect();
-        let _ = fs::write(dir.join("skipped.txt"), names.join("\n"));
+    let tmp = dir.join(format!(".libcompiler_rt-{}.a", std::process::id()));
+    crate::write_archive(&tmp, crate::ArchiveKind::Gnu, &objs)?;
+    fs::rename(&tmp, &lib).map_err(|e| format!("cannot write {}: {e}", lib.display()))?;
+    if !failures.is_empty() {
+        // each skipped file with the first lines of why (expected for a few
+        // generic files on every target; anything else is worth a look)
+        let text: Vec<String> = failures
+            .iter()
+            .map(|(p, why)| {
+                let first: Vec<&str> = why.lines().filter(|l| l.contains("error")).take(2).collect();
+                format!("{}\t{}", rel_name(&src, p), first.join(" | "))
+            })
+            .collect();
+        let _ = fs::write(dir.join("skipped.txt"), text.join("\n"));
     }
     let _ = fs::remove_dir_all(&work);
     Ok(lib)

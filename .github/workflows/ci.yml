@@ -71,3 +71,11 @@ jobs:
 
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
+
+      - name: Diagnostics (on failure)
+        if: failure()
+        run: |
+          for f in /tmp/mimic-golden-home/cache/libc/compiler-rt/*/skipped.txt; do
+            [ -f "$f" ] && { echo "== $f"; cat "$f"; echo; }
+          done
+          true

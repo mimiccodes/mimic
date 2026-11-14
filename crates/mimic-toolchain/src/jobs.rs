@@ -12,8 +12,9 @@ pub struct Job {
 }
 
 /// `mimic cc <args> -c <src> -o <out>` for every job, on all cores.
-/// With `tolerate`, failed jobs are skipped and returned instead of failing.
-pub fn run(jobs: &[Job], tolerate: bool) -> Result<Vec<PathBuf>, String> {
+/// With `tolerate`, failed jobs are skipped and returned (source, compiler
+/// message) instead of failing.
+pub fn run(jobs: &[Job], tolerate: bool) -> Result<Vec<(PathBuf, String)>, String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let next = AtomicUsize::new(0);
     let failed: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
@@ -77,7 +78,7 @@ pub fn run(jobs: &[Job], tolerate: bool) -> Result<Vec<PathBuf>, String> {
     if !tolerate && let Some((src, err)) = failed.first() {
         return Err(format!("compiling {} failed:\n{err}", src.display()));
     }
-    Ok(failed.into_iter().map(|(s, _)| s).collect())
+    Ok(failed)
 }
 
 /// Files in `dir` with one of `exts`, sorted.
