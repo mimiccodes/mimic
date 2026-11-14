@@ -1,0 +1,165 @@
+# Build `mimic` for Linux x86_64, macOS arm64 and Windows x86_64 and publish
+# them as one GitHub release, with checksums. Runs when a version tag is
+# pushed (`git tag v0.2.0 && git push origin v0.2.0`), or by hand for a tag
+# that exists. The release notes are the tag's section of CHANGELOG.md.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  LLVM_VERSION: 23.1.4
+  LLVM_TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-arm64
+          - os: windows-2025
+            platform: windows-x86_64
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustc --version
+
+      # Unix-style paths for the shell's tools (Git Bash's tar reads `C:` as a
+      # host); Windows paths for what Rust reads
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deps="$HOME/.mimic/deps"
+          mkdir -p "$deps"
+          gh release download "$LLVM_TAG" -p "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -D "$deps"
+          tar -xJf "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -C "$deps"
+          rm "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz"
+          "$deps/llvm-$LLVM_VERSION/bin/llvm-config" --version
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
+            echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
+          else
+            ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
+          fi
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
+
+      - name: Build
+        run: cargo build --release
+
+      # the binary must work on its own: a project created, built and run
+      # with nothing but `mimic` (and, on Linux and macOS, the system linker)
+      - name: Check
+        run: |
+          m="$PWD/target/release/mimic"
+          "$m" --version
+          "$m" cc --version
+          cd "$RUNNER_TEMP"
+          "$m" create hello
+          cd hello
+          "$m" run
+
+      - name: Package
+        run: |
+          v=${TAG#v}
+          name=mimic-$v-${{ matrix.platform }}
+          mkdir -p "dist/$name"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/release/mimic.exe tools/release/install.ps1 tools/release/install.cmd "dist/$name/"
+          else
+            cp target/release/mimic tools/release/install.sh "dist/$name/"
+            chmod +x "dist/$name/install.sh"
+          fi
+          cp LICENSE README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            ls -l "$name.zip"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            ls -l "$name.tar.gz"
+          fi
+
+      # the install script, as a team mate would run it, from the package
+      - name: Install script
+        run: |
+          name=mimic-${TAG#v}-${{ matrix.platform }}
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1"
+            "$USERPROFILE/.mimic/bin/mimic.exe" --version
+            powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1" -Uninstall
+          else
+            "dist/$name/install.sh"
+            "$HOME/.mimic/bin/mimic" --version
+            "dist/$name/install.sh" --uninstall
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and notes
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          cd ..
+          # this version's section of CHANGELOG.md, then how to install
+          python3 - <<'PY' > notes.md
+          import os, re
+          v = os.environ["TAG"].lstrip("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## " + re.escape(v) + r"\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
+          print(m.group(1).strip() if m else f"Mimic {v}.")
+          print(open(".github/release-install.md", encoding="utf-8").read().replace("{v}", v))
+          PY
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Mimic ${TAG#v}" --notes-file notes.md --verify-tag
+          gh release upload "$TAG" dist/* --clobber

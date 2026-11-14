@@ -1,6 +1,6 @@
-# Build mimic and run every test on Linux and macOS, build mimic on Windows
-# and run the golden programs there (built on Windows, and built on Linux),
-# on every push to main
+# Build mimic and run every test on Linux, macOS and Windows; run the golden
+# programs as static Linux executables (x86_64 here, arm64 on an Arm runner)
+# and as Windows programs cross-built on Linux; on every push to main
 # and every pull request. The LLVM it links comes from the llvm workflow's
 # release download.
 name: ci
@@ -80,6 +80,25 @@ jobs:
           path: winfix
           retention-days: 3
 
+      # the static Linux programs `--target x86_64-linux` makes, run here;
+      # the arm64 ones are cross-built here and run by the linux-arm64 job
+      - name: Static Linux programs (x86_64-linux-musl)
+        if: runner.os == 'Linux'
+        run: |
+          tools/build-fixtures.sh x86_64-linux-musl muslfix
+          tools/run-fixtures.sh muslfix
+
+      - name: Static Linux programs (aarch64-linux-musl, cross-built)
+        if: runner.os == 'Linux'
+        run: tools/build-fixtures.sh aarch64-linux-musl armfix
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: linux-arm64-fixtures
+          path: armfix
+          retention-days: 3
+
       - name: Test
         run: cargo test --release --no-fail-fast
 
@@ -126,6 +145,26 @@ jobs:
       - name: Run
         shell: bash
         run: tools/run-fixtures.sh winfix
+
+  # The static arm64 Linux programs, cross-built by the Linux job, on Arm.
+  linux-arm64:
+    name: run (linux-arm64, built on x86_64)
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64-fixtures
+          path: armfix
+
+      - name: Run
+        run: |
+          chmod +x armfix/*/*
+          tools/run-fixtures.sh armfix
 
   # mimic itself on Windows (MSVC Rust, the llvm workflow's Windows LLVM):
   # it builds the golden programs for its own machine, which then run there.
@@ -180,5 +219,4 @@ jobs:
 
       - name: Test
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: cargo test --release --no-fail-fast

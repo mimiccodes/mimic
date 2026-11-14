@@ -89,12 +89,15 @@ pub fn tier(target: &Target) -> Tier {
     let arch = target.arch.as_str();
     let apple_arm = matches!(arch, "aarch64" | "arm64");
     match (target.os.as_str(), target.env.as_str()) {
-        // native builds, and the targets the golden tests run here:
-        // macOS arm64 and x86_64 (Rosetta), Mac Catalyst, WASI (Node)
+        // native builds, and the targets whose golden tests run (here and in
+        // CI): macOS arm64 and x86_64 (Rosetta), Mac Catalyst, WASI (Node),
+        // static Linux x86_64 and arm64, Windows x86_64
         _ if target.name.is_none() => Tier::Stable,
         ("macosx", _) if apple_arm || arch == "x86_64" => Tier::Stable,
         ("ios", "macabi") if apple_arm => Tier::Stable,
         ("wasi" | "wasip1", _) if arch == "wasm32" => Tier::Stable,
+        ("linux", "musl") if matches!(arch, "x86_64" | "aarch64") => Tier::Stable,
+        ("windows", "gnu") if arch == "x86_64" => Tier::Stable,
         ("ios", "simulator") if apple_arm => Tier::Runs,
         _ => match support(target) {
             Support::Bundled | Support::Sdk => Tier::Links,

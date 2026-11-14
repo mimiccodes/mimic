@@ -811,6 +811,8 @@ fn targets_cmd(cpus: Option<&str>, features: Option<&str>, check: Option<&str>, 
     // complete executables: the bundled-musl targets, plus macOS with its SDK
     let mut exes: Vec<String> = mimic_toolchain::musl::TARGETS.iter().map(|t| t.to_string()).collect();
     exes.push("wasm32-wasi".into());
+    // Windows with the bundled MinGW-w64
+    exes.extend(["x86_64-windows".into(), "aarch64-windows".into()]);
     // Apple platforms whose SDK is installed (Xcode)
     for t in [
         "aarch64-macos", "x86_64-macos", "aarch64-ios-macabi", "aarch64-ios", "aarch64-ios-simulator",
