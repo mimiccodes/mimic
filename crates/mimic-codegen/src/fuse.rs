@@ -1474,7 +1474,12 @@ impl<'ctx> Cg<'ctx, '_> {
         let n = self.plan_len(&plan)?;
         let out = self.alloc_vec(dtype_of(el), n)?;
         let data = self.data_of(out)?;
+        // chunks 16 times the usual: a scan writes all it reads, and many
+        // small chunks first-touched by turns on different threads made the
+        // parallel scan slower than one thread on Windows (and no faster
+        // elsewhere); fixed, so float results do not depend on the threads
         let grain = self.grain()?;
+        let grain = self.b.build_int_mul(grain, i64t.const_int(16, false), "scan_grain").s()?;
         let g1 = self.b.build_int_sub(grain, i64t.const_int(1, false), "").s()?;
         let nc = self.b.build_int_add(n, g1, "").s()?;
         let nc = self.b.build_int_signed_div(nc, grain, "").s()?;
@@ -1500,7 +1505,7 @@ impl<'ctx> Cg<'ctx, '_> {
         // 1: each chunk's own total
         let k1 = self.emit_kernel(&root, &plan, Mode::Reduce(prim, float))?;
         let ctx1 = self.pack_ctx(&plan, &[parts.into(), grain.into()])?;
-        self.par_for(n, k1, ctx1)?;
+        self.par_for_grain(n, grain, k1, ctx1)?;
         // 2: totals → starting offsets (in place, in chunk order)
         let pre = self.b.get_insert_block().unwrap();
         let body = self.ctx.append_basic_block(f, "offs");
@@ -1530,7 +1535,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let sgrain = self.b.build_select(one, n, grain, "").s()?.into_int_value();
         let sgrain = self.b.build_select(self.b.build_int_compare(IntPredicate::SGT, sgrain, i64t.const_zero(), "").s()?, sgrain, grain, "").s()?.into_int_value();
         let ctx2 = self.pack_ctx(&plan, &[data, sgrain.into(), parts.into()])?;
-        self.scan_for(n, k2, ctx2, one)?;
+        self.scan_for(n, grain, k2, ctx2, one)?;
         self.release_plan(&plan)?;
         self.free_partials(parts, heap)?;
         Ok(out)
@@ -1615,7 +1620,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// pool, no locks), else through the runtime's parallel loop.
     /// A scan's second pass: one direct call over everything when `one`
     /// (one chunk), else the usual parallel loop.
-    fn scan_for(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>, one: IntValue<'ctx>) -> R<()> {
+    fn scan_for(&mut self, n: IntValue<'ctx>, grain: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>, one: IntValue<'ctx>) -> R<()> {
         let f = self.cur_fn.unwrap();
         let direct = self.ctx.append_basic_block(f, "scan_direct");
         let split = self.ctx.append_basic_block(f, "scan_split");
@@ -1625,7 +1630,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_call(k, &[ctx.into(), self.ctx.i64_type().const_zero().into(), n.into()], "").s()?;
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(split);
-        self.par_for(n, k, ctx)?;
+        self.par_for_grain(n, grain, k, ctx)?;
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(done);
         Ok(())
@@ -1633,6 +1638,15 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn par_for(&mut self, n: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>) -> R<()> {
         let grain = self.grain()?;
+        self.par_for_with(n, grain, k, ctx, false)
+    }
+
+    /// par_for in chunks of `grain` (the kernel must count chunks the same way)
+    fn par_for_grain(&mut self, n: IntValue<'ctx>, grain: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>) -> R<()> {
+        self.par_for_with(n, grain, k, ctx, true)
+    }
+
+    fn par_for_with(&mut self, n: IntValue<'ctx>, grain: IntValue<'ctx>, k: FunctionValue<'ctx>, ctx: PointerValue<'ctx>, explicit: bool) -> R<()> {
         let one = self.b.build_int_compare(IntPredicate::SLE, n, grain, "").s()?;
         let f = self.cur_fn.unwrap();
         let direct = self.ctx.append_basic_block(f, "k_direct");
@@ -1643,7 +1657,11 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_call(k, &[ctx.into(), self.ctx.i64_type().const_zero().into(), n.into()], "").s()?;
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(pooled);
-        self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        if explicit {
+            self.call_rt("mim_par_for_grain", &[n.into(), grain.into(), self.fn_addr(k).into(), ctx.into()])?;
+        } else {
+            self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
+        }
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(done);
         Ok(())

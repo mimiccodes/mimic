@@ -344,6 +344,7 @@ static void parallel_for(int64_t n, mim_task fn, void *ctx);
  * runs it with the same fixed-size chunks as the built-in kernels, so results
  * (including floating-point reductions) do not depend on the thread count. */
 void mim_par_for(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for(n, f, ctx); }
+void mim_par_for_grain(int64_t n, int64_t grain, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for_grain(n, grain, f, ctx); }
 
 /* A compiled loop whose elements may each be much work (they call into
  * recursion): time the first element, then share out the rest (in small

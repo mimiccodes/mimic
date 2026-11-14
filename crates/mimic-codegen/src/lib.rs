@@ -1475,6 +1475,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
+            "mim_par_for_grain" => void.fn_type(&[i64t, i64t, p, p], false),
             "mim_gpu_wants" => self.ctx.i32_type().fn_type(&[i64t, i64t], false),
             "mim_gpu_run" => self.ctx.i32_type().fn_type(&[p, i64t, i32t, p, p, p, i32t, p, i64t], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
