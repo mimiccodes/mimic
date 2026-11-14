@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - uses: actions/setup-go@v5
         with:
@@ -76,7 +76,7 @@ jobs:
       # same kernels on the CPU (same results), so passing tests prove nothing
       # about it; this reports what the runner had.
       - name: GPU (Metal)
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
         run: |
           for f in gpu_map gpu_each; do
             MIMIC_GPU=1 MIMIC_GPU_DEBUG=1 target/release/mimic run --release tests/fixtures/run/$f.mim > /tmp/$f.out 2> /tmp/$f.err

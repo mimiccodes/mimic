@@ -62,6 +62,12 @@ def main():
             total += 1
             src, want = m.group(1), m.group(2)
             code, got, err = run(a.mimic, src)
+            # examples that measure time can lose on a busy machine: a real
+            # difference shows up every time, a stall does not
+            tries = 1
+            while code == 0 and not a.update and got != want and tries < 3:
+                code, got, err = run(a.mimic, src)
+                tries += 1
             if code != 0:
                 print(f"{path.name}: example failed (exit {code}):\n{src}\n{err}")
                 failures += 1

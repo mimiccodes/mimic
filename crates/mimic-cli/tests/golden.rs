@@ -365,7 +365,7 @@ fn wasi_fixtures() {
                 // still crashing: which engine settings avoid it (diagnostics)
                 let sh = |c: &str| std::process::Command::new("sh").arg("-c").arg(c).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
                 probe.push_str(&format!("ulimit -s: {}; node: {}\n", sh("ulimit -s"), sh("node --version")));
-                for flags in [&["--liftoff-only"][..], &["--no-liftoff"], &["--stack-size=400"], &["--stack-size=4000"], &["--no-wasm-tier-up"], &["--no-wasm-lazy-compilation"]] {
+                for flags in [&["--liftoff-only"][..], &["--no-liftoff"], &["--stack-size=400"], &["--stack-size=4000"], &["--no-wasm-tier-up"], &["--no-wasm-lazy-compilation"], &["--no-wasm-trap-handler"], &["--single-threaded"]] {
                     let r = std::process::Command::new("node").arg("--no-warnings").args(flags).arg(&runner).arg(wasm).arg(&tmp).output().unwrap();
                     let ok = String::from_utf8_lossy(&r.stdout) == std::fs::read_to_string(f.with_extension("out")).unwrap_or_default();
                     probe.push_str(&format!("  node {flags:?}: {} ({})\n", if ok { "ok" } else { "differs" }, r.status));
