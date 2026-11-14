@@ -57,6 +57,29 @@ jobs:
       - name: Build mimic
         run: cargo build --release
 
+      # Is the machine code really vector code? Count SIMD instructions in a
+      # release build of the SIMD fixture (native CPU: AVX2/AVX-512 on x86,
+      # NEON on arm64).
+      - name: SIMD check
+        run: |
+          {
+            echo "### CPU and SIMD (${{ matrix.platform }})"
+            if [ "$(uname)" = Linux ]; then
+              echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) cores"
+              echo "- vector features: $(grep -o -w -E 'avx2|avx512f|fma' /proc/cpuinfo | sort -u | tr '\n' ' ')"
+            else
+              echo "- CPU: $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exe=$(target/release/mimic build --release --emit-json tests/fixtures/run/simd_each.mim | python3 -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
+          "$exe" | diff - tests/fixtures/run/simd_each.out
+          objdump -d "$exe" > /tmp/simd.s
+          ymm=$(grep -c -E '%ymm' /tmp/simd.s || true)
+          zmm=$(grep -c -E '%zmm' /tmp/simd.s || true)
+          neon=$(grep -c -E '\bv[0-9]+\.(2d|4s|8h|16b)|\s[a-z0-9]+\.(2d|4s|8h|16b)\s' /tmp/simd.s || true)
+          echo "- simd_each (release, native CPU): output correct; vector instructions: AVX ymm $ymm, AVX-512 zmm $zmm, NEON $neon" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ $((ymm + zmm + neon)) -gt 0 ]
+
       - name: Crates for the Rust versions
         run: for d in bench/*/rust; do (cd "$d" && cargo fetch); done
 
