@@ -72,8 +72,8 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         (d / "empty").mkdir()
-        (d / "empty" / "main.mim").write_text("module main\n\nfn main() {\n    print(1)\n}\n")
-        (d / "empty" / "main.c").write_text("#include <stdio.h>\nint main(void) { puts(\"1\"); return 0; }\n")
+        (d / "empty" / "main.mim").write_text("module main\n\nfn main() {\n    print(1)\n}\n", encoding="utf-8")
+        (d / "empty" / "main.c").write_text("#include <stdio.h>\nint main(void) { puts(\"1\"); return 0; }\n", encoding="utf-8")
         rows = []
         for name in ["empty"] + a.benches:
             src = d / "empty" if name == "empty" else ROOT / "bench" / name
@@ -88,7 +88,7 @@ def main():
         if "prefix_sum" in a.benches:
             red = d / "reduce"
             red.mkdir()
-            (red / "main.mim").write_text("module main\n\nfn main() {\n    print(⍳ 100000000 % 1000 ▷ +/)\n}\n")
+            (red / "main.mim").write_text("module main\n\nfn main() {\n    print(⍳ 100000000 % 1000 ▷ +/)\n}\n", encoding="utf-8")
             rexe, _ = mimic_build(a.mimic, red / "main.mim", d)
             pexe = d / ("prefix_sum_mim" + EXE)
             for k in (1, nproc):
