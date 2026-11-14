@@ -302,7 +302,7 @@ Every connection of `http::serve` and `ws::serve` runs as a **task**, and so doe
 You never write `async` or `await`, and nothing changes in your code. The difference shows at scale: a WebSocket echo server holds 3000 open connections with 14 threads, where one thread per connection would need 3000. A task always stays on the same thread, so pure work inside a handler still uses the parallel array kernels as usual.
 
 Details:
-* **Where it runs.** On Apple systems and Linux, on arm64 and x86-64. Elsewhere (Windows, WebAssembly, other CPUs) tasks are threads or deferred calls, as before.
+* **Where it runs.** On Apple systems, Linux and Windows, on arm64 and x86-64 (on Windows the coroutines are fibers and sockets are watched through IOCP). Elsewhere (WebAssembly, other CPUs) tasks are threads or deferred calls, as before.
 * **Switching it off.** Set the environment variable `MIMIC_NO_EVENT_LOOP=1` to run each connection on its own thread instead.
 * **Calls that still block their thread for a moment:** looking up a host name, TLS handshakes on Linux, file I/O, `os::run` and `io::read_line`. Other tasks on the same thread wait meanwhile. Tasks on other threads keep running.
 * **Timeouts still apply.** A task's socket wait ends at the same timeout a thread's would: 60 seconds for an HTTP response, 30 seconds for a request a server is reading.

@@ -134,15 +134,46 @@ static int mw_getaddrinfo(const char *h, const char *p, const struct addrinfo *h
     ws_start();
     return getaddrinfo(h, p, hi, r);
 }
-static ssize_t mrecv(int fd, void *buf, size_t n) { return WS_CHECK(recv((SOCKET)fd, (char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), 0)); }
+/* One Winsock call, non-blocking inside a coroutine: when it would block, the
+ * coroutine parks until the socket is ready (its thread runs others
+ * meanwhile), within the socket's own timeout. Outside coroutines, a plain
+ * blocking call. */
+#if MIM_GREEN
+#define WS_CO(call, fd, write, timeo)                                                    \
+    do {                                                                                 \
+        if (!t_co) return WS_CHECK(call);                                                \
+        for (;;) {                                                                       \
+            u_long on = 1, off = 0;                                                      \
+            ioctlsocket((SOCKET)(fd), FIONBIO, &on);                                     \
+            int r_ = (call);                                                             \
+            int e_ = r_ == SOCKET_ERROR ? WSAGetLastError() : 0;                         \
+            ioctlsocket((SOCKET)(fd), FIONBIO, &off);                                    \
+            if (r_ != SOCKET_ERROR) return r_;                                           \
+            if (e_ != WSAEWOULDBLOCK) {                                                  \
+                WSASetLastError(e_);                                                     \
+                errno = ws_errno();                                                      \
+                return -1;                                                               \
+            }                                                                            \
+            if (!co_wait_fd((fd), (write), sock_timeo((fd), (timeo)))) {                 \
+                errno = EAGAIN; /* as a blocking socket reports its timeout */          \
+                return -1;                                                               \
+            }                                                                            \
+        }                                                                                \
+    } while (0)
+#else
+#define WS_CO(call, fd, write, timeo) return WS_CHECK(call)
+#endif
+static ssize_t mrecv(int fd, void *buf, size_t n) {
+    WS_CO(recv((SOCKET)fd, (char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), 0), fd, 0, SO_RCVTIMEO);
+}
 static ssize_t msend(int fd, const void *buf, size_t n, int flags) {
-    return WS_CHECK(send((SOCKET)fd, (const char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), flags));
+    WS_CO(send((SOCKET)fd, (const char *)buf, (int)(n > 1 << 30 ? 1 << 30 : n), flags), fd, 1, SO_SNDTIMEO);
 }
 static ssize_t mrecvfrom(int fd, void *buf, size_t n, struct sockaddr *from, socklen_t *fl) {
-    return WS_CHECK(recvfrom((SOCKET)fd, (char *)buf, (int)n, 0, from, fl));
+    WS_CO(recvfrom((SOCKET)fd, (char *)buf, (int)n, 0, from, fl), fd, 0, SO_RCVTIMEO);
 }
 static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr *to, socklen_t tl) {
-    return WS_CHECK(sendto((SOCKET)fd, (const char *)buf, (int)n, 0, to, tl));
+    WS_CO(sendto((SOCKET)fd, (const char *)buf, (int)n, 0, to, tl), fd, 1, SO_SNDTIMEO);
 }
 #define socket mw_socket
 #define accept mw_accept
@@ -258,7 +289,28 @@ static void sock_timeout(int fd, int seconds) {
 /* connect; on the event loop the coroutine waits for the connection
  * instead of blocking its thread */
 static int connect_co(int fd, const struct sockaddr *addr, socklen_t len) {
-#if MIM_GREEN
+#if MIM_GREEN && defined(_WIN32)
+    if (t_co) {
+        u_long on = 1, off = 0;
+        ioctlsocket((SOCKET)fd, FIONBIO, &on);
+        int rc = connect(fd, addr, len);
+        if (rc != 0 && errno == EWOULDBLOCK) { /* Windows: in progress */
+            co_wait_fd(fd, 1, 0);
+            int e = 0;
+            socklen_t el = sizeof e;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el);
+            rc = e ? -1 : 0;
+            if (e) {
+                WSASetLastError(e);
+                errno = ws_errno();
+            }
+        }
+        int saved = errno;
+        ioctlsocket((SOCKET)fd, FIONBIO, &off);
+        errno = saved;
+        return rc;
+    }
+#elif MIM_GREEN
     if (t_co) {
         int fl = fcntl(fd, F_GETFL);
         fcntl(fd, F_SETFL, fl | O_NONBLOCK);

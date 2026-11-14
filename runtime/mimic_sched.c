@@ -8,31 +8,45 @@
  * threads, one per core. A coroutine that would block on a socket, a timer, a
  * channel or another task "parks": it switches back to its scheduler, which
  * runs other coroutines meanwhile. One poller thread watches every waiting
- * socket (kqueue on Apple systems, epoll on Linux) and every timer, and puts
- * coroutines back on their run queue when they can go on.
+ * socket (kqueue on Apple systems, epoll on Linux, IOCP through wepoll on
+ * Windows) and every timer, and puts coroutines back on their run queue when
+ * they can go on. On Windows the coroutines are fibers.
  *
  * A coroutine always runs on the same scheduler thread (it is never moved),
  * so thread-local state and locks behave as in ordinary threads.
  *
- * Where there is no event loop (Windows, WASI, other CPUs, or the environment
+ * Where there is no event loop (WASI, other CPUs, or the environment
  * variable MIMIC_NO_EVENT_LOOP=1), the same functions fall back to threads and
  * blocking calls. */
 
-#if MIM_THREADS && !defined(_WIN32) && (defined(__APPLE__) || defined(__linux__)) && (defined(__aarch64__) || defined(__x86_64__))
+#if MIM_THREADS && (defined(__APPLE__) || defined(__linux__) || defined(_WIN32)) && (defined(__aarch64__) || defined(__x86_64__))
 #define MIM_GREEN 1
 #else
 #define MIM_GREEN 0
 #endif
 
 #if MIM_GREEN
+#include <time.h>
+#ifdef _WIN32
+/* wepoll: epoll on Windows (IOCP and the AFD driver's poll), compiled in.
+ * It sets its own Windows version macros: the runtime's are kept. */
+#pragma push_macro("_WIN32_WINNT")
+#pragma push_macro("WIN32_LEAN_AND_MEAN")
+#include "wepoll.c"
+#pragma pop_macro("WIN32_LEAN_AND_MEAN")
+#pragma pop_macro("_WIN32_WINNT")
+/* wepoll declares UNICODE_STRING (same layout as the SDK's): the security
+ * headers the TLS code includes later must not declare it again */
+#define __UNICODE_STRING_DEFINED
+#else
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <fcntl.h>
-#include <time.h>
 #ifdef __APPLE__
 #include <sys/event.h>
 #else
 #include <sys/epoll.h>
+#endif
 #endif
 
 /* ---- context switching -----------------------------------------------------
@@ -48,9 +62,20 @@
 #endif
 
 typedef struct mim_co mim_co;
+void mim_co_entry(mim_co *co);
+
+#ifdef _WIN32
+/* Windows: each coroutine is a fiber (the system switches stacks, and keeps
+ * the stack limits that exception handling and stack probes rely on) */
+static void mim_co_switch(void **save, void *to) {
+    (void)save; /* a fiber's handle never changes */
+    SwitchToFiber(to);
+}
+
+static void WINAPI co_fiber_main(void *co) { mim_co_entry((mim_co *)co); }
+#else
 void mim_co_switch(void **save, void *to);
 void mim_co_boot(void);
-void mim_co_entry(mim_co *co);
 
 #if defined(__aarch64__)
 __asm__(".text\n"
@@ -139,6 +164,7 @@ static void *co_first_frame(char *top, mim_co *co) {
     return f;
 }
 #endif
+#endif /* _WIN32 */
 
 /* ---- coroutines and schedulers ------------------------------------------ */
 
@@ -180,6 +206,7 @@ static pthread_mutex_t g_green_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_next_sched;
 static _Thread_local mim_co *t_co; /* the coroutine running on this thread */
 
+#ifndef _WIN32
 static char *g_stacks[CO_STACK_CACHE];
 static int g_nstacks;
 static pthread_mutex_t g_stack_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -208,6 +235,29 @@ static void stack_put(char *s) {
     }
     pthread_mutex_unlock(&g_stack_lock);
     if (s) munmap(s, CO_STACK);
+}
+#endif
+
+/* a new coroutine's stack, ready to start in mim_co_entry */
+static void co_stack_new(mim_co *co) {
+#ifdef _WIN32
+    co->sp = CreateFiberEx((SIZE_T)64 << 10, CO_STACK, FIBER_FLAG_FLOAT_SWITCH, co_fiber_main, co);
+    if (!co->sp) mim_panic("out of memory (coroutine stack)");
+#else
+    co->stack = stack_get();
+    co->sp = co_first_frame(co->stack + CO_STACK, co);
+#endif
+}
+
+/* free a finished coroutine's stack (from its scheduler, off that stack) */
+static void co_stack_free(mim_co *co) {
+#ifdef _WIN32
+    DeleteFiber(co->sp);
+    co->sp = NULL;
+#else
+    stack_put(co->stack);
+    co->stack = NULL;
+#endif
 }
 
 static void co_ready(mim_co *co) {
@@ -246,8 +296,7 @@ void mim_co_entry(mim_co *co) {
 }
 
 static void co_finish(mim_co *co) {
-    stack_put(co->stack);
-    co->stack = NULL;
+    co_stack_free(co);
     pthread_mutex_lock(&co->m);
     co->done = 1;
     mim_co *j = co->joiner;
@@ -264,6 +313,10 @@ static void co_finish(mim_co *co) {
 
 static void *sched_main(void *p) {
     co_sched *s = (co_sched *)p;
+#ifdef _WIN32
+    s->sp = ConvertThreadToFiberEx(NULL, FIBER_FLAG_FLOAT_SWITCH); /* the scheduler's own fiber */
+    if (!s->sp) mim_panic("cannot start the event loop");
+#endif
     for (;;) {
         pthread_mutex_lock(&s->m);
         while (!s->head) pthread_cond_wait(&s->c, &s->m);
@@ -306,12 +359,33 @@ typedef struct co_wait {
     int64_t at;   /* deadline (monotonic ns), or 0 */
     int64_t heap; /* position in the timer heap, or -1 */
     int fd, write;
-    int dupfd;    /* the descriptor the poller watches, or -1 */
+    int dupfd;    /* the descriptor the poller watches, or -1 (Windows: 1 while registered) */
     int timed_out;
+    struct co_wait *link; /* Windows: the next wait on the same socket */
+    void *reg;            /* Windows: the socket's registration */
 } co_wait;
 
+#ifdef _WIN32
+/* wepoll watches a socket once: each socket has one registration, with the
+ * waits for reading and for writing on it. A registration no wait needs is
+ * removed, and freed by the poller before its next wait (so an event already
+ * returned for it never points at freed memory). */
+typedef struct ws_reg {
+    uintptr_t sock;
+    co_wait *rd, *wr;
+    struct ws_reg *next; /* in its hash bucket, then in the free list */
+    int added, dead;
+} ws_reg;
+#define WS_BUCKETS 4096
+static ws_reg *g_regs[WS_BUCKETS];
+static ws_reg *g_reg_free;
+static HANDLE g_ep;
+static SOCKET g_wake_sock = INVALID_SOCKET;
+static struct sockaddr_in g_wake_addr;
+#else
 static int g_poll = -1;
 static int g_wake[2] = {-1, -1};
+#endif
 static pthread_mutex_t g_wait_lock = PTHREAD_MUTEX_INITIALIZER;
 static co_wait **g_timers; /* a binary min-heap on `at` */
 static int64_t g_ntimers, g_timers_cap;
@@ -370,18 +444,80 @@ static void timer_remove(co_wait *w) {
 }
 
 static void poller_wake(void) {
+#ifdef _WIN32
+    char b = 1;
+    sendto(g_wake_sock, &b, 1, 0, (struct sockaddr *)&g_wake_addr, sizeof g_wake_addr);
+#else
     char b = 1;
     ssize_t r = write(g_wake[1], &b, 1);
     (void)r;
+#endif
 }
+
+#ifdef _WIN32
+/* the registration of a socket (under g_wait_lock) */
+static ws_reg *reg_of(uintptr_t sock) {
+    ws_reg **b = &g_regs[(sock >> 2) % WS_BUCKETS];
+    for (ws_reg *r = *b; r; r = r->next)
+        if (r->sock == sock) return r;
+    ws_reg *r = (ws_reg *)calloc(1, sizeof *r);
+    r->sock = sock;
+    r->next = *b;
+    *b = r;
+    return r;
+}
+
+/* watch the socket for what its waits need, or stop watching it when none
+ * is left (under g_wait_lock); 0, or -1 when it cannot be watched */
+static int reg_arm(ws_reg *r) {
+    uint32_t want = (r->rd ? EPOLLIN | EPOLLRDHUP : 0) | (r->wr ? EPOLLOUT : 0);
+    if (!want) {
+        if (r->added) epoll_ctl(g_ep, EPOLL_CTL_DEL, (SOCKET)r->sock, NULL);
+        ws_reg **b = &g_regs[(r->sock >> 2) % WS_BUCKETS];
+        while (*b != r) b = &(*b)->next;
+        *b = r->next;
+        r->dead = 1;
+        r->next = g_reg_free;
+        g_reg_free = r;
+        return 0;
+    }
+    struct epoll_event e;
+    memset(&e, 0, sizeof e);
+    e.events = want | EPOLLONESHOT;
+    e.data.ptr = r;
+    /* a socket closed and reused since: wepoll forgot it, so add it again */
+    if (r->added && epoll_ctl(g_ep, EPOLL_CTL_MOD, (SOCKET)r->sock, &e) == 0) return 0;
+    if (epoll_ctl(g_ep, EPOLL_CTL_ADD, (SOCKET)r->sock, &e) != 0) return -1;
+    r->added = 1;
+    return 0;
+}
+
+/* take w out of its socket's list (under g_wait_lock) */
+static void reg_unlink(co_wait *w) {
+    ws_reg *r = (ws_reg *)w->reg;
+    for (co_wait **p = w->write ? &r->wr : &r->rd; *p; p = &(*p)->link) {
+        if (*p == w) {
+            *p = w->link;
+            break;
+        }
+    }
+    w->reg = NULL;
+}
+#endif
 
 /* stop watching w's descriptor (under g_wait_lock) */
 static void fd_unwatch(co_wait *w) {
     if (w->dupfd < 0) return;
+#ifdef _WIN32
+    ws_reg *r = (ws_reg *)w->reg;
+    reg_unlink(w);
+    reg_arm(r);
+#else
 #ifndef __APPLE__
     epoll_ctl(g_poll, EPOLL_CTL_DEL, w->dupfd, NULL);
 #endif
     close(w->dupfd); /* a kqueue forgets a closed descriptor by itself */
+#endif
     w->dupfd = -1;
 }
 
@@ -419,11 +555,75 @@ static void fd_fired(co_wait *w) {
     co_ready(co);
 }
 
+#ifdef _WIN32
+/* events on a registration: wake the waits they answer, watch on for the rest */
+static void reg_fired(ws_reg *r, uint32_t ev) {
+    mim_co *due = NULL;
+    pthread_mutex_lock(&g_wait_lock);
+    if (!r->dead) {
+        co_wait *woken = NULL;
+        if (ev & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
+            woken = r->rd;
+            r->rd = NULL;
+        }
+        if (ev & (EPOLLOUT | EPOLLHUP | EPOLLERR)) {
+            co_wait *w = r->wr;
+            r->wr = NULL;
+            while (w) {
+                co_wait *n = w->link;
+                w->link = woken;
+                woken = w;
+                w = n;
+            }
+        }
+        while (woken) {
+            co_wait *w = woken;
+            woken = w->link;
+            if (w->heap >= 0) timer_remove(w);
+            w->dupfd = -1;
+            w->reg = NULL;
+            w->co->next = due;
+            due = w->co;
+        }
+        reg_arm(r); /* one-shot: watch again for the waits still there */
+    }
+    pthread_mutex_unlock(&g_wait_lock);
+    while (due) {
+        mim_co *n = due->next;
+        co_ready(due);
+        due = n;
+    }
+}
+#endif
+
 static void *poller_main(void *p) {
     (void)p;
     for (;;) {
         int64_t wait = timers_due();
-#ifdef __APPLE__
+#ifdef _WIN32
+        /* registrations dropped before this wait cannot show up in it */
+        pthread_mutex_lock(&g_wait_lock);
+        ws_reg *gone = g_reg_free;
+        g_reg_free = NULL;
+        pthread_mutex_unlock(&g_wait_lock);
+        while (gone) {
+            ws_reg *n = gone->next;
+            free(gone);
+            gone = n;
+        }
+        struct epoll_event ev[64];
+        int ms = wait < 0 ? -1 : (int)((wait + 999999) / 1000000);
+        int n = epoll_wait(g_ep, ev, 64, ms);
+        for (int i = 0; i < n; i++) {
+            if (ev[i].data.ptr == NULL) {
+                char buf[64];
+                while (recv(g_wake_sock, buf, sizeof buf, 0) > 0) {
+                }
+            } else {
+                reg_fired((ws_reg *)ev[i].data.ptr, ev[i].events);
+            }
+        }
+#elif defined(__APPLE__)
         struct kevent ev[64];
         struct timespec ts, *tp = NULL;
         if (wait >= 0) {
@@ -477,6 +677,33 @@ static int green_on(void) {
     if (g_green < 0) {
         const char *off = getenv("MIMIC_NO_EVENT_LOOP");
         int on = !(off && *off && strcmp(off, "0") != 0);
+#ifdef _WIN32
+        if (on) {
+            WSADATA d;
+            on = WSAStartup(MAKEWORD(2, 2), &d) == 0;
+        }
+        if (on) {
+            g_ep = epoll_create1(0);
+            /* the poller's wake-up: a loopback datagram to itself */
+            g_wake_sock = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+            memset(&g_wake_addr, 0, sizeof g_wake_addr);
+            g_wake_addr.sin_family = AF_INET;
+            g_wake_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            int len = sizeof g_wake_addr;
+            u_long nb = 1;
+            on = g_ep != NULL && g_wake_sock != INVALID_SOCKET &&
+                 bind(g_wake_sock, (struct sockaddr *)&g_wake_addr, sizeof g_wake_addr) == 0 &&
+                 getsockname(g_wake_sock, (struct sockaddr *)&g_wake_addr, &len) == 0 && ioctlsocket(g_wake_sock, FIONBIO, &nb) == 0;
+            if (on) {
+                struct epoll_event e;
+                memset(&e, 0, sizeof e);
+                e.events = EPOLLIN;
+                e.data.ptr = NULL;
+                on = epoll_ctl(g_ep, EPOLL_CTL_ADD, g_wake_sock, &e) == 0;
+            }
+        }
+        if (on) {
+#else
         if (on) {
             g_page = (size_t)sysconf(_SC_PAGESIZE);
 #ifdef __APPLE__
@@ -501,6 +728,7 @@ static int green_on(void) {
             e.data.ptr = NULL;
             epoll_ctl(g_poll, EPOLL_CTL_ADD, g_wake[0], &e);
 #endif
+#endif /* _WIN32 */
             g_nsched = g_nthreads > 1 ? g_nthreads : 2;
             g_sched = (co_sched *)calloc((size_t)g_nsched, sizeof(co_sched));
             for (int i = 0; i < g_nsched; i++) {
@@ -524,8 +752,7 @@ static mim_co *co_spawn(void (*fn)(void *), void *arg, int detached) {
     co->fn = fn;
     co->arg = arg;
     co->detached = detached;
-    co->stack = stack_get();
-    co->sp = co_first_frame(co->stack + CO_STACK, co);
+    co_stack_new(co);
     pthread_mutex_init(&co->m, NULL);
     pthread_cond_init(&co->c, NULL);
     uint32_t k = __atomic_fetch_add(&g_next_sched, 1, __ATOMIC_RELAXED);
@@ -568,6 +795,23 @@ static void wait_park(mim_co *co, void *arg) {
         timer_push(w);
         first = w->heap == 0;
     }
+#ifdef _WIN32
+    if (w->fd >= 0) {
+        ws_reg *r = reg_of((uintptr_t)w->fd);
+        co_wait **list = w->write ? &r->wr : &r->rd;
+        w->link = *list;
+        *list = w;
+        w->reg = r;
+        w->dupfd = 1;
+        if (reg_arm(r) != 0) { /* let the caller's next call report the error */
+            reg_unlink(w);
+            w->dupfd = -1;
+            reg_arm(r);
+            if (w->heap >= 0) timer_remove(w);
+            ready = 1;
+        }
+    }
+#else
     if (w->fd >= 0) {
         /* each wait watches its own duplicate of the descriptor, so a reader
          * and a writer of one socket can wait at the same time */
@@ -592,6 +836,7 @@ static void wait_park(mim_co *co, void *arg) {
             ready = 1;
         }
     }
+#endif
     pthread_mutex_unlock(&g_wait_lock);
     if (first) poller_wake();
     if (ready) co_ready(co);
@@ -599,13 +844,13 @@ static void wait_park(mim_co *co, void *arg) {
 
 /* park until fd can be read (or written); 0 when timeout_ns (if > 0) passed first */
 static int co_wait_fd(int fd, int write, int64_t timeout_ns) {
-    co_wait w = {NULL, timeout_ns > 0 ? mono_ns() + timeout_ns : 0, -1, fd, write, -1, 0};
+    co_wait w = {NULL, timeout_ns > 0 ? mono_ns() + timeout_ns : 0, -1, fd, write, -1, 0, NULL, NULL};
     co_park(wait_park, &w);
     return !w.timed_out;
 }
 
 static void co_sleep(int64_t ns) {
-    co_wait w = {NULL, mono_ns() + ns, -1, -1, 0, -1, 0};
+    co_wait w = {NULL, mono_ns() + ns, -1, -1, 0, -1, 0, NULL, NULL};
     co_park(wait_park, &w);
 }
 
@@ -620,14 +865,22 @@ static void co_lock(pthread_mutex_t *m) {
 
 /* the socket's receive or send timeout (SO_RCVTIMEO / SO_SNDTIMEO) in ns */
 static int64_t sock_timeo(int fd, int which) {
+#ifdef _WIN32
+    DWORD ms = 0; /* Windows keeps socket timeouts in milliseconds */
+    int len = sizeof ms;
+    if (getsockopt((SOCKET)fd, SOL_SOCKET, which, (char *)&ms, &len) != 0) return 0;
+    return (int64_t)ms * 1000000;
+#else
     struct timeval tv = {0, 0};
     socklen_t len = sizeof tv;
     if (getsockopt(fd, SOL_SOCKET, which, &tv, &len) != 0) return 0;
     return (int64_t)tv.tv_sec * 1000000000 + (int64_t)tv.tv_usec * 1000;
+#endif
 }
 
 /* recv and send that park instead of blocking inside a coroutine; the
- * socket's own timeouts still apply */
+ * socket's own timeouts still apply (Windows: mimic_socket.c) */
+#ifndef _WIN32
 static ssize_t mrecv(int fd, void *buf, size_t n) {
     if (!t_co) return recv(fd, buf, n, 0);
     for (;;) {
@@ -683,6 +936,8 @@ static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr 
         }
     }
 }
+
+#endif /* !_WIN32 */
 
 /* before a call that would block until fd is ready (accept) */
 static void mim_wait_readable(int fd) {

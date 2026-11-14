@@ -18,5 +18,8 @@ The mimic binary contains the following software, under its own licences:
   https://www.mingw-w64.org
 * Mbed TLS 3.6.7 (Apache License 2.0), TLS in static Linux programs
   https://www.trustedfirmware.org/projects/mbed-tls/
+* wepoll 1.5.8 (BSD 2-Clause; runtime/third_party/wepoll.LICENSE), the event
+  loop of Windows programs
+  https://github.com/piscisaureus/wepoll
 
 Programs built for those targets contain parts of these libraries.
