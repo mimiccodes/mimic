@@ -1619,7 +1619,15 @@ mim_val *mim_std_chan_receive(mim_val *rx) {
         CH_LOCK(&c->m);
     }
 #endif
-    while (c->n == 0 && !c->closed) pthread_cond_wait(&c->c, &c->m);
+    if (c->n == 0 && !c->closed) {
+#if MIM_GREEN
+        __atomic_fetch_add(&g_thread_chan_waits, 1, __ATOMIC_RELAXED);
+#endif
+        while (c->n == 0 && !c->closed) pthread_cond_wait(&c->c, &c->m);
+#if MIM_GREEN
+        __atomic_fetch_sub(&g_thread_chan_waits, 1, __ATOMIC_RELAXED);
+#endif
+    }
 #else
     /* without threads: let deferred tasks run until there is something */
     while (c->n == 0 && !c->closed && lazy_run_one()) {
@@ -2188,7 +2196,7 @@ mim_val *mim_std_time_format_pattern(mim_val *t, mim_val *pattern) {
         default: {
             mim_release(pv);
             free(b.p);
-            char buf[96];
+            char buf[160];
             snprintf(buf, sizeof buf, "time::format: `%%%c` is not a pattern code (codes: %%Y %%m %%d %%H %%M %%S %%f %%j %%a %%A %%b %%B %%y %%I %%p %%%%)", c);
             mim_panic(buf);
         }

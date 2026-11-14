@@ -118,10 +118,14 @@ jobs:
             for p in release debug; do
               fails=0; hangs=0
               for i in $(seq 300); do
-                if [ $mode = default ]; then out=$(timeout 20 ./chat_room_$p.exe 2>&1); rc=$?
-                else out=$(env $mode=1 timeout 20 ./chat_room_$p.exe 2>&1); rc=$?; fi
+                if [ $mode = default ]; then out=$(MIMIC_DEBUG_WATCHDOG=12 timeout 20 ./chat_room_$p.exe 2> err.txt); rc=$?
+                else out=$(env $mode=1 timeout 20 ./chat_room_$p.exe 2> err.txt); rc=$?; fi
                 out=$(printf '%s' "$out" | tr -d '\r')
-                [ $rc = 124 ] && hangs=$((hangs + 1))
+                if [ $rc = 124 ]; then
+                  hangs=$((hangs + 1))
+                  # what every task was doing (MIMIC_DEBUG_WATCHDOG), for the first hangs
+                  if [ $hangs -le 2 ]; then echo "--- hang ($p, $mode, run $i): output so far:"; printf '%s\n' "$out"; echo "--- tasks:"; tr -d '\r' < err.txt; fi
+                fi
                 [ "$out" = "$want" ] || fails=$((fails + 1))
               done
               echo "- chat_room $p, $mode: $fails of 300 wrong, $hangs hung" | tee -a "$GITHUB_STEP_SUMMARY"

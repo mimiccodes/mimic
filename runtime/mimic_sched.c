@@ -195,7 +195,22 @@ struct mim_co {
     int done, detached;
     int refs; /* who still uses this struct: the finisher, and the joiner unless detached */
     mim_co *joiner;
+    /* MIMIC_DEBUG_WATCHDOG: what it is doing, and the list of live ones */
+    int state; /* CO_QUEUED, CO_RUNNING, CO_PARKED */
+    co_park_fn waiting; /* while parked: how */
+    void *waiting_arg;
+    int64_t serial;
+    mim_co *all_prev, *all_next;
 };
+
+enum { CO_QUEUED, CO_RUNNING, CO_PARKED };
+/* MIMIC_DEBUG_WATCHDOG=<seconds>: a program still running then prints every
+ * live coroutine and what it waits for (on standard error), to find hangs */
+static int g_watch;
+static pthread_mutex_t g_all_lock = PTHREAD_MUTEX_INITIALIZER;
+static mim_co *g_all;
+static int64_t g_serial;
+static int g_thread_joins, g_thread_chan_waits; /* plain threads blocked there */
 
 #define CO_STACK ((size_t)32 << 20) /* reserved, not committed: pages appear as used */
 #define CO_STACK_CACHE 64
@@ -263,6 +278,7 @@ static void co_stack_free(mim_co *co) {
 
 static void co_ready(mim_co *co) {
     co_sched *s = co->home;
+    co->state = CO_QUEUED;
     pthread_mutex_lock(&s->m);
     co->next = NULL;
     if (s->tail) s->tail->next = co;
@@ -278,6 +294,8 @@ static void co_park(co_park_fn fn, void *arg) {
     mim_co *co = t_co;
     co->park = fn;
     co->park_arg = arg;
+    co->waiting = fn;
+    co->waiting_arg = arg;
     mim_co_switch(&co->sp, co->home->sp);
 }
 
@@ -309,6 +327,13 @@ static void co_drop(mim_co *co) {
 
 static void co_finish(mim_co *co) {
     co_stack_free(co);
+    if (g_watch) {
+        pthread_mutex_lock(&g_all_lock);
+        if (co->all_prev) co->all_prev->all_next = co->all_next;
+        else if (g_all == co) g_all = co->all_next;
+        if (co->all_next) co->all_next->all_prev = co->all_prev;
+        pthread_mutex_unlock(&g_all_lock);
+    }
     pthread_mutex_lock(&co->m);
     co->done = 1;
     mim_co *j = co->joiner;
@@ -337,6 +362,7 @@ static void *sched_main(void *p) {
         t_native_depth = co->native_depth;
         t_in_parallel = co->in_parallel;
         t_co = co;
+        co->state = CO_RUNNING;
         mim_co_switch(&s->sp, co->sp);
         t_co = NULL;
         co->native_depth = t_native_depth;
@@ -349,6 +375,7 @@ static void *sched_main(void *p) {
         } else if (co->park) {
             co_park_fn fn = co->park;
             co->park = NULL;
+            co->state = CO_PARKED;
             fn(co, co->park_arg);
         }
     }
@@ -676,6 +703,53 @@ static void start_thread(void *(*fn)(void *), void *arg) {
     pthread_attr_destroy(&a);
 }
 
+static void join_park(mim_co *self, void *arg);
+static void wait_park(mim_co *co, void *arg);
+#if MIM_GREEN
+static void chan_park(mim_co *co, void *arg);
+static void chan_send_park(mim_co *co, void *arg);
+#endif
+
+static void *watchdog_main(void *p) {
+    (void)p;
+#ifdef _WIN32
+    Sleep((DWORD)g_watch * 1000);
+#else
+    sleep((unsigned)g_watch);
+#endif
+    fprintf(stderr, "== MIMIC_DEBUG_WATCHDOG after %d s: threads in co_join %d, threads in chan::receive %d, timers %lld\n", g_watch,
+            __atomic_load_n(&g_thread_joins, __ATOMIC_RELAXED), __atomic_load_n(&g_thread_chan_waits, __ATOMIC_RELAXED), (long long)g_ntimers);
+    for (int i = 0; i < g_nsched; i++) {
+        pthread_mutex_lock(&g_sched[i].m);
+        int q = 0;
+        for (mim_co *c = g_sched[i].head; c; c = c->next) q++;
+        pthread_mutex_unlock(&g_sched[i].m);
+        fprintf(stderr, "scheduler %d: %d queued\n", i, q);
+    }
+    pthread_mutex_lock(&g_all_lock);
+    for (mim_co *c = g_all; c; c = c->all_next) {
+        const char *how = "?";
+        char extra[64] = "";
+        if (c->state == CO_QUEUED) how = "queued";
+        else if (c->state == CO_RUNNING) how = "running";
+        else if (c->waiting == join_park) how = "joining a task";
+        else if (c->waiting == yield_park) how = "yielding";
+#if MIM_GREEN
+        else if (c->waiting == chan_park) how = "in chan::receive";
+        else if (c->waiting == chan_send_park) how = "in chan::send (full)";
+#endif
+        else if (c->waiting == wait_park) {
+            co_wait *w = (co_wait *)c->waiting_arg;
+            how = w->fd >= 0 ? (w->write ? "waiting to write" : "waiting to read") : "sleeping";
+            snprintf(extra, sizeof extra, " (fd %d, timer %s)", w->fd, w->at ? "yes" : "no");
+        }
+        fprintf(stderr, "task %lld on scheduler %d: %s%s%s\n", (long long)c->serial, (int)(c->home - g_sched), how, extra, c->done ? " (done)" : "");
+    }
+    pthread_mutex_unlock(&g_all_lock);
+    fflush(stderr);
+    return NULL;
+}
+
 /* is the event loop on? starts it on first use */
 static int green_on(void) {
     int g = __atomic_load_n(&g_green, __ATOMIC_ACQUIRE);
@@ -744,6 +818,11 @@ static int green_on(void) {
                 start_thread(sched_main, &g_sched[i]);
             }
             start_thread(poller_main, NULL);
+            const char *wd = getenv("MIMIC_DEBUG_WATCHDOG");
+            if (wd && atoi(wd) > 0) {
+                g_watch = atoi(wd);
+                start_thread(watchdog_main, NULL);
+            }
         }
         __atomic_store_n(&g_green, on, __ATOMIC_RELEASE);
     }
@@ -761,6 +840,14 @@ static mim_co *co_spawn(void (*fn)(void *), void *arg, int detached) {
     co->detached = detached;
     co->refs = detached ? 1 : 2;
     co_stack_new(co);
+    if (g_watch) {
+        pthread_mutex_lock(&g_all_lock);
+        co->serial = ++g_serial;
+        co->all_next = g_all;
+        if (g_all) g_all->all_prev = co;
+        g_all = co;
+        pthread_mutex_unlock(&g_all_lock);
+    }
     pthread_mutex_init(&co->m, NULL);
     pthread_cond_init(&co->c, NULL);
     uint32_t k = __atomic_fetch_add(&g_next_sched, 1, __ATOMIC_RELAXED);
@@ -783,9 +870,11 @@ static void co_join(mim_co *co) {
     if (t_co) {
         co_park(join_park, co);
     } else {
+        __atomic_fetch_add(&g_thread_joins, 1, __ATOMIC_RELAXED);
         pthread_mutex_lock(&co->m);
         while (!co->done) pthread_cond_wait(&co->c, &co->m);
         pthread_mutex_unlock(&co->m);
+        __atomic_fetch_sub(&g_thread_joins, 1, __ATOMIC_RELAXED);
     }
     co_drop(co);
 }
