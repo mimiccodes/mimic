@@ -1,7 +1,8 @@
 module ffi
 
-// C functions are declared in `extern "C"` blocks with C types. Calls need
-// `unsafe { }` unless the block is marked `trusted`.
+// C functions are declared in `extern "C"` blocks with C types, and called
+// through the namespace `c::`. Calls need `unsafe { }` unless the block is
+// marked `trusted`.
 trusted extern "C" {
     fn sqrt(x: f64) -> f64
 }
@@ -12,9 +13,9 @@ extern "C" {
 
 pub fn demo() {
     print(showcase::banner("ffi: calling C"))
-    print(sqrt(2.0))
+    print(c::sqrt(2.0))
     print(hypot(3.0, 4.0))
-    print(unsafe { strlen("mimic") })
+    print(unsafe { c::strlen("mimic") })
 }
 
-fn hypot(a: f64, b: f64) -> f64 { sqrt(a × a + b × b) }
+fn hypot(a: f64, b: f64) -> f64 { c::sqrt(a × a + b × b) }

@@ -371,11 +371,15 @@ impl Parser {
                 }
                 let mut fns = Vec::new();
                 let mut includes = Vec::new();
+                // `as sql`: the namespace its names live in (default `c::`)
+                let alias_of = |p: &mut Self| -> Result<Option<String>, Diag> { if p.eat(&Tok::As) { Ok(Some(p.ident()?.0)) } else { Ok(None) } };
                 // `extern "C" include "math.h"`: a whole header, no braces
                 if let Some(inc) = self.include_directive()? {
                     includes.push(inc);
-                    return Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, span: start }));
+                    let alias = alias_of(self)?;
+                    return Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, alias, span: start }));
                 }
+                let alias = alias_of(self)?;
                 self.expect(&Tok::LBrace)?;
                 loop {
                     self.skip_newlines();
@@ -420,7 +424,7 @@ impl Parser {
                     fns.push(ExternFn { name, is_pub: fpub, params, variadic, link_name: None, intrinsic, type_params, effects, overlap, sync, ret, span: fstart });
                 }
                 let trusted = trusted || intrinsic;
-                Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, span: start }))
+                Ok(Item::Extern(ExternBlock { abi, trusted, effect, fns, includes, is_pub, alias, span: start }))
             }
             other => Err(Diag::new(&C::UNEXPECTED_TOKEN, 
                 format!("expected an item (`fn`, `module`, `use`, `extern`), found {}", other.describe()),

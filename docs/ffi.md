@@ -19,6 +19,8 @@ Mimic's dtypes *are* C's dtypes, so calling C needs no wrapper types and passing
 
 ## Importing C functions (M1)
 
+Everything declared in an `extern "C"` block, written by hand or imported from a header, lives in the namespace **`c::`** of the module that declares it: `c::sqrt(2.0)`, `c::Vec2 { x: 1.0, y: 2.0 }`. Writing the namespace is required, so C calls are always visible in the code, and C names never collide with Mimic's (`c::abs` and `abs`, `c::div` and the `div` operator). Using a C name without it is error E0303, which says to write `c::name`. `extern "C" … as name` chooses another namespace. C++ will get `cpp::` the same way.
+
 ```mimic
 module main
 
@@ -33,8 +35,8 @@ extern "C" {
 }
 
 fn main() {
-    print(sqrt(2.0))                    // trusted: callable anywhere
-    print(unsafe { strlen("mimic") })   // untrusted: requires unsafe
+    print(c::sqrt(2.0))                    // trusted: callable anywhere
+    print(unsafe { c::strlen("mimic") })   // untrusted: requires unsafe
 }
 ```
 
@@ -80,7 +82,8 @@ extern "C" {
     fn my_extra(x: i32) -> i32           // hand-written declarations still work
 }
 
-pub extern "C" include "mylib.h"         // `pub`: the imported functions are public
+pub extern "C" include "mylib.h"         // `pub`: other modules reach them as `thismodule::c::…`
+extern "C" include "sqlite3.h" as sql    // its own namespace: `sql::sqlite3_open(…)`
 ```
 
 How the import works:
@@ -100,8 +103,8 @@ How the import works:
   | Typedefs | Resolved to what they stand for |
   | `struct vec2` by value (in a `trusted` import) | the record `Vec2`, see below |
 
-* **C names that Mimic reserves.** A C function, struct field or wrapper whose name is a Mimic keyword or the word form of a glyph gets a `_` after it: `div` from `stdlib.h` is `div_(17, 5)`, a field `type` is `t.type_`, a function `sum` is `sum_`. It still calls the C one. A declaration that cannot be written in Mimic at all is left out; the rest of the header still imports.
-* **Name clashes.** Names your module already defines win over imported ones: your functions, types, modules and hand-written externs. Each name is imported once, even if several headers declare it.
+* **The `c::` namespace.** Every function, record and wrapper that comes from C is reached through `c::` (or the block's `as` name). C names keep their spelling, including ones Mimic uses itself: `c::div(17, 5)` from `stdlib.h`, a struct field `t.type`, `c::sum` next to Mimic's `sum`. A wrapper that still cannot be written in Mimic is left out; the rest of the header imports.
+* **Name clashes.** Inside a namespace, hand-written declarations win over imported ones, and each name is imported once, even if several headers declare it. Names from C never clash with the module's own: they live in their namespace. A module of your own named `c` (or the `as` name) is an error.
 * **What is skipped, for now.** These functions are left out. They are not an error, and the reason is recorded:
 
   | Skipped | Reason |
@@ -131,10 +134,10 @@ trusted extern "C" include "cb.h"
 
 fn square(x: f64) -> f64 { x × x }
 
-integrate(square, 0.0, 3.0, 1000)            // a named function
+c::integrate(square, 0.0, 3.0, 1000)            // a named function
 let k = 10
-integrate(x => x + k, 0.0, 1.0, 10)          // a closure
-count_up(3, (i, ud) => print("visit {i}"), 0)
+c::integrate(x => x + k, 0.0, 1.0, 10)          // a closure
+c::count_up(3, (i, ud) => print("visit {i}"), 0)
 ```
 
 **How it works.** For each such function `mimic` generates a C *trampoline*: a function with the callback's exact signature that converts the C arguments to Mimic values, calls the Mimic function, and converts the result back. Clang compiles it for the target.
@@ -165,7 +168,7 @@ extern "C" {
     fn snprintf(buf: ptr[u8], n: usize, fmt: cstr, ...) -> i32
 }
 
-unsafe { printf("%s has %lld cores, pi ~ %.3f\n", "mimic", 12, 3.14159) }
+unsafe { c::printf("%s has %lld cores, pi ~ %.3f\n", "mimic", 12, 3.14159) }
 ```
 
 The extra arguments get C's default promotions:
@@ -197,8 +200,8 @@ rect_t mkrect(double x, double y, int w, int h);
 trusted extern "C" include "geo.h"
 
 fn main() {
-    print(vadd(Vec2 { x: 3.0, y: 4.0 }, Vec2 { x: 1.0, y: 1.0 }))  // Vec2 { x: 4.0, y: 5.0 }
-    let r = mkrect(1.5, 2.5, 640, 480)
+    print(c::vadd(c::Vec2 { x: 3.0, y: 4.0 }, c::Vec2 { x: 1.0, y: 1.0 }))  // Vec2 { x: 4.0, y: 5.0 }
+    let r = c::mkrect(1.5, 2.5, 640, 480)
     print(r.size.w * r.size.h)                                    // 307200
 }
 ```
@@ -232,15 +235,15 @@ extern "C" include "sqlite3.h"            // mim.mim: ffi { link = ["sqlite3"] }
 
 fn main() {
     let mut db_out = [0]                  // sqlite3 **: C writes the handle here
-    unsafe { sqlite3_open(":memory:", db_out) }
+    unsafe { c::sqlite3_open(":memory:", db_out) }
     let db = db_out[0]                    // a cptr
     let mut stmt_out = [0]
     let mut tail = [0]
-    unsafe { sqlite3_prepare_v2(db, "select 'mimic', 40 + 2", ¯1, stmt_out, tail) }
+    unsafe { c::sqlite3_prepare_v2(db, "select 'mimic', 40 + 2", ¯1, stmt_out, tail) }
     let stmt = stmt_out[0]
-    unsafe { sqlite3_step(stmt) }
-    print(unsafe { sqlite3_column_text(stmt, 0) })   // mimic
-    print(unsafe { sqlite3_column_int64(stmt, 1) })  // 42
+    unsafe { c::sqlite3_step(stmt) }
+    print(unsafe { c::sqlite3_column_text(stmt, 0) })   // mimic
+    print(unsafe { c::sqlite3_column_int64(stmt, 1) })  // 42
 }
 ```
 
@@ -253,7 +256,7 @@ A function declared `extern "C" fn` is a normal Mimic function that is also expo
 ```mimic
 module lib
 
-pub extern "C" fn mm_hypot(a: f64, b: f64) -> f64 { sqrt(a * a + b * b) }
+pub extern "C" fn mm_hypot(a: f64, b: f64) -> f64 { c::sqrt(a * a + b * b) }
 pub extern "C" fn mm_sum_to(n: i64) -> i64 { ⍳ n ▷ +/ }          // parallel inside
 pub extern "C" fn mm_greet(name: cstr) -> cstr { "hello, {name}" }
 ```

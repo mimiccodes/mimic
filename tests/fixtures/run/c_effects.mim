@@ -13,10 +13,10 @@ trusted extern "C" concurrent {
 
 trusted extern "C" ordered include "stdio.h"
 
-fn roots(xs: [f64]) -> [f64] { xs ¨ (x => sqrt(x)) }      // pure: parallel
+fn roots(xs: [f64]) -> [f64] { xs ¨ (x => c::sqrt(x)) }      // pure: parallel
 
 fn nap(ms: i64) -> i64 {
-    usleep(ms * 1000)
+    c::usleep(ms * 1000)
     ms
 }
 
@@ -26,6 +26,6 @@ fn main() {
     let b = nap(30)
     print(a + b)
     print([10 20 30] ¨ nap)                               // in parallel
-    puts("printed by C, in order")
+    c::puts("printed by C, in order")
     print("after C")
 }

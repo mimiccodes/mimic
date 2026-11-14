@@ -170,7 +170,7 @@ showcase/
 | Parallel `¨` for pure functions; ordered for impure ones | `compute.mim` | `[10 20 25] ¨ fib`, `⍳ 3 ¨ shout` |
 | Parallel array kernels | `compute.mim` | `big × 2 ▷ +/` over 5 million elements |
 | Static types with unboxed numbers | everywhere | `fn gcd(a: i64, b: i64) -> i64` |
-| C FFI | `ffi.mim` | `trusted extern "C" { fn sqrt(x: f64) -> f64 }` |
+| C FFI | `ffi.mim` | `trusted extern "C" { fn sqrt(x: f64) -> f64 }`, then `c::sqrt(2.0)` |
 | Union types and exhaustive `match` | `shapes.mim` | `Circle(r) => 3.14159 × r × r` |
 | Records and `with` | `shop.mim`, `web.mim` | `{ apple with qty: apple.qty + 5 }` |
 | Lists of records and strings | `shop.mim` | `cart[1].name`, `cart ¨ name_of` |

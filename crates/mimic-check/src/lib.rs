@@ -40,6 +40,9 @@ pub struct Module {
     pub file: Option<usize>,
     pub span: Span,
     pub full: Span,
+    /// A namespace of C declarations (`c::`, or an `as` name): its names are
+    /// always written with the namespace, so they shadow nothing.
+    pub foreign: bool,
 }
 
 pub enum FnKind {
@@ -330,6 +333,7 @@ impl Program {
             file,
             span,
             full,
+            foreign: false,
         });
         self.mods.len() - 1
     }
@@ -365,6 +369,8 @@ impl Program {
         // `lib` is the library entry point and is always public.
         let is_pub = decl.is_pub || (is_file_root && decl.name == "lib");
         let id = self.new_mod(decl.name.clone(), Some(parent), &pkg, is_pub, Some(file), decl.span, decl.full);
+        // the driver gathers every `extern "C"` block into its namespace module
+        self.mods[id].foreign = decl.items.iter().any(|i| matches!(i, Item::Extern(b) if b.abi == "C"));
         self.mods[parent].children.insert(decl.name.clone(), id);
         for item in &decl.items {
             match item {
@@ -436,7 +442,7 @@ impl Program {
         }
         // strict: no shadowing of functions from enclosing modules (the
         // standard library's modules are always used by path: `fs::remove`)
-        let mut cur = if self.mods[m].package == "std" { None } else { self.mods[m].parent };
+        let mut cur = if self.mods[m].package == "std" || self.mods[m].foreign { None } else { self.mods[m].parent };
         while let Some(a) = cur {
             if self.mods[a].fns.contains_key(name) {
                 diags.push(FileDiag {
@@ -610,6 +616,25 @@ impl Program {
         let Some(mut cur) = cur else {
             if quiet {
                 return Err(plain(&C::UNRESOLVED_NAME, String::new()));
+            }
+            // a C name written without its namespace: say where it is
+            let mut m = Some(from);
+            while let Some(here) = m {
+                for (ns, &child) in &self.mods[here].children {
+                    let c = &self.mods[child];
+                    if c.foreign && (c.fns.contains_key(first.as_str()) || c.types.contains_key(first.as_str())) {
+                        let mut fixed = path.to_vec();
+                        fixed.insert(0, ns.clone());
+                        return Err(ResolveError {
+                            code: &C::UNRESOLVED_NAME,
+                            msg: format!("cannot find `{first}` in this scope"),
+                            suggestion: Some(fixed.join("::")),
+                            private: None,
+                            note: Some(format!("`{first}` comes from C: names from C are written with their namespace, `{ns}::{first}`")),
+                        });
+                    }
+                }
+                m = self.mods[here].parent;
             }
             let names = self.visible_names(from);
             let suggestion = mimic_syntax::closest(first, names.iter().map(String::as_str)).map(|best| {

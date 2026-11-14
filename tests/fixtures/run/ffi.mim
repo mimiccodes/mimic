@@ -10,10 +10,10 @@ extern "C" {
 }
 
 fn main() {
-    print(sqrt(16.0))
-    print(self::abs(¯42))      // the C function; plain `abs` is the built-in
-    print(unsafe { strlen("mimic") })
+    print(c::sqrt(16.0))
+    print(c::abs(¯42))      // the C function; plain `abs` is the built-in
+    print(unsafe { c::strlen("mimic") })
     print([1.0 4.0 9.0] ¨ root)
 }
 
-fn root(x: f64) -> f64 { sqrt(x) }
+fn root(x: f64) -> f64 { c::sqrt(x) }

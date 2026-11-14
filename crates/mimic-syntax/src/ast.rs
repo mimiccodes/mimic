@@ -218,6 +218,9 @@ pub struct ExternBlock {
     pub includes: Vec<(String, Span)>,
     /// `pub extern …`: imported declarations are public.
     pub is_pub: bool,
+    /// `extern "C" include "sqlite3.h" as sql`: the namespace the names live
+    /// in (`sql::…`); `c::` when not given.
+    pub alias: Option<String>,
     pub span: Span,
 }
 

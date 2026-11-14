@@ -103,7 +103,7 @@ fn check_fix() {
     let f = dir.join("fixme.mim");
     std::fs::write(
         &f,
-        "module main\n\nmodule util {\n    fn double(x) { x * 2 }\n}\n\nextern \"C\" { fn puts(s: cstr) -> i32 }\n\nfn main() {\n    let n = 1\n    n = util::double(n)\n    puts(\"hi\")\n    print(n)\n}\n",
+        "module main\n\nmodule util {\n    fn double(x) { x * 2 }\n}\n\nextern \"C\" { fn puts(s: cstr) -> i32 }\n\nfn main() {\n    let n = 1\n    n = util::double(n)\n    c::puts(\"hi\")\n    print(n)\n}\n",
     )
     .unwrap();
     let out = mimic().args(["check", "--fix", "--emit-json"]).arg(&f).output().unwrap();
@@ -113,7 +113,7 @@ fn check_fix() {
     let fixed = std::fs::read_to_string(&f).unwrap();
     assert!(fixed.contains("    pub fn double(x)"), "{fixed}");
     assert!(fixed.contains("    let mut n = 1"), "{fixed}");
-    assert!(fixed.contains("    unsafe { puts(\"hi\") }"), "{fixed}");
+    assert!(fixed.contains("    unsafe { c::puts(\"hi\") }"), "{fixed}");
     let out = mimic().arg("run").arg(&f).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n2\n");
     std::fs::remove_dir_all(&dir).unwrap();
@@ -557,16 +557,16 @@ extern "C" include "sqlite3.h"
 
 fn main() {
     let mut db_out = [0]
-    print(unsafe { sqlite3_open(":memory:", db_out) })
+    print(unsafe { c::sqlite3_open(":memory:", db_out) })
     let db = db_out[0]
     let mut stmt_out = [0]
     let mut tail = [0]
-    print(unsafe { sqlite3_prepare_v2(db, "select 'mimic', 40 + 2", ¯1, stmt_out, tail) })
+    print(unsafe { c::sqlite3_prepare_v2(db, "select 'mimic', 40 + 2", ¯1, stmt_out, tail) })
     let stmt = stmt_out[0]
-    print(unsafe { sqlite3_step(stmt) })
-    print(unsafe { sqlite3_column_text(stmt, 0) })
-    print(unsafe { sqlite3_column_int64(stmt, 1) })
-    print(unsafe { sqlite3_finalize(stmt) } + unsafe { sqlite3_close(db) })
+    print(unsafe { c::sqlite3_step(stmt) })
+    print(unsafe { c::sqlite3_column_text(stmt, 0) })
+    print(unsafe { c::sqlite3_column_int64(stmt, 1) })
+    print(unsafe { c::sqlite3_finalize(stmt) } + unsafe { c::sqlite3_close(db) })
 }
 "#,
     )
@@ -596,7 +596,7 @@ fn c_sources_in_project() {
     std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/vec.c\"]\n    include = [\"c\"]")).unwrap();
     std::fs::write(
         proj.join("src/main.mim"),
-        "module main\n\ntrusted extern \"C\" include \"vec.h\"\n\nfn main() {\n    print(dot([1.0 2.0 3.0], [4.0 5.0 6.0], 3))\n    print(greeting())\n}\n",
+        "module main\n\ntrusted extern \"C\" include \"vec.h\"\n\nfn main() {\n    print(c::dot([1.0 2.0 3.0], [4.0 5.0 6.0], 3))\n    print(c::greeting())\n}\n",
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();
@@ -635,8 +635,8 @@ fn c_structs_by_value() {
     std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/geo.c\"]\n    include = [\"c\"]")).unwrap();
     std::fs::write(
         proj.join("src/main.mim"),
-        "module main\n\ntrusted extern \"C\" include \"geo.h\"\n\nfn main() {\n    print(vlen(Vec2 { x: 3.0, y: 4.0 }))\n    print(vadd(Vec2 { x: 3.0, y: 4.0 }, Vec2 { x: 1.0, y: 1.0 }))\n\
-         \n    let r = mkrect(1.5, 2.5, 640, 480)\n    print(r)\n    print(area(r))\n}\n",
+        "module main\n\ntrusted extern \"C\" include \"geo.h\"\n\nfn main() {\n    print(c::vlen(c::Vec2 { x: 3.0, y: 4.0 }))\n    print(c::vadd(c::Vec2 { x: 3.0, y: 4.0 }, c::Vec2 { x: 1.0, y: 1.0 }))\n\
+         \n    let r = c::mkrect(1.5, 2.5, 640, 480)\n    print(r)\n    print(c::area(r))\n}\n",
     )
     .unwrap();
     let want = "5.0\nVec2 { x: 4.0, y: 5.0 }\nRect { origin: Vec2 { x: 1.5, y: 2.5 }, size: Size2 { w: 640, h: 480 }, flags: 7 }\n307200\n";
@@ -649,8 +649,8 @@ fn c_structs_by_value() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// C names that are Mimic keywords or glyph words get a `_` (`div_`, a field
-/// `type_`); the rest of the header still imports (stdlib.h has `div`).
+/// C names keep their spelling under `c::`, keywords and glyph words too
+/// (`c::div` from stdlib.h, a field `t.type`, `c::sum`), next to Mimic's own.
 #[test]
 fn c_reserved_names() {
     let dir = std::env::temp_dir().join(format!("mimic-golden-creserved-{}", std::process::id()));
@@ -679,12 +679,12 @@ int take(int n);
     std::fs::write(
         proj.join("src/main.mim"),
         "module main\n\ntrusted extern \"C\" include \"kw.h\"\ntrusted extern \"C\" include \"stdlib.h\"\n\n\
-         fn main() {\n    let t = next(4)\n    print((t.type_, t.match_))\n    print(sum_(2, 3))\n    print(take_(21))\n\
-             let d = div_(17, 5)\n    print((d.quot, d.rem))\n    print(abs(¯3))\n}\n",
+         fn main() {\n    let t = c::next(4)\n    print((t.type, t.match))\n    print(c::sum(2, 3))\n    print(c::take(21))\n\
+             let d = c::div(17, 5)\n    print((d.quot, d.rem))\n    print(c::abs(¯3))\n    print([1 2 3] ▷ sum)\n}\n",
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "(5, 7)\n5\n42\n(3, 2)\n3\n", "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "(5, 7)\n5\n42\n(3, 2)\n3\n6\n", "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -700,7 +700,7 @@ fn export_to_c() {
     std::fs::write(
         proj.join("src/lib.mim"),
         "module lib\n\ntrusted extern \"C\" include \"math.h\"\n\n\
-         pub extern \"C\" fn mm_hypot(a: f64, b: f64) -> f64 { sqrt(a * a + b * b) }\n\
+         pub extern \"C\" fn mm_hypot(a: f64, b: f64) -> f64 { c::sqrt(a * a + b * b) }\n\
          pub extern \"C\" fn mm_sum_to(n: i64) -> i64 { ⍳ n ▷ +/ }\n\
          pub extern \"C\" fn mm_is_even(n: i64) -> bool { n % 2 == 0 }\n\
          pub extern \"C\" fn mm_greet(name: cstr) -> cstr { \"hello, {name}\" }\n",
@@ -818,9 +818,9 @@ fn c_callbacks() {
     std::fs::write(
         proj.join("src/main.mim"),
         "module main\n\nextern \"C\" include \"cb.h\"\n\nfn square(x: f64) -> f64 { x × x }\n\nfn main() {\n\
-         \x20   print(unsafe { integrate(x => 2.0 × x, 0.0, 1.0, 10) })\n    let k = 10\n    print(unsafe { apply_twice(x => x + k, 1) })\n\
-         \x20   unsafe { count_up(3, (i, ud) => print(\"visit {i}\"), 0) }\n    print(unsafe { sum_mapped(4, i => unsafe { apply_twice(j => j × 2, i) }) })\n\
-         \x20   print(unsafe { integrate(square, 0.0, 1.0, 4) })\n}\n",
+         \x20   print(unsafe { c::integrate(x => 2.0 × x, 0.0, 1.0, 10) })\n    let k = 10\n    print(unsafe { c::apply_twice(x => x + k, 1) })\n\
+         \x20   unsafe { c::count_up(3, (i, ud) => print(\"visit {i}\"), 0) }\n    print(unsafe { c::sum_mapped(4, i => unsafe { c::apply_twice(j => j × 2, i) }) })\n\
+         \x20   print(unsafe { c::integrate(square, 0.0, 1.0, 4) })\n}\n",
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();

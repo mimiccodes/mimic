@@ -188,13 +188,6 @@ struct Lexer<'a> {
     out: Vec<Token>,
 }
 
-/// Does `w` read as a plain name? Keywords (`div`, `match`, `type`, …) and
-/// the word forms of glyphs (`sum`, `take`, …) do not: names coming from
-/// elsewhere (C headers) that are one of those need another spelling.
-pub fn is_plain_name(w: &str) -> bool {
-    matches!(lex(w).as_deref(), Ok([Token { tok: Tok::Ident(n), .. }, Token { tok: Tok::Eof, .. }]) if n == w)
-}
-
 fn keyword(w: &str) -> Option<Tok> {
     Some(match w {
         "module" => Tok::Module,
@@ -448,7 +441,16 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 let w = &self.src[start.start..self.pos];
-                if let Some(k) = keyword(w) {
+                // Where only a name can stand, any word is one: after `::`
+                // (`c::div`), after `.` (`t.type`), after `fn`, and before a
+                // single `:` (a field: `{ type: 1 }`). C names keep their
+                // spelling under `c::` that way.
+                let rest = self.src[self.pos..].trim_start_matches([' ', '\t']);
+                let name_only = matches!(self.out.last().map(|t| &t.tok), Some(Tok::PathSep | Tok::Dot | Tok::Fn))
+                    || (rest.starts_with(':') && !rest.starts_with("::") && !matches!(w, "true" | "false"));
+                if name_only {
+                    Tok::Ident(w.to_string())
+                } else if let Some(k) = keyword(w) {
                     k
                 } else if let Some(p) = Prim::from_word(w) {
                     Tok::Prim(p)
@@ -656,14 +658,6 @@ mod tests {
 
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().into_iter().map(|t| t.tok).collect()
-    }
-
-    #[test]
-    fn plain_names() {
-        assert!(is_plain_name("printf") && is_plain_name("abs_2"));
-        for w in ["div", "match", "type", "with", "sum", "take", "not"] {
-            assert!(!is_plain_name(w), "{w}");
-        }
     }
 
     #[test]

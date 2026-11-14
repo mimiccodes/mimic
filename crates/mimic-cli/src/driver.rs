@@ -771,11 +771,14 @@ fn header_dirs(input: &Input, file: Option<&Path>) -> Vec<PathBuf> {
 }
 
 /// Fill `extern "C" include` blocks (in every module, nested ones too) with the
-/// functions the header makes visible. Names the module already defines (its
-/// own functions, types, modules, hand-written externs) win over imported ones.
-/// Functions taking or returning structs by value get generated Mimic wrappers
-/// (added to the module) and C wrappers (collected in `wrappers`); they are
-/// only generated for `trusted` imports, since the wrapper hides the C call.
+/// functions the header makes visible, and put everything that comes from C
+/// in its own namespace: each module's `extern "C"` blocks (imported and
+/// hand-written functions alike), the records of C structs and their
+/// wrappers move into a nested module `c` (or the block's `as` name), so C
+/// names are always written `c::printf`, `c::Vec2`, and never collide with
+/// Mimic's own. Functions taking or returning structs by value get generated
+/// Mimic wrappers and C wrappers (collected in `wrappers`); they are only
+/// generated for `trusted` imports, since the wrapper hides the C call.
 fn import_headers(
     items: &mut Vec<mimic_syntax::ast::Item>,
     dirs: &[PathBuf],
@@ -783,34 +786,30 @@ fn import_headers(
     errs: &mut Vec<(String, mimic_syntax::Span)>,
     wrappers: &mut Vec<String>,
 ) {
-    use mimic_syntax::ast::Item;
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+    use mimic_syntax::ast::{Item, ModuleDecl};
+    use std::collections::{BTreeMap, HashSet};
+    let ns_of = |b: &mimic_syntax::ast::ExternBlock| b.alias.clone().unwrap_or_else(|| "c".to_string());
+    // per namespace: the names it has (hand-written declarations win over
+    // imported ones; each name is imported once) and its generated Mimic code
+    let mut taken: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    let mut generated: BTreeMap<String, String> = BTreeMap::new();
     for item in items.iter() {
-        match item {
-            Item::Fn(f) => {
-                taken.insert(f.name.clone());
-            }
-            Item::Type(t) => {
-                taken.insert(t.name.clone());
-            }
-            Item::Module(m) => {
-                taken.insert(m.name.clone());
-            }
-            Item::Use(u) => {
-                taken.insert(u.alias.clone().unwrap_or_else(|| u.path.last().cloned().unwrap_or_default()));
-            }
-            Item::Extern(b) => taken.extend(b.fns.iter().map(|f| f.name.clone())),
+        if let Item::Extern(b) = item
+            && b.abi == "C"
+        {
+            taken.entry(ns_of(b)).or_default().extend(b.fns.iter().map(|f| f.name.clone()));
         }
     }
-    let mut generated = String::new();
     for item in items.iter_mut() {
         match item {
             Item::Module(m) => import_headers(&mut m.items, dirs, target, errs, wrappers),
             Item::Extern(b) if !b.includes.is_empty() => {
+                let ns = ns_of(b);
+                let taken = taken.entry(ns.clone()).or_default();
                 for (header, span) in b.includes.clone() {
                     match crate::cimport::import(&header, dirs, target) {
                         Ok(imp) => {
-                            for f in imp.extern_fns(b.is_pub, b.effect, span) {
+                            for f in imp.extern_fns(true, b.effect, span) {
                                 if taken.insert(f.name.clone()) {
                                     b.fns.push(f);
                                 }
@@ -822,11 +821,10 @@ fn import_headers(
                             if !b.trusted {
                                 continue; // struct wrappers hide the unsafe call: trusted imports only
                             }
-                            let pubkw = if b.is_pub { "pub " } else { "" };
+                            let generated = generated.entry(ns.clone()).or_default();
                             let mut c = String::new();
                             for f in &imp.struct_fns {
-                                // a wrapper that does not parse (a C name no
-                                // spelling fits) is left out, not the header
+                                // a wrapper that does not parse is left out, not the header
                                 let alone: String = f.uses.iter().map(|r| format!("{}\n", imp.records[r])).collect::<String>() + &f.mimic;
                                 if mimic_syntax::parser::parse_file(&format!("module generated\n{}", alone.replace("PUB ", ""))).is_err() {
                                     continue;
@@ -838,11 +836,11 @@ fn import_headers(
                                     let decl = &imp.records[r];
                                     let tname = decl.split_whitespace().nth(2).unwrap_or("").to_string();
                                     if taken.insert(tname) {
-                                        generated.push_str(&decl.replacen("PUB ", pubkw, 1));
+                                        generated.push_str(&decl.replacen("PUB ", "pub ", 1));
                                         generated.push('\n');
                                     }
                                 }
-                                generated.push_str(&f.mimic.replace("PUB ", pubkw));
+                                generated.push_str(&f.mimic.replace("PUB ", "pub "));
                                 c.push_str(&f.c);
                             }
                             if !c.is_empty() {
@@ -856,11 +854,43 @@ fn import_headers(
             _ => {}
         }
     }
-    if !generated.is_empty() {
-        match mimic_syntax::parser::parse_file(&format!("module generated\n{generated}")) {
-            Ok(f) => items.extend(f.module.items),
-            Err(d) => errs.push((format!("internal error in generated C bindings: {}\n{generated}", d.msg), d.span)),
+    // the namespaces: every `extern "C"` block of this scope moves into one
+    let mut spaces: BTreeMap<String, ModuleDecl> = BTreeMap::new();
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        match item {
+            Item::Extern(mut b) if b.abi == "C" => {
+                let ns = ns_of(&b);
+                let m = spaces.entry(ns.clone()).or_insert_with(|| ModuleDecl { name: ns, is_pub: false, items: Vec::new(), span: b.span, full: b.span });
+                m.is_pub |= b.is_pub; // `pub extern`: `lib::c::…` from other modules
+                for f in &mut b.fns {
+                    f.is_pub = true; // visible to the module that imported it
+                }
+                m.items.push(Item::Extern(b));
+            }
+            other => kept.push(other),
         }
+    }
+    *items = kept;
+    for (ns, code) in generated {
+        if code.is_empty() {
+            continue;
+        }
+        match mimic_syntax::parser::parse_file(&format!("module generated\n{code}")) {
+            Ok(f) => {
+                if let Some(m) = spaces.get_mut(&ns) {
+                    m.items.extend(f.module.items);
+                }
+            }
+            Err(d) => errs.push((format!("internal error in generated C bindings: {}\n{code}", d.msg), d.span)),
+        }
+    }
+    for (ns, m) in spaces {
+        if let Some(Item::Module(own)) = items.iter().find(|i| matches!(i, Item::Module(o) if o.name == ns)) {
+            errs.push((format!("`{ns}` is the namespace of the C functions imported here (`{ns}::…`): rename this module, or import with `as` another name"), own.span));
+            continue;
+        }
+        items.push(Item::Module(m));
     }
 }
 

@@ -4,9 +4,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Changed (breaking)
+- **Everything from C is written with the namespace `c::`:** `c::printf(…)`, `c::sqrt(2.0)`, `c::Vec2 { … }`, for functions from `extern "C"` blocks, imported headers and C struct records alike. It is required, so C code is always visible, and C names never collide with Mimic's (`c::abs` next to `abs`, `c::div` next to the `div` operator). `extern "C" include "sqlite3.h" as sql` picks another namespace. A C name used without it is error E0303 with the fix (`did you mean c::floor?`). C++ will use `cpp::`. To update code: put `c::` before each C function and struct name.
+
 ### Fixed
 - `"\033"` and other C octal escapes were read as NUL followed by digits, silently; they are now an error that suggests `\x1b`.
-- Importing a C header failed when it declared a name Mimic reserves (`div` in `stdlib.h`, a field `type`, a function `sum`). Such names get a `_` (`div_`, `t.type_`), and a declaration that cannot be written in Mimic is left out instead of failing the import.
+- Importing a C header failed when it declared a name Mimic uses itself (`div` in `stdlib.h`, a field `type`, a function `sum`). Under `c::` (below) they keep their C spelling; a wrapper that cannot be written in Mimic is left out instead of failing the import.
 
 ### Added
 - String escapes `\x1b` (an ASCII character by two hex digits) and `\u{1F600}` (any Unicode character), so terminal colour and cursor codes can be written.

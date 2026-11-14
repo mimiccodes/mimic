@@ -8,6 +8,8 @@ order: 12
 
 Mimic's number types are C's number types, so calling C needs no wrappers and arrays cross the boundary without copying.
 
+Everything that comes from C lives in the namespace `c::`: you write `c::sqrt(2.0)`, `c::printf(…)`, `c::Vec2 { … }`. So C code is always easy to spot, and C names never collide with Mimic's own: `c::abs` and Mimic's `abs`, `c::div` and the `div` operator, all work side by side.
+
 ## Declaring C functions
 
 ```mimic run
@@ -24,9 +26,9 @@ extern "C" {
 }
 
 fn main() {
-    print(sqrt(2.0))
-    print(abs(-7))
-    print(unsafe { strlen("mimic") })   // untrusted: needs `unsafe`
+    print(c::sqrt(2.0))
+    print(c::abs(-7))
+    print(unsafe { c::strlen("mimic") })   // untrusted: needs `unsafe`
 }
 ```
 
@@ -48,9 +50,9 @@ module main
 trusted extern "C" include "math.h"
 
 fn main() {
-    print(floor(2.7))
-    print(pow(2.0, 10.0))
-    print(hypot(3.0, 4.0))
+    print(c::floor(2.7))
+    print(c::pow(2.0, 10.0))
+    print(c::hypot(3.0, 4.0))
 }
 ```
 
@@ -65,7 +67,8 @@ How the import works:
 * **Your own headers.** Put them next to your source, or list their folders in `mim.mim` under `ffi { include = [...] }`.
 * **Your own C code.** List C files under `ffi { sources = [...] }`. They are compiled into your program for every target.
 * **Libraries to link.** Name them under `ffi { link = ["sqlite3"] }`.
-* **C names that are Mimic words.** A C name that Mimic uses itself, such as `div` in `stdlib.h` or a struct field called `type`, gets a `_` after it: `div_(17, 5)`, `t.type_`.
+* **Every name keeps its C spelling.** After `c::` and `.` any name works, even ones Mimic uses itself: `c::div(17, 5)` from `stdlib.h`, a struct field `t.type`.
+* **Another namespace.** `include "sqlite3.h" as sql` puts the header's names under `sql::` instead: `sql::sqlite3_open(…)`.
 
 ## Type mapping
 
@@ -82,16 +85,16 @@ How the import works:
 ## Structs, varargs and callbacks
 
 When the header is imported with `trusted`:
-* **Structs by value.** A C `struct vec2` becomes a Mimic record `Vec2`, and you pass and receive it as one.
+* **Structs by value.** A C `struct vec2` becomes a Mimic record `c::Vec2`, and you pass and receive it as one.
 * **Varargs.** Variadic functions like `printf` work. Pass integers to `%lld`, because Mimic integers are 64-bit.
 * **Callbacks.** A C parameter that takes a function pointer accepts any Mimic function: a named function, a lambda or a closure. C must call it before the call returns; C may not keep it for later.
 
 ```mimic
 trusted extern "C" include "integrate.h"
 
-integrate(x => x * x, 0.0, 3.0, 1000)      // pass a lambda to C
+c::integrate(x => x * x, 0.0, 3.0, 1000)      // pass a lambda to C
 let k = 10
-apply_twice(x => x + k, 1)                 // a closure works too
+c::apply_twice(x => x + k, 1)                 // a closure works too
 ```
 
 ## Telling Mimic what C functions do
@@ -110,12 +113,12 @@ trusted extern "C" concurrent {          // waits, but changes nothing others re
 }
 
 fn nap(ms: i64) -> i64 {
-    usleep(ms * 1000)
+    c::usleep(ms * 1000)
     ms
 }
 
 fn main() {
-    print([1.0 4.0 9.0] ¨ (x => sqrt(x)))   // pure: in parallel
+    print([1.0 4.0 9.0] ¨ (x => c::sqrt(x)))   // pure: in parallel
     let start = time::clock()
     let a = nap(300)                         // concurrent: both naps overlap
     let b = nap(300)

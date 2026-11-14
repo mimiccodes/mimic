@@ -6,8 +6,8 @@ module main
 extern "C" include "stdio.h"
 
 fn main() {
-    unsafe { printf("%s has %lld cores\n", "mimic", 12) }
-    unsafe { printf("pi ~ %.3f, big %lld, neg %lld\n", 3.14159, 9000000000, ¯5) }
-    unsafe { printf("flag %d, text %s\n", true, "ok") }
+    unsafe { c::printf("%s has %lld cores\n", "mimic", 12) }
+    unsafe { c::printf("pi ~ %.3f, big %lld, neg %lld\n", 3.14159, 9000000000, ¯5) }
+    unsafe { c::printf("flag %d, text %s\n", true, "ok") }
     print("after printf")
 }

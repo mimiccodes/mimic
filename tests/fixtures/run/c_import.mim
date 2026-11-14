@@ -9,13 +9,13 @@ extern "C" {
     fn strlen(s: cstr) -> usize      // hand-written declarations work alongside
 }
 
-fn hyp(a: f64, b: f64) -> f64 { sqrt(a * a + b * b) }
+fn hyp(a: f64, b: f64) -> f64 { c::sqrt(a * a + b * b) }
 
 fn main() {
     print(hyp(3.0, 4.0))
-    print(pow(2.0, 10.0))
-    print(floor(2.7) + ceil(2.2))
-    print(fmax(1.5, ¯2.0))
-    print(unsafe { labs(¯42) })
-    print(unsafe { strlen("mimic") })
+    print(c::pow(2.0, 10.0))
+    print(c::floor(2.7) + c::ceil(2.2))
+    print(c::fmax(1.5, ¯2.0))
+    print(unsafe { c::labs(¯42) })
+    print(unsafe { c::strlen("mimic") })
 }
