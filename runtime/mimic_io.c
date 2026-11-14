@@ -644,7 +644,9 @@ static mim_val *impl_seed_random(mim_val *seed) {
 /* ---- processes ---------------------------------------------------------- */
 
 static mim_val *impl_pid(void) {
-#if defined(_WIN32) || defined(__wasi__)
+#if defined(_WIN32)
+    return mim_int((int64_t)GetCurrentProcessId());
+#elif defined(__wasi__)
     return mim_int(0);
 #else
     return mim_int((int64_t)getpid());

@@ -10,10 +10,13 @@
 
 extern const mim_desc mim_desc_tcp_Socket, mim_desc_tcp_Listener, mim_desc_http_Request, mim_desc_http_Response;
 
+static const char *sock_strerror(int e);
+
 static mim_val *err_errno(const char *what, const char *detail) {
+    int e = errno;
     char buf[512];
-    if (detail) snprintf(buf, sizeof buf, "%s %s: %s", what, detail, strerror(errno));
-    else snprintf(buf, sizeof buf, "%s: %s", what, strerror(errno));
+    if (detail) snprintf(buf, sizeof buf, "%s %s: %s", what, detail, sock_strerror(e));
+    else snprintf(buf, sizeof buf, "%s: %s", what, sock_strerror(e));
     return err_of(buf);
 }
 
@@ -52,7 +55,7 @@ static int ws_errno(void) {
     case WSAEACCES: return EACCES;
     case WSAEMSGSIZE: return EMSGSIZE;
     case WSAESHUTDOWN: return EPIPE;
-    default: return EIO;
+    default: return WSAGetLastError(); /* ≥ 10000: no errno value collides */
     }
 }
 
@@ -71,7 +74,15 @@ static const char *ws_strerror(int e) {
     case ENOTCONN: return "Socket is not connected";
     case EPIPE: return "Broken pipe";
     case EMSGSIZE: return "Message too long";
-    default: return strerror(e);
+    default:
+        if (e >= WSABASEERR) { /* Windows' own words for the rest */
+            static _Thread_local char msg[256];
+            DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, (DWORD)e, 0, msg, sizeof msg, NULL);
+            while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r' || msg[n - 1] == '.')) msg[--n] = 0;
+            if (n == 0) snprintf(msg, sizeof msg, "Windows socket error %d", e);
+            return msg;
+        }
+        return strerror(e);
     }
 }
 
@@ -138,6 +149,22 @@ static ssize_t msendto(int fd, const void *buf, size_t n, const struct sockaddr 
 #define getaddrinfo mw_getaddrinfo
 #define strerror ws_strerror
 #define SHUT_WR SD_SEND
+#endif
+
+static const char *sock_strerror(int e) { return strerror(e); }
+
+#ifndef MIM_NO_SOCKETS
+/* Let a new listener take a port that closed connections still hold. On
+ * Windows that is already so, and SO_REUSEADDR would instead let a second
+ * socket share a port in use: there the port is claimed exclusively. */
+static void reuse_port(int fd) {
+    int one = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, &one, sizeof one);
+#else
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#endif
+}
 #endif
 
 #ifdef MIM_NO_SOCKETS
@@ -318,8 +345,7 @@ mim_val *mim_std_tcp_connect(mim_val *host, mim_val *port) {
 mim_val *mim_std_tcp_listen(mim_val *port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return err_errno("cannot listen", NULL);
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    reuse_port(fd);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -2956,7 +2982,7 @@ mim_val *mim_std_udp_bind(mim_val *port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return err_errno("cannot open a UDP socket", NULL);
     int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    reuse_port(fd);
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
