@@ -978,6 +978,10 @@ static void win_start(int32_t *argc, char ***argv) {
     _setmode(_fileno(stderr), _O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
     SetConsoleOutputCP(CP_UTF8);
+    /* ANSI escape codes (colours, cursor moves) on the console, as on Unix */
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode;
+    if (out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode)) SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     if (*argc <= 0) return;
     int n = 0;
     wchar_t **w = CommandLineToArgvW(GetCommandLineW(), &n);

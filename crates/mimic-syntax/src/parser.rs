@@ -1354,7 +1354,17 @@ impl Parser {
                     match p {
                         StrPart::Text(t) => out.push(InterpPart::Text(t)),
                         StrPart::Code(c) => {
-                            let mut e = parse_expr(&c).map_err(|d| Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {}", d.msg), span))?;
+                            // `{x:.2}`: a format after a single `:` at the top level
+                            let (code, spec) = split_format_spec(&c);
+                            let mut e = match spec {
+                                Some(spec) => {
+                                    check_format_spec(spec).map_err(|why| Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {why}"), span))?;
+                                    let quoted: String = spec.chars().map(|ch| if matches!(ch, '"' | '\\' | '{' | '}') { format!("\\{ch}") } else { ch.to_string() }).collect();
+                                    parse_expr(&format!("std::prelude::format({code}, \"{quoted}\")"))
+                                }
+                                None => parse_expr(&c),
+                            }
+                            .map_err(|d| Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {}", d.msg), span))?;
                             respan(&mut e, span);
                             out.push(InterpPart::Expr(e));
                         }
@@ -2029,4 +2039,75 @@ fn main() {
         assert_eq!(targs("handlers[k](x)"), Some(0)); // indexing, then a call
         assert_eq!(targs("xs[i]"), None);
     }
+}
+
+/// `x:.2` → (`x`, Some(`.2`)): the format of an interpolation, after a `:`
+/// that is alone (not `::`) and outside brackets, braces, parentheses and
+/// strings (so `{c::x}`, `{f(size: 3)}` and `{P { x: 1 }}` have none).
+fn split_format_spec(code: &str) -> (&str, Option<&str>) {
+    let b = code.as_bytes();
+    let (mut depth, mut quote) = (0i32, None::<u8>);
+    for i in 0..b.len() {
+        let ch = b[i];
+        if let Some(q) = quote {
+            if ch == b'\\' {
+                continue;
+            }
+            if ch == q && (i == 0 || b[i - 1] != b'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            b'"' | b'\'' => quote = Some(ch),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b':' if depth == 0 && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':') => {
+                return (&code[..i], Some(&code[i + 1..]));
+            }
+            _ => {}
+        }
+    }
+    (code, None)
+}
+
+/// The same grammar as the runtime's `format` (runtime/mimic_std.c):
+/// `[[fill]align][sign][#][0][width][,|_][.precision][type]`.
+fn check_format_spec(spec: &str) -> Result<(), String> {
+    let s: Vec<char> = spec.chars().collect();
+    let mut i = 0;
+    if s.len() > 1 && "<>^".contains(s[1]) {
+        i = 2;
+    } else if !s.is_empty() && "<>^".contains(s[0]) {
+        i = 1;
+    }
+    if i < s.len() && "+- ".contains(s[i]) {
+        i += 1;
+    }
+    if i < s.len() && s[i] == '#' {
+        i += 1;
+    }
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < s.len() && (s[i] == ',' || s[i] == '_') {
+        i += 1;
+    }
+    if i < s.len() && s[i] == '.' {
+        i += 1;
+        if i >= s.len() || !s[i].is_ascii_digit() {
+            return Err("a precision after `.`, as in `.2`".into());
+        }
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i < s.len() && "xXobeEf%sd".contains(s[i]) {
+        i += 1;
+    }
+    if i != s.len() {
+        let rest: String = s[i..].iter().collect();
+        return Err(format!("`{rest}` is not part of a format (as in `>8`, `05`, `.2`, `x`, `+,.3f`)"));
+    }
+    Ok(())
 }

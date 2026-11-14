@@ -231,6 +231,53 @@ let config = fs::read("app.conf") else {
 }
 ```
 
+### The terminal
+
+`print` always ends the line. `io::write(x)` does not, so you can build a line piece by piece or redraw a progress bar in place:
+
+```mimic
+fn progress(done: i64, total: i64) {
+    let width = 30
+    let filled = done * width div total
+    io::write("\r[" + repeat("#", filled) + repeat(" ", width - filled) + "] {done * 100 div total}%")
+}
+```
+
+On a terminal, `io::write` shows its text at once. When output goes to a file or a pipe, call `io::flush()` when it must appear.
+
+The `term` module covers full-screen programs such as games and editors:
+
+```mimic
+module main
+
+fn game(x: i64) -> i64 {
+    term::clear()
+    term::move_to(x, 5)
+    io::write("\x1b[1;32m@\x1b[0m")          // a green @
+    match term::read_key() {
+        Some("left") => game(x - 1),
+        Some("right") => game(x + 1),
+        Some("q") => x,
+        _ => game(x),
+    }
+}
+
+fn main() {
+    let raw = term::raw(true) else { return }   // keys one at a time, no echo
+    term::alternate_screen(true)
+    term::show_cursor(false)
+    let x = game(10)
+    term::alternate_screen(false)
+    print("stopped at {x}")
+}                                            // the terminal is restored at exit
+```
+
+* `term::read_key()` returns a word for special keys (`"up"`, `"enter"`, `"escape"`, `"ctrl-a"`, …) or the character typed.
+* `term::size()` gives the columns and rows.
+* `os::on_interrupt(() => …)` runs a function when Ctrl-C is pressed, instead of stopping the program.
+
+All of this works on Windows too.
+
 ## Time
 
 `time::now()` is the current time and `time::clock()` is a stopwatch. Both count nanoseconds, so they mix with duration literals like `250ms` and `2s`:

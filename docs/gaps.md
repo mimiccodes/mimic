@@ -10,32 +10,15 @@ Several things that look missing exist under another name, or are left out on pu
 |---|---|
 | String escape for ESC and other control characters (`\x1b`, `\u{…}`); `\033` was silently misread | ✅ fixed |
 | `include "stdlib.h"` failed: C's `div` clashes with the `div` operator | ✅ fixed (names from C live under `c::`) |
-| `print` cannot write without a newline, and output cannot be flushed (terminal games, progress bars) | 0.2.6 |
+| `print` cannot write without a newline, and output cannot be flushed (terminal games, progress bars) | ✅ `io::write`, `io::flush`, the `term` module |
 
-## Terminal and console (0.2.6)
+## Terminal and console ✅ (0.2.6)
 
-| Gap | Today |
-|---|---|
-| `io::write(text)`: write without a newline | Only `print`, which adds one |
-| `io::flush()` | Output is flushed at exit, before reading stdin, and by `eprint` |
-| `io::read_char()` / `io::read_key()`: one key, without waiting for Enter | Only whole lines (`io::read_line`) |
-| `io::read_bytes(n)` from stdin | Only text |
-| `term::raw(on)`: raw mode (no echo, no line editing) | Needs termios from C, which cannot be imported yet (see C interop) |
-| `term::size()`: columns and rows | Needs `ioctl(TIOCGWINSZ)` from C, which cannot be imported yet |
-| `term::is_terminal(stream)` | None |
-| Ctrl-C: `os::on_interrupt(f)` | The program ends at once |
+Closed: `io::write`, `io::flush`, `io::read_char`, `io::read_bytes`; the `term` module (`raw`, `read_key`, `size`, `is_terminal`, `clear`, `move_to`, `show_cursor`, `alternate_screen`, all undone at exit); `os::on_interrupt`. Golden test `text_format`; raw mode and keys checked in a pseudo-terminal.
 
-## Text and numbers (0.2.6)
+## Text and numbers ✅ (0.2.6)
 
-| Gap | Today |
-|---|---|
-| Character codes: `char_code("A")` → 65, `char_of(65)` → `"A"` | None |
-| Format specifiers in interpolation: `"{x:.2}"`, `"{n:>5}"`, `"{n:05}"`, `"{n:x}"` | Only the default formatting |
-| Numbers as hex, binary, octal text | None |
-| `parse_int(text, base)` | Base 10 only |
-| `pad_start`, `pad_end` | None |
-| `words(text)`: split on any whitespace | `split` on one separator |
-| Substring by position: `slice(text, from, to)` | `↑` / `↓` work (take, drop), but are two steps |
+Closed: `char_code`, `char_of`; format specs in interpolation (`{x:.2}`, `{n:>5}`, `{n:05}`, `{n:#x}`, `{n:,}`, `{x:.1%}`) and `format(x, spec)`; `parse_int(text, base)`; `pad_start`, `pad_end`; `words`; `slice`.
 
 ## Collections (0.2.7)
 

@@ -129,7 +129,20 @@ pub extern \"mimic\" {
     fn remove(m: any, key: any) -> any
     fn keys(m: any) -> any
     fn values(m: any) -> any
+    fn char_code(s: str) -> i64
+    fn char_of(code: i64) -> str
+    fn words(s: str) -> [str]
+    fn slice(s: str, from: i64, to: i64) -> str
+    fn format(value: any, spec: str) -> str
+    fn text_pad_start(s: str, width: i64, fill: str) -> str
+    fn text_pad_end(s: str, width: i64, fill: str) -> str
+    fn is_int_base(s: str, base: i64) -> bool
+    fn to_int_base(s: str, base: i64) -> i64
 }
+
+// `s` widened to `width` characters with `fill` in front (or after).
+pub fn pad_start(s: str, width: i64, fill: str = \" \") -> str { text_pad_start(s, width, fill) }
+pub fn pad_end(s: str, width: i64, fill: str = \" \") -> str { text_pad_end(s, width, fill) }
 
 // `Some(byte index)` of the first occurrence of `part`, or `None`.
 pub fn find(s: str, part: str) {
@@ -137,9 +150,13 @@ pub fn find(s: str, part: str) {
     if i < 0 { None } else { Some(i) }
 }
 
-// `Some(n)` when `s` is an integer, else `None`.
-pub fn parse_int(s: str) {
-    if is_int(s) { Some(to_int(s)) } else { None }
+// `Some(n)` when `s` is an integer (in `base`, 2 to 36), else `None`.
+pub fn parse_int(s: str, base: i64 = 10) {
+    if base == 10 {
+        if is_int(s) { Some(to_int(s)) } else { None }
+    } else {
+        if is_int_base(s, base) { Some(to_int_base(s, base)) } else { None }
+    }
 }
 
 // `Some(x)` when `s` is a number, else `None`.
@@ -220,6 +237,31 @@ pub module io {
         fn read_line() -> Option[str]
         fn read_input() -> str
         fn eprint(value: any)
+        // like print, without the newline (shown at once on a terminal)
+        fn write(value: any)
+        fn flush()
+        fn read_char() -> Option[str]
+        fn read_bytes(n: i64) -> [u8]
+    }
+}
+
+// The terminal: raw mode, size, keys, the cursor (ANSI codes; on Windows too).
+pub module term {
+    pub type Size = { columns: i64, rows: i64 }
+
+    pub extern \"mimic\" ordered {
+        // no echo, no line editing: keys arrive one at a time (Ctrl-C still works)
+        fn raw(on: bool) -> Result[bool, str]
+        fn size() -> Option[Size]
+        // 0 standard input, 1 standard output, 2 standard error
+        fn is_terminal(stream: i64) -> bool
+        // \"up\", \"enter\", \"ctrl-c\", … or the character typed
+        fn read_key() -> Option[str]
+        fn clear()
+        // from 0, the top left
+        fn move_to(column: i64, row: i64)
+        fn show_cursor(on: bool)
+        fn alternate_screen(on: bool)
     }
 }
 
@@ -244,6 +286,8 @@ pub module os {
         // Run a command line through the system shell: /bin/sh -c, or
         // cmd.exe /c on Windows.
         fn shell(command: str) -> Result[Output, str]
+        // Ctrl-C calls `handler` (on a thread of its own) instead of stopping
+        fn on_interrupt(handler: fn())
     }
 }
 

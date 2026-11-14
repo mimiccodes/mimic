@@ -54,13 +54,16 @@ check io_read_bytes   '    print(io::read_bytes(4))'
 check term_raw        '    term::raw(true)'
 check term_size       '    print(term::size())'
 check term_is_tty     '    print(term::is_terminal(1))'
+check term_read_key   '    print(term::read_key())'
+check term_cursor     '    term::move_to(0, 0)
+    term::clear()'
 check on_interrupt    '    os::on_interrupt(() => print("bye"))'
 echo "== text and numbers"
 check char_code       '    print(char_code("A"))'
 check char_of         '    print(char_of(65))'
 check fmt_spec        '    let x = 3.14159
     print("{x:.2}")'
-check int_hex         '    print(hex_of(255))'
+check int_hex         '    print(format(255, "x"))'
 check parse_int_base  '    print(parse_int("ff", 16))'
 check pad_start       '    print(pad_start("7", 3, "0"))'
 check words           '    print(words("a  b c"))'

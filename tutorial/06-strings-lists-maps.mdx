@@ -80,6 +80,42 @@ café → 😀
 
 C's octal escapes such as `\033` do not exist; the compiler says to write `\x1b`.
 
+### Formatting numbers and text
+
+Put a format after a `:` inside `{…}`. It uses the same rules as Python and Rust:
+
+```mimic run
+module main
+
+fn main() {
+    let price = 1234.5
+    let n = 255
+    print("{price:.2}  {price:,.1}  {0.256:.1%}")
+    print("{n:x}  {n:#b}  {n:06}  {n:+}")
+    print("[{"name":<8}] [{n:>5}] [{"ok":*^6}]")
+    print(pad_start("7", 3, "0") + " " + string(char_code("A")) + " " + char_of(65))
+}
+```
+
+```output
+1234.50  1,234.5  25.6%
+ff  0b11111111  000255  +255
+[name    ] [  255] [**ok**]
+007 65 A
+```
+
+| Spec | Meaning |
+|---|---|
+| `.2` | Two decimals |
+| `>8` `<8` `^8` | Width 8, aligned right, left or centred (a fill character may come first: `*^8`) |
+| `06` | Pad with zeros |
+| `+` | Always show the sign |
+| `,` | Thousands separators |
+| `x` `o` `b` | Hex, octal, binary (`#` adds `0x`, `0o`, `0b`) |
+| `e` `%` | Exponent; percent |
+
+`format(x, spec)` does the same as a function. `parse_int("ff", 16)` reads numbers in other bases, `words(s)` splits on any whitespace, and `slice(s, from, to)` takes a part of a string.
+
 ## Parsing
 
 `parse_int` and `parse_float` return an `Option`, which is `Some(value)` or `None` ([chapter 7](07-errors.mdx)):

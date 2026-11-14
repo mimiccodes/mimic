@@ -1665,3 +1665,340 @@ mim_val *mim_std_chan_close(mim_val *tx) {
 #endif
     return NULL;
 }
+
+/* ==== io: output without a newline, characters, bytes (0.2.6) ============== */
+
+#ifdef _WIN32
+#define mim_isatty(fd) _isatty(fd)
+#else
+#define mim_isatty(fd) isatty(fd)
+#endif
+
+/* io::write(x): like print, without the newline; shown at once on a terminal */
+mim_val *mim_std_io_write(mim_val *v) {
+    print_val(v);
+    if (mim_isatty(1)) fflush(stdout);
+    return NULL;
+}
+
+mim_val *mim_std_io_flush(void) {
+    fflush(stdout);
+    return NULL;
+}
+
+/* io::read_char(): the next character of standard input (UTF-8), or None */
+mim_val *mim_std_io_read_char(void) {
+    fflush(stdout);
+    int c = getchar();
+    if (c == EOF) return none_val();
+    char b[4] = {(char)c};
+    int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    for (int i = 1; i < n; i++) {
+        int d = getchar();
+        if (d == EOF) { n = i; break; }
+        b[i] = (char)d;
+    }
+    return some_of(mim_str(b, n));
+}
+
+/* io::read_bytes(n): up to n bytes (fewer only at the end of input) */
+mim_val *mim_std_io_read_bytes(mim_val *count) {
+    int64_t n = geti(count, 0);
+    if (n < 0) mim_panic("io::read_bytes: the count cannot be negative");
+    fflush(stdout);
+    mim_val *r = alloc(MIM_U8, 1, n);
+    size_t got = n ? fread(r->data, 1, (size_t)n, stdin) : 0;
+    r->len = (int64_t)got;
+    return r;
+}
+
+/* ==== term: the terminal (0.2.6) ===========================================
+ * Raw mode keeps output processing (\n still starts a new line) and Ctrl-C
+ * (so os::on_interrupt and the default stop still work). The terminal's
+ * settings are restored when the program ends. */
+
+MIM_STD_DESC mim_desc_term_Size;
+
+__attribute__((unused)) static mim_val *err_errno_io(const char *what) {
+    char b[256];
+    snprintf(b, sizeof b, "%s: %s", what, strerror(errno));
+    return err_of(b);
+}
+
+#if defined(_WIN32)
+static DWORD tm_saved;
+static int tm_have_saved;
+static void tm_restore(void) {
+    if (tm_have_saved) SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), tm_saved);
+}
+#elif !defined(__wasi__)
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <poll.h>
+static struct termios tm_saved;
+static int tm_have_saved;
+static void tm_restore(void) {
+    if (tm_have_saved) tcsetattr(0, TCSANOW, &tm_saved);
+}
+#endif
+
+mim_val *mim_std_term_raw(mim_val *on) {
+    int want = (int)geti(on, 0);
+#if defined(_WIN32)
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD m;
+    if (!GetConsoleMode(h, &m)) return err_of("term::raw: standard input is not a terminal");
+    if (!tm_have_saved) {
+        tm_saved = m;
+        tm_have_saved = 1;
+        atexit(tm_restore);
+    }
+    m = want ? (tm_saved & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT : tm_saved;
+    if (!SetConsoleMode(h, m)) return err_of("term::raw: cannot change the console mode");
+    return ok_of(mim_bool(want));
+#elif !defined(__wasi__)
+    if (!isatty(0)) return err_of("term::raw: standard input is not a terminal");
+    if (!tm_have_saved) {
+        if (tcgetattr(0, &tm_saved) != 0) return err_errno_io("term::raw");
+        tm_have_saved = 1;
+        atexit(tm_restore);
+    }
+    struct termios t = tm_saved;
+    if (want) {
+        t.c_lflag &= ~(tcflag_t)(ICANON | ECHO | IEXTEN);
+        t.c_iflag &= ~(tcflag_t)(IXON | ICRNL);
+        t.c_cc[VMIN] = 1;
+        t.c_cc[VTIME] = 0;
+    }
+    if (tcsetattr(0, TCSANOW, &t) != 0) return err_errno_io("term::raw");
+    return ok_of(mim_bool(want));
+#else
+    (void)want;
+    return err_of("term::raw: there is no terminal control on this platform");
+#endif
+}
+
+/* term::size(): Some(Size { columns, rows }), or None without a terminal */
+mim_val *mim_std_term_size(void) {
+    int64_t cols = 0, rows = 0;
+#if defined(_WIN32)
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) {
+        cols = info.srWindow.Right - info.srWindow.Left + 1;
+        rows = info.srWindow.Bottom - info.srWindow.Top + 1;
+    }
+#elif !defined(__wasi__)
+    struct winsize ws;
+    for (int fd = 1; fd >= 0 && !cols; fd = fd == 1 ? 2 : fd == 2 ? 0 : -1)
+        if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+            cols = ws.ws_col;
+            rows = ws.ws_row;
+        }
+#endif
+    if (!cols) return none_val();
+    mim_val *f[2] = {mim_int(cols), mim_int(rows)};
+    return some_of(obj_owned(&mim_desc_term_Size, 2, f));
+}
+
+/* term::is_terminal(stream): 0 standard input, 1 output, 2 error */
+mim_val *mim_std_term_is_terminal(mim_val *stream) {
+    int64_t fd = geti(stream, 0);
+    return mim_bool(fd >= 0 && fd <= 2 && mim_isatty((int)fd));
+}
+
+/* one byte of keyboard input, waiting at most `ms` (-1: forever); -1 if none */
+static int key_byte(int ms) {
+#if defined(_WIN32)
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if (ms >= 0 && WaitForSingleObject(h, (DWORD)ms) != WAIT_OBJECT_0) return -1;
+    unsigned char c;
+    DWORD got = 0;
+    if (!ReadFile(h, &c, 1, &got, NULL) || got != 1) return -1;
+    return c;
+#elif !defined(__wasi__)
+    if (ms >= 0) {
+        struct pollfd p = {0, POLLIN, 0};
+        if (poll(&p, 1, ms) <= 0) return -1;
+    }
+    unsigned char c;
+    ssize_t r;
+    while ((r = read(0, &c, 1)) < 0 && errno == EINTR) {
+    }
+    return r == 1 ? c : -1;
+#else
+    (void)ms;
+    int c = getchar();
+    return c == EOF ? -1 : c;
+#endif
+}
+
+/* term::read_key(): one key as a word ("up", "enter", "ctrl-c", …) or the
+ * character typed; None at the end of input. Meant for raw mode. Reads the
+ * keyboard directly (not through io::read_line's buffer). */
+mim_val *mim_std_term_read_key(void) {
+    fflush(stdout);
+    int c = key_byte(-1);
+    if (c < 0) return none_val();
+    const char *name = NULL;
+    if (c == 27) {
+        int b = key_byte(30);
+        if (b < 0) name = "escape";
+        else if (b == '[' || b == 'O') {
+            int d = key_byte(30), num = 0;
+            while (d >= '0' && d <= '9') {
+                num = num * 10 + (d - '0');
+                d = key_byte(30);
+            }
+            while (d == ';') { /* modifiers: ignored */
+                d = key_byte(30);
+                while (d >= '0' && d <= '9') d = key_byte(30);
+            }
+            switch (d) {
+            case 'A': name = "up"; break;
+            case 'B': name = "down"; break;
+            case 'C': name = "right"; break;
+            case 'D': name = "left"; break;
+            case 'H': name = "home"; break;
+            case 'F': name = "end"; break;
+            case 'P': name = "f1"; break;
+            case 'Q': name = "f2"; break;
+            case 'R': name = "f3"; break;
+            case 'S': name = "f4"; break;
+            case 'Z': name = "shift-tab"; break;
+            case '~':
+                name = num == 1 || num == 7 ? "home" : num == 4 || num == 8 ? "end" : num == 2 ? "insert" : num == 3 ? "delete"
+                     : num == 5 ? "page_up" : num == 6 ? "page_down" : num == 15 ? "f5" : num == 17 ? "f6" : num == 18 ? "f7"
+                     : num == 19 ? "f8" : num == 20 ? "f9" : num == 21 ? "f10" : num == 23 ? "f11" : num == 24 ? "f12" : "unknown";
+                break;
+            default: name = "unknown";
+            }
+        } else {
+            name = "escape"; /* Alt+key: the key itself is dropped */
+        }
+    } else if (c == '\r' || c == '\n') name = "enter";
+    else if (c == '\t') name = "tab";
+    else if (c == 127 || c == 8) name = "backspace";
+    else if (c >= 1 && c <= 26) {
+        static const char *ctrl[27] = {"", "ctrl-a", "ctrl-b", "ctrl-c", "ctrl-d", "ctrl-e", "ctrl-f", "ctrl-g", "ctrl-h", "ctrl-i", "ctrl-j", "ctrl-k", "ctrl-l", "ctrl-m",
+                                       "ctrl-n", "ctrl-o", "ctrl-p", "ctrl-q", "ctrl-r", "ctrl-s", "ctrl-t", "ctrl-u", "ctrl-v", "ctrl-w", "ctrl-x", "ctrl-y", "ctrl-z"};
+        name = ctrl[c];
+    }
+    if (name) return some_of(mim_str(name, (int64_t)strlen(name)));
+    char b[4] = {(char)c};
+    int n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    for (int i = 1; i < n; i++) {
+        int d = key_byte(30);
+        if (d < 0) { n = i; break; }
+        b[i] = (char)d;
+    }
+    return some_of(mim_str(b, n));
+}
+
+static void term_out(const char *s) {
+    fputs(s, stdout);
+    fflush(stdout);
+}
+
+mim_val *mim_std_term_clear(void) { term_out("\x1b[2J\x1b[H"); return NULL; }
+
+/* term::move_to(column, row): from 0, the top left */
+mim_val *mim_std_term_move_to(mim_val *col, mim_val *row) {
+    char b[48];
+    int64_t c = geti(col, 0), r = geti(row, 0);
+    snprintf(b, sizeof b, "\x1b[%lld;%lldH", (long long)(r < 0 ? 1 : r + 1), (long long)(c < 0 ? 1 : c + 1));
+    term_out(b);
+    return NULL;
+}
+
+/* a hidden cursor and the alternate screen are undone when the program
+ * ends, so a program that stops early leaves the terminal usable */
+static volatile int tm_cursor_hidden, tm_alt_screen, tm_undo_set;
+static void tm_undo(void) {
+    if (tm_alt_screen) fputs("\x1b[?1049l", stdout);
+    if (tm_cursor_hidden) fputs("\x1b[?25h", stdout);
+    fflush(stdout);
+}
+static void tm_undo_at_exit(void) {
+    if (!tm_undo_set) {
+        tm_undo_set = 1;
+        atexit(tm_undo);
+    }
+}
+
+mim_val *mim_std_term_show_cursor(mim_val *on) {
+    int show = (int)geti(on, 0);
+    tm_cursor_hidden = !show;
+    if (!show) tm_undo_at_exit();
+    term_out(show ? "\x1b[?25h" : "\x1b[?25l");
+    return NULL;
+}
+
+mim_val *mim_std_term_alternate_screen(mim_val *on) {
+    int alt = (int)geti(on, 0);
+    tm_alt_screen = alt;
+    if (alt) tm_undo_at_exit();
+    term_out(alt ? "\x1b[?1049h" : "\x1b[?1049l");
+    return NULL;
+}
+
+/* ==== os::on_interrupt (0.2.6) =============================================
+ * Ctrl-C calls the handler (on a thread of its own, never inside the signal)
+ * instead of stopping the program; the handler decides, e.g. os::exit(0). */
+
+static mim_val *volatile intr_fn;
+
+#if defined(_WIN32)
+static BOOL WINAPI intr_console(DWORD kind) {
+    if ((kind == CTRL_C_EVENT || kind == CTRL_BREAK_EVENT) && intr_fn) {
+        mim_release(mim_call(intr_fn, 0, NULL));
+        return TRUE;
+    }
+    return FALSE;
+}
+#elif MIM_THREADS && !defined(__wasi__)
+#include <signal.h>
+static int intr_pipe[2] = {-1, -1};
+static void intr_signal(int sig) {
+    (void)sig;
+    int saved = errno;
+    char b = 1;
+    ssize_t r = write(intr_pipe[1], &b, 1);
+    (void)r;
+    errno = saved;
+}
+static void *intr_watch(void *p) {
+    (void)p;
+    char b;
+    for (;;) {
+        ssize_t r = read(intr_pipe[0], &b, 1);
+        if (r == 1 && intr_fn) mim_release(mim_call(intr_fn, 0, NULL));
+        else if (r < 0 && errno != EINTR) return NULL;
+    }
+}
+#endif
+
+mim_val *mim_std_os_on_interrupt(mim_val *handler) {
+    if (!handler || handler->dtype != MIM_FN) mim_panic("os::on_interrupt: expected a function");
+    mim_retain(handler);
+    mim_val *old = intr_fn;
+    intr_fn = handler;
+    if (old) return NULL; /* already installed: the new handler takes over */
+#if defined(_WIN32)
+    SetConsoleCtrlHandler(intr_console, TRUE);
+#elif MIM_THREADS && !defined(__wasi__)
+    if (pipe(intr_pipe) == 0) {
+        fcntl(intr_pipe[0], F_SETFD, FD_CLOEXEC);
+        fcntl(intr_pipe[1], F_SETFD, FD_CLOEXEC);
+        pthread_t t;
+        pthread_create(&t, NULL, intr_watch, NULL);
+        pthread_detach(t);
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = intr_signal;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART;
+        sigaction(SIGINT, &sa, NULL);
+    }
+#endif
+    return NULL;
+}

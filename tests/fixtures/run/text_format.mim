@@ -1,0 +1,27 @@
+module main
+
+// Text and numbers (0.2.6): character codes, padding, words, slices, bases,
+// format specs in interpolation, io::write / flush / read_char / read_bytes.
+
+fn main() {
+    print(char_code("A"))
+    print(char_of(233) + char_of(0x1F600))
+    print(pad_start("7", 3, "0") + " " + pad_end("ab", 5) + "|")
+    print(words("  one two\tthree\n"))
+    print(slice("hello world", 6, 11) + " " + slice("hello", ¯3, ¯1))
+    print((parse_int("ff", 16), parse_int("-0b101", 2), parse_int("42"), parse_int("12", 3), parse_int("9", 8)))
+    let pi = 3.14159
+    let n = 255
+    print("{pi:.2} {pi:8.3}| {pi:e} {0.256:.1%}")
+    print("{n:x} {n:#X} {n:o} {n:b} {n:#b}")
+    print("[{n:>6}] [{n:<6}] [{n:^7}] [{n:06}] [{n:+}] [{0 - n:+08}]")
+    print("{1234567:,} {0xDEADBEEF:_x} {1234.5:,.1}")
+    print("[{"left":<8}] [{"right":>8}] [{"mid":*^9}] [{"truncated":.5}]")
+    print(format(42, "05") + " " + format(true, ">6"))
+    io::write("no ")
+    io::write("newline")
+    io::flush()
+    print("")
+    print(io::read_char())
+    print(io::read_bytes(4))
+}

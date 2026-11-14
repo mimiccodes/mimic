@@ -909,3 +909,297 @@ int32_t mim_test_main(int32_t n, const char *const *names, mim_val *(*const *fns
     int32_t code = mim_rt_shutdown(leak_check);
     return failed ? 1 : code;
 }
+
+/* ==== characters, padding, words, slices, bases (0.2.6) =================== */
+
+static void sb_putc(sbuf *b, char c) { sb_put(b, &c, 1); }
+
+/* the number of characters (UTF-8 code points) in a byte range */
+static int64_t utf8_count(const char *p, int64_t n) {
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++)
+        if (((unsigned char)p[i] & 0xC0) != 0x80) k++;
+    return k;
+}
+
+/* char_code("A") → 65: the first character's code point */
+mim_val *mim_std_char_code(mim_val *s) {
+    const unsigned char *p = (const unsigned char *)str_arg(s, "char_code");
+    int64_t n = s->len;
+    if (n == 0) mim_panic("char_code: the text is empty");
+    uint32_t c = p[0];
+    int more = c < 0x80 ? 0 : c < 0xE0 ? 1 : c < 0xF0 ? 2 : 3;
+    if (more) c &= 0x3F >> more;
+    for (int i = 1; i <= more && i < n; i++) c = c << 6 | (p[i] & 0x3F);
+    return mim_int((int64_t)c);
+}
+
+/* char_of(65) → "A" */
+mim_val *mim_std_char_of(mim_val *code) {
+    int64_t c = int_arg(code, "char_of");
+    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "char_of: %lld is not a Unicode character", (long long)c);
+        mim_panic(buf);
+    }
+    char b[4];
+    int n;
+    if (c < 0x80) { b[0] = (char)c; n = 1; }
+    else if (c < 0x800) { b[0] = (char)(0xC0 | c >> 6); b[1] = (char)(0x80 | (c & 0x3F)); n = 2; }
+    else if (c < 0x10000) { b[0] = (char)(0xE0 | c >> 12); b[1] = (char)(0x80 | (c >> 6 & 0x3F)); b[2] = (char)(0x80 | (c & 0x3F)); n = 3; }
+    else { b[0] = (char)(0xF0 | c >> 18); b[1] = (char)(0x80 | (c >> 12 & 0x3F)); b[2] = (char)(0x80 | (c >> 6 & 0x3F)); b[3] = (char)(0x80 | (c & 0x3F)); n = 4; }
+    return mim_str(b, n);
+}
+
+/* text padded to `width` characters with copies of `fill` (its first character) */
+static mim_val *pad_text(mim_val *s, mim_val *width, mim_val *fill, int at_start, const char *fn) {
+    const char *a = str_arg(s, fn), *f = str_arg(fill, fn);
+    int64_t w = int_arg(width, fn), have = utf8_count(a, s->len);
+    if (fill->len == 0) mim_panic("pad: the fill text is empty");
+    int64_t flen = 1;
+    while (flen < fill->len && ((unsigned char)f[flen] & 0xC0) == 0x80) flen++;
+    int64_t pad = w > have ? w - have : 0;
+    mim_val *r = alloc(MIM_CHAR, 1, s->len + pad * flen);
+    char *o = (char *)r->data;
+    if (!at_start) { memcpy(o, a, (size_t)s->len); o += s->len; }
+    for (int64_t i = 0; i < pad; i++) { memcpy(o, f, (size_t)flen); o += flen; }
+    if (at_start) { memcpy(o, a, (size_t)s->len); o += s->len; }
+    *o = 0;
+    return r;
+}
+
+mim_val *mim_std_text_pad_start(mim_val *s, mim_val *width, mim_val *fill) { return pad_text(s, width, fill, 1, "pad_start"); }
+mim_val *mim_std_text_pad_end(mim_val *s, mim_val *width, mim_val *fill) { return pad_text(s, width, fill, 0, "pad_end"); }
+
+/* words("a  b\tc") → ["a" "b" "c"]: split on runs of whitespace */
+mim_val *mim_std_words(mim_val *s) {
+    const char *a = str_arg(s, "words");
+    int64_t n = s->len, k = 0, cap = 8;
+    mim_val **parts = (mim_val **)malloc(sizeof(mim_val *) * (size_t)cap);
+    for (int64_t i = 0; i < n;) {
+        while (i < n && strchr(" \t\n\r\f\v", a[i])) i++;
+        int64_t j = i;
+        while (j < n && !strchr(" \t\n\r\f\v", a[j])) j++;
+        if (j > i) {
+            if (k == cap) parts = (mim_val **)realloc(parts, sizeof(mim_val *) * (size_t)(cap *= 2));
+            parts[k++] = mim_str(a + i, j - i);
+        }
+        i = j;
+    }
+    mim_val *r = k == 0 ? alloc(MIM_BOXED, 1, 0) : list_take(k, parts);
+    free(parts);
+    return r;
+}
+
+/* slice(text, from, to): the bytes from..to (to excluded), as `find` and `≢`
+ * count them; negative positions count from the end; a position inside a
+ * multi-byte character moves to that character's edge (never half of one) */
+mim_val *mim_std_slice(mim_val *s, mim_val *from, mim_val *to) {
+    const char *a = str_arg(s, "slice");
+    int64_t n = s->len, i = int_arg(from, "slice"), j = int_arg(to, "slice");
+    if (i < 0) i += n;
+    if (j < 0) j += n;
+    i = i < 0 ? 0 : i > n ? n : i;
+    j = j < 0 ? 0 : j > n ? n : j;
+    while (i > 0 && i < n && ((unsigned char)a[i] & 0xC0) == 0x80) i--;
+    while (j < n && j > 0 && ((unsigned char)a[j] & 0xC0) == 0x80) j++;
+    return mim_str(a + i, j > i ? j - i : 0);
+}
+
+/* an integer in base 2..36 ("ff", "-1010", "0xff" for 16): 1 and the value,
+ * or 0 when the text is not one (or it overflows) */
+static int int_in_base(const char *a, int64_t n, int64_t base, int64_t *out) {
+    if (base < 2 || base > 36) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "parse_int: base %lld is not between 2 and 36", (long long)base);
+        mim_panic(buf);
+    }
+    int64_t i = 0;
+    while (i < n && (a[i] == ' ' || a[i] == '\t')) i++;
+    while (n > i && (a[n - 1] == ' ' || a[n - 1] == '\t' || a[n - 1] == '\n' || a[n - 1] == '\r')) n--;
+    int neg = 0;
+    if (i < n && (a[i] == '-' || a[i] == '+')) neg = a[i++] == '-';
+    if (i + 1 < n && a[i] == '0') {
+        char p = (char)(a[i + 1] | 0x20);
+        if ((p == 'x' && base == 16) || (p == 'b' && base == 2) || (p == 'o' && base == 8)) i += 2;
+    }
+    if (i >= n) return 0;
+    uint64_t v = 0, lim = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+    for (; i < n; i++) {
+        char c = a[i];
+        if (c == '_') continue;
+        int d = c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'z' ? (c | 0x20) - 'a' + 10 : 99;
+        if (d >= base) return 0;
+        if (v > (lim - (uint64_t)d) / (uint64_t)base) return 0;
+        v = v * (uint64_t)base + (uint64_t)d;
+    }
+    *out = neg ? (int64_t)(0 - v) : (int64_t)v;
+    return 1;
+}
+
+mim_val *mim_std_is_int_base(mim_val *s, mim_val *base) {
+    int64_t v;
+    return mim_bool(int_in_base(str_arg(s, "parse_int"), s->len, int_arg(base, "parse_int"), &v));
+}
+
+mim_val *mim_std_to_int_base(mim_val *s, mim_val *base) {
+    int64_t v = 0;
+    int_in_base(str_arg(s, "parse_int"), s->len, int_arg(base, "parse_int"), &v);
+    return mim_int(v);
+}
+
+/* ==== format(value, spec): `"{x:.2}"` (0.2.6) ===============================
+ * spec = [[fill]align][sign][#][0][width][,|_][.precision][type]
+ *   align  < left, > right, ^ centre (numbers default right, text left)
+ *   sign   + always, - only negative (default), space: a space for positive
+ *   #      0x, 0o, 0b before hex, octal, binary
+ *   0      pad numbers with zeros after the sign
+ *   ,  _   thousands separators (groups of 4 digits with _ in x, o, b)
+ *   type   x X o b (integers in base 16, 8, 2), e E (exponent), f (fixed),
+ *          % (percent), s (text), d (decimal) */
+
+typedef struct {
+    char fill[5];
+    int fill_n;
+    char align, sign, type;
+    int alt, zero, group;
+    int64_t width, prec;
+} fspec;
+
+/* parse a spec; 0 with a message when it is not one */
+static int fspec_parse(const char *s, int64_t n, fspec *f, char *why, size_t whyn) {
+    memset(f, 0, sizeof *f);
+    f->fill[0] = ' ';
+    f->fill_n = 1;
+    f->prec = -1;
+    int64_t i = 0;
+    int64_t c1 = 1; /* bytes of the first character */
+    while (c1 < n && ((unsigned char)s[c1] & 0xC0) == 0x80) c1++;
+    if (c1 < n && strchr("<>^", s[c1])) {
+        memcpy(f->fill, s, (size_t)c1);
+        f->fill_n = (int)c1;
+        f->align = s[c1];
+        i = c1 + 1;
+    } else if (i < n && strchr("<>^", s[i])) {
+        f->align = s[i++];
+    }
+    if (i < n && strchr("+- ", s[i])) f->sign = s[i++];
+    if (i < n && s[i] == '#') { f->alt = 1; i++; }
+    if (i < n && s[i] == '0') { f->zero = 1; i++; }
+    while (i < n && s[i] >= '0' && s[i] <= '9') f->width = f->width * 10 + (s[i++] - '0');
+    if (i < n && (s[i] == ',' || s[i] == '_')) f->group = s[i++];
+    if (i < n && s[i] == '.') {
+        i++;
+        if (i >= n || s[i] < '0' || s[i] > '9') { snprintf(why, whyn, "a precision after `.`, as in `.2`"); return 0; }
+        f->prec = 0;
+        while (i < n && s[i] >= '0' && s[i] <= '9') f->prec = f->prec * 10 + (s[i++] - '0');
+    }
+    if (i < n && strchr("xXobeEf%sd", s[i])) f->type = s[i++];
+    if (i != n) { snprintf(why, whyn, "`%.*s` is not part of a format (as in `>8`, `05`, `.2`, `x`, `+,.3f`)", (int)(n - i), s + i); return 0; }
+    return 1;
+}
+
+/* digits with a separator every `every` from the right */
+static void group_digits(sbuf *b, const char *d, int64_t n, char sep, int every) {
+    for (int64_t i = 0; i < n; i++) {
+        if (i > 0 && (n - i) % every == 0) sb_putc(b, sep);
+        sb_putc(b, d[i]);
+    }
+}
+
+mim_val *mim_std_format(mim_val *v, mim_val *specv) {
+    const char *spec = str_arg(specv, "format");
+    fspec f;
+    char why[160];
+    if (!fspec_parse(spec, specv->len, &f, why, sizeof why)) {
+        char buf[260];
+        snprintf(buf, sizeof buf, "format: %s", why);
+        mim_panic(buf);
+    }
+    sbuf body = {0};   /* the digits or text */
+    const char *pre = ""; /* sign and 0x, before zero padding */
+    char prebuf[8];
+    int numeric = v && v->rank == 0 && IS_NUMDT(v->dtype) && v->dtype != MIM_BOOL;
+    if (numeric && !IS_FLOAT(v->dtype) && !strchr("eEf%", f.type ? f.type : 'd')) {
+        int64_t x = geti(v, 0);
+        uint64_t u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+        int base = f.type == 'x' || f.type == 'X' ? 16 : f.type == 'o' ? 8 : f.type == 'b' ? 2 : 10;
+        char d[72];
+        int k = 0;
+        do {
+            int r = (int)(u % (uint64_t)base);
+            d[k++] = (char)(r < 10 ? '0' + r : (f.type == 'X' ? 'A' : 'a') + r - 10);
+            u /= (uint64_t)base;
+        } while (u);
+        for (int a = 0, z = k - 1; a < z; a++, z--) { char t = d[a]; d[a] = d[z]; d[z] = t; }
+        if (f.group) group_digits(&body, d, k, f.group, base == 10 ? 3 : 4);
+        else sb_put(&body, d, k);
+        int p = 0;
+        if (x < 0) prebuf[p++] = '-';
+        else if (f.sign == '+' || f.sign == ' ') prebuf[p++] = f.sign;
+        if (f.alt && base != 10) { prebuf[p++] = '0'; prebuf[p++] = f.type == 'X' ? 'X' : (char)f.type; }
+        prebuf[p] = 0;
+        pre = prebuf;
+    } else if (numeric) {
+        double x = IS_FLOAT(v->dtype) ? getf(v, 0) : (double)geti(v, 0);
+        char t = f.type;
+        if (t == '%') x *= 100;
+        int neg = signbit(x) && !isnan(x);
+        double ax = fabs(x);
+        char d[400];
+        if (t == 'e' || t == 'E') snprintf(d, sizeof d, t == 'e' ? "%.*e" : "%.*E", (int)(f.prec < 0 ? 6 : f.prec), ax);
+        else if (t == 'f' || t == '%' || f.prec >= 0) snprintf(d, sizeof d, "%.*f", (int)(f.prec < 0 ? 6 : f.prec), ax);
+        else { /* as print shows it */
+            sbuf tmp = {0};
+            mim_val *a = mim_float(ax);
+            fmt_val(&tmp, a, 0);
+            mim_release(a);
+            snprintf(d, sizeof d, "%.*s", (int)tmp.n, tmp.p ? tmp.p : "");
+            free(tmp.p);
+        }
+        if (f.group && isfinite(ax)) {
+            int64_t ip = 0, len = (int64_t)strlen(d);
+            while (ip < len && d[ip] >= '0' && d[ip] <= '9') ip++;
+            group_digits(&body, d, ip, f.group, 3);
+            sb_put(&body, d + ip, len - ip);
+        } else {
+            sb_str(&body, d);
+        }
+        if (t == '%') sb_putc(&body, '%');
+        int p = 0;
+        if (neg) prebuf[p++] = '-';
+        else if (f.sign == '+' || f.sign == ' ') prebuf[p++] = f.sign;
+        prebuf[p] = 0;
+        pre = prebuf;
+    } else {
+        fmt_val(&body, v, 0);
+        if (f.prec >= 0) { /* at most `prec` characters */
+            int64_t keep = 0, chars = 0;
+            while (keep < (int64_t)body.n && chars <= f.prec) {
+                if (((unsigned char)body.p[keep] & 0xC0) != 0x80) chars++;
+                if (chars > f.prec) break;
+                keep++;
+            }
+            body.n = (size_t)keep;
+        }
+    }
+    int64_t len = utf8_count(pre, (int64_t)strlen(pre)) + utf8_count(body.p ? body.p : "", (int64_t)body.n);
+    int64_t pad = f.width > len ? f.width - len : 0;
+    sbuf out = {0};
+    if (f.zero && numeric && !f.align) {
+        sb_str(&out, pre);
+        for (int64_t i = 0; i < pad; i++) sb_putc(&out, '0');
+        sb_put(&out, body.p, (int64_t)body.n);
+    } else {
+        char align = f.align ? f.align : numeric ? '>' : '<';
+        int64_t left = align == '>' ? pad : align == '^' ? pad / 2 : 0, right = pad - left;
+        for (int64_t i = 0; i < left; i++) sb_put(&out, f.fill, f.fill_n);
+        sb_str(&out, pre);
+        sb_put(&out, body.p, (int64_t)body.n);
+        for (int64_t i = 0; i < right; i++) sb_put(&out, f.fill, f.fill_n);
+    }
+    mim_val *r = mim_str(out.p ? out.p : "", (int64_t)out.n);
+    free(out.p);
+    free(body.p);
+    return r;
+}

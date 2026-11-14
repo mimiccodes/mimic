@@ -18,9 +18,33 @@ These are visible in every file without an import. The string, list and map func
 | `repeat(s, n)` | `str` |
 | `string(x)` | Any value as text, the way `print` shows it |
 | `parse_int(s)`, `parse_float(s)` | `Some(number)` or `None` |
+| `parse_int(s, base)` | In base 2 to 36: `parse_int("ff", 16)` is `Some(255)`. A `0x`, `0o` or `0b` that matches the base may come first. |
+| `char_code(s)`, `char_of(n)` | The code point of the first character (`char_code("A")` is 65), and the character of a code point (`char_of(233)` is `"é"`) |
+| `pad_start(s, width, fill)`, `pad_end(s, width, fill)` | `s` widened to `width` characters with `fill` (default `" "`) before or after: `pad_start("7", 3, "0")` is `"007"` |
+| `words(s)` | `[str]`: split on runs of spaces, tabs and newlines |
+| `slice(s, from, to)` | The bytes `from` to `to` (excluded), as `find` and `≢` count them; negative positions count from the end. A position inside a multi-byte character moves to its edge. |
+| `format(x, spec)` | `x` as text by a format spec; the same as `"{x:spec}"` (below) |
 | `a + b` | Joins two strings. |
 | `a == b` | Compares two whole strings. |
 | `≢ s`, `s ↑ n`, `s ↓ n`, `⌽ s` | Length, take, drop and reverse, as for any array. |
+
+### Formats in interpolation
+
+`"{x:spec}"` formats a value by a spec after a single `:`, the grammar Python and Rust use: `[[fill]align][sign][#][0][width][,][.precision][type]`.
+
+| Spec | Example | Text |
+|---|---|---|
+| `.2` | `"{3.14159:.2}"` | `3.14` |
+| `>8`, `<8`, `^8` | `"{42:>8}"` | `      42` (right, left, centre) |
+| `*^9` | `"{"mid":*^9}"` | `***mid***` (a fill character before the alignment) |
+| `06` | `"{42:06}"` | `000042` (zeros after the sign) |
+| `+` | `"{42:+}"` | `+42` |
+| `,` / `_` | `"{1234567:,}"` | `1,234,567` |
+| `x` `X` `o` `b`, with `#` | `"{255:#x}"` | `0xff` |
+| `e`, `f`, `%` | `"{0.256:.1%}"` | `25.6%` |
+| `.5` on text | `"{"truncated":.5}"` | `trunc` |
+
+A spec that is not one is a compile error (E0213).
 
 ## Lists
 
@@ -168,6 +192,23 @@ How channels behave:
 | `io::read_line()` | `Option[str]`: the next line without its newline; `None` at the end |
 | `io::read_input()` | `str`: everything left on standard input |
 | `io::eprint(x)` | Print to standard error |
+| `io::write(x)` | Like `print`, without the newline; shown at once on a terminal |
+| `io::flush()` | Send what was written so far (to a file or pipe) |
+| `io::read_char()` | `Option[str]`: the next character of standard input |
+| `io::read_bytes(n)` | `[u8]`: up to `n` bytes (fewer only at the end of input) |
+
+### `term`: the terminal (ordered)
+
+| Function | Result |
+|---|---|
+| `term::raw(on)` | `Result[bool, str]`. Raw mode: keys arrive one at a time, without echo or line editing. `\n` still starts a new line, and Ctrl-C still stops the program (or calls `os::on_interrupt`). The terminal is restored when the program ends. |
+| `term::read_key()` | `Option[str]`: one key, as a word (`"up"`, `"down"`, `"left"`, `"right"`, `"enter"`, `"tab"`, `"backspace"`, `"escape"`, `"delete"`, `"home"`, `"end"`, `"page_up"`, `"page_down"`, `"insert"`, `"f1"`… `"f12"`, `"ctrl-a"`… `"ctrl-z"`) or the character typed. It reads the keyboard directly, so do not mix it with `io::read_line` on the same input. |
+| `term::size()` | `Option[term::Size]`: `{ columns, rows }`, or `None` without a terminal |
+| `term::is_terminal(stream)` | `bool`: 0 standard input, 1 standard output, 2 standard error |
+| `term::clear()`, `term::move_to(column, row)` | Clear the screen; move the cursor (from 0, top left) |
+| `term::show_cursor(on)`, `term::alternate_screen(on)` | Hide the cursor; draw on a separate screen that disappears at the end, as full-screen programs do. Both are undone when the program ends. |
+
+Colours and other effects are ANSI codes in strings: `"\x1b[1;32mgreen\x1b[0m"`. They work on Windows too.
 
 ### `os`: the program and other programs
 
@@ -178,6 +219,7 @@ How channels behave:
 | `os::pid()` | This process's id | concurrent |
 | `os::set_env(name, value)` | `Result[bool, str]` | sync |
 | `os::run(program, arguments)` | `Result[os::Output, str]`: `program` is looked up through `PATH`; `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely | sync |
+| `os::on_interrupt(f)` | Ctrl-C calls `f` (on a thread of its own) instead of stopping the program; `f` decides, for example with `os::exit(0)` | sync |
 | `os::shell(command)` | the command line through the system shell: `/bin/sh -c` (on Windows `cmd.exe /c`) | sync |
 | `os::exit(code)` | Leave the program now with that exit status | ordered |
 
