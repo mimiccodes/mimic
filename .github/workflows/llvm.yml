@@ -6,6 +6,10 @@ name: llvm
 
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build: all, or a comma-separated list (linux-x86_64, macos-arm64, windows-x86_64)"
+        default: all
 
 permissions:
   contents: write
@@ -16,15 +20,30 @@ env:
   TAG: deps-llvm-23.1.4
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          WANT: ${{ inputs.platforms }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          all = [{"os": "ubuntu-24.04", "platform": "linux-x86_64"},
+                 {"os": "macos-15", "platform": "macos-arm64"},
+                 {"os": "windows-2025", "platform": "windows-x86_64"}]
+          want = os.environ.get("WANT", "all").replace(" ", "")
+          pick = all if want in ("", "all") else [p for p in all if p["platform"] in want.split(",")]
+          print("matrix=" + json.dumps({"include": pick}))
+          PY
+
   build:
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-          - os: macos-15
-            platform: macos-arm64
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     steps:
@@ -43,6 +62,7 @@ jobs:
         run: brew install ninja
 
       - name: LLVM sources
+        if: runner.os != 'Windows'
         run: |
           mkdir -p ~/.mimic/deps
           T=~/.mimic/deps/llvm-project-$LLVM_VERSION.src.tar.xz
@@ -50,17 +70,69 @@ jobs:
           echo "$LLVM_SHA256  $T" | shasum -a 256 -c
 
       - name: Build LLVM
+        if: runner.os != 'Windows'
         run: |
           JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu) NICE=0 GENERATOR=Ninja CLEAN=1 tools/build-llvm.sh
           df -h ~
 
+      # Windows: the same configuration as tools/build-llvm.sh, with MSVC (the
+      # compiler of Rust's standard Windows target), from PowerShell. Only the
+      # libraries, Clang's headers and llvm-config are built: mimic links the
+      # libraries, and the 6-hour limit leaves no room for every tool.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Build LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $deps = "$env:USERPROFILE\.mimic\deps"
+          New-Item -ItemType Directory -Force $deps | Out-Null
+          $t = "$deps\llvm-project-$env:LLVM_VERSION.src.tar.xz"
+          curl.exe -fL --retry 3 -o $t "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/llvm-project-$env:LLVM_VERSION.src.tar.xz"
+          if ((Get-FileHash -Algorithm SHA256 $t).Hash.ToLower() -ne $env:LLVM_SHA256) { throw "checksum mismatch" }
+          $src = "C:\llvm-src"
+          New-Item -ItemType Directory -Force $src | Out-Null
+          $top = "llvm-project-$env:LLVM_VERSION.src"
+          tar.exe -xJf $t -C $src --strip-components=1 "$top/llvm" "$top/clang" "$top/lld" "$top/cmake" "$top/third-party" "$top/libunwind" "$top/libc"
+          $out = "$deps\llvm-$env:LLVM_VERSION"
+          cmake -S "$src\llvm" -B C:\llvm-build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$out" `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TARGETS_TO_BUILD=all `
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="ARC;CSKY;M68k;Xtensa;DirectX" `
+            -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_LINK_LLVM_DYLIB=OFF -DBUILD_SHARED_LIBS=OFF `
+            -DLLVM_ENABLE_ASSERTIONS=OFF `
+            -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_LIBXML2=OFF `
+            -DLLVM_ENABLE_Z3_SOLVER=OFF -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_LIBEDIT=OFF `
+            -DLLVM_ENABLE_FFI=OFF -DLLVM_ENABLE_LIBPFM=OFF -DLLVM_ENABLE_CURL=OFF -DLLVM_ENABLE_HTTPLIB=OFF `
+            -DLLVM_ENABLE_DIA_SDK=OFF `
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF `
+            -DLLVM_INCLUDE_DOCS=OFF -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF `
+            -DCLANG_ENABLE_STATIC_ANALYZER=ON -DCLANG_ENABLE_ARCMT=OFF `
+            -DLLVM_ENABLE_BINDINGS=OFF -DLLVM_ENABLE_OCAMLDOC=OFF `
+            -DLLVM_BUILD_TOOLS=OFF -DCLANG_BUILD_TOOLS=OFF -DLLVM_INCLUDE_UTILS=OFF
+          if ($LASTEXITCODE) { throw "cmake failed" }
+          # everything but the tools (left out above), and llvm-config
+          cmake --build C:\llvm-build
+          if ($LASTEXITCODE) { throw "build failed" }
+          cmake --build C:\llvm-build --target llvm-config
+          if ($LASTEXITCODE) { throw "llvm-config failed" }
+          cmake --install C:\llvm-build
+          if ($LASTEXITCODE) { throw "install failed" }
+          Copy-Item C:\llvm-build\bin\llvm-config.exe "$out\bin\" -ErrorAction SilentlyContinue
+          Get-ChildItem "$out\lib\*.lib" | Measure-Object | Select-Object Count
+          Remove-Item -Recurse -Force C:\llvm-build, $src
+
       - name: Package
+        shell: bash
         run: |
           F=llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz
           XZ_OPT="-T0 -6" tar -C ~/.mimic/deps -cJf "$F" llvm-$LLVM_VERSION
           ls -lh "$F"
 
       - name: Publish
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
