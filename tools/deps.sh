@@ -43,7 +43,8 @@ mkdir -p "$DEPS"
 fetch "$URL" "$TARBALL" "$LLVM_SHA256"
 if [ ! -d "$SRC/clang/tools/driver" ]; then
     echo "extracting (lld, clang driver, cmake, libunwind, compiler-rt)"
-    tar -xJf "$TARBALL" -C "$DEPS" \
+    # (without llvm/utils/mlgo-utils: symbolic links Windows cannot always make)
+    tar -xJf "$TARBALL" -C "$DEPS" --exclude='*/mlgo-utils' \
         "llvm-project-$LLVM_VERSION.src/lld" \
         "llvm-project-$LLVM_VERSION.src/clang/tools/driver" \
         "llvm-project-$LLVM_VERSION.src/cmake" \
@@ -117,7 +118,9 @@ if [ ! -f "$MINGW_OUT/lib/x86_64-w64-mingw32/crt2.o" ]; then
     rm -rf "$MINGW_OUT" "$DEPS/mingw-extract"
     mkdir -p "$DEPS/mingw-extract" "$MINGW_OUT/lib"
     # (not its host tools, whose symbolic links Windows cannot always make)
-    tar -xJf "$MINGW_TXZ" -C "$DEPS/mingw-extract" --exclude='*/bin/*' --exclude='*/share/*' --exclude='*/python/*' 
+    tar -xJf "$MINGW_TXZ" -C "$DEPS/mingw-extract" --exclude='*/bin/*' --exclude='*/share/*' --exclude='*/python/*' \
+        --exclude='*/lib/lib*.so*' --exclude='*/x86_64-w64-mingw32/include' --exclude='*/aarch64-w64-mingw32/include' \
+        --exclude='*/i686-w64-mingw32/include' --exclude='*/armv7-w64-mingw32/include'
     top=$DEPS/mingw-extract/$(ls "$DEPS/mingw-extract")
     # C headers (no C++, IDL sources or driver kit)
     cp -R "$top/generic-w64-mingw32/include" "$MINGW_OUT/include"
