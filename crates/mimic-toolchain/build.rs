@@ -67,12 +67,21 @@ fn main() {
         .flag_if_supported("-fno-exceptions")
         .flag_if_supported("-funwind-tables")
         // MSVC: LLVM is built without RTTI, and its headers want these
+        // (the flags of LLVM's own MSVC build: HandleLLVMOptions.cmake)
         .flag_if_supported("/GR-")
         .flag_if_supported("/Zc:__cplusplus")
+        .flag_if_supported("/Zc:preprocessor")
+        .flag_if_supported("/Zc:inline")
+        .flag_if_supported("/bigobj")
         .flag_if_supported("/permissive-")
         .include(llvm.join("include"))
         .include(lld.join("include"))
         .file("src/shim.cpp");
+    if msvc() {
+        for d in ["_CRT_SECURE_NO_DEPRECATE", "_CRT_SECURE_NO_WARNINGS", "_CRT_NONSTDC_NO_DEPRECATE", "_CRT_NONSTDC_NO_WARNINGS", "_SCL_SECURE_NO_DEPRECATE", "_SCL_SECURE_NO_WARNINGS", "UNICODE", "_UNICODE"] {
+            b.define(d, None);
+        }
+    }
     for f in ["driver.cpp", "cc1_main.cpp", "cc1as_main.cpp", "cc1gen_reproducer_main.cpp"] {
         let p = driver.join(f);
         if p.is_file() {
