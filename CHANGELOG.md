@@ -12,6 +12,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - Importing a C header failed when it declared a name Mimic uses itself (`div` in `stdlib.h`, a field `type`, a function `sum`). Under `c::` (below) they keep their C spelling; a wrapper that cannot be written in Mimic is left out instead of failing the import.
 
 ### Added
+- C constants and globals: `#define` constants and enum values (`c::SEEK_END`, `c::M_PI`, `c::TIOCGWINSZ`), computed by Clang and inlined; globals and expression macros (`c::stdout`, `c::errno`) read through generated getters; `#define` aliases of functions (`c::CreateFile`); C functions with uppercase names (the Windows API). Struct, callback and getter wrappers are generated only for the C names a program uses.
 - Collections: `unique`, `sort_by` (stable, `descending: true`), `zip`, `enumerate`, `any`, `all`, `count`, `group_by`, `flatten`, `min_by`, `max_by`, `clamp`, `to_map`, and a `set` module (`set::of`, `has`, `add`, `remove`, `union`, `intersection`, `difference`).
 - `panic(message)` and `assert(ok, message)` in ordinary code; `os::env_all()`; `fs::walk(dir)` and `fs::modified(path)`; `time::format(t, pattern)` (`%Y-%m-%d %H:%M`); `random::choice` and `random::shuffle`.
 - Terminal programs without C: `io::write` (no newline), `io::flush`, `io::read_char`, `io::read_bytes`; the `term` module (`raw`, `read_key`, `size`, `is_terminal`, `clear`, `move_to`, `show_cursor`, `alternate_screen`, undone when the program ends), on Windows too (ANSI codes are switched on); `os::on_interrupt` for Ctrl-C.

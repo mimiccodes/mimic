@@ -69,6 +69,7 @@ How the import works:
 * **Libraries to link.** Name them under `ffi { link = ["sqlite3"] }`.
 * **Every name keeps its C spelling.** After `c::` and `.` any name works, even ones Mimic uses itself: `c::div(17, 5)` from `stdlib.h`, a struct field `t.type`.
 * **Another namespace.** `include "sqlite3.h" as sql` puts the header's names under `sql::` instead: `sql::sqlite3_open(…)`.
+* **Constants and globals.** `#define` constants and `enum` values come too (`c::SEEK_END`, `c::M_PI`), and so do globals such as `c::stdout` and `c::errno`, read when used.
 
 ## Type mapping
 

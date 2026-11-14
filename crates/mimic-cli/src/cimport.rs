@@ -54,6 +54,23 @@ pub struct Imported {
     pub callback_c: String,
     /// (name, why it was skipped)
     pub skipped: Vec<(String, String)>,
+    /// Constants: `#define`s and enum values whose value is known when the
+    /// header is read. `c::NAME` is replaced by the value.
+    pub constants: Vec<(String, CConst)>,
+    /// Globals and macros that stand for an expression (`c::stdout`,
+    /// `c::errno`): read through a generated getter each time they are used.
+    /// Their getters are in `fns`; `c::NAME` becomes a call.
+    pub globals: Vec<String>,
+    /// C for the getters (empty when there are none).
+    pub globals_c: String,
+}
+
+/// The value of a C constant.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CConst {
+    Int(i64),
+    Float(f64),
+    Str(String),
 }
 
 impl Imported {
@@ -102,7 +119,7 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
         .map(|t| format!("{t:?}"))
         .unwrap_or_default();
     let key = mimic_syntax::fnv1a(
-        format!("v10|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
+        format!("v15|{header}|{local:?}|{stamp}|{dirs:?}|{}|{:?}|{}", target.name(), target.llvm, toolchain::describe(&tc)).as_bytes(),
     );
     let cache = mimic_project::packages::cache_dir().join("cimport");
     let cached = cache.join(format!("{key:016x}.json"));
@@ -146,6 +163,61 @@ pub fn import(header: &str, dirs: &[PathBuf], target: &Target) -> Result<Importe
     let v: Value = serde_json::from_slice(&ast).map_err(|e| format!("cannot read Clang's AST for `{header}`: {e}"))?;
     let mut imported = collect(&v, header, local.as_deref(), &model);
     imported.include_line = line.trim().to_string();
+    // #define constants and expressions: one more Clang pass, which may
+    // report errors for the macros that are neither (they are left out)
+    let lenient = |probe: &Path| -> Option<Vec<u8>> {
+        let mut c = toolchain::cc(&tc, target);
+        for d in dirs.iter().filter(|d| !d.as_os_str().is_empty()) {
+            c.arg(format!("-I{}", d.display()));
+        }
+        c.args(["-fsyntax-only", "-ferror-limit=0", "-Wno-everything", "-Xclang", "-ast-dump=json"]).arg(probe);
+        c.output().ok().map(|o| o.stdout)
+    };
+    let probe2 = cache.join(format!("consts-{key:016x}-{}.c", std::process::id()));
+    macro_constants(&String::from_utf8_lossy(&macros), line.trim(), &lenient, &probe2, &mut imported);
+    let _ = std::fs::remove_file(&probe2);
+    // every getter must compile (a macro may name something that is not a
+    // value): compile them once, and leave out the lines Clang rejects
+    if !imported.globals_c.is_empty() {
+        let probe3 = cache.join(format!("getters-{key:016x}-{}.c", std::process::id()));
+        let _ = std::fs::write(&probe3, format!("{}\n{}", line.trim(), imported.globals_c));
+        let mut c = toolchain::cc(&tc, target);
+        for d in dirs.iter().filter(|d| !d.as_os_str().is_empty()) {
+            c.arg(format!("-I{}", d.display()));
+        }
+        c.args(["-fsyntax-only", "-ferror-limit=0", "-Wno-everything", "-fno-color-diagnostics"]).arg(&probe3);
+        let bad: std::collections::HashSet<usize> = c
+            .output()
+            .map(|o| {
+                let name = probe3.display().to_string();
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .filter(|l| l.contains(": error:"))
+                    .filter_map(|l| l.strip_prefix(&format!("{name}:"))?.split(':').next()?.parse::<usize>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(&probe3);
+        if !bad.is_empty() {
+            // line 1 is the #include; getter k is on line k + 2
+            let lines: Vec<&str> = imported.globals_c.lines().collect();
+            let mut keep = String::new();
+            let mut dropped = std::collections::HashSet::new();
+            for (k, l) in lines.iter().enumerate() {
+                if bad.contains(&(k + 2)) {
+                    if let Some(sym) = l.split('(').next().and_then(|x| x.rsplit(' ').next()) {
+                        dropped.insert(sym.to_string());
+                    }
+                } else {
+                    keep.push_str(l);
+                    keep.push('\n');
+                }
+            }
+            imported.globals_c = keep;
+            imported.fns.retain(|f| !f.link_name.as_ref().is_some_and(|l| dropped.contains(l)));
+            imported.globals.retain(|g| !dropped.contains(&format!("mimicw_g_{g}")));
+        }
+    }
     let _ = mimic_toolchain::jobs::write_atomic(&cached, to_cache(&imported).to_string().as_bytes());
     Ok(imported)
 }
@@ -250,12 +322,51 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
     let mut seen = std::collections::HashSet::new();
     for node in ast["inner"].as_array().into_iter().flatten() {
         update_file(node, &mut cur);
+        let builtin = cur.as_deref().is_some_and(|f| f.contains("/lib/clang/") || f.contains("/clang-23/include/")) && !cur.as_deref().is_some_and(mine);
+        // enum values: constants
+        if node["kind"] == "EnumDecl" && !builtin {
+            // a value without `= …` is the one before plus 1 (from 0)
+            let mut next = 0i64;
+            for c in node["inner"].as_array().into_iter().flatten().filter(|c| c["kind"] == "EnumConstantDecl") {
+                let v = constant_value(c).unwrap_or(next);
+                next = v.wrapping_add(1);
+                if let Some(n) = c["name"].as_str()
+                    && !n.starts_with('_')
+                    && seen.insert(n.to_string())
+                {
+                    out.constants.push((n.to_string(), CConst::Int(v)));
+                }
+            }
+            continue;
+        }
+        // `extern int counter;`: a getter reads it
+        if node["kind"] == "VarDecl" && node["storageClass"] == "extern" && !builtin {
+            if let Some(n) = node["name"].as_str()
+                && !n.starts_with('_')
+                && seen.insert(n.to_string())
+            {
+                let t = &node["type"];
+                let kind = match map_type(t["qualType"].as_str().unwrap_or(""), t["desugaredQualType"].as_str(), m, true).as_deref() {
+                    Ok("f32" | "f64") => Some(Getter::Float),
+                    Ok("cstr") => Some(Getter::Text),
+                    Ok("cptr") => Some(Getter::Pointer),
+                    Ok(t) if t.starts_with("ptr[") => Some(Getter::Pointer),
+                    Ok("void") | Err(_) => None,
+                    Ok(_) => Some(Getter::Int),
+                };
+                match kind {
+                    Some(k) => add_getter(&mut out, n, k, n),
+                    None => out.skipped.push((n.to_string(), "a global whose type has no Mimic counterpart".into())),
+                }
+            }
+            continue;
+        }
         if node["kind"] != "FunctionDecl" || node["isImplicit"].as_bool() == Some(true) {
             continue;
         }
         // everything the header makes visible (like C's #include), except
         // the compiler's own builtin headers
-        if cur.as_deref().is_some_and(|f| f.contains("/lib/clang/") || f.contains("/clang-23/include/")) && !cur.as_deref().is_some_and(mine) {
+        if builtin {
             continue;
         }
         let Some(name) = node["name"].as_str() else { continue };
@@ -266,10 +377,7 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
         if name.starts_with('_') {
             continue; // reserved: implementation details
         }
-        if name.starts_with(|c: char| c.is_ascii_uppercase()) {
-            out.skipped.push(skip("names starting with an uppercase letter are types or variants in Mimic"));
-            continue;
-        }
+        // (uppercase names are fine: everything from C is written `c::Name`)
         if node["storageClass"] == "static" || node["inline"].as_bool() == Some(true) {
             out.skipped.push(skip("static/inline: no symbol to link (wrappers come with the next FFI step)"));
             continue;
@@ -299,7 +407,8 @@ fn collect(ast: &Value, header: &str, local: Option<&Path>, m: &DataModel) -> Im
             match callback_wrapper(name, &ret_q, &ret_c, &parms, m) {
                 Ok((f, c)) => {
                     out.fns.push(f);
-                    out.callback_c.push_str(&c);
+                    // tagged, so a program gets only the wrappers it uses
+                    out.callback_c.push_str(&format!("/* mimic:fn {name} */\n{c}"));
                 }
                 Err(why) => out.skipped.push(skip(&why)),
             }
@@ -829,6 +938,13 @@ fn to_cache(i: &Imported) -> Value {
         "records": i.records,
         "include": i.include_line,
         "skipped": i.skipped.iter().map(|(n, w)| serde_json::json!([n, w])).collect::<Vec<_>>(),
+        "constants": i.constants.iter().map(|(n, c)| match c {
+            CConst::Int(v) => serde_json::json!({"name": n, "int": v}),
+            CConst::Float(v) => serde_json::json!({"name": n, "float": v}),
+            CConst::Str(v) => serde_json::json!({"name": n, "str": v}),
+        }).collect::<Vec<_>>(),
+        "globals": i.globals,
+        "globals_c": i.globals_c,
     })
 }
 
@@ -862,6 +978,23 @@ fn from_cache(v: &Value) -> Imported {
         include_line: s(&v["include"]),
         callback_c: s(&v["callback_c"]),
         skipped: v["skipped"].as_array().into_iter().flatten().map(|p| (s(&p[0]), s(&p[1]))).collect(),
+        constants: v["constants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let value = if let Some(i) = c["int"].as_i64() {
+                    CConst::Int(i)
+                } else if let Some(x) = c["float"].as_f64() {
+                    CConst::Float(x)
+                } else {
+                    CConst::Str(c["str"].as_str()?.to_string())
+                };
+                Some((s(&c["name"]), value))
+            })
+            .collect(),
+        globals: v["globals"].as_array().into_iter().flatten().map(s).collect(),
+        globals_c: s(&v["globals_c"]),
     }
 }
 
@@ -884,5 +1017,196 @@ mod tests {
         assert_eq!(map_type("const unsigned char *", None, &lp64, true).unwrap(), "cstr");
         assert!(map_type("int (*)(void *, int)", None, &lp64, false).is_err());
         assert_eq!(map_type("enum color", None, &lp64, false).unwrap(), "i32");
+    }
+}
+
+/// The value Clang computed for a constant expression (`ConstantExpr` below
+/// an enum value), as i64 (unsigned values wrap, as in C).
+fn constant_value(node: &Value) -> Option<i64> {
+    match node {
+        Value::Object(o) => {
+            if o.get("kind").and_then(Value::as_str) == Some("ConstantExpr")
+                && let Some(v) = o.get("value").and_then(Value::as_str)
+            {
+                return v.parse::<i128>().ok().map(|x| x as i64);
+            }
+            o.values().find_map(constant_value)
+        }
+        Value::Array(a) => a.iter().find_map(constant_value),
+        _ => None,
+    }
+}
+
+/// What a getter returns: integers as i64, floats as f64, text, pointers.
+#[derive(Clone, Copy)]
+enum Getter {
+    Int,
+    Float,
+    Text,
+    Pointer,
+}
+
+/// A getter for a global or an expression macro: a zero-argument function
+/// (in `fns`, linked to the generated C) that `c::name` turns into a call.
+fn add_getter(out: &mut Imported, name: &str, kind: Getter, expr: &str) {
+    let w = format!("mimicw_g_{name}");
+    let (c, ty) = match kind {
+        Getter::Int => ("long long", "i64"),
+        Getter::Float => ("double", "f64"),
+        Getter::Text => ("const char *", "cstr"),
+        Getter::Pointer => ("void *", "cptr"),
+    };
+    out.globals_c.push_str(&format!("{c} {w}(void) {{ return ({c})({expr}); }}\n"));
+    out.fns.push(CFn { name: name.to_string(), params: Vec::new(), ret: Some(ty.to_string()), variadic: false, link_name: Some(w) });
+    out.globals.push(name.to_string());
+}
+
+/// `#define NAME body` lines that look like values: object-like (no
+/// parameters), not reserved (`_x`), with a body.
+fn value_macros(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| l.strip_prefix("#define "))
+        .filter_map(|l| {
+            let end = l.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(l.len());
+            let (name, rest) = l.split_at(end);
+            (!name.is_empty() && !name.starts_with('_') && !name.starts_with(|c: char| c.is_ascii_digit()) && rest.starts_with(' ') && !rest.trim().is_empty())
+                .then(|| (name.to_string(), rest.trim().to_string()))
+        })
+        .collect()
+}
+
+/// A C string literal body (`"a" "b\n"`), unescaped; None when it is not one.
+fn c_string(body: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut cs = body.trim().trim_start_matches('(').trim_end_matches(')').trim().chars().peekable();
+    let mut any = false;
+    loop {
+        while cs.peek().is_some_and(|c| c.is_whitespace()) {
+            cs.next();
+        }
+        match cs.next() {
+            None => return any.then_some(out),
+            Some('"') => any = true,
+            Some(_) => return None,
+        }
+        loop {
+            match cs.next()? {
+                '"' => break,
+                '\\' => match cs.next()? {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    '0' => out.push('\0'),
+                    'x' => {
+                        let mut v = 0u32;
+                        while let Some(d) = cs.peek().and_then(|c| c.to_digit(16)) {
+                            v = v * 16 + d;
+                            cs.next();
+                        }
+                        out.push(char::from_u32(v)?);
+                    }
+                    c => out.push(c),
+                },
+                c => out.push(c),
+            }
+        }
+    }
+}
+
+/// A C floating literal body (`3.14`, `(1e-9)`, `2.5f`); None otherwise.
+fn c_float(body: &str) -> Option<f64> {
+    let t = body.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    let t = t.trim_end_matches(['f', 'F', 'l', 'L']);
+    if !t.contains(['.', 'e', 'E']) || t.starts_with("0x") || t.starts_with("0X") {
+        return None;
+    }
+    t.parse::<f64>().ok()
+}
+
+/// The macros of a header that are constants or expressions: Clang computes
+/// each integer value (so `_IOR(…)` and `sizeof` work) and the type of each
+/// (`__typeof__`), in one pass that tolerates the ones that are neither.
+fn macro_constants(macros: &str, include_line: &str, run: &dyn Fn(&Path) -> Option<Vec<u8>>, probe: &Path, out: &mut Imported) {
+    let mut taken: std::collections::HashSet<String> = out.fns.iter().map(|f| f.name.clone()).chain(out.constants.iter().map(|c| c.0.clone())).collect();
+    // `#define CreateFile CreateFileA`: another name for an imported function
+    let fns: std::collections::HashMap<String, CFn> = out.fns.iter().map(|f| (f.name.clone(), f.clone())).collect();
+    let mut cands = Vec::new();
+    for (n, body) in value_macros(macros) {
+        if taken.contains(&n) {
+            continue;
+        }
+        let target = body.trim().trim_start_matches('(').trim_end_matches(')').trim();
+        if let Some(f) = fns.get(target) {
+            let mut alias = f.clone();
+            alias.name = n.clone();
+            alias.link_name = Some(f.link_name.clone().unwrap_or_else(|| f.name.clone()));
+            out.fns.push(alias);
+            taken.insert(n);
+            continue;
+        }
+        cands.push((n, body));
+    }
+    if cands.is_empty() {
+        return;
+    }
+    let mut src = format!("{include_line}\n");
+    for (i, (n, _)) in cands.iter().enumerate() {
+        // its value when it is an integer constant; else its kind of type
+        // (100 text, else Clang's type class: 1-4 integer, 5 pointer, 8 float)
+        src.push_str(&format!(
+            "enum {{ mimic_i{i} = ({n}) }};\nenum {{ mimic_k{i} = _Generic(({n}), char *: 100, const char *: 100, default: __builtin_classify_type(({n}))) }};\n"
+        ));
+    }
+    if std::fs::write(probe, &src).is_err() {
+        return;
+    }
+    let Some(ast) = run(probe) else { return };
+    let _ = std::fs::remove_file(probe);
+    let Ok(v) = serde_json::from_slice::<Value>(&ast) else { return };
+    let mut ints: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+    let index = |name: &str, prefix: &str| name.strip_prefix(prefix).and_then(|x| x.parse::<usize>().ok());
+    for node in v["inner"].as_array().into_iter().flatten() {
+        if node["kind"] == "EnumDecl" {
+            for c in node["inner"].as_array().into_iter().flatten() {
+                if c["isInvalid"].as_bool() == Some(true) {
+                    continue;
+                }
+                let Some(val) = constant_value(c) else { continue };
+                if let Some(i) = c["name"].as_str().and_then(|n| index(n, "mimic_i")) {
+                    ints.insert(i, val);
+                } else if let Some(i) = c["name"].as_str().and_then(|n| index(n, "mimic_k")) {
+                    kinds.insert(i, val);
+                }
+            }
+        }
+    }
+    for (i, (name, body)) in cands.iter().enumerate() {
+        if let Some(v) = ints.get(&i) {
+            out.constants.push((name.clone(), CConst::Int(*v)));
+            continue;
+        }
+        let Some(kind) = kinds.get(&i) else { continue };
+        let getter = match kind {
+            100 => match c_string(body) {
+                Some(text) => {
+                    out.constants.push((name.clone(), CConst::Str(text)));
+                    continue;
+                }
+                None => Getter::Text,
+            },
+            8 => match c_float(body) {
+                Some(x) => {
+                    out.constants.push((name.clone(), CConst::Float(x)));
+                    continue;
+                }
+                None => Getter::Float,
+            },
+            1..=4 => Getter::Int,
+            5 => Getter::Pointer,
+            _ => continue,
+        };
+        // an expression (`stdout`, `errno`): read through a getter
+        add_getter(out, name, getter, &format!("({name})"));
     }
 }

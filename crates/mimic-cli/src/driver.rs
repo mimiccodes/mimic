@@ -942,11 +942,33 @@ fn import_headers(
     // imported ones; each name is imported once) and its generated Mimic code
     let mut taken: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     let mut generated: BTreeMap<String, String> = BTreeMap::new();
+    // per namespace: C constants (`c::SEEK_SET` becomes its value) and
+    // getters of globals and expression macros (`c::errno` becomes a call)
+    let mut constants: BTreeMap<String, std::collections::HashMap<String, crate::cimport::CConst>> = BTreeMap::new();
+    let mut getters: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    // their C, emitted only for the ones the program uses (a getter may name
+    // a function of a library the program does not link)
+    let mut getter_c: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
     for item in items.iter() {
         if let Item::Extern(b) = item
             && b.abi == "C"
         {
             taken.entry(ns_of(b)).or_default().extend(b.fns.iter().map(|f| f.name.clone()));
+        }
+    }
+    // the C names this scope's code mentions (`c::name`): only their C
+    // wrappers are generated, since a wrapper refers to its C function, and a
+    // header can declare functions of libraries the program does not link
+    let mut referenced: HashSet<(String, String)> = HashSet::new();
+    for item in items.iter() {
+        if let Item::Fn(f) = item {
+            f.body.walk(&mut |e| {
+                if let mimic_syntax::ast::ExprKind::Path(p) = &e.kind
+                    && p.len() == 2
+                {
+                    referenced.insert((p[0].clone(), p[1].clone()));
+                }
+            });
         }
     }
     for item in items.iter_mut() {
@@ -963,9 +985,28 @@ fn import_headers(
                                     b.fns.push(f);
                                 }
                             }
-                            // callback trampolines: the externs keep their unsafe rule
-                            if !imp.callback_c.is_empty() {
-                                wrappers.push(format!("{}\n{CALLBACK_PRELUDE}{}", imp.include_line, imp.callback_c));
+                            let consts = constants.entry(ns.clone()).or_default();
+                            for (name, value) in &imp.constants {
+                                if !taken.contains(name) {
+                                    consts.entry(name.clone()).or_insert_with(|| value.clone());
+                                }
+                            }
+                            getters.entry(ns.clone()).or_default().extend(imp.globals.iter().cloned());
+                            for l in imp.globals_c.lines() {
+                                if let Some(sym) = l.split('(').next().and_then(|x| x.rsplit(' ').next()) {
+                                    getter_c.entry(sym.to_string()).or_insert_with(|| (imp.include_line.clone(), l.to_string()));
+                                }
+                            }
+                            // callback trampolines (the externs keep their unsafe
+                            // rule), for the functions used
+                            let used_callbacks: String = imp
+                                .callback_c
+                                .split("/* mimic:fn ")
+                                .filter(|chunk| chunk.split(" */").next().is_some_and(|n| referenced.contains(&(ns.clone(), n.to_string()))))
+                                .map(|chunk| chunk.split_once(" */\n").map(|x| x.1).unwrap_or(""))
+                                .collect();
+                            if !used_callbacks.is_empty() {
+                                wrappers.push(format!("{}\n{CALLBACK_PRELUDE}{used_callbacks}", imp.include_line));
                             }
                             if !b.trusted {
                                 continue; // struct wrappers hide the unsafe call: trusted imports only
@@ -973,6 +1014,9 @@ fn import_headers(
                             let generated = generated.entry(ns.clone()).or_default();
                             let mut c = String::new();
                             for f in &imp.struct_fns {
+                                if !referenced.contains(&(ns.clone(), f.name.clone())) {
+                                    continue; // not used here
+                                }
                                 // a wrapper that does not parse is left out, not the header
                                 let alone: String = f.uses.iter().map(|r| format!("{}\n", imp.records[r])).collect::<String>() + &f.mimic;
                                 if mimic_syntax::parser::parse_file(&format!("module generated\n{}", alone.replace("PUB ", ""))).is_err() {
@@ -1021,6 +1065,60 @@ fn import_headers(
         }
     }
     *items = kept;
+    // `c::NAME` in this module's functions: constants become their value,
+    // globals a call of their getter (`c::errno` reads errno each time)
+    let used: std::cell::RefCell<HashSet<String>> = Default::default();
+    let rewrite = |e: &mut mimic_syntax::ast::Expr| {
+        use mimic_syntax::ast::{Expr, ExprKind};
+        use crate::cimport::CConst;
+        match &mut e.kind {
+            ExprKind::Path(p) if p.len() == 2 => {
+                if let Some(c) = constants.get(&p[0]).and_then(|m| m.get(&p[1])) {
+                    e.kind = match c {
+                        CConst::Int(v) => ExprKind::Int(*v),
+                        CConst::Float(v) => ExprKind::Float(*v),
+                        CConst::Str(v) => ExprKind::Str(v.clone()),
+                    };
+                } else if getters.get(&p[0]).is_some_and(|g| g.contains(&p[1])) {
+                    used.borrow_mut().insert(format!("mimicw_g_{}", p[1]));
+                    let callee = Expr { kind: ExprKind::Path(p.clone()), span: e.span };
+                    e.kind = ExprKind::Call { callee: Box::new(callee), args: Vec::new() };
+                }
+            }
+            // `c::errno()` written out: undo the call added to its callee
+            ExprKind::Call { callee, args } if args.is_empty() => {
+                if let ExprKind::Call { callee: inner, args: a } = &callee.kind
+                    && a.is_empty()
+                    && matches!(&inner.kind, ExprKind::Path(p) if p.len() == 2 && getters.get(&p[0]).is_some_and(|g| g.contains(&p[1])))
+                {
+                    let inner = (**inner).clone();
+                    **callee = inner;
+                }
+            }
+            _ => {}
+        }
+    };
+    if !constants.is_empty() || !getters.is_empty() {
+        for item in items.iter_mut() {
+            if let Item::Fn(f) = item {
+                f.body.walk_mut(&mut |e| rewrite(e));
+                for p in &mut f.params {
+                    if let Some(d) = &mut p.default {
+                        d.walk_mut(&mut |e| rewrite(e));
+                    }
+                }
+            }
+        }
+    }
+    // the getters used, once each in the whole program (several headers
+    // define NULL, EOF, …)
+    for sym in used.into_inner() {
+        if let Some((include, line)) = getter_c.get(&sym)
+            && !wrappers.iter().any(|w| w.contains(&format!(" {sym}(void)")))
+        {
+            wrappers.push(format!("{include}\n{line}\n"));
+        }
+    }
     for (ns, code) in generated {
         if code.is_empty() {
             continue;

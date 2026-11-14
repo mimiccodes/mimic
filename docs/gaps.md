@@ -32,9 +32,9 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 
 | Gap | Today |
 |---|---|
-| `#define` constants: `c::EXIT_SUCCESS`, `c::SEEK_SET`, `c::TIOCGWINSZ`, string constants | Not imported |
-| `enum` values: `c::GREEN` | The type maps to `i32`, but the names are not imported |
-| Global variables: `c::stdout`, `c::stderr`, `c::errno` | Not imported |
+| `#define` constants: `c::EXIT_SUCCESS`, `c::SEEK_SET`, `c::TIOCGWINSZ`, string constants | ✅ |
+| `enum` values: `c::GREEN` | ✅ |
+| Global variables: `c::stdout`, `c::stderr`, `c::errno` | ✅ (read through getters) |
 | Structs with array fields (`struct termios`, `struct sockaddr_un`) | Functions using them are skipped |
 | Unions | Skipped |
 | A struct filled in through a pointer (`ioctl(fd, TIOCGWINSZ, &ws)`, `tcgetattr(fd, &t)`) | Only arrays of numbers can be passed for C to fill |

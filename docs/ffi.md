@@ -103,6 +103,9 @@ How the import works:
   | Typedefs | Resolved to what they stand for |
   | `struct vec2` by value (in a `trusted` import) | the record `Vec2`, see below |
 
+* **Constants.** `#define` constants and `enum` values are imported too: `c::SEEK_END`, `c::EXIT_FAILURE`, `c::M_PI`, `c::GREEN`. Clang computes each value when the header is read (so `_IOR(…)` and `sizeof` in a macro work), and `c::NAME` is replaced by it while compiling, as C does. Integers are `i64` (an unsigned 64-bit value wraps, as a cast in C does), floats `f64`, text `str`.
+* **Globals and expression macros.** `extern` variables and macros that stand for an expression (`c::stdout`, `c::errno`) are read through a small generated getter each time they are used, so their value is always current. Integers come back as `i64`, floats as `f64`, `char *` as `cstr`, other pointers as `cptr`. Only the getters a program uses are generated. They can be read, not assigned.
+* **Other names for functions.** `#define CreateFile CreateFileA` makes `c::CreateFile` call `CreateFileA`, as in C.
 * **The `c::` namespace.** Every function, record and wrapper that comes from C is reached through `c::` (or the block's `as` name). C names keep their spelling, including ones Mimic uses itself: `c::div(17, 5)` from `stdlib.h`, a struct field `t.type`, `c::sum` next to Mimic's `sum`. A wrapper that still cannot be written in Mimic is left out; the rest of the header imports.
 * **Name clashes.** Inside a namespace, hand-written declarations win over imported ones, and each name is imported once, even if several headers declare it. Names from C never clash with the module's own: they live in their namespace. A module of your own named `c` (or the `as` name) is an error.
 * **What is skipped, for now.** These functions are left out. They are not an error, and the reason is recorded:
@@ -112,7 +115,6 @@ How the import works:
   | Functions that take unions by value, or structs with array, union or function-pointer fields | Rest of B2 |
   | `long double` | No Mimic type |
   | `static inline` functions | No symbol to link |
-  | Names starting with an uppercase letter | Mimic reserves those for types and variants |
   | Reserved `_names` | |
 
 * **Caching.** Results are cached per header, target and modification time in `~/.mimic/cache/cimport`, so only the first build pays the roughly 1 s that Clang takes.

@@ -688,6 +688,48 @@ int take(int n);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Constants and globals from C: `#define` numbers, text and floats, enum
+/// values (counted), `extern` globals read live, expression macros
+/// (`c::stdout`, `c::errno`), from a project header and system headers.
+#[test]
+fn c_constants() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-cconst-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "kc"]).status().unwrap().success());
+    let proj = dir.join("kc");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(
+        proj.join("c/kc.h"),
+        "#define ANSWER 42\n#define TWICE (ANSWER * 2)\n#define HALF (0.5f)\n#define GREETING \"hi\\tthere\"\n\
+         #define ALL_BITS 0xFFFFFFFFFFFFFFFFULL\nenum color { RED, GREEN = 5, BLUE };\nextern int counter;\nint bump(void);\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("c/kc.c"), "#include \"kc.h\"\nint counter = 7;\nint bump(void) { return ++counter; }\n").unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/kc.c\"]\n    include = [\"c\"]")).unwrap();
+    std::fs::write(
+        proj.join("src/main.mim"),
+        "module main\n\ntrusted extern \"C\" include \"kc.h\"\ntrusted extern \"C\" include \"stdio.h\"\n\
+         trusted extern \"C\" include \"errno.h\"\ntrusted extern \"C\" include \"math.h\"\n\n\
+         fn main() {\n    print((c::ANSWER, c::TWICE, c::HALF, c::GREETING, c::ALL_BITS))\n    print((c::RED, c::GREEN, c::BLUE))\n\
+             print(c::counter)\n    c::bump()\n    print(c::counter)\n    print((c::SEEK_END, c::EOF, c::M_PI > 3.14))\n\
+             print(c::fflush(c::stdout))\n    print(c::errno >= 0)\n}\n",
+    )
+    .unwrap();
+    let out = mimic().current_dir(&proj).arg("run").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "(42, 84, 0.5, \"hi\tthere\", -1)\n(0, 5, 6)\n7\n8\n(2, -1, true)\n0\ntrue\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // the same program for Windows: its getters link against mingw-w64
+    let out = mimic().current_dir(&proj).args(["build", "--target", "x86_64-windows"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Mimic called from C: `extern "C" fn` exports, `--emit-header`, a C program
 /// linked against the Mimic library (the runtime starts itself).
 #[test]
