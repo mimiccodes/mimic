@@ -36,6 +36,12 @@ pub fn main(cxx: bool, rest: &[String]) -> i32 {
     let mut post: Vec<String> = Vec::new();
     let mut flavour_target: Option<String> = None;
 
+    // Windows: this machine's target is MinGW, as for `mimic build` (Clang's
+    // own default there would be MSVC, its headers and its linker)
+    if cfg!(windows) && target_arg(&user).is_none() {
+        user.insert(0, format!("--target={}-windows-gnu", std::env::consts::ARCH));
+    }
+
     if let Some((at, value)) = target_arg(&user) {
         let t = match Target::parse(&value) {
             Ok(t) => t,

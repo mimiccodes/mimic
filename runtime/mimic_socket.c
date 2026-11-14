@@ -8,7 +8,7 @@
 
 /* ok_of, err_of, obj_owned: see mimic_io.c */
 
-extern const mim_desc mim_desc_tcp_Socket, mim_desc_tcp_Listener, mim_desc_http_Request, mim_desc_http_Response;
+MIM_STD_DESC mim_desc_tcp_Socket, mim_desc_tcp_Listener, mim_desc_http_Request, mim_desc_http_Response;
 
 static const char *sock_strerror(int e);
 
@@ -2566,7 +2566,7 @@ mim_val *mim_std_http_serve_requests(mim_val *port, mim_val *handler, mim_val *c
 
 /* ==== WebSockets (RFC 6455) ================================================ */
 
-extern const mim_desc mim_desc_ws_Socket, mim_desc_ws_Text, mim_desc_ws_Binary, mim_desc_ws_Closed;
+MIM_STD_DESC mim_desc_ws_Socket, mim_desc_ws_Text, mim_desc_ws_Binary, mim_desc_ws_Closed;
 
 /* SHA-1, for the handshake's Sec-WebSocket-Accept only */
 static void sha1(const uint8_t *msg, size_t len, uint8_t out[20]) {
@@ -2979,7 +2979,7 @@ mim_val *mim_std_ws_serve_connections(mim_val *port, mim_val *handler, mim_val *
  * Datagrams over IPv4: each send is one packet, each receive returns one
  * packet with the sender's address. Packets may be lost or reordered. */
 
-extern const mim_desc mim_desc_udp_Socket, mim_desc_udp_Packet;
+MIM_STD_DESC mim_desc_udp_Socket, mim_desc_udp_Packet;
 
 static int udp_fd(mim_val *s, const char *what) {
     return (int)geti(field_of(s, &mim_desc_udp_Socket, 0, what), 0);
@@ -3094,7 +3094,7 @@ mim_val *mim_std_udp_close(mim_val *s) {
  * the Mimic values only hold their index. Identities are kept for the whole
  * run (a server uses one for all its connections). */
 
-extern const mim_desc mim_desc_tls_Identity, mim_desc_tls_Stream;
+MIM_STD_DESC mim_desc_tls_Identity, mim_desc_tls_Stream;
 
 static void **tls_ids;
 static int64_t tls_ids_n, tls_ids_cap;

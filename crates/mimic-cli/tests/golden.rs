@@ -169,7 +169,7 @@ fn create_build_cross() {
     // `mimic build` with no flags produces the fastest (release) binary
     let out = mimic().current_dir(&proj).arg("build").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(proj.join("target/release/demo").is_file(), "build must default to the release profile");
+    assert!(proj.join(format!("target/release/demo{}", std::env::consts::EXE_SUFFIX)).is_file(), "build must default to the release profile");
     // complete static Linux executables, built only with the tools inside mimic
     for (t, machine) in [("aarch64-linux-musl", 183u16), ("x86_64-linux-musl", 62)] {
         let out = mimic().current_dir(&proj).args(["build", "--target", t]).output().unwrap();
@@ -298,7 +298,8 @@ fn mimic_cc() {
     let exe = dir.join("hello");
     let out = mimic().current_dir(&dir).args(["cc", "-O2", "hello.c", "-o"]).arg(&exe).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&std::process::Command::new(&exe).output().unwrap().stdout), "1.414\n");
+    // (C's stdout in text mode writes \r\n on Windows)
+    assert_eq!(String::from_utf8_lossy(&std::process::Command::new(&exe).output().unwrap().stdout).replace("\r\n", "\n"), "1.414\n");
     // cross: a static Linux executable with no flags beyond --target
     let out = mimic().current_dir(&dir).args(["cc", "--target=aarch64-linux", "hello.c", "-lm", "-o", "hello-linux"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -678,7 +679,7 @@ fn export_to_c() {
     let out = cc.output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let run = std::process::Command::new(proj.join("main_c")).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "5.0 499500 10\nhello, C\n");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"), "5.0 499500 10\nhello, C\n");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

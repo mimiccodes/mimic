@@ -20,8 +20,8 @@
 
 /* ---- standard-library values -------------------------------------------- */
 
-extern const mim_desc mim_desc_Ok, mim_desc_Err, mim_desc_Some, mim_desc_None;
-extern const mim_desc mim_desc_os_Output, mim_desc_time_DateTime;
+MIM_STD_DESC mim_desc_Ok, mim_desc_Err, mim_desc_Some, mim_desc_None;
+MIM_STD_DESC mim_desc_os_Output, mim_desc_time_DateTime;
 
 static mim_val *obj_owned(const mim_desc *d, int64_t n, mim_val **fields) {
     mim_val *r = mim_obj(d, n, fields); /* retains the fields */
@@ -1047,7 +1047,7 @@ mim_val *mim_std_ui_detach(mim_val *f) {
 /* ui::then(state, job): the next state, and one job to run (ui::Step). Made
  * here rather than in Mimic: a job may have effects (that is its point), and
  * Mimic code cannot keep such a function in a value (E0605). */
-extern const mim_desc mim_desc_ui_Step;
+MIM_STD_DESC mim_desc_ui_Step;
 
 mim_val *mim_std_ui_then(mim_val *state, mim_val *job) {
     if (!job || job->dtype != MIM_FN) mim_panic("ui::then: expected a function");
@@ -1395,7 +1395,7 @@ mim_val *mim_std_fs_write_bytes(mim_val *path, mim_val *b) {
  * the channel to be closed and drained. Values are immutable and reference
  * counted atomically, so handing one to another thread is safe. */
 
-extern const mim_desc mim_desc_tuple, mim_desc_chan_Sender, mim_desc_chan_Receiver;
+MIM_STD_DESC mim_desc_tuple, mim_desc_chan_Sender, mim_desc_chan_Receiver;
 
 typedef struct {
 #if MIM_THREADS

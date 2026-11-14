@@ -15,7 +15,7 @@ typedef struct mim_schema {
     const struct mim_schema *const *items;
 } mim_schema;
 
-extern const mim_desc mim_desc_json_Null, mim_desc_json_Bool, mim_desc_json_Number, mim_desc_json_Text, mim_desc_json_List, mim_desc_json_Object;
+MIM_STD_DESC mim_desc_json_Null, mim_desc_json_Bool, mim_desc_json_Number, mim_desc_json_Text, mim_desc_json_List, mim_desc_json_Object;
 
 /* ---- parsing into a C tree ------------------------------------------------ */
 

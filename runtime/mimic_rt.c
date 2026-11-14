@@ -72,6 +72,15 @@ typedef struct {
     uint64_t raw, fbits, bbits;
 } mim_desc;
 
+/* The standard library's type descriptors, defined by each compiled program.
+ * On Windows they are weak: a program that never uses one (a raw `.mnet`)
+ * links without it, as unused code is dropped before linking elsewhere. */
+#ifdef _WIN32
+#define MIM_STD_DESC extern const mim_desc __attribute__((weak))
+#else
+#define MIM_STD_DESC extern const mim_desc
+#endif
+
 /* FN: a function value — `len` captured handles plus a descriptor (stored in
  * `desc`); `code(env, args)` borrows both and returns an owned value. */
 typedef struct mim_val mim_val;
