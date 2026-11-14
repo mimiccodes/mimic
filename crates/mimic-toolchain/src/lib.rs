@@ -7,6 +7,7 @@
 pub mod bundle;
 pub mod compiler_rt;
 pub mod jobs;
+pub mod mbedtls;
 pub mod mingw;
 pub mod musl;
 pub mod wasi;

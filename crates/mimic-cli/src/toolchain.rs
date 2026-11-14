@@ -198,6 +198,25 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
     Ok(None)
 }
 
+/// Mbed TLS for a static Linux target (built on first use), which the runtime's
+/// TLS uses there instead of loading OpenSSL. `None` for other targets, or
+/// when it cannot be built (TLS then reports that it is not available).
+pub fn static_tls(tc: &Toolchain) -> Option<mimic_toolchain::mbedtls::Built> {
+    let Toolchain::Embedded(Sysroot::Musl { triple, root, .. }) = tc else { return None };
+    let cache = libc_cache();
+    let mut flags = mimic_toolchain::musl::target_flags(triple);
+    flags.push(format!("--sysroot={}", root.display()));
+    flags.push("-resource-dir".into());
+    flags.push(mimic_toolchain::resource_dir(&cache).ok()?.display().to_string());
+    match mimic_toolchain::mbedtls::ensure(&cache, triple, &flags) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!("note: {e}; TLS will not be available in this program");
+            None
+        }
+    }
+}
+
 /// Windows with the GNU environment on x86_64 or aarch64: what the bundled
 /// mingw-w64 covers.
 fn is_mingw(target: &Target) -> bool {

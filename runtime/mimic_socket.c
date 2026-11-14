@@ -965,6 +965,299 @@ static void tls_close(void *t) {
     st.release(t);
 }
 
+#elif defined(MIM_MBEDTLS)
+
+/* Static Linux programs cannot load OpenSSL: TLS comes from the bundled Mbed
+ * TLS, linked in (built by mimic for the target). Randomness is the
+ * system's (os_random), trusted certificates are the system's CA bundle. */
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/net_sockets.h>
+#include <psa/crypto.h>
+
+static int mt_rng(void *ctx, unsigned char *out, size_t n) {
+    (void)ctx;
+    return os_random(out, n) ? 0 : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+}
+
+/* a client configuration with its own trusted certificates, shared by the
+ * sessions that use it (the last one out frees it) */
+typedef struct {
+    mbedtls_ssl_config conf;
+    mbedtls_x509_crt ca;
+    volatile long refs;
+} mt_trust;
+
+static struct {
+    int ready;
+    mt_trust *system; /* the system's CA bundle (never freed) */
+    const char *why;  /* why not ready */
+} mt;
+static pthread_mutex_t mt_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int mt_client_conf(mt_trust *t) {
+    mbedtls_ssl_config_init(&t->conf);
+    if (mbedtls_ssl_config_defaults(&t->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) return 0;
+    mbedtls_ssl_conf_rng(&t->conf, mt_rng, NULL);
+    mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&t->conf, &t->ca, NULL);
+    return 1;
+}
+
+static int tls_load(void) {
+    pthread_mutex_lock(&mt_lock);
+    if (!mt.ready) {
+        if (psa_crypto_init() != PSA_SUCCESS) {
+            mt.why = "TLS: the crypto library could not start";
+        } else {
+            /* the system's trusted certificates: $SSL_CERT_FILE, or where
+             * Linux distributions keep their CA bundle */
+            static const char *paths[] = {"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                                          "/etc/ssl/ca-bundle.pem", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                                          "/etc/ssl/cert.pem", NULL};
+            mt_trust *t = (mt_trust *)calloc(1, sizeof *t);
+            mbedtls_x509_crt_init(&t->ca);
+            const char *env = getenv("SSL_CERT_FILE");
+            int loaded = env && *env && mbedtls_x509_crt_parse_file(&t->ca, env) >= 0 && t->ca.raw.len > 0;
+            for (int i = 0; !loaded && paths[i]; i++) loaded = mbedtls_x509_crt_parse_file(&t->ca, paths[i]) >= 0 && t->ca.raw.len > 0;
+            t->refs = 1;
+            if (mt_client_conf(t)) {
+                mt.system = t;
+                /* without a CA bundle every server is untrusted: say so then */
+                if (!loaded) mt.why = "no trusted certificates found (install ca-certificates, or set SSL_CERT_FILE)";
+            } else {
+                mt.why = "TLS: cannot set up a client";
+            }
+        }
+        mt.ready = mt.system ? 1 : -1;
+    }
+    pthread_mutex_unlock(&mt_lock);
+    return mt.ready == 1;
+}
+
+/* a session on a socket */
+typedef struct {
+    mbedtls_ssl_context ssl;
+    int fd;
+    mt_trust *trust; /* the client configuration it holds a reference to */
+} mt_sess;
+
+static int mt_send(void *ctx, const unsigned char *p, size_t n) {
+    int fd = (int)(intptr_t)ctx;
+    for (;;) {
+        ssize_t w = msend(fd, p, n, MIM_SEND_FLAGS);
+        if (w >= 0) return (int)w;
+        if (errno == EINTR) continue;
+        return MBEDTLS_ERR_NET_SEND_FAILED;
+    }
+}
+
+static int mt_recv(void *ctx, unsigned char *p, size_t n) {
+    int fd = (int)(intptr_t)ctx;
+    for (;;) {
+        ssize_t r = mrecv(fd, p, n);
+        if (r >= 0) return (int)r;
+        if (errno == EINTR) continue;
+        return errno == EAGAIN || errno == EWOULDBLOCK ? MBEDTLS_ERR_SSL_TIMEOUT : MBEDTLS_ERR_NET_RECV_FAILED;
+    }
+}
+
+static mt_sess *mt_new(int fd, const mbedtls_ssl_config *conf) {
+    mt_sess *s = (mt_sess *)calloc(1, sizeof *s);
+    mbedtls_ssl_init(&s->ssl);
+    if (mbedtls_ssl_setup(&s->ssl, conf) != 0) {
+        mbedtls_ssl_free(&s->ssl);
+        free(s);
+        return NULL;
+    }
+    s->fd = fd;
+    mbedtls_ssl_set_bio(&s->ssl, (void *)(intptr_t)fd, mt_send, mt_recv, NULL);
+    return s;
+}
+
+static int mt_handshake(mt_sess *s) {
+    int r;
+    while ((r = mbedtls_ssl_handshake(&s->ssl)) == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
+    }
+    return r;
+}
+
+static void mt_trust_release(mt_trust *t) {
+    if (t && __atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        mbedtls_ssl_config_free(&t->conf);
+        mbedtls_x509_crt_free(&t->ca);
+        free(t);
+    }
+}
+
+/* a server identity: the certificate chain and key, in a server configuration */
+typedef struct {
+    mbedtls_ssl_config conf;
+    mbedtls_x509_crt chain;
+    mbedtls_pk_context key;
+} mt_identity;
+
+/* PEM text as Mbed TLS reads it: with its terminating NUL counted */
+static unsigned char *mt_pem(const char *p, size_t n) {
+    unsigned char *b = (unsigned char *)malloc(n + 1);
+    memcpy(b, p, n);
+    b[n] = 0;
+    return b;
+}
+
+static void *tls_identity_load(const char *cert, size_t cn, const char *key, size_t kn, char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "%s", mt.why ? mt.why : "TLS is not available");
+        return NULL;
+    }
+    mt_identity *id = (mt_identity *)calloc(1, sizeof *id);
+    mbedtls_x509_crt_init(&id->chain);
+    mbedtls_pk_init(&id->key);
+    mbedtls_ssl_config_init(&id->conf);
+    unsigned char *b = mt_pem(cert, cn);
+    int ok = mbedtls_x509_crt_parse(&id->chain, b, cn + 1) >= 0 && id->chain.raw.len > 0;
+    free(b);
+    const char *bad = NULL;
+    if (!ok) bad = "tls::identity: no certificate found in the certificate text (expected PEM)";
+    if (!bad) {
+        b = mt_pem(key, kn);
+        ok = mbedtls_pk_parse_key(&id->key, b, kn + 1, NULL, 0, mt_rng, NULL) == 0;
+        free(b);
+        if (!ok) bad = "tls::identity: no private key found in the key text (expected PEM)";
+    }
+    if (!bad && mbedtls_pk_check_pair(&id->chain.pk, &id->key, mt_rng, NULL) != 0) bad = "tls::identity: the key does not belong to the certificate";
+    if (!bad && (mbedtls_ssl_config_defaults(&id->conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0 ||
+                 mbedtls_ssl_conf_own_cert(&id->conf, &id->chain, &id->key) != 0))
+        bad = "TLS: cannot create a server context";
+    if (bad) {
+        mbedtls_ssl_config_free(&id->conf);
+        mbedtls_pk_free(&id->key);
+        mbedtls_x509_crt_free(&id->chain);
+        free(id);
+        snprintf(err, errn, "%s", bad);
+        return NULL;
+    }
+    mbedtls_ssl_conf_rng(&id->conf, mt_rng, NULL);
+    mbedtls_ssl_conf_authmode(&id->conf, MBEDTLS_SSL_VERIFY_NONE);
+    return id;
+}
+
+/* a client configuration that trusts only the given certificates */
+static void *tls_trust_load(const char *pem, size_t n, char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "%s", mt.why ? mt.why : "TLS is not available");
+        return NULL;
+    }
+    mt_trust *t = (mt_trust *)calloc(1, sizeof *t);
+    mbedtls_x509_crt_init(&t->ca);
+    unsigned char *b = mt_pem(pem, n);
+    int ok = mbedtls_x509_crt_parse(&t->ca, b, n + 1) >= 0 && t->ca.raw.len > 0;
+    free(b);
+    if (!ok || !mt_client_conf(t)) {
+        mbedtls_ssl_config_free(&t->conf);
+        mbedtls_x509_crt_free(&t->ca);
+        free(t);
+        snprintf(err, errn, "no certificate found in the trusted certificate text (expected PEM)");
+        return NULL;
+    }
+    t->refs = 1;
+    return t;
+}
+
+static void tls_trust_free(void *t) { mt_trust_release((mt_trust *)t); }
+
+/* the server side of a TLS session on an accepted socket (the handshake
+ * blocks this thread) */
+static void *tls_accept_on(int fd, void *identity, char *err, size_t errn) {
+    mt_sess *s = mt_new(fd, &((mt_identity *)identity)->conf);
+    if (!s) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    if (mt_handshake(s) != 0) {
+        snprintf(err, errn, "TLS with the client failed");
+        mbedtls_ssl_free(&s->ssl);
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+
+static void *tls_open_trusting(int fd, const char *host, void *trust, char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "%s", mt.why ? mt.why : "TLS is not available");
+        return NULL;
+    }
+    mt_trust *t = trust ? (mt_trust *)trust : mt.system;
+    mt_sess *s = mt_new(fd, &t->conf);
+    if (!s) {
+        snprintf(err, errn, "TLS: cannot create a session");
+        return NULL;
+    }
+    mbedtls_ssl_set_hostname(&s->ssl, host); /* SNI, and the name to check */
+    int r = mt_handshake(s);
+    if (r != 0) {
+        uint32_t v = mbedtls_ssl_get_verify_result(&s->ssl);
+        char why[256] = "";
+        if (!trust && mt.why) snprintf(why, sizeof why, "%s", mt.why);
+        else if (v != 0 && v != (uint32_t)-1) {
+            mbedtls_x509_crt_verify_info(why, sizeof why, "", v);
+            char *nl = strchr(why, '\n');
+            if (nl) *nl = 0;
+        }
+        if (why[0]) snprintf(err, errn, "TLS with %s failed: %s", host, why);
+        else snprintf(err, errn, "TLS with %s failed", host);
+        mbedtls_ssl_free(&s->ssl);
+        free(s);
+        return NULL;
+    }
+    if (t != mt.system) __atomic_add_fetch(&t->refs, 1, __ATOMIC_ACQ_REL);
+    s->trust = t;
+    return s;
+}
+
+static void *tls_open(int fd, const char *host, char *err, size_t errn) { return tls_open_trusting(fd, host, NULL, err, errn); }
+
+static ssize_t tls_read(void *t, void *buf, size_t n) {
+    mt_sess *s = (mt_sess *)t;
+#if MIM_GREEN
+    /* nothing decrypted yet: wait on the event loop rather than in the read */
+    if (t_co && mbedtls_ssl_get_bytes_avail(&s->ssl) == 0 && !mbedtls_ssl_check_pending(&s->ssl)) {
+        if (!co_wait_fd(s->fd, 0, sock_timeo(s->fd, SO_RCVTIMEO))) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+#endif
+    for (;;) {
+        int r = mbedtls_ssl_read(&s->ssl, (unsigned char *)buf, n > 1 << 30 ? 1 << 30 : n);
+        if (r > 0) return r;
+        /* TLS 1.3 session tickets and renegotiation steps are not data */
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE || r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+        return 0; /* closed (or an error: treated as the end) */
+    }
+}
+
+static int tls_write_all(void *t, const char *p, size_t n) {
+    mt_sess *s = (mt_sess *)t;
+    while (n > 0) {
+        int w = mbedtls_ssl_write(&s->ssl, (const unsigned char *)p, n > 1 << 30 ? 1 << 30 : n);
+        if (w == MBEDTLS_ERR_SSL_WANT_READ || w == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (w <= 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+static void tls_close(void *t) {
+    mt_sess *s = (mt_sess *)t;
+    mbedtls_ssl_close_notify(&s->ssl);
+    mbedtls_ssl_free(&s->ssl);
+    if (s->trust != mt.system) mt_trust_release(s->trust);
+    free(s);
+}
 #elif defined(__linux__)
 
 static struct {
@@ -1844,6 +2137,46 @@ static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
 }
 
 static void ec_free(void *key) { st.release(key); }
+
+#elif defined(MIM_MBEDTLS)
+
+/* static Linux: Mbed TLS (ECDSA P-256 over SHA-256) */
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/sha256.h>
+
+static void *ec_keygen(uint8_t pub[65], uint8_t priv[32], char *err, size_t errn) {
+    if (!tls_load()) {
+        snprintf(err, errn, "tls::self_signed: %s", mt.why ? mt.why : "TLS is not available");
+        return NULL;
+    }
+    mbedtls_ecp_keypair *k = (mbedtls_ecp_keypair *)calloc(1, sizeof *k);
+    mbedtls_ecp_keypair_init(k);
+    size_t pn = 0, kn = 0;
+    if (mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, k, mt_rng, NULL) != 0 ||
+        mbedtls_ecp_write_public_key(k, MBEDTLS_ECP_PF_UNCOMPRESSED, &pn, pub, 65) != 0 || pn != 65 ||
+        mbedtls_ecp_write_key_ext(k, &kn, priv, 32) != 0 || kn != 32) {
+        mbedtls_ecp_keypair_free(k);
+        free(k);
+        snprintf(err, errn, "tls::self_signed: cannot make a key");
+        return NULL;
+    }
+    return k;
+}
+
+static int ec_sign(void *key, const uint8_t *msg, size_t n, dbuf *sig) {
+    unsigned char hash[32], buf[MBEDTLS_ECDSA_MAX_LEN];
+    size_t len = 0;
+    if (mbedtls_sha256(msg, n, hash, 0) != 0) return 0;
+    if (mbedtls_ecdsa_write_signature((mbedtls_ecdsa_context *)key, MBEDTLS_MD_SHA256, hash, sizeof hash, buf, sizeof buf, &len, mt_rng, NULL) != 0)
+        return 0;
+    db_put(sig, buf, len);
+    return 1;
+}
+
+static void ec_free(void *key) {
+    mbedtls_ecp_keypair_free((mbedtls_ecp_keypair *)key);
+    free(key);
+}
 
 #elif defined(__linux__)
 

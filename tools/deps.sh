@@ -20,6 +20,8 @@ WASI_SDK=34
 WASI_SHA256=9d813544eeebe38b7b8f2244ed591de46b6db812c6dd1a257ff9f0d2a905a2be
 LLVM_MINGW=20261020
 LLVM_MINGW_SHA256=55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335
+MBEDTLS=3.6.7
+MBEDTLS_SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
 MUSL_VERSION=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 
@@ -140,6 +142,23 @@ if [ ! -f "$MINGW_OUT/lib/x86_64-w64-mingw32/crt2.o" ]; then
     rm -rf "$DEPS/mingw-extract"
 fi
 echo "mingw-w64: $MINGW_OUT"
+
+# ---- Mbed TLS (TLS inside static Linux programs, which cannot load OpenSSL) --
+# Only the library sources, headers and licence are kept and bundled.
+MBEDTLS_TBZ=$DEPS/mbedtls-$MBEDTLS.tar.bz2
+fetch "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS/mbedtls-$MBEDTLS.tar.bz2" "$MBEDTLS_TBZ" "$MBEDTLS_SHA256"
+MBEDTLS_OUT=$DEPS/mbedtls-$MBEDTLS
+if [ ! -f "$MBEDTLS_OUT/library/ssl_tls.c" ]; then
+    rm -rf "$MBEDTLS_OUT" "$DEPS/mbedtls-extract"
+    mkdir -p "$DEPS/mbedtls-extract" "$MBEDTLS_OUT"
+    tar -xjf "$MBEDTLS_TBZ" -C "$DEPS/mbedtls-extract" "mbedtls-$MBEDTLS/library" "mbedtls-$MBEDTLS/include" "mbedtls-$MBEDTLS/LICENSE"
+    cp -R "$DEPS/mbedtls-extract/mbedtls-$MBEDTLS/library" "$DEPS/mbedtls-extract/mbedtls-$MBEDTLS/include" \
+        "$DEPS/mbedtls-extract/mbedtls-$MBEDTLS/LICENSE" "$MBEDTLS_OUT/"
+    # sources only (the release has build files and generators in there too)
+    find "$MBEDTLS_OUT/library" -type f ! -name '*.c' ! -name '*.h' -exec rm -f {} +
+    rm -rf "$DEPS/mbedtls-extract"
+fi
+echo "mbedtls: $MBEDTLS_OUT"
 
 # the LLVM this repository builds against (.cargo/config.toml): keep a static
 # build from tools/build-llvm.sh if one is linked, else use $LLVM_PREFIX

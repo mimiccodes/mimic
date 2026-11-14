@@ -2,3 +2,21 @@ Mimic
 Copyright 2026 Harcorp Industries (https://harcorp.ai)
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The mimic binary contains the following software, under its own licences:
+
+* LLVM, Clang and LLD 23.1.4 (Apache License 2.0 with LLVM Exceptions),
+  including compiler-rt's builtins and Clang's headers
+  https://llvm.org
+* musl 1.2.5 (MIT), the C library of the static Linux targets
+  https://musl.libc.org
+* wasi-libc from wasi-sdk 34 (Apache 2.0 with LLVM Exceptions, MIT, CC0),
+  the C library of the WebAssembly targets
+  https://github.com/WebAssembly/wasi-sdk
+* mingw-w64 from llvm-mingw 20261020 (ZPL 2.1, MIT, public domain; see its
+  COPYING files), the C library of the Windows targets
+  https://www.mingw-w64.org
+* Mbed TLS 3.6.7 (Apache License 2.0), TLS in static Linux programs
+  https://www.trustedfirmware.org/projects/mbed-tls/
+
+Programs built for those targets contain parts of these libraries.

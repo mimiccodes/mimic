@@ -12,6 +12,9 @@ pub static WASI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/wasi.tar.gz")
 /// mingw-w64 from llvm-mingw (`mingw-sysroot/{include,lib/<arch>-w64-mingw32}`):
 /// the C library of the Windows targets (UCRT), with static winpthreads.
 pub static MINGW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mingw.tar.gz"));
+/// Mbed TLS 3.6 (`mbedtls/{library,include,LICENSE}`): TLS for the static
+/// Linux targets, which cannot load the system's OpenSSL.
+pub static MBEDTLS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mbedtls.tar.gz"));
 /// Clang's resource headers (`include/…`): stddef.h, stdarg.h, intrinsics.
 pub static CLANG_INCLUDE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clang-include.tar.gz"));
 

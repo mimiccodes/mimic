@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const LLVM_VERSION: &str = "23.1.4";
 const WASI_SDK: &str = "34";
 const LLVM_MINGW: &str = "20261020";
+const MBEDTLS: &str = "3.6.7";
 
 /// A static library's file name: `libX.a`, or `X.lib` with MSVC.
 fn lib_file(name: &str) -> String {
@@ -156,6 +157,8 @@ fn bundle(deps: &Path, llvm: &Path) {
     pack(&deps.join(format!("wasi-sysroot-{WASI_SDK}")), "wasi-sysroot", &out.join("wasi.tar.gz"));
     // mingw-w64 for Windows (x86_64, aarch64), trimmed by tools/deps.sh
     pack(&deps.join(format!("mingw-sysroot-{LLVM_MINGW}")), "mingw-sysroot", &out.join("mingw.tar.gz"));
+    // Mbed TLS (library sources, headers, licence), trimmed by tools/deps.sh
+    pack(&deps.join(format!("mbedtls-{MBEDTLS}")), "mbedtls", &out.join("mbedtls.tar.gz"));
     let major = LLVM_VERSION.split('.').next().unwrap();
     pack(&llvm.join("lib/clang").join(major).join("include"), "include", &out.join("clang-include.tar.gz"));
 }

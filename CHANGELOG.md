@@ -4,6 +4,11 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Added
+- TLS in static Linux programs: `https://` and `tls::` work in `--target x86_64-linux` (and every other `*-linux-musl`) builds, through Mbed TLS 3.6 bundled in `mimic` and built for the target on first use. They trust the system's CA bundle, or `SSL_CERT_FILE`.
+- The Linux `mimic` is built against glibc 2.28, so it runs on Linux systems from 2018 on (Ubuntu 20.04, Debian 10, RHEL 8 and later).
+- `NOTICE` lists the software bundled in `mimic`; release downloads include it.
+
 ## 0.2.0 — 2026-11-14
 
 Downloadable builds for Linux, macOS and Windows; Windows as a target and as a host; static Linux and Windows programs proven in CI.

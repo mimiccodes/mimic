@@ -89,7 +89,7 @@ A name LLVM does not accept is an error, with a suggestion for the closest name.
 | **compiles** | Object files or assembly only: no C library is bundled yet | The other CPU architectures |
 | **not yet** | GPU architecture: needs the GPU backend (roadmap F8) | amdgpu, r600, spirv, spirv32, spirv64 |
 
-Static Linux programs (`*-linux-musl`, what `--target x86_64-linux` makes) cannot load the system's OpenSSL, so TLS (`https://`, `tls::`) returns an `Err` that says so; everything else behaves as in native builds.
+Static Linux programs (`*-linux-musl`, what `--target x86_64-linux` makes) cannot load the system's OpenSSL, so their TLS (`https://`, `tls::`) is Mbed TLS 3.6, bundled in `mimic`, built for the target on first use (cached like musl) and linked into the program. They trust the system's CA bundle, or the file `SSL_CERT_FILE` names.
 
 A target moves up a tier when tests run on it. CI runs every golden program on Linux x86_64 (native and static), on Arm Linux (static, cross-built), and on Windows x86_64 (built there by `mimic` itself, and cross-built on Linux).
 

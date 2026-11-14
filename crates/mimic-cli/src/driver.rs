@@ -655,6 +655,11 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
         }
         _ => {}
     }
+    // static Linux: TLS from the bundled Mbed TLS (OpenSSL cannot be loaded)
+    if let Some(tls) = toolchain::static_tls(tc) {
+        flags.push("-DMIM_MBEDTLS=1".into());
+        flags.extend(tls.cflags);
+    }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{RUNTIME_WINDOW_C}{RUNTIME_GPU_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
@@ -975,6 +980,7 @@ fn codegen_and_link(
         let mut objects = vec![obj, rt];
         objects.extend(parts);
         objects.extend(c_objects);
+        objects.extend(toolchain::static_tls(&tc).map(|t| t.lib));
         let mut job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !profile.release };
         if let Input::Project(p) = input {
             job.search = p.manifest.ffi_search.iter().map(|s| p.root.join(s)).collect();
@@ -1213,7 +1219,8 @@ pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
     c.args(["-c", if release { "-O2" } else { "-O0" }]).arg(&c_src).arg("-o").arg(&main_obj);
     run_tool(c, "compiling the net")?;
     let exe = dir.join(&stem);
-    let objects = [main_obj, rt];
+    let mut objects = vec![main_obj, rt];
+    objects.extend(toolchain::static_tls(&tc).map(|t| t.lib));
     let job = LinkJob { objects: &objects, output: &exe, search: Vec::new(), libs: Vec::new(), debug: !release };
     run_tool(toolchain::link(&tc, &target, &job), "linking the net")?;
     Ok(exe)

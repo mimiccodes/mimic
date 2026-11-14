@@ -8,7 +8,7 @@ Download the file for your system below and unpack it. Then run the install scri
 |---|---|---|---|
 | **Windows** x86_64 (10, 11) | `mimic-{v}-windows-x86_64.zip` | Double-click `install.cmd` | Nothing: Windows programs are linked with the MinGW-w64 inside `mimic`. |
 | **macOS** Apple silicon | `mimic-{v}-macos-arm64.tar.gz` | `./install.sh` | The Xcode Command Line Tools (`xcode-select --install`), for the macOS SDK. |
-| **Linux** x86_64 | `mimic-{v}-linux-x86_64.tar.gz` | `./install.sh` | glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 or later) and a C compiler (`cc`) to link native programs. `--target x86_64-linux` needs nothing else. |
+| **Linux** x86_64 | `mimic-{v}-linux-x86_64.tar.gz` | `./install.sh` | glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL 8 or later) and a C compiler (`cc`) to link native programs. `--target x86_64-linux` needs nothing else. |
 
 The script says if something is missing and how to install it. Open a new terminal afterwards so the new `PATH` applies.
 

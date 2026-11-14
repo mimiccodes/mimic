@@ -53,8 +53,8 @@ Linux)
     if [ -n "$glibc" ]; then
         major=${glibc%.*}
         minor=${glibc#*.}
-        if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 39 ]; }; then
-            echo "error: this mimic needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40); this system has $glibc" >&2
+        if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 28 ]; }; then
+            echo "error: this mimic needs glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL 8 or later); this system has $glibc" >&2
             exit 1
         fi
     fi
