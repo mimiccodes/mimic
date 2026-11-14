@@ -639,7 +639,8 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     let mut flags: Vec<String> = vec!["-c".into(), if release { "-O3" } else { "-O1" }.into(), "-fPIC".into()];
     match cpu {
         Some("native") | None if release && target.name.is_none() => {
-            flags.push("-mcpu=native".into()); /* native builds use every feature of this CPU */
+            // native builds use every feature of this CPU (x86 names it with -march)
+            flags.push(if cfg!(target_arch = "x86_64") { "-march=native" } else { "-mcpu=native" }.into());
         }
         Some("") => {} // portable without a family baseline: the target default
         Some(cpu) if cpu != "native" => {

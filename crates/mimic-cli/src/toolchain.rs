@@ -273,6 +273,14 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
             }
             c
         }
+        // the host's own headers and libraries (Linux with glibc, …), compiled
+        // by the embedded Clang when there is one: C code (the runtime, imported
+        // headers) always sees Clang, whatever the system compiler is
+        Toolchain::System if mimic_toolchain::EMBEDDED => {
+            let mut c = Command::new(self_exe());
+            c.env(mimic_toolchain::RAW_CC_ENV, "1").arg("cc").arg("-resource-dir").arg(resource_dir());
+            c
+        }
         Toolchain::System => Command::new("cc"),
     }
 }
@@ -354,7 +362,8 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             c
         }
         Toolchain::System => {
-            let mut c = cc(tc, target);
+            // linked by the system compiler driver, which knows its C library
+            let mut c = Command::new("cc");
             c.args(job.objects).arg("-o").arg(job.output);
             for s in &job.search {
                 c.arg(format!("-L{}", s.display()));

@@ -899,7 +899,7 @@ static void jenc_num(sbuf *b, double x) {
     if (!strpbrk(tmp, ".eEn")) sb_str(b, ".0"); /* stays a float */
 }
 
-static void jnl(sbuf *b, int indent, int depth) {
+static void json_newline(sbuf *b, int indent, int depth) {
     if (indent <= 0) return;
     sb_put(b, "\n", 1);
     for (int k = 0; k < indent * depth; k++) sb_put(b, " ", 1);
@@ -911,7 +911,7 @@ static void jenc_elems(sbuf *b, const mim_val *v, int64_t from, int64_t n, int i
     sb_put(b, "[", 1);
     for (int64_t k = 0; k < n; k++) {
         if (k) sb_put(b, ",", 1);
-        jnl(b, indent, depth + 1);
+        json_newline(b, indent, depth + 1);
         int64_t i = from + k;
         switch (v->dtype) { /* elements in place: no boxing */
         case MIM_BOXED: jenc(b, ((mim_val *const *)v->data)[i], indent, depth + 1); continue;
@@ -926,7 +926,7 @@ static void jenc_elems(sbuf *b, const mim_val *v, int64_t from, int64_t n, int i
         jenc(b, e, indent, depth + 1);
         mim_release(e);
     }
-    if (n) jnl(b, indent, depth);
+    if (n) json_newline(b, indent, depth);
     sb_put(b, "]", 1);
 }
 
@@ -941,10 +941,10 @@ static void jenc_shaped(sbuf *b, const mim_val *v, int axis, int64_t from, int i
     sb_put(b, "[", 1);
     for (int64_t k = 0; k < d; k++) {
         if (k) sb_put(b, ",", 1);
-        jnl(b, indent, depth + 1);
+        json_newline(b, indent, depth + 1);
         jenc_shaped(b, v, axis + 1, from + k * cell, indent, depth + 1);
     }
-    if (d) jnl(b, indent, depth);
+    if (d) json_newline(b, indent, depth);
     sb_put(b, "]", 1);
 }
 
@@ -984,7 +984,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
         sb_put(b, "{", 1);
         for (int64_t k = 0; k < count; k++) {
             if (k) sb_put(b, ",", 1);
-            jnl(b, indent, depth + 1);
+            json_newline(b, indent, depth + 1);
             mim_val *key = h[2 * k];
             if (key->dtype == MIM_CHAR && key->rank == 1) {
                 jenc_str(b, (const char *)key->data, (size_t)key->len);
@@ -997,7 +997,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
             sb_put(b, indent > 0 ? ": " : ":", indent > 0 ? 2 : 1);
             jenc(b, h[2 * k + 1], indent, depth + 1);
         }
-        if (count) jnl(b, indent, depth);
+        if (count) json_newline(b, indent, depth);
         sb_put(b, "}", 1);
         return;
     }
@@ -1015,12 +1015,12 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
                 sb_put(b, "{", 1);
                 for (int64_t k = 0; k < v->len; k++) {
                     if (k) sb_put(b, ",", 1);
-                    jnl(b, indent, depth + 1);
+                    json_newline(b, indent, depth + 1);
                     jenc_str(b, d->fields[k], strlen(d->fields[k]));
                     sb_put(b, indent > 0 ? ": " : ":", indent > 0 ? 2 : 1);
                     jenc_field(b, v, k, indent, depth + 1);
                 }
-                if (v->len) jnl(b, indent, depth);
+                if (v->len) json_newline(b, indent, depth);
                 sb_put(b, "}", 1);
                 return;
             }
@@ -1028,10 +1028,10 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
                 sb_put(b, "[", 1);
                 for (int64_t k = 0; k < v->len; k++) {
                     if (k) sb_put(b, ",", 1);
-                    jnl(b, indent, depth + 1);
+                    json_newline(b, indent, depth + 1);
                     jenc_field(b, v, k, indent, depth + 1);
                 }
-                if (v->len) jnl(b, indent, depth);
+                if (v->len) json_newline(b, indent, depth);
                 sb_put(b, "]", 1);
                 return;
             }
@@ -1042,7 +1042,7 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
             }
             const char *name = d == &mim_desc_Ok ? "ok" : d == &mim_desc_Err ? "error" : d->variant;
             sb_put(b, "{", 1);
-            jnl(b, indent, depth + 1);
+            json_newline(b, indent, depth + 1);
             jenc_str(b, name, strlen(name));
             sb_put(b, indent > 0 ? ": " : ":", indent > 0 ? 2 : 1);
             if (v->len == 1) {
@@ -1051,13 +1051,13 @@ static void jenc(sbuf *b, const mim_val *v, int indent, int depth) {
                 sb_put(b, "[", 1);
                 for (int64_t k = 0; k < v->len; k++) {
                     if (k) sb_put(b, ",", 1);
-                    jnl(b, indent, depth + 2);
+                    json_newline(b, indent, depth + 2);
                     jenc_field(b, v, k, indent, depth + 2);
                 }
-                jnl(b, indent, depth + 1);
+                json_newline(b, indent, depth + 1);
                 sb_put(b, "]", 1);
             }
-            jnl(b, indent, depth);
+            json_newline(b, indent, depth);
             sb_put(b, "}", 1);
             return;
         }

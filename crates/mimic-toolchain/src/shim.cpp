@@ -88,12 +88,23 @@ extern "C" int mimic_write_archive(const char *out, int kind, int n, const char 
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Triple.h"
+#include <mutex>
+
+// Register every target once. LLVM's registry is a plain linked list: two
+// threads registering at once can link a target to itself, and every later
+// lookup then loops forever (tests call these from several threads).
+static void init_targets() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        llvm::InitializeAllTargetInfos();
+        llvm::InitializeAllTargets();
+        llvm::InitializeAllTargetMCs();
+    });
+}
 
 // List the CPU models (what = 0) or features (what = 1) LLVM knows for a triple.
 extern "C" int mimic_list_cpus(const char *triple, int what, void (*cb)(const char *, const char *, void *), void *ud) {
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
+    init_targets();
     std::string err;
     llvm::Triple tt(triple);
     const llvm::Target *t = llvm::TargetRegistry::lookupTarget(tt, err);
@@ -145,7 +156,7 @@ extern "C" void mimic_llvm_names(int kind, void (*cb)(const char *, const char *
         }
         break;
     default:
-        llvm::InitializeAllTargetInfos();
+        init_targets();
         for (const auto &t : llvm::TargetRegistry::targets()) {
             a = t.getName();
             b = t.getShortDescription();
@@ -159,7 +170,7 @@ extern "C" void mimic_llvm_names(int kind, void (*cb)(const char *, const char *
 // backend is the code generator's name, or empty when there is none.
 extern "C" void mimic_llvm_triple(const char *in, char *out, size_t outlen) {
     using llvm::Triple;
-    llvm::InitializeAllTargetInfos();
+    init_targets();
     Triple t(Triple::normalize(in));
     std::string err;
     const llvm::Target *tg = t.getArch() == Triple::UnknownArch ? nullptr : llvm::TargetRegistry::lookupTarget(t, err);
@@ -174,9 +185,7 @@ extern "C" void mimic_llvm_triple(const char *in, char *out, size_t outlen) {
 
 // Is `cpu` a CPU name (or alias) LLVM accepts for `triple`? -1 = no backend.
 extern "C" int mimic_cpu_valid(const char *triple, const char *cpu) {
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
+    init_targets();
     std::string err;
     llvm::Triple tt(triple);
     const llvm::Target *t = llvm::TargetRegistry::lookupTarget(tt, err);

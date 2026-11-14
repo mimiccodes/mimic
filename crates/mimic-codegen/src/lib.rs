@@ -129,7 +129,10 @@ pub type SplitFn = fn(*mut std::ffi::c_void, *mut std::ffi::c_void, &[std::path:
 /// Returns the files written: the object (or assembly), then any further
 /// parts of it (see Settings::split).
 pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<Vec<std::path::PathBuf>> {
-    Target::initialize_all(&InitializationConfig::default());
+    // once per process: LLVM's target registry is not safe to fill from
+    // several threads at once
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| Target::initialize_all(&InitializationConfig::default()));
     let triple = match &settings.triple {
         Some(t) => TargetTriple::create(t),
         None => TargetMachine::get_default_triple(),
