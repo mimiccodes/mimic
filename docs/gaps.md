@@ -57,7 +57,8 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Seeing where code runs in parallel, and why not (`mimic why`) | ✅ (`mimic why`, labels in editors) | 0.3.9 |
 | Quality, security and verification checks (`mimic audit`, contracts, property tests) | ✅ (`mimic audit`, `requires`/`ensures`, `test … for`) | 0.3.10, 0.3.11 |
 | A terminal editor (`mimic edit`) | ✅ | 0.3.12 |
-| A REPL, a profiler, and benchmarks against Rust and Go | Benchmarks against C | 0.3.13 |
+| A REPL, a profiler, and benchmarks against Rust and Go | ✅ REPL (`mimic repl`); benchmarks against C | 0.3.13 |
+| The REPL answers in milliseconds: each line is a new program, which macOS checks on its first run (about 1 s, unless the terminal is a Developer Tool); compiling into the running `mimic` would skip it | Each line builds and runs a program (about 0.5 s, plus the check on macOS) | later |
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
 | Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | ✅ (native CPU, real naps, bigger scan chunks) | 0.2.9 |
 

@@ -15,6 +15,7 @@ mod lsp;
 mod man;
 mod mcp;
 mod modfile;
+mod repl;
 mod report;
 mod targets;
 mod toolchain;
@@ -293,6 +294,8 @@ enum Cmd {
         /// A file to open, or a project folder (default: the project here)
         path: Option<PathBuf>,
     },
+    /// Type Mimic a line at a time and see the values (`:help` lists the commands)
+    Repl,
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
         /// Accepted for editors that pass it; stdin and stdout are always used
@@ -596,6 +599,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Repl => {
+            repl::run()?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Edit { path } => {
             edit::run(path.as_deref())?;
             Ok(ExitCode::SUCCESS)

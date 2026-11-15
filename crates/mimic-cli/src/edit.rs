@@ -1275,7 +1275,7 @@ impl Editor {
 }
 
 /// Is the end of `before` (one line) inside a string?
-fn inside_string(before: &str) -> bool {
+pub(crate) fn inside_string(before: &str) -> bool {
     let mut inside = false;
     let mut chars = before.chars();
     while let Some(c) = chars.next() {

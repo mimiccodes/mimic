@@ -43,6 +43,15 @@ Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com
 
 Errors appear as you type: a red mark beside the line, the code underlined, the message after it. Where code runs shows after each line as a label (`∥ parallel`, `◷ task`, `→ in order`).
 
+## The REPL
+
+`mimic repl` is the quickest way to try an expression: type `⍳ 10 ▷ +/` (or
+`\i 10 ▷ +/`) and see `45`. `let`s and `fn`s you type stay for the lines after,
+and `:show` prints them as a program. On macOS, the system checks every new
+program the first time it runs, which adds about a second to each line; add
+your terminal app under System Settings → Privacy & Security → Developer
+Tools to skip the check (it also speeds up `mimic run` and `mimic test`).
+
 ## VS Code
 
 The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode)) starts `mimic lsp` by itself and adds:

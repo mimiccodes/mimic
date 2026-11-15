@@ -2077,3 +2077,18 @@ fn signal_of(s: std::process::ExitStatus) -> Option<i32> {
         None
     }
 }
+
+/// `mimic repl` from a pipe: values, `let`s, definitions over several lines,
+/// errors that are not kept, and the session as a program.
+#[test]
+fn repl_session() {
+    use std::io::Write;
+    let mut child = mimic().arg("repl").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let input = "⍳ 10 ▷ +/\nlet xs = [3 1 4]\nxs × 2\nfn sq(x: i64) -> i64 {\n    x * x\n}\nxs ¨ sq\nnope(1)\nprint(\"hi\")\n\\i 3\n:show\n:reset\n:show\n";
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let want = "45\n[6 2 8]\n[9 1 16]\nerror[E0303]: cannot find `nope` in this scope\nhi\n[0 1 2]\nmodule main\n\nfn sq(x: i64) -> i64 {\n    x * x\n}\n\nfn main() {\n    let xs = [3 1 4]\n}\n(the session is empty)\nmodule main\n\nfn main() {\n}\n";
+    assert_eq!(text, want);
+}

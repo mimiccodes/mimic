@@ -157,6 +157,25 @@ test, F1 for the manual on the word under the cursor, and labels showing
 where code runs in parallel. Ctrl-S saves, Ctrl-Q quits. `mimic man editors`
 lists every key.
 
+## Trying things out
+
+`mimic repl` reads Mimic a line at a time and shows each value:
+
+```text
+› ⍳ 10 ▷ +/
+45
+› let xs = [3 1 4 1 5]
+› xs × 2
+[6 2 8 2 10]
+› fn sq(x: i64) -> i64 { x * x }
+› xs ¨ sq
+[9 1 16 1 25]
+```
+
+`let`s and functions stay for the next lines; `:show` prints them as a
+program you can paste into a file, `:help` lists the other commands. Every
+line is compiled to native code, so what you see is what a program does.
+
 ## Editors
 
 `mimic lsp` is the language server: errors as you type with quick fixes, hover, go to definition, glyph input (type `\i` and pick `⍳`), completion and formatting, in VS Code, Neovim, Helix, Emacs, Sublime Text and others. `mimic man editors` shows the set-up for each.
