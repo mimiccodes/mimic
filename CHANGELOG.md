@@ -2,6 +2,14 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
+## Unreleased
+
+### Added
+- **The Workbench engine and `mimic query`** (step 0.3.0): one analysis of the project that every tool will ask. `mimic query` answers as JSON: `check`, `symbols`, `definition`, `hover`, `references`, `outline`, `docs`, `effects` (pure, concurrent, ordered or sync) and `stats`. `mimic query --serve` keeps it running, reading one JSON request per line; files sent by an editor (`open`, `change`, `close`) are used instead of the disk, and only changed files are parsed again: an edit of the showcase project is re-checked in about 25 ms. While the program has errors, lookups use the last program that checked. See [docs/workbench.md](docs/workbench.md).
+
+### Changed
+- **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
+
 ## 0.2.9 — 2026-11-15
 
 Stage 0.2 complete: native windows on Windows and Linux, shared libraries, thousands of waiting tasks on the event loop, terminal programs, text formats, collections, C constants, globals, structs and unions, and Windows at full speed.

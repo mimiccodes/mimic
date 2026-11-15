@@ -548,7 +548,7 @@ fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
     impl W<'_> {
         fn is_self(&self, e: &Expr) -> bool {
             matches!(&e.kind, ExprKind::Call { callee, .. }
-                if matches!(&callee.kind, ExprKind::Path(path) if matches!(self.p.resolve(self.module, path), Ok(Resolved::Fn(f)) if f == self.fid)))
+                if matches!(&callee.kind, ExprKind::Path(path) if matches!(self.p.lookup(self.module, path), Some(Resolved::Fn(f)) if f == self.fid)))
         }
         /// any self-call anywhere in `e` is a non-tail call
         fn none(&mut self, e: &Expr) {
@@ -2926,7 +2926,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 ExprKind::Lambda { params, body } => params.len() == 1 && self.captures(params, body).is_empty(),
                 ExprKind::Path(path) => {
                     !(path.len() == 1 && self.lookup(&path[0]).is_some())
-                        && matches!(self.p.resolve(self.cur_mod, path), Ok(Resolved::Fn(f)) if matches!(self.p.fns[f].kind, FnKind::User(_)))
+                        && matches!(self.p.lookup(self.cur_mod, path), Some(Resolved::Fn(f)) if matches!(self.p.fns[f].kind, FnKind::User(_)))
                         && self.cur_spec.as_ref().is_some_and(|sp| sp.calls.contains_key(&id(cur)))
                 }
                 _ => false,
@@ -4553,7 +4553,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 // anything that is not a named function or variant is a function value
                 let named = match &callee.kind {
                     ExprKind::Path(path) if !(path.len() == 1 && self.lookup(&path[0]).is_some()) => {
-                        matches!(self.p.resolve(self.cur_mod, path), Ok(Resolved::Fn(_) | Resolved::Variant(..)))
+                        matches!(self.p.lookup(self.cur_mod, path), Some(Resolved::Fn(_) | Resolved::Variant(..)))
                     }
                     _ => false,
                 };
@@ -4562,7 +4562,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.call_value(f, args, ty);
                 }
                 let ExprKind::Path(path) = &callee.kind else { return Err("unsupported callee".into()) };
-                if let Ok(Resolved::Variant(t, v)) = self.p.resolve(self.cur_mod, path) {
+                if let Some(Resolved::Variant(t, v)) = self.p.lookup(self.cur_mod, path) {
                     let ftys = self.field_tys(t, v);
                     let mut vals = Vec::new();
                     for (i, a) in args.iter().enumerate() {

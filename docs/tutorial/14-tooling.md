@@ -164,6 +164,16 @@ mimic check --emit-json
 
 The format is described in [docs/diagnostics.md](../diagnostics.md).
 
+`mimic query` asks the analysis engine about your code: where a function is defined, where it is used, its signature, its comment, and whether it is pure.
+
+```sh
+mimic query definition file=src/main.mim line=12 column=9
+mimic query references name=area
+mimic query symbols query=read
+```
+
+`mimic query --serve` keeps the engine running for an editor or a script, which gets an answer within milliseconds after each edit. The questions are listed in [docs/workbench.md](../workbench.md).
+
 ## Glyphs at a glance
 
 ```sh

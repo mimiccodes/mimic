@@ -178,7 +178,7 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Call { callee, args }
                 if matches!(&callee.kind, ExprKind::Path(path)
                     if !(path.len() == 1 && self.cur_spec.as_ref().is_some_and(|_| self.is_param(&path[0])))
-                    && matches!(self.p.resolve(self.cur_mod, path), Ok(Resolved::Fn(_) | Resolved::Variant(..)))) =>
+                    && matches!(self.p.lookup(self.cur_mod, path), Some(Resolved::Fn(_) | Resolved::Variant(..)))) =>
             {
                 for a in args {
                     self.fj_collect(a, false, out);

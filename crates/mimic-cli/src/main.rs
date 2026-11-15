@@ -7,6 +7,7 @@ mod cc;
 mod cimport;
 mod doc;
 mod driver;
+mod engine;
 mod modfile;
 mod report;
 mod targets;
@@ -240,6 +241,19 @@ enum Cmd {
         /// Print as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Ask the analysis engine about the project, as JSON (`mimic query definition file=src/main.mim line=3 column=9`)
+    Query {
+        /// What to ask: check, symbols, definition, hover, references, outline, docs, effects, stats
+        method: Option<String>,
+        /// Parameters as key=value (file=… line=… column=… name=… query=… kind=… limit=…)
+        params: Vec<String>,
+        /// A standalone file to analyse instead of the project in this folder
+        #[arg(long = "in", value_name = "FILE")]
+        input: Option<PathBuf>,
+        /// Keep running: answer one JSON request per line on stdin ({"id", "method", "params"})
+        #[arg(long)]
+        serve: bool,
     },
     /// Explain an error code (`mimic explain E0401`), or list them all
     Explain {
@@ -493,6 +507,26 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Query { method, params, input, serve } => {
+            let mut eng = engine::Engine::open(input.as_deref()).map_err(|e| Report::from_text(&mimic_syntax::codes::IO, &e))?;
+            if serve {
+                engine::serve(&mut eng);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let method = method.unwrap_or_else(|| "check".into());
+            let params = engine::params_from_words(&params).map_err(|e| Report::from_text(&mimic_syntax::codes::IO, &e))?;
+            match eng.query(&method, &params) {
+                Ok(v) => {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                    let failed = method == "check" && v.get("success") == Some(&serde_json::Value::Bool(false));
+                    Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+                }
+                Err(e) => {
+                    println!("{}", serde_json::json!({ "error": e }));
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
         Cmd::Targets { cpus, features, check, json } => targets_cmd(cpus.as_deref(), features.as_deref(), check.as_deref(), json),
         Cmd::Run { file, profile, emit_json, web, port, terminal, window, args } => {
             let built = (|| -> Result<driver::Artifact, Report> {

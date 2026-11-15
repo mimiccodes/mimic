@@ -140,6 +140,83 @@ fn json_fix_suggestions() {
     assert_eq!(d["labels"][0]["location"]["text"], "x", "and label the parameter");
 }
 
+/// The Workbench engine (`mimic query`): names, references, effects, C
+/// headers, and edits sent through `--serve` that override the disk.
+#[test]
+fn query_engine() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::env::temp_dir().join(format!("mimic-golden-query-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("q.mim");
+    let src = "module main\n\ntrusted extern \"C\" pure include \"math.h\"\n\n// twice the value\nfn double(x: f64) -> f64 { x × 2.0 }\n\nfn main() {\n    let y = double(3.0)\n    print(y + c::sqrt(y))\n    print(double(y))\n}\n";
+    std::fs::write(&f, src).unwrap();
+    let q = |args: &[&str]| -> serde_json::Value {
+        let out = mimic().arg("query").arg("--in").arg(&f).args(args).output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
+    };
+    let file = format!("file={}", f.display());
+    let v = q(&["check"]);
+    assert_eq!(v["success"], true, "{v}");
+    // `double` on line 9, column 13: its definition, with its comment
+    let v = q(&["definition", &file, "line=9", "column=13"]);
+    assert_eq!(v["path"], "double", "{v}");
+    assert_eq!(v["doc"], "twice the value");
+    assert_eq!(v["signature"], "fn double(x: f64) -> f64");
+    assert_eq!(v["location"]["line"], 6);
+    assert_eq!(v["location"]["column"], 4);
+    let v = q(&["references", "name=double"]);
+    assert_eq!(v.as_array().unwrap().len(), 2, "{v}");
+    let v = q(&["hover", &file, "line=9", "column=13"]);
+    assert_eq!(v["effects"], "pure", "{v}");
+    // a local: `y` used on line 10 is the `let y` of line 9
+    let v = q(&["hover", &file, "line=10", "column=11"]);
+    assert_eq!(v["kind"], "local", "{v}");
+    assert_eq!(v["location"]["line"], 9);
+    assert_eq!(v["location"]["column"], 9);
+    // a C function knows its header
+    let v = q(&["hover", &file, "line=10", "column=20"]);
+    assert_eq!(v["header"], "math.h", "{v}");
+    let v = q(&["symbols", "query=dou", "package=q"]);
+    assert_eq!(v["total"], 1, "{v}");
+    let v = q(&["frobnicate"]);
+    assert!(v["error"].as_str().unwrap().contains("unknown method"), "{v}");
+
+    // the editor's text wins over the disk; the last good index stays
+    let mut child = mimic()
+        .args(["query", "--serve", "--in"])
+        .arg(&f)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |req: serde_json::Value| -> serde_json::Value {
+        writeln!(input, "{req}").unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let path = f.display().to_string();
+    let r = ask(serde_json::json!({ "id": 1, "method": "check" }));
+    assert_eq!(r["id"], 1);
+    assert_eq!(r["result"]["success"], true, "{r}");
+    let broken = src.replace("print(double(y))", "print(dubble(y))");
+    let r = ask(serde_json::json!({ "id": 2, "method": "change", "params": { "file": path, "text": broken } }));
+    assert_eq!(r["result"]["success"], false, "{r}");
+    assert_eq!(r["result"]["stale_index"], true);
+    assert_eq!(r["result"]["diagnostics"][0]["code"], "E0303", "{r}");
+    let r = ask(serde_json::json!({ "id": 3, "method": "definition", "params": { "file": path, "line": 9, "column": 13 } }));
+    assert_eq!(r["result"]["path"], "double", "lookups still work: {r}");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), src, "the disk is never written");
+    let r = ask(serde_json::json!({ "id": 4, "method": "close", "params": { "file": path } }));
+    assert_eq!(r["result"]["success"], true, "{r}");
+    writeln!(input, "{{\"method\": \"exit\"}}").unwrap();
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();
@@ -1148,9 +1225,11 @@ fn http_keep_alive() {
     let json = String::from_utf8_lossy(&out.stdout);
     let at = json.find("\"path\":\"").expect("an artifact path") + 8;
     let exe = &json[at..at + json[at..].find('"').unwrap()];
-    let mut server = Command::new(exe).spawn().unwrap();
+    let mut server = Command::new(exe).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let mut conn = None;
-    for _ in 0..200 {
+    // up to 30 s: under the whole suite's load, a new binary can take
+    // seconds to start (the OS checks every freshly built executable)
+    for _ in 0..1200 {
         if let Ok(c) = std::net::TcpStream::connect(("127.0.0.1", port)) {
             conn = Some(c);
             break;
@@ -1173,6 +1252,20 @@ fn http_keep_alive() {
         c.read_to_string(&mut got)?;
         Ok(got)
     };
+    if conn.is_none() {
+        // say why: the server stopped (and what it printed), or is still starting
+        let state = match server.try_wait() {
+            Ok(Some(status)) => {
+                let mut err = String::new();
+                let _ = server.stderr.take().map(|mut e| e.read_to_string(&mut err));
+                format!("it exited with {status}: {err}")
+            }
+            _ => "it is still running".to_string(),
+        };
+        let _ = server.kill();
+        let _ = server.wait();
+        panic!("the server does not listen on port {port} after 30 s: {state}");
+    }
     let first = conn.ok_or("the server does not listen").and_then(|mut c| exchange(&mut c, &[]).map_err(|_| "no answer"));
     let split = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|_| "no second connection").and_then(|mut c| exchange(&mut c, &[7, 32, 51, 71, 78, 93]).map_err(|_| "no answer (split)"));
     let _ = server.kill(); // before any assertion: never leave it running

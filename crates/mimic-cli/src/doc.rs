@@ -42,7 +42,7 @@ pub fn show_type(t: &Type) -> String {
 }
 
 /// The `//` comment lines right above line `line` (1-based) of `src`.
-fn comment_above(src: &str, line: u32) -> String {
+pub fn comment_above(src: &str, line: u32) -> String {
     let lines: Vec<&str> = src.lines().collect();
     let mut k = line as usize;
     let mut out = Vec::new();
@@ -56,7 +56,7 @@ fn comment_above(src: &str, line: u32) -> String {
     out.join("\n")
 }
 
-fn fn_sig(f: &FnDecl, src: &str) -> String {
+pub fn fn_sig(f: &FnDecl, src: &str) -> String {
     let tp = if f.type_params.is_empty() { String::new() } else { format!("[{}]", f.type_params.join(", ")) };
     let ps: Vec<String> = f
         .params
@@ -77,7 +77,7 @@ fn fn_sig(f: &FnDecl, src: &str) -> String {
     format!("fn {}{tp}({}){ret}", f.name, ps.join(", "))
 }
 
-fn type_sig(t: &TypeDecl) -> String {
+pub fn type_sig(t: &TypeDecl) -> String {
     let tp = if t.params.is_empty() { String::new() } else { format!("[{}]", t.params.join(", ")) };
     match &t.kind {
         TypeKind::Record(fs) => {

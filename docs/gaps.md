@@ -45,7 +45,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 
 | Gap | Today | Version |
 |---|---|---|
-| Dependencies on version ranges, fetched on the first build; workspaces | `mimic install <git-url>`, revisions locked in `mod.mim` | 0.3.1 |
+| Libraries installed from git at a chosen tag or commit; workspaces | `mimic install <git-url>` (the default branch), revisions locked in `mod.mim` | 0.3.1 |
 | A manual inside `mimic`: topics, functions, glyphs (`mimic man ⌿`), search, "coming from C or Python" pages, a guide for agents | `mimic explain` for errors, `mimic doc --std` | 0.3.2 |
 | Syntax highlighting for editors (TextMate and tree-sitter grammars) and, later, on GitHub | None | 0.3.3 |
 | A language server: errors as you type, glyph input, hover, go to definition; names under `c::` and `cpp::` in their own colour | `mimic check --emit-json` | 0.3.4 |

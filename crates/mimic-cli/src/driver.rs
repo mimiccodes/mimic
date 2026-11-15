@@ -588,8 +588,81 @@ pub module http {
 ", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/ui.mim"));
 
 fn prelude_file() -> SourceFile {
+    let key = PathBuf::from("<prelude>");
+    if let Some(sf) = sources::parsed(&key, PRELUDE, "std", "<prelude>") {
+        return sf;
+    }
     let ast = parse_file(PRELUDE).expect("the prelude parses");
-    SourceFile { path: PathBuf::from("<prelude>"), display: "<prelude>".into(), src: PRELUDE.into(), ast, package: "std".into() }
+    let sf = SourceFile { path: key, display: "<prelude>".into(), src: PRELUDE.into(), ast, package: "std".into() };
+    sources::remember(&sf);
+    sf
+}
+
+/// Where source text comes from, and parses worth keeping. A command run
+/// once reads every file from disk and keeps nothing; a long-running process
+/// (the Workbench engine) turns the cache on, so only changed files are
+/// parsed again, and gives the text of files open in an editor, which wins
+/// over the file on disk.
+pub mod sources {
+    use mimic_check::SourceFile;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static KEEP: AtomicBool = AtomicBool::new(false);
+    static OPEN: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+    /// path → (hash of text, package, display, the parse)
+    static PARSED: Mutex<Option<HashMap<PathBuf, (u64, SourceFile)>>> = Mutex::new(None);
+
+    /// Keep parsed files for the life of the process.
+    pub fn keep_parses() {
+        KEEP.store(true, Ordering::Relaxed);
+    }
+
+    /// The text of a file open in an editor (`None`: use the file on disk again).
+    pub fn set_open(path: &Path, text: Option<String>) {
+        let mut open = OPEN.lock().unwrap();
+        let open = open.get_or_insert_with(HashMap::new);
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        match text {
+            Some(t) => open.insert(real, t),
+            None => open.remove(&real),
+        };
+    }
+
+    /// The text of `path`: the editor's, or the file's.
+    pub fn read(path: &Path) -> std::io::Result<String> {
+        if let Some(open) = OPEN.lock().unwrap().as_ref()
+            && !open.is_empty()
+        {
+            // the same file may be named two ways (`/var` and `/private/var`)
+            let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if let Some(t) = open.get(path).or_else(|| open.get(&real)) {
+                return Ok(t.clone());
+            }
+        }
+        std::fs::read_to_string(path)
+    }
+
+    /// A parse kept from before, if the text is the same.
+    pub fn parsed(path: &Path, src: &str, package: &str, display: &str) -> Option<SourceFile> {
+        if !KEEP.load(Ordering::Relaxed) {
+            return None;
+        }
+        let hash = mimic_syntax::fnv1a(src.as_bytes());
+        let kept = PARSED.lock().unwrap();
+        let (h, sf) = kept.as_ref()?.get(path)?;
+        (*h == hash && sf.package == package && sf.display == display && sf.src == src).then(|| sf.clone())
+    }
+
+    /// Keep a fresh parse (before C headers are imported into it).
+    pub fn remember(sf: &SourceFile) {
+        if KEEP.load(Ordering::Relaxed) {
+            let hash = mimic_syntax::fnv1a(sf.src.as_bytes());
+            PARSED.lock().unwrap().get_or_insert_with(HashMap::new).insert(sf.path.clone(), (hash, sf.clone()));
+        }
+    }
 }
 
 fn display_path(root: Option<&Path>, p: &Path) -> String {
@@ -597,17 +670,22 @@ fn display_path(root: Option<&Path>, p: &Path) -> String {
 }
 
 fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) -> Option<SourceFile> {
-    let src = match fs::read_to_string(path) {
+    let src = match sources::read(path) {
         Ok(s) => s,
         Err(e) => {
             report.push_plain(&C::IO, format!("cannot read {}: {e}", path.display()));
             return None;
         }
     };
+    if let Some(sf) = sources::parsed(path, &src, package, &display) {
+        return Some(sf);
+    }
     match parse_file(&src).and_then(|mut ast| mimic_syntax::desugar::lift_arms(&mut ast).map(|_| ast)) {
         Ok(mut ast) => {
             expect_with_text(&mut ast.module.items, &src);
-            Some(SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() })
+            let sf = SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() };
+            sources::remember(&sf);
+            Some(sf)
         }
         Err(d) => {
             report.push_in(Some(path), &display, &src, d);
@@ -663,6 +741,7 @@ pub fn load_for(input: &Input, target: &Target) -> Result<Program, Report> {
 
 /// `tests`: also src/test.mim (for `mimic test`).
 pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program, Report> {
+    let mut clock = Phases::new();
     let mut report = Report::default();
     let mut files = Vec::new();
     let pkg = input.name();
@@ -730,6 +809,7 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
             }
         }
     }
+    clock.mark("read and parse");
     if !report.entries.is_empty() {
         return Err(report);
     }
@@ -746,8 +826,11 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
     if !report.entries.is_empty() {
         return Err(report);
     }
+    clock.mark("C headers");
     files.push(prelude_file());
+    clock.mark("prelude");
     let (mut program, diags) = Program::build(files, &pkg);
+    clock.mark("resolve");
     if !wrappers.is_empty() {
         // one C file with every struct wrapper, named by its content
         let text = wrappers.join("\n");
@@ -764,19 +847,42 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
     }
     // named and default arguments become plain positional calls
     let ndiags = mimic_check::normalize(&mut program);
+    clock.mark("normalize");
     if !ndiags.is_empty() {
         return Err(Report::from_program(&program, ndiags));
     }
     let diags = mimic_check::check(&program, &Options { require_main: input.is_bin() && !tests, check_std: std::env::var_os("MIMIC_CHECK_STD").is_some() });
+    clock.mark("check");
     if !diags.is_empty() {
         return Err(Report::from_program(&program, diags));
     }
     // static type errors (inference over every reachable specialisation)
     let tdiags = mimic_check::types::check_types(&program, !input.is_bin());
+    clock.mark("types");
     if !tdiags.is_empty() {
         return Err(Report::from_program(&program, tdiags));
     }
     Ok(program)
+}
+
+/// `MIMIC_DEBUG_PHASES=1`: how long each step of loading a program takes.
+struct Phases {
+    on: bool,
+    last: std::time::Instant,
+}
+
+impl Phases {
+    fn new() -> Self {
+        Phases { on: std::env::var_os("MIMIC_DEBUG_PHASES").is_some(), last: std::time::Instant::now() }
+    }
+
+    fn mark(&mut self, what: &str) {
+        if self.on {
+            let now = std::time::Instant::now();
+            eprintln!("mimic: {what:<16} {:>8.2} ms", (now - self.last).as_secs_f64() * 1e3);
+            self.last = now;
+        }
+    }
 }
 
 // ---- toolchain --------------------------------------------------------------
