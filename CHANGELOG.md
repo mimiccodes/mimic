@@ -7,6 +7,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ### Added
 - **The Workbench engine and `mimic query`** (step 0.3.0): one analysis of the project that every tool will ask. `mimic query` answers as JSON: `check`, `symbols`, `definition`, `hover`, `references`, `outline`, `docs`, `effects` (pure, concurrent, ordered or sync) and `stats`. `mimic query --serve` keeps it running, reading one JSON request per line; files sent by an editor (`open`, `change`, `close`) are used instead of the disk, and only changed files are parsed again: an edit of the showcase project is re-checked in about 25 ms. While the program has errors, lookups use the last program that checked. See [docs/workbench.md](docs/workbench.md).
 
+- **Libraries at a chosen version, from git** (step 0.3.1). `mimic install <git-url>@v1.2.0` installs a tag, branch or commit next to other versions (`~/.mimic/libraries/<name>@v1.2.0`), and `rev = "v1.2.0"` in a dependency of `mim.mim` picks it. `mimic install` with no URL, inside a project, installs every missing dependency that has a `git` URL (and theirs), at its `rev` or at the commit `mod.mim` locked, so a fresh clone builds with the same library code. `mimic update` moves a library to the newest commit of its branch and leaves tags and commits where they are.
+- **Workspaces:** a `mim.mim` with `workspace { members = [...] }` groups projects; `check`, `build`, `test`, `fmt`, `install` and `mod update` in its folder run in every member, and all members build into its one `target/`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

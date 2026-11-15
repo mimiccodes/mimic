@@ -217,6 +217,115 @@ fn query_engine() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Libraries from git: pinned to a tag (`rev`), several versions installed
+/// side by side, and `mimic install` in a project restoring the commit
+/// mod.mim locked when mim.mim pins none.
+#[test]
+fn git_dependencies() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-git-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = dir.join("home");
+    let m = || {
+        let mut c = mimic();
+        c.env("MIMIC_HOME", &home);
+        c
+    };
+    let git = |args: &[&str], cwd: &Path| {
+        let ok = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(cwd).output().unwrap();
+        assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+    };
+    // a library with three versions: v1.0.0 and v2.0.0 tagged, then one more commit
+    let lib = dir.join("greet");
+    assert!(m().args(["create", "greet", "--lib"]).current_dir(&dir).status().unwrap().success());
+    git(&["init", "-q", "-b", "main"], &lib);
+    for (word, tag) in [("hello", Some("v1.0.0")), ("howdy", Some("v2.0.0")), ("hey", None)] {
+        std::fs::write(lib.join("src/lib.mim"), format!("module lib\n\npub fn hello() {{\n    print(\"{word} from greet\")\n}}\n")).unwrap();
+        git(&["add", "-A"], &lib);
+        git(&["commit", "-qm", word], &lib);
+        if let Some(t) = tag {
+            git(&["tag", t], &lib);
+        }
+    }
+    let app = dir.join("app");
+    assert!(m().args(["create", "app"]).current_dir(&dir).status().unwrap().success());
+    std::fs::write(app.join("src/main.mim"), "module main\n\nfn main() { greet::hello() }\n").unwrap();
+    let url = lib.display().to_string().replace('\\', "/");
+    let manifest = std::fs::read_to_string(app.join("mim.mim")).unwrap();
+    let with_dep = |rev: Option<&str>| {
+        let dep = match rev {
+            Some(r) => format!("dependencies {{\n    greet = {{ git = \"{url}\", rev = \"{r}\" }}\n}}"),
+            None => format!("dependencies {{\n    greet = {{ git = \"{url}\" }}\n}}"),
+        };
+        let start = manifest.find("dependencies {").unwrap();
+        let end = start + manifest[start..].find('}').unwrap() + 1;
+        std::fs::write(app.join("mim.mim"), format!("{}{dep}{}", &manifest[..start], &manifest[end..])).unwrap();
+    };
+    let run = || {
+        let out = m().arg("run").current_dir(&app).output().unwrap();
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), if out.status.success() { String::new() } else { String::from_utf8_lossy(&out.stderr).to_string() })
+    };
+    // pinned to v1.0.0: missing until `mimic install`
+    with_dep(Some("v1.0.0"));
+    assert!(run().contains("mimic install"), "the error says how to get it");
+    assert!(m().arg("install").current_dir(&app).status().unwrap().success());
+    assert_eq!(run(), "hello from greet\n");
+    // v2.0.0 next to it
+    with_dep(Some("v2.0.0"));
+    assert!(m().arg("install").current_dir(&app).status().unwrap().success());
+    assert_eq!(run(), "howdy from greet\n");
+    assert!(home.join("libraries/greet@v1.0.0").is_dir() && home.join("libraries/greet@v2.0.0").is_dir());
+    // no pin: `mimic install` takes the commit mod.mim locked (v2), not the branch's newest
+    with_dep(None);
+    assert!(m().arg("install").current_dir(&app).status().unwrap().success());
+    assert_eq!(run(), "howdy from greet\n");
+    // `mimic update` moves it to the newest commit of the branch
+    assert!(m().args(["update", "greet"]).status().unwrap().success());
+    assert_eq!(run(), "hey from greet\n");
+    // a commit, by URL
+    let out = m().args(["install", &format!("{url}@v1.0.0")]).output().unwrap();
+    assert!(!out.status.success(), "already installed");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A workspace: commands at its root run in every member, members build
+/// into the workspace's one `target/`, and a member uses another by path.
+#[test]
+fn workspace() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-ws-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mim.mim"), "module mim\n\nworkspace {\n    members = [\"app\", \"greet\"]\n}\n").unwrap();
+    assert!(mimic().args(["create", "greet", "--lib"]).current_dir(&dir).status().unwrap().success());
+    assert!(mimic().args(["create", "app"]).current_dir(&dir).status().unwrap().success());
+    let manifest = std::fs::read_to_string(dir.join("app/mim.mim")).unwrap();
+    let start = manifest.find("dependencies {").unwrap();
+    let end = start + manifest[start..].find('}').unwrap() + 1;
+    let manifest = format!("{}dependencies {{\n    greet = {{ path = \"../greet\" }}\n}}{}", &manifest[..start], &manifest[end..]);
+    std::fs::write(dir.join("app/mim.mim"), manifest).unwrap();
+    std::fs::write(dir.join("app/src/main.mim"), "module main\n\nfn main() { greet::hello() }\n\ntest \"adds\" { expect(1 + 1 == 2) }\n").unwrap();
+    let out = mimic().arg("check").current_dir(&dir).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("Checked `app`") && err.contains("Checked `greet`") && err.contains("2 member(s)"), "{err}");
+    let out = mimic().arg("test").current_dir(&dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // `run` needs one member
+    let out = mimic().arg("run").current_dir(&dir).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is a workspace: run this inside one of its members (app, greet)"));
+    let out = mimic().arg("run").current_dir(dir.join("app")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello from greet\n");
+    assert!(dir.join("target/debug/app").exists() || dir.join("target/debug/app.exe").exists(), "the workspace's target/");
+    assert!(!dir.join("app/target/debug").exists(), "nothing built in the member's own target/");
+    // a broken member fails the whole command, and says which
+    std::fs::write(dir.join("greet/src/lib.mim"), "module lib\n\npub fn hello() { print(nope) }\n").unwrap();
+    let out = mimic().arg("check").current_dir(&dir).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("failed in app, greet"), "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

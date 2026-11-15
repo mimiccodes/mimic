@@ -1,6 +1,9 @@
 //! Global package store: `~/.mimic/libraries/<name>/` (override with `MIMIC_HOME`).
 //!
-//! Milestone 1 installs from git URLs; a registry comes later.
+//! Libraries come from git: `mimic install <git-url>` takes the default
+//! branch into `<name>/`; `mimic install <git-url>@<ref>` takes a tag,
+//! branch or commit into `<name>@<ref>/`, so projects pinned to different
+//! versions of one library each find their own. A registry comes later.
 
 use crate::{MANIFEST, parse_manifest};
 use std::fs;
@@ -29,7 +32,28 @@ pub struct Installed {
     pub name: String,
     pub version: String,
     pub source: String,
+    /// The tag, branch or commit it was installed at (`None`: the default branch).
+    pub rev: Option<String>,
     pub dir: PathBuf,
+}
+
+/// `github.com/x/y.git@v1.2.0` → (`github.com/x/y.git`, `Some("v1.2.0")`).
+/// Only an `@` after the last `/` counts (`git@github.com:…` is a URL).
+pub fn split_ref(src: &str) -> (String, Option<String>) {
+    let tail_at = src.rfind(['/', ':']).map_or(0, |i| i + 1);
+    match src[tail_at..].rfind('@') {
+        Some(i) if i > 0 && tail_at + i + 1 < src.len() => (src[..tail_at + i].to_string(), Some(src[tail_at + i + 1..].to_string())),
+        _ => (src.to_string(), None),
+    }
+}
+
+/// Where library `name` is installed: `<name>` for the default branch,
+/// `<name>@<rev>` for a tag, branch or commit (`/` in a branch name becomes `-`).
+pub fn dir_for(name: &str, rev: Option<&str>) -> PathBuf {
+    match rev {
+        None => libraries_dir().join(name),
+        Some(r) => libraries_dir().join(format!("{name}@{}", r.replace(['/', '\\'], "-"))),
+    }
 }
 
 const SOURCE_FILE: &str = ".mimic-source";
@@ -62,6 +86,7 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
 }
 
 pub fn install(src: &str) -> Result<Installed, String> {
+    let (src, rev) = split_ref(src);
     let looks_like_url = src.contains('/') || src.contains("://") || src.ends_with(".git");
     if !looks_like_url {
         return Err(format!(
@@ -69,11 +94,36 @@ pub fn install(src: &str) -> Result<Installed, String> {
              install from git instead, e.g. `mimic install github.com/<owner>/{src}.git`"
         ));
     }
-    let url = normalize_url(src);
+    install_at(&normalize_url(&src), rev.as_deref(), None)
+}
+
+/// Clone `url` at `rev` (a tag, branch or commit; `None`: the default
+/// branch), then, when `commit` is given, check out that exact commit (a
+/// revision locked in mod.mim).
+pub fn install_at(url: &str, rev: Option<&str>, commit: Option<&str>) -> Result<Installed, String> {
     let tmp = libraries_dir().join(format!(".tmp-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(libraries_dir()).map_err(|e| e.to_string())?;
-    git(&["clone", "--depth", "1", "--quiet", &url, &tmp.to_string_lossy()], None)?;
+    let tmp_s = tmp.to_string_lossy().to_string();
+    let cloned = match (rev, commit) {
+        // a tag or branch, newest commit only
+        (Some(r), None) => git(&["clone", "--depth", "1", "--quiet", "--branch", r, url, &tmp_s], None).is_ok(),
+        (None, None) => {
+            git(&["clone", "--depth", "1", "--quiet", url, &tmp_s], None)?;
+            true
+        }
+        _ => false,
+    };
+    if !cloned {
+        // a commit (or a locked revision): the whole history, then check it out
+        let _ = fs::remove_dir_all(&tmp);
+        git(&["clone", "--quiet", url, &tmp_s], None)?;
+        let want = commit.or(rev).unwrap_or("HEAD");
+        if let Err(e) = git(&["checkout", "--quiet", want], Some(&tmp)) {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(format!("{url} has no tag, branch or commit `{want}`:\n{e}"));
+        }
+    }
     let manifest = match parse_manifest(&tmp.join(MANIFEST)) {
         Ok(m) => m,
         Err(e) => {
@@ -85,17 +135,22 @@ pub fn install(src: &str) -> Result<Installed, String> {
         let _ = fs::remove_dir_all(&tmp);
         return Err(format!("`{}` is not a library (add `lib` to `kind` in its mim.mim)", manifest.name));
     }
-    if manifest.name != repo_name(&url) {
-        eprintln!("note: repository `{}` provides library `{}`", repo_name(&url), manifest.name);
+    if manifest.name != repo_name(url) {
+        eprintln!("note: repository `{}` provides library `{}`", repo_name(url), manifest.name);
     }
-    let dest = libraries_dir().join(&manifest.name);
+    let dest = dir_for(&manifest.name, rev);
     if dest.exists() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("`{}` is already installed; use `mimic update {}`", manifest.name, manifest.name));
+        let shown = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+        return Err(format!("`{shown}` is already installed; use `mimic update {shown}`"));
     }
-    fs::write(tmp.join(SOURCE_FILE), &url).map_err(|e| e.to_string())?;
+    let record = match rev {
+        Some(r) => format!("{url}\n{r}\n"),
+        None => format!("{url}\n"),
+    };
+    fs::write(tmp.join(SOURCE_FILE), record).map_err(|e| e.to_string())?;
     fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-    Ok(Installed { name: manifest.name, version: manifest.version, source: url, dir: dest })
+    Ok(Installed { name: manifest.name, version: manifest.version, source: url.to_string(), rev: rev.map(String::from), dir: dest })
 }
 
 pub fn list() -> Result<Vec<Installed>, String> {
@@ -111,24 +166,45 @@ pub fn list() -> Result<Vec<Installed>, String> {
             continue;
         }
         let version = parse_manifest(&p.join(MANIFEST)).map(|m| m.version).unwrap_or_else(|_| "?".into());
-        let source = fs::read_to_string(p.join(SOURCE_FILE)).unwrap_or_default().trim().to_string();
-        out.push(Installed { name, version, source, dir: p });
+        let record = fs::read_to_string(p.join(SOURCE_FILE)).unwrap_or_default();
+        let mut lines = record.lines().map(str::trim);
+        let source = lines.next().unwrap_or("").to_string();
+        let rev = lines.next().filter(|r| !r.is_empty()).map(String::from);
+        out.push(Installed { name, version, source, rev, dir: p });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
+/// An installed library by its folder name: `ai`, or `ai@v1.2.0`.
 pub fn find(name: &str) -> Result<Installed, String> {
     list()?.into_iter().find(|i| i.name == name).ok_or_else(|| format!("library `{name}` is not installed (see `mimic list`)"))
 }
 
-/// Fast-forward one installed library. Returns (old rev, new rev).
+/// The library's name without its version: `ai@v1.2.0` → `ai`.
+pub fn base_name(installed: &str) -> &str {
+    installed.split('@').next().unwrap_or(installed)
+}
+
+/// Move one installed library to the newest commit of its branch (the
+/// default branch, or the branch it was installed at). A tag or a commit
+/// stays where it is. Returns (old rev, new rev).
 pub fn update(lib: &Installed) -> Result<(String, String), String> {
     if !lib.dir.join(".git").exists() {
         return Err(format!("`{}` was not installed from git; reinstall it", lib.name));
     }
     let before = git(&["rev-parse", "--short", "HEAD"], Some(&lib.dir))?;
-    git(&["pull", "--ff-only", "--quiet"], Some(&lib.dir))?;
+    let branch = match &lib.rev {
+        None => Some("HEAD".to_string()),
+        Some(r) => {
+            let heads = git(&["ls-remote", "--heads", "origin", r], Some(&lib.dir))?;
+            (!heads.is_empty()).then(|| r.clone())
+        }
+    };
+    if let Some(b) = branch {
+        git(&["fetch", "--quiet", "--depth", "1", "origin", &b], Some(&lib.dir))?;
+        git(&["checkout", "--quiet", "FETCH_HEAD"], Some(&lib.dir))?;
+    }
     let after = git(&["rev-parse", "--short", "HEAD"], Some(&lib.dir))?;
     Ok((before, after))
 }
@@ -152,5 +228,10 @@ mod tests {
         assert_eq!(normalize_url("github.com/harcorp/ai.git"), "https://github.com/harcorp/ai.git");
         assert_eq!(repo_name("https://github.com/harcorp/ai.git"), "ai");
         assert_eq!(repo_name("git@github.com:harcorp/speech.git"), "speech");
+        assert_eq!(split_ref("github.com/x/y.git@v1.2.0"), ("github.com/x/y.git".into(), Some("v1.2.0".into())));
+        assert_eq!(split_ref("git@github.com:x/y.git"), ("git@github.com:x/y.git".into(), None));
+        assert_eq!(split_ref("git@github.com:x/y.git@main"), ("git@github.com:x/y.git".into(), Some("main".into())));
+        assert_eq!(split_ref("https://github.com/x/y"), ("https://github.com/x/y".into(), None));
+        assert_eq!(base_name("ai@v1"), "ai");
     }
 }

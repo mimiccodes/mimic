@@ -998,7 +998,7 @@ impl ArtifactKind {
 
 pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
     let base = match input {
-        Input::Project(p) => p.root.join("target"),
+        Input::Project(p) => p.target_dir(),
         Input::File(f) => {
             let abs = fs::canonicalize(f).unwrap_or_else(|_| f.clone());
             let h = mimic_syntax::fnv1a(abs.to_string_lossy().as_bytes());

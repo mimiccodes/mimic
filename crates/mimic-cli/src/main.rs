@@ -268,10 +268,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModCmd,
     },
-    /// Install a library globally into ~/.mimic/libraries (from a git URL)
+    /// Install a library from git into ~/.mimic/libraries; with no URL, inside a project, install its dependencies
     Install {
-        /// Git URL, e.g. github.com/harcorp/ai.git
-        source: String,
+        /// Git URL, e.g. github.com/harcorp/ai.git, optionally @tag, @branch or @commit
+        source: Option<String>,
     },
     /// List globally installed libraries
     List,
@@ -372,6 +372,9 @@ fn project_here() -> Result<Project, String> {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
+    if let Some(code) = for_each_member(&cli.cmd)? {
+        return Ok(code);
+    }
     match cli.cmd {
         Cmd::Create { name, kind } => {
             let (bin, lib) = kind.kinds();
@@ -566,13 +569,17 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Cmd::Doc { file, std, json, out } => doc_cmd(file, std, json, out),
         Cmd::Lldb { file, args } => lldb_cmd(file, args),
         Cmd::Mod { cmd } => mod_cmd(cmd),
-        Cmd::Install { source } => {
+        Cmd::Install { source: Some(source) } => {
             status("Installing", &source);
             let i = packages::install(&source)?;
             status("Installed", format!("{} v{} → {}", i.name, i.version, i.dir.display()));
-            eprintln!("             add it to a project's mim.mim:  dependencies {{ {} = {{}} }}", i.name);
+            match &i.rev {
+                Some(r) => eprintln!("             add it to a project's mim.mim:  dependencies {{ {} = {{ git = {}, rev = {} }} }}", i.name, mimic_syntax::config::quote(&i.source), mimic_syntax::config::quote(r)),
+                None => eprintln!("             add it to a project's mim.mim:  dependencies {{ {} = {{ git = {} }} }}", i.name, mimic_syntax::config::quote(&i.source)),
+            }
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Install { source: None } => install_dependencies(),
         Cmd::List => {
             let libs = packages::list()?;
             if libs.is_empty() {
@@ -608,6 +615,90 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// At the root of a workspace (a `mim.mim` with `workspace { members = [...] }`
+/// and no project): `check`, `build`, `test`, `fmt`, `install` and `mod update`
+/// run in every member, in order; other project commands say to pick one.
+fn for_each_member(cmd: &Cmd) -> Result<Option<ExitCode>, String> {
+    let each = match cmd {
+        Cmd::Check { file: None, .. } | Cmd::Build { file: None, .. } | Cmd::Install { source: None } => true,
+        // a file to test is named first; words only filter the tests
+        Cmd::Test { args, .. } => !args.first().is_some_and(|a| a.ends_with(".mim")),
+        Cmd::Fmt { files, .. } => files.is_empty(),
+        Cmd::Mod { cmd: ModCmd::Update } => true,
+        Cmd::Run { file: None, .. } | Cmd::Doc { file: None, .. } | Cmd::Mod { .. } | Cmd::Lldb { file: None, .. } => false,
+        _ => return Ok(None),
+    };
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let Some((root, members)) = mimic_project::workspace_root(&cwd) else { return Ok(None) };
+    let names: Vec<String> = members.iter().map(|m| m.strip_prefix(&root).unwrap_or(m).display().to_string()).collect();
+    if !each {
+        return Err(format!("{} is a workspace: run this inside one of its members ({})", root.display(), names.join(", ")));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut failed = Vec::new();
+    for (m, name) in members.iter().zip(&names) {
+        status("Member", name);
+        let ok = std::process::Command::new(&exe).args(&args).current_dir(m).status().map_err(|e| e.to_string())?.success();
+        if !ok {
+            failed.push(name.clone());
+        }
+    }
+    if failed.is_empty() {
+        status("Workspace", format!("{} member(s): all passed", members.len()));
+        Ok(Some(ExitCode::SUCCESS))
+    } else {
+        status("Workspace", format!("failed in {}", failed.join(", ")));
+        Ok(Some(ExitCode::FAILURE))
+    }
+}
+
+/// `mimic install` in a project: every git dependency that is not installed
+/// yet (and theirs), at the `rev` mim.mim asks for, or at the commit mod.mim
+/// locked when it asks for none.
+fn install_dependencies() -> Result<ExitCode, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let root = mimic_project::find_root(&cwd)
+        .ok_or("not inside a project: give a git URL (`mimic install github.com/<owner>/<library>.git`)".to_string())?;
+    let proj = Project::load(&root)?;
+    let locked = modfile::locked(&proj);
+    let mut queue: Vec<(PathBuf, mimic_project::Dependency, bool)> =
+        proj.manifest.dependencies.iter().rev().map(|d| (root.clone(), d.clone(), true)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut installed, mut present) = (0, 0);
+    while let Some((from, dep, direct)) = queue.pop() {
+        if !seen.insert(dep.name.clone()) {
+            continue;
+        }
+        let holder = Project::load(&from)?;
+        let dir = match holder.dep_dir(&dep) {
+            Ok(dir) => {
+                present += 1;
+                dir
+            }
+            Err(e) => match &dep.source {
+                mimic_project::DepSource::Git { url, rev } => {
+                    let commit = if direct && rev.is_none() { locked.get(&dep.name).map(String::as_str) } else { None };
+                    let at = rev.as_deref().or(commit.map(|c| &c[..c.len().min(12)])).unwrap_or("the default branch");
+                    status("Installing", format!("{} ({url} at {at})", dep.name));
+                    let i = packages::install_at(&packages::normalize_url(url), rev.as_deref(), commit)?;
+                    if i.name != dep.name {
+                        return Err(format!("{url} provides library `{}`, but mim.mim calls it `{}`", i.name, dep.name));
+                    }
+                    installed += 1;
+                    i.dir
+                }
+                _ => return Err(format!("{e}\n  (to install it automatically, give its git URL in mim.mim: `{} = {{ git = \"…\" }}`)", dep.name)),
+            },
+        };
+        for d in Project::load(&dir)?.manifest.dependencies.iter().rev() {
+            queue.push((dir.clone(), d.clone(), false));
+        }
+    }
+    status("Installed", format!("{installed} new, {present} already present"));
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `mimic fmt`: format files in place (or, with --check, only report).
@@ -700,7 +791,7 @@ fn doc_cmd(file: Option<PathBuf>, std: bool, json: bool, out: Option<PathBuf>) -
         let p = driver::load(&input).map_err(|r| r.human())?;
         let name = input.name();
         let out = match &input {
-            Input::Project(pr) => pr.root.join("target").join("doc"),
+            Input::Project(pr) => pr.target_dir().join("doc"),
             Input::File(_) => PathBuf::from(format!("{name}-doc")),
         };
         (p, name.clone(), name, None, out)

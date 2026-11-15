@@ -22,16 +22,21 @@
 | `mimic mod update` | Regenerate `mod.mim`. |
 | `mimic mod list [--all]` | List the project's modules. `--all` adds functions and dependencies. |
 | `mimic mod delete <module> [--yes]` | Remove a module. A nested module's block is deleted; a file module's file is deleted. This is a dry run unless you pass `--yes`. |
-| `mimic install <git-url>` | Clone a library into `~/.mimic/libraries/<name>`, e.g. `mimic install github.com/harcorp/ai.git`. |
+| `mimic install <git-url>[@ref]` | Clone a library into `~/.mimic/libraries/<name>`, e.g. `mimic install github.com/harcorp/ai.git`. With `@v1.2.0` (a tag, branch or commit) it goes into `<name>@v1.2.0`, next to other versions. |
+| `mimic install` | In a project: install every dependency with a `git` URL in `mim.mim` that is missing (and theirs), at its `rev`, or at the commit `mod.mim` locked. |
 | `mimic list` | List the installed libraries. |
-| `mimic update [library]` | Fast-forward every installed library, or just one. |
-| `mimic uninstall <library>` | Remove an installed library. |
+| `mimic update [library]` | Move every installed library, or one, to the newest commit of its branch; libraries installed at a tag or commit stay. |
+| `mimic uninstall <library>` | Remove an installed library (`ai`, or `ai@v1.2.0`). |
 | `mimic glyphs` | Print the glyph ↔ word ↔ digraph table. |
 | `mimic targets [--cpus ARCH] [--features ARCH] [--check TARGET] [--json]` | List what the linked LLVM can target (architectures, OSes, environments, code generators) and which targets build complete executables. See [targets.md](targets.md). |
 | `mimic cc …`, `mimic c++ …` | The embedded Clang C/C++ compiler. |
 | `mimic ld.lld …`, `mimic ld64.lld …`, `mimic lld-link …`, `mimic wasm-ld …` | The embedded LLD linker, in its ELF, Mach-O, COFF and WebAssembly flavours. |
 | `mimic net run <file.mnet> [--release] [--stats] [--threads N]` | Reduce a raw interaction net and print the value of `@main`. This is a runtime developer tool; see [net.md](net.md). |
 | `mimic net fmt <file.mnet>` | Print a net back in canonical form. |
+
+## Workspaces
+
+In a folder whose `mim.mim` declares `workspace { members = [...] }` and no project, `check`, `build`, `test`, `fmt`, `install` and `mod update` run in every member, and every member builds into that folder's `target/`. Other project commands ask you to run them inside a member. See [manifest.md](manifest.md#workspaces).
 
 ## Profiles
 

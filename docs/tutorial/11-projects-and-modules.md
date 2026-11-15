@@ -30,6 +30,7 @@ project {
 dependencies {
     money = { path = "../money" }                       // a local project
     vision = { git = "github.com/harcorp/vision.git" }  // installed with `mimic install`
+    speech = { git = "github.com/harcorp/speech.git", rev = "v1.2.0" }  // a tag, branch or commit
 }
 
 ffi {
@@ -90,12 +91,31 @@ The standard library's modules (`fs`, `http`, `json`, …) are found the same wa
 
 A library project exposes `module lib` from `src/lib.mim`. Users of the library call its items as `libname::item`:
 
+Libraries come from git:
+
 ```sh
-mimic install github.com/harcorp/money.git   # → ~/.mimic/libraries
+mimic install github.com/harcorp/money.git          # the default branch → ~/.mimic/libraries/money
+mimic install github.com/harcorp/money.git@v1.2.0   # a tag, branch or commit → money@v1.2.0
 mimic list
-mimic update money
-mimic uninstall money
+mimic update money                                  # the newest commit of its branch
+mimic uninstall money@v1.2.0
 ```
+
+Inside a project, `mimic install` with no URL installs every dependency that has a `git` URL in `mim.mim` and is missing (and the dependencies of those). It takes the `rev` you asked for; without one, the exact commit recorded in `mod.mim`, so a fresh clone of your project builds with the same library code you used.
+
+## Workspaces
+
+Several projects developed together share a folder whose `mim.mim` lists them:
+
+```mimic
+module mim
+
+workspace {
+    members = ["app", "money"]
+}
+```
+
+`mimic check`, `build`, `test`, `fmt` and `install` in that folder run in every member, and all members build into its one `target/`. A member uses another by path: `money = { path = "../money" }`. `mimic run` runs inside one member.
 
 ## The module index
 

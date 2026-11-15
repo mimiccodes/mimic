@@ -36,7 +36,8 @@ project {
 
 dependencies {
     speech = {}                                       // installed in ~/.mimic/libraries
-    vision = { git = "github.com/harcorp/vision.git" } // must be `mimic install`ed (auto-fetch: planned)
+    vision = { git = "github.com/harcorp/vision.git" } // `mimic install` in the project fetches it
+    audio  = { git = "github.com/harcorp/audio.git", rev = "v1.2.0" } // a tag, branch or commit
     util   = { path = "../util" }                     // local project
     tensor = "1.2"                                    // version string (registry: planned)
 }
@@ -52,6 +53,29 @@ ffi {
 
 Every declared dependency is in scope in every file of the project as `name::…`, so files do not need imports. `use name::item` is also available.
 
+### Dependencies from git
+
+* `{ git = "…" }`: the library at its default branch, installed in `~/.mimic/libraries/<name>`.
+* `{ git = "…", rev = "v1.2.0" }`: a tag, branch or commit, installed in `~/.mimic/libraries/<name>@v1.2.0`, so projects pinned to different versions each find their own.
+* `{}`: a library installed by hand with `mimic install <git-url>`.
+* `"1.2"`: a version from the registry (planned).
+
+`mimic install` with no URL, run in the project, installs every missing dependency that has a `git` URL, at its `rev`, or (with no `rev`) at the commit `mod.mim` locked. `mimic update <name>` moves a library to the newest commit of its branch; one installed at a tag or commit stays there.
+
+### Workspaces
+
+A folder whose `mim.mim` holds only a workspace groups several projects:
+
+```mimic
+module mim
+
+workspace {
+    members = ["app", "money", "tools/gen"]
+}
+```
+
+`mimic check`, `build`, `test`, `fmt`, `install` and `mod update` in that folder run in every member, in order, and fail if one fails. Every member builds into the workspace's `target/`. Members use each other by path (`money = { path = "../money" }`), and `run`, `doc` and `lldb` run inside one member.
+
 ### Planned fields
 
 | Field | Purpose |
@@ -59,7 +83,6 @@ Every declared dependency is in scope in every file of the project as `name::…
 | `bin { name, path }` | Multiple binaries. |
 | `features { simd = [], gpu = ["dep/gpu"] }` | Conditional compilation. |
 | `dev-dependencies` | Test-only dependencies. |
-| `workspace { members = [...] }` | Multi-project workspaces. |
 | `targets` per project | Platform-specific dependencies. |
 
 ## build.mim
@@ -83,6 +106,6 @@ targets = ["x86_64-linux-musl", "aarch64-linux", "x86_64-apple-macosx"]   // mim
 
 * **`modules`:** every module in the project *and its dependencies*, with its file, line and visibility.
 * **`functions`:** every function, with its kind (`fn`/`extern`), visibility, location, signature and a stable **signature hash**. The incremental compiler will use the hashes to skip re-checking dependents when only a function body changed.
-* **`lock`:** each dependency's source and resolved git revision.
+* **`lock`:** each dependency's source (`git`, and `at` for the `rev` asked for) and the exact commit it resolved to (`rev`). `mimic install` in a fresh clone installs that commit for a dependency that pins no `rev`.
 
 The related CLI commands are `mimic mod init | update | list [--all] | delete <module> [--yes]`.

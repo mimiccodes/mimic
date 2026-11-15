@@ -57,7 +57,12 @@ pub fn render(project: &Project, p: &Program) -> String {
         let mut t = Table::default();
         match &d.source {
             DepSource::Path(path) => t.entries.push(entry("path".into(), Value::Str(path.display().to_string()))),
-            DepSource::Git { url, .. } => t.entries.push(entry("git".into(), Value::Str(url.clone()))),
+            DepSource::Git { url, rev } => {
+                t.entries.push(entry("git".into(), Value::Str(url.clone())));
+                if let Some(r) = rev {
+                    t.entries.push(entry("at".into(), Value::Str(r.clone())));
+                }
+            }
             DepSource::Installed => t.entries.push(entry("installed".into(), Value::Bool(true))),
         }
         if let Ok(dir) = project.dep_dir(d)
@@ -85,6 +90,23 @@ pub fn sync(project: &Project, p: &Program) -> Result<bool, String> {
     }
     fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(true)
+}
+
+/// The commits mod.mim has locked, by dependency name.
+pub fn locked(project: &Project) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(src) = fs::read_to_string(project.root.join(MOD_FILE)) else { return out };
+    let Ok(cfg) = config::parse(&src) else { return out };
+    if let Some(lock) = cfg.root.table("lock") {
+        for (name, v, _) in &lock.entries {
+            if let Value::Table(t) = v
+                && let Some(rev) = t.str("rev")
+            {
+                out.insert(name.clone(), rev.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Rows for `mimic mod list`: (path, kind, pub, location).

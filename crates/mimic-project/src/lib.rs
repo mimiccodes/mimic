@@ -80,6 +80,37 @@ pub struct Project {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub build: BuildConfig,
+    /// The workspace this project is a member of: its root folder.
+    pub workspace: Option<PathBuf>,
+}
+
+/// The members of a workspace manifest (`workspace { members = [...] }`), as
+/// folders; `None` when `path` declares no workspace.
+pub fn workspace_members(path: &Path) -> Result<Option<Vec<PathBuf>>, String> {
+    let src = fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let cfg = config::parse(&src).map_err(|d| err_at(path, &src, d))?;
+    let Some(ws) = cfg.root.table("workspace") else { return Ok(None) };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let members: Vec<PathBuf> = strings(ws.get("members")).iter().map(|m| dir.join(m)).collect();
+    for m in &members {
+        if !m.join(MANIFEST).is_file() {
+            return Err(format!("{}: workspace member {} has no {MANIFEST}", path.display(), m.display()));
+        }
+    }
+    Ok(Some(members))
+}
+
+/// A workspace whose root manifest declares no project of its own: the
+/// folder `start` is in (or above), and its members.
+pub fn workspace_root(start: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
+    let root = find_root(start)?;
+    let src = fs::read_to_string(root.join(MANIFEST)).ok()?;
+    let cfg = config::parse(&src).ok()?;
+    if cfg.root.table("project").is_some() {
+        return None;
+    }
+    let members = workspace_members(&root.join(MANIFEST)).ok()??;
+    Some((root, members))
 }
 
 fn err_at(path: &Path, src: &str, d: mimic_syntax::Diag) -> String {
@@ -103,6 +134,12 @@ pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
         return Err(format!("{}: the manifest must start with `module mim`", path.display()));
     }
     let root = &cfg.root;
+    if root.table("project").is_none() && root.table("workspace").is_some() {
+        return Err(format!(
+            "{} declares a workspace, not a project: run `mimic check`, `build`, `test` or `install` there for every member, or the command inside one member",
+            path.display()
+        ));
+    }
     let proj = root.table("project").ok_or_else(|| format!("{}: missing `project {{ … }}` block", path.display()))?;
     let name = proj.str("name").ok_or_else(|| bad("project.name is required".into(), "project", root))?.to_string();
     if !valid_ident(&name) {
@@ -210,7 +247,19 @@ impl Project {
     pub fn load(root: &Path) -> Result<Project, String> {
         let manifest = parse_manifest(&root.join(MANIFEST))?;
         let build = parse_build(&root.join(BUILD_FILE))?;
-        Ok(Project { root: root.to_path_buf(), manifest, build })
+        // a member of a workspace above it (one level or more)
+        let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let workspace = real.ancestors().skip(1).find_map(|dir| {
+            let ws = dir.join(MANIFEST);
+            let members = workspace_members(&ws).ok().flatten()?;
+            members.iter().any(|m| m.canonicalize().is_ok_and(|m| m == real)).then(|| dir.to_path_buf())
+        });
+        Ok(Project { root: root.to_path_buf(), manifest, build, workspace })
+    }
+
+    /// Where builds go: the workspace's `target/` for its members, else the project's.
+    pub fn target_dir(&self) -> PathBuf {
+        self.workspace.as_deref().unwrap_or(&self.root).join("target")
     }
 
     /// All `.mim` sources under `src/`, sorted for determinism.
@@ -222,11 +271,13 @@ impl Project {
     pub fn dep_dir(&self, d: &Dependency) -> Result<PathBuf, String> {
         let dir = match &d.source {
             DepSource::Path(p) => self.root.join(p),
-            DepSource::Installed | DepSource::Git { .. } => packages::libraries_dir().join(&d.name),
+            DepSource::Installed => packages::dir_for(&d.name, None),
+            DepSource::Git { rev, .. } => packages::dir_for(&d.name, rev.as_deref()),
         };
         if !dir.join(MANIFEST).is_file() {
             let hint = match &d.source {
-                DepSource::Git { url, .. } => format!("run `mimic install {url}`"),
+                DepSource::Git { rev: Some(r), .. } => format!("run `mimic install` in the project, or `mimic install <git-url>@{r}`"),
+                DepSource::Git { .. } => "run `mimic install` in the project".into(),
                 DepSource::Installed => format!("run `mimic install <git-url>` to install `{}`", d.name),
                 DepSource::Path(_) => "check the `path` in mim.mim".into(),
             };
