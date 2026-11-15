@@ -160,16 +160,23 @@ mimic lldb                     # or: mimic lldb app.mim -- program arguments
 (lldb) breakpoint set --file main.mim --line 8
 (lldb) run
 (lldb) frame variable
-(value) p = 0x0000000a63440000 Point { x: 1.5, y: -2.0, name: "origin" }
-(long[4]) xs = ([0] = 1, [1] = 2, [2] = 3, [3] = 4)
-(value) words = 0x0000000a6340d8f0 ["a" "bc"]
-(value) s = 0x0000000a6340d950 Circle(2.5)
+(value) p = Point { x: 1.5, y: -2.0, name: "origin" }
+(long[4]) xs = [1 2 3 4]
+(value) words = ["a" "bc"]
+(value) ages = ["ada": 36, "alan": 41]
+(value) s = Circle(2.5)
 (lldb) next
 (lldb) bt
 ```
 
 Functions appear under their Mimic names (`app::main::area`). Release
 builds have no debug information.
+
+Editors debug through `mimic dap`, which speaks the Debug Adapter Protocol
+(through LLVM's `lldb-dap`): in VS Code, press F5 or click **Debug** above
+`fn main`; other editors are set up in `mimic man editors`. Breakpoints,
+stepping, the call stack and the variables work the same way, with the
+same values.
 
 ## Error codes
 

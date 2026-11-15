@@ -118,7 +118,23 @@ def show(proc, addr, depth=0):
     if dtype == FN:
         return "<function>"
     if dtype == MAP:
-        return "<map of %d>" % length
+        # handle pairs (k0 v0 k1 v1 …) in insertion order; `desc` points at
+        # the hash index, whose first word is the number of live entries
+        count = struct.unpack("<q", _read(proc, desc, 8))[0] if desc else 0
+        if count == 0:
+            return "[:]"
+        cap = length // 2
+        pairs = []
+        for i in range(cap):
+            k, v = struct.unpack("<QQ", _read(proc, data + 16 * i, 16))
+            if k == 0:
+                continue
+            pairs.append("%s: %s" % (show(proc, k, depth + 1), show(proc, v, depth + 1)))
+            if len(pairs) >= min(count, MAX_ITEMS):
+                break
+        if count > len(pairs):
+            pairs.append("… (%d in all)" % count)
+        return "[" + ", ".join(pairs) + "]"
     return "<value 0x%x>" % addr
 
 
@@ -129,6 +145,44 @@ def summary(valobj, _dict):
         return "<%s>" % e
 
 
+def _scalar(v):
+    """A number or truth value kept in a register, as Mimic prints it."""
+    name = v.GetType().GetName()
+    if name in ("bool",):
+        return "true" if v.GetValueAsUnsigned() else "false"
+    if name in ("f64", "double", "f32", "float"):
+        x = float(v.GetValue())
+        return repr(x) if x != int(x) or abs(x) >= 1e16 else "%.1f" % x
+    if name in ("i64", "i32", "long", "int"):
+        return str(v.GetValueAsSigned())
+    return _register(v)
+
+
+def _register(v):
+    if v.GetType().IsArrayType():
+        return "[" + " ".join(_scalar(v.GetChildAtIndex(i)) for i in range(min(v.GetNumChildren(), MAX_ITEMS))) + ("" if v.GetNumChildren() <= MAX_ITEMS else " …") + "]"
+    if v.GetType().IsAggregateType():
+        fields = ["%s: %s" % (v.GetChildAtIndex(i).GetName(), _register(v.GetChildAtIndex(i))) for i in range(v.GetNumChildren())]
+        return "%s { %s }" % (v.GetType().GetName(), ", ".join(fields))
+    if v.GetType().GetName() == "value":
+        return show(v.GetProcess(), v.GetValueAsUnsigned())
+    return _scalar(v)
+
+
+def register_summary(valobj, _dict):
+    """Lists of known length and flat records, which live in registers."""
+    try:
+        return _register(valobj)
+    except Exception as e:  # never break the debugger
+        return "<%s>" % e
+
+
 def __lldb_init_module(debugger, _dict):
-    debugger.HandleCommand("type summary add -F %s.summary value" % __name__)
+    # a handle's address says nothing: show only what it holds
+    debugger.HandleCommand("type summary add -v -F %s.summary value" % __name__)
+    debugger.HandleCommand("type format add -f void value")
     debugger.HandleCommand("type format add -f decimal i64")
+    # lists of numbers in registers: [3 1 4]
+    debugger.HandleCommand('type summary add -x "^(i64|i32|f64|f32|bool|long|int|double|float)\\[[0-9]+\\]$" -F %s.register_summary' % __name__)
+    # records in registers (Mimic type names start with a capital)
+    debugger.HandleCommand('type summary add -x "^[A-Z][A-Za-z0-9_]*$" -F %s.register_summary' % __name__)

@@ -562,6 +562,87 @@ fn language_server() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mimic dap`: an editor's debug session (through LLVM's lldb-dap) stops
+/// at a breakpoint on a `.mim` line and shows every variable as Mimic prints
+/// it: lists, text, records, maps and options. Skipped where lldb-dap is not
+/// installed (macOS has it with Xcode).
+#[test]
+fn debugger() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let have = Command::new("xcrun").args(["-f", "lldb-dap"]).output().is_ok_and(|o| o.status.success())
+        || std::env::var_os("MIMIC_LLDB_DAP").is_some();
+    if !have {
+        eprintln!("skipped: no lldb-dap");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mimic-golden-dap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("dbg.mim");
+    std::fs::write(&f, "module main\n\ntype Point = { x: f64, y: f64 }\n\nfn show(xs: [i64], name: str, p: Point, m: [str: i64], o: Option[i64]) -> i64 {\n    let total = +/ xs\n    print(\"{name} {total} {p.x} {≢ m} {o}\")\n    total\n}\n\nfn main() {\n    let xs = [3 1 4 1 5]\n    let p = Point { x: 1.5, y: 2.0 }\n    let m = [\"a\": 1, \"b\": 2]\n    print(show(xs, \"hi\", p, m, Some(7)))\n}\n").unwrap();
+    let mut child = mimic().arg("dap").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut seq = 0;
+    let mut send = |cmd: &str, args: serde_json::Value| -> i64 {
+        seq += 1;
+        let b = serde_json::json!({ "seq": seq, "type": "request", "command": cmd, "arguments": args }).to_string();
+        write!(input, "Content-Length: {}\r\n\r\n{b}", b.len()).unwrap();
+        input.flush().unwrap();
+        seq
+    };
+    let mut wait = |pred: &dyn Fn(&serde_json::Value) -> bool| -> serde_json::Value {
+        loop {
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                assert!(output.read_line(&mut line).unwrap() > 0, "the adapter stopped");
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                    len = n.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            output.read_exact(&mut body).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if pred(&v) {
+                return v;
+            }
+        }
+    };
+    let reply = |s: i64| move |v: &serde_json::Value| v["type"] == "response" && v["request_seq"] == s;
+    let s = send("initialize", serde_json::json!({ "adapterID": "mimic", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path" }));
+    assert_eq!(wait(&reply(s))["success"], true);
+    send("launch", serde_json::json!({ "program": f.display().to_string() }));
+    wait(&|v| v["event"] == "initialized");
+    let s = send("setBreakpoints", serde_json::json!({ "source": { "path": f.display().to_string() }, "breakpoints": [{ "line": 7 }] }));
+    assert_eq!(wait(&reply(s))["body"]["breakpoints"][0]["verified"], true);
+    let s = send("configurationDone", serde_json::json!({}));
+    wait(&reply(s));
+    let stop = wait(&|v| v["event"] == "stopped");
+    let s = send("stackTrace", serde_json::json!({ "threadId": stop["body"]["threadId"] }));
+    let frames = wait(&reply(s))["body"]["stackFrames"].clone();
+    assert_eq!(frames[0]["name"], "dbg::main::show", "{frames}");
+    assert_eq!(frames[0]["line"], 7);
+    let s = send("scopes", serde_json::json!({ "frameId": frames[0]["id"] }));
+    let scopes = wait(&reply(s))["body"]["scopes"].clone();
+    let s = send("variables", serde_json::json!({ "variablesReference": scopes[0]["variablesReference"] }));
+    let vars = wait(&reply(s))["body"]["variables"].clone();
+    let get = |n: &str| vars.as_array().unwrap().iter().find(|v| v["name"] == n).map(|v| v["value"].as_str().unwrap().to_string()).unwrap_or_default();
+    assert_eq!(get("xs"), "[3 1 4 1 5]", "{vars}");
+    assert_eq!(get("name"), "\"hi\"", "{vars}");
+    assert_eq!(get("p"), "Point { x: 1.5, y: 2.0 }", "{vars}");
+    assert_eq!(get("m"), "[\"a\": 1, \"b\": 2]", "{vars}");
+    assert_eq!(get("o"), "Some(7)", "{vars}");
+    assert_eq!(get("total"), "14", "{vars}");
+    let s = send("disconnect", serde_json::json!({ "terminateDebuggee": true }));
+    wait(&reply(s));
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

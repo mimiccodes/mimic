@@ -7,6 +7,7 @@ mod cc;
 mod cimport;
 mod doc;
 mod driver;
+mod dap;
 mod engine;
 mod lsp;
 mod man;
@@ -261,6 +262,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Debugging from editors (Debug Adapter Protocol, over stdin and stdout): builds the program and runs it under lldb-dap
+    Dap,
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
         /// Accepted for editors that pass it; stdin and stdout are always used
@@ -535,6 +538,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Dap => {
+            dap::serve()?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Lsp { .. } => {
             lsp::serve()?;
             Ok(ExitCode::SUCCESS)
@@ -787,21 +794,35 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
 /// lldb formatters for Mimic values (see lldb_mimic.py).
 const LLDB_FORMATTERS: &str = include_str!("lldb_mimic.py");
 
-fn lldb_cmd(file: Option<PathBuf>, args: Vec<String>) -> Result<ExitCode, String> {
-    let input = driver::input_from(file.as_deref()).map_err(|e| e.to_string())?;
-    let mut prof = Profile::for_input(&input, false);
+/// A debug build for a debugger: the executable (`mimic lldb`, `mimic dap`).
+pub(crate) fn debug_build(input: &Input) -> Result<PathBuf, String> {
+    let mut prof = Profile::for_input(input, false);
     prof.net = true;
-    let a = driver::build(&input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
+    let a = driver::build(input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
+    Ok(a.path)
+}
+
+/// The lldb formatters that show Mimic's values, written to the cache.
+pub(crate) fn lldb_formatters() -> Result<PathBuf, String> {
     let dir = packages::cache_dir().join("lldb");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let script = dir.join("mimic_values.py");
-    std::fs::write(&script, LLDB_FORMATTERS).map_err(|e| format!("cannot write {}: {e}", script.display()))?;
-    status("Debugging", a.path.display().to_string());
+    if std::fs::read_to_string(&script).ok().as_deref() != Some(LLDB_FORMATTERS) {
+        mimic_toolchain::jobs::write_atomic(&script, LLDB_FORMATTERS.as_bytes()).map_err(|e| format!("cannot write {}: {e}", script.display()))?;
+    }
+    Ok(script)
+}
+
+fn lldb_cmd(file: Option<PathBuf>, args: Vec<String>) -> Result<ExitCode, String> {
+    let input = driver::input_from(file.as_deref()).map_err(|e| e.to_string())?;
+    let exe = debug_build(&input)?;
+    let script = lldb_formatters()?;
+    status("Debugging", exe.display().to_string());
     let st = std::process::Command::new("lldb")
         .arg("-o")
         .arg(format!("command script import {}", script.display()))
         .arg("--")
-        .arg(&a.path)
+        .arg(&exe)
         .args(&args)
         .status()
         .map_err(|e| format!("cannot start lldb ({e}); it comes with the Xcode command line tools on macOS and the lldb package on Linux"))?;

@@ -18,13 +18,15 @@ description: Mimic in VS Code, Neovim, Helix, Emacs, Sublime Text and Zed: the l
 
 Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com/mimiccodes/mimic-syntax): TextMate for VS Code, tree-sitter for Neovim, Helix and Zed.
 
+**Debugging** goes through `mimic dap`, the Debug Adapter Protocol: breakpoints on `.mim` lines, stepping, the call stack, and variables shown as Mimic prints them (`[3 1 4]`, `Point { x: 1.5, y: 2.0 }`, `["a": 1]`, `Some(7)`). It runs LLVM's `lldb-dap`, which comes with Xcode on macOS and with the `lldb` package on Linux. A launch request takes `program`: a `.mim` file or a project folder, which it builds with debug information.
+
 ## VS Code
 
 The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode)) starts `mimic lsp` by itself and adds:
 
 * the highlighting, and the Mimic file icon;
 * the glyph palette (`Cmd+Alt+G` on macOS, `Ctrl+Alt+G` elsewhere): every glyph with its word, how to type it and what it does;
-* **▶ Run** above `fn main` and **▶ Run test** above each test, and the Test Explorer (also for examples in comments);
+* **▶ Run** and **Debug** above `fn main`, **▶ Run test** above each test, and the Test Explorer (also for examples in comments); F5 debugs the current project or file;
 * the manual beside your code (*Mimic: Open the Manual…*, or `Cmd/Ctrl+Alt+M` for the word under the cursor);
 * *Convert File to Glyphs / Words*;
 * a check that `mimic` is new enough, with the download when it is not.
@@ -47,7 +49,7 @@ For highlighting, add the tree-sitter grammar as the mimic-syntax README shows.
 
 ## Helix
 
-In `~/.config/helix/languages.toml`:
+In `~/.config/helix/languages.toml` (with `debugger` for `:debug-start`):
 
 ```toml
 [language-server.mimic]
@@ -62,6 +64,18 @@ roots = ["mim.mim"]
 comment-token = "//"
 indent = { tab-width = 4, unit = "    " }
 language-servers = ["mimic"]
+
+[language.debugger]
+name = "mimic"
+transport = "stdio"
+command = "mimic"
+args = ["dap"]
+
+[[language.debugger.templates]]
+name = "project"
+request = "launch"
+completion = [ { name = "project folder", completion = "directory", default = "." } ]
+args = { program = "{0}" }
 ```
 
 ## Emacs (eglot)
@@ -73,7 +87,7 @@ language-servers = ["mimic"]
   (add-to-list 'eglot-server-programs '(mimic-mode "mimic" "lsp")))
 ```
 
-Then `M-x eglot` in a `.mim` file.
+Then `M-x eglot` in a `.mim` file. For debugging, dape can use `mimic dap` as its adapter.
 
 ## Sublime Text (with the LSP package)
 

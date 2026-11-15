@@ -20,6 +20,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **The VS Code extension** (step 0.3.5), in the new [mimic-vscode](https://github.com/mimiccodes/mimic-vscode) repository (a submodule at `editors/vscode`): everything of `mimic lsp`, the highlighting and file icon, a glyph palette, **Run** and **Run test** above functions and tests, the Test Explorer (tests and examples in comments, with both sides of a failed `expect`), the manual beside the code, conversion between glyphs and words, and a check that `mimic` is new enough. CI runs it in a real VS Code against the `mimic` it builds.
 
+- **Debugging shows Mimic's values** (step 0.3.6). `mimic lldb` shows text, lists, maps (`["a": 1, "b": 2]`), records (also those kept in registers, which had no debug information before: `Point { x: 1.5, y: 2.0 }`), lists of numbers as `[3 1 4]` and variants as `Some(7)`, without the handles' addresses. `mimic dap` debugs from editors over the Debug Adapter Protocol (through LLVM's `lldb-dap`): breakpoints on `.mim` lines, stepping, the call stack, and the same values; in VS Code, F5 or **Debug** above `fn main`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 
