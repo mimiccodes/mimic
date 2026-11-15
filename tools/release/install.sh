@@ -8,7 +8,9 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-bin=${MIMIC_BIN:-$HOME/.mimic/bin}
+home=${MIMIC_HOME:-$HOME/.mimic}
+bin=${MIMIC_BIN:-$home/bin}
+mark="$home/installed-version"
 line="export PATH=\"$bin:\$PATH\""
 os=$(uname -s)
 
@@ -23,14 +25,14 @@ profiles() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$bin/mimic"
+    rm -f "$bin/mimic" "$mark"
     for p in $(profiles); do
         if [ -f "$p" ]; then
             grep -v "# added by mimic's install.sh" "$p" > "$p.mimic-tmp" || true
             mv "$p.mimic-tmp" "$p"
         fi
     done
-    echo "mimic removed from $bin (the build cache stays in ~/.mimic/cache; delete it if you like)"
+    echo "mimic removed from $bin (the build cache stays in $home/cache; delete it if you like)"
     exit 0
 fi
 
@@ -72,13 +74,42 @@ Linux)
     ;;
 esac
 
+# ---- an earlier mimic ------------------------------------------------------
+new=$("$here/mimic" --version 2>/dev/null | head -1 || true)
+old=$(cat "$mark" 2>/dev/null || true)
+if [ -z "$old" ] && [ -x "$bin/mimic" ]; then old=$("$bin/mimic" --version 2>/dev/null | head -1 || true); fi
+# another mimic first on PATH would hide this one
+other=$(command -v mimic 2>/dev/null || true)
+if [ -n "$other" ] && [ "$other" != "$bin/mimic" ]; then
+    echo "another mimic comes first on PATH: $other ($("$other" --version 2>/dev/null | head -1 || echo "version unknown"))"
+    answer=n
+    if [ -t 0 ] && [ -w "$(dirname "$other")" ]; then
+        printf "remove it, so the new one is used? [y/N] "
+        read -r answer || answer=n
+    fi
+    case "$answer" in
+    y | Y | yes)
+        rm -f "$other"
+        echo "removed $other"
+        ;;
+    *) echo "kept it. To use the new mimic, remove it (rm $other) or put $bin first on PATH." ;;
+    esac
+fi
+
 # ---- install ---------------------------------------------------------------
 mkdir -p "$bin"
 cp "$here/mimic" "$bin/mimic"
 chmod +x "$bin/mimic"
 # a downloaded program is quarantined on macOS
 [ "$os" = Darwin ] && xattr -d com.apple.quarantine "$bin/mimic" 2>/dev/null || true
-echo "installed $bin/mimic"
+echo "installed $bin/mimic${old:+ (replacing $old)}"
+# what an older mimic built (its runtime, C libraries, imported headers) is
+# rebuilt by the new one; projects and installed libraries are not touched
+if [ -n "$old" ] && [ "$old" != "$new" ] && [ -d "$home/cache" ]; then
+    rm -rf "$home/cache"
+    echo "cleared the build cache of the old version ($home/cache)"
+fi
+echo "$new" > "$mark"
 
 case ":$PATH:" in
 *":$bin:"*) ;;

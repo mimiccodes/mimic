@@ -2,7 +2,11 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
-## Unreleased
+## 0.2.9 — 2026-11-15
+
+Stage 0.2 complete: native windows on Windows and Linux, shared libraries, thousands of waiting tasks on the event loop, terminal programs, text formats, collections, C constants, globals, structs and unions, and Windows at full speed.
+
+**Upgrading from 0.2.0:** names from C are now written with `c::` (`c::printf`, `c::sqrt`). Run `mimic check --fix` in each project to add it where it is missing. The install script replaces the old `mimic` and clears its build cache.
 
 ### Changed (breaking)
 - **Everything from C is written with the namespace `c::`:** `c::printf(…)`, `c::sqrt(2.0)`, `c::Vec2 { … }`, for functions from `extern "C"` blocks, imported headers and C struct records alike. It is required, so C code is always visible, and C names never collide with Mimic's (`c::abs` next to `abs`, `c::div` next to the `div` operator). `extern "C" include "sqlite3.h" as sql` picks another namespace. A C name used without it is error E0303 with the fix (`did you mean c::floor?`). C++ will use `cpp::`. To update code: put `c::` before each C function and struct name.

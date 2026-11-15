@@ -10,10 +10,18 @@ Download the file for your system below and unpack it. Then run the install scri
 | **macOS** Apple silicon | `mimic-{v}-macos-arm64.tar.gz` | `./install.sh` | The Xcode Command Line Tools (`xcode-select --install`), for the macOS SDK. |
 | **Linux** x86_64 | `mimic-{v}-linux-x86_64.tar.gz` | `./install.sh` | glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL 8 or later) and a C compiler (`cc`) to link native programs. `--target x86_64-linux` needs nothing else. |
 
+**On Windows, if double-clicking `install.cmd` does nothing** (some company PCs block scripts), open PowerShell in the unpacked folder and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\install.ps1"
+```
+
 The script says if something is missing and how to install it. Open a new terminal afterwards so the new `PATH` applies.
 
+**Upgrading from an earlier Mimic:** run the new install script the same way. It replaces the old `mimic`, clears the build cache the old version left in `~/.mimic/cache` (it is rebuilt on first use), and keeps your projects and installed libraries. If another `mimic` comes first on your `PATH`, it says where, and offers to remove it.
+
 - **macOS:** the script clears the download quarantine. If you copy `mimic` by hand instead, run `xattr -d com.apple.quarantine mimic` once.
-- **Windows:** SmartScreen may ask the first time: "More info" → "Run anyway".
+- **Windows:** the script unblocks the downloaded files. SmartScreen may still ask the first time: "More info" → "Run anyway".
 - **Uninstall:** `./install.sh --uninstall`, or `install.cmd -Uninstall` on Windows. Your projects are not touched.
 
 ## First program

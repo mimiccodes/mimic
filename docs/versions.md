@@ -26,7 +26,7 @@ Mimic follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 5. **Before every tag:** the owner approves it.
 6. **No gap forgotten:** [gaps.md](gaps.md) lists every everyday feature still missing, each with the version that closes it, and `tools/gaps.sh` checks them all against the compiler. Every problem a user reports becomes a check there the same day, and a closed gap becomes a golden test.
 
-**Released so far:** 0.1.0, then **0.2.0** (2026-11-14). 0.2.0 brings parts of the plan forward: the release builds of 0.1.1 (Linux x86_64, macOS arm64 and Windows x86_64, with install scripts in place of a `curl … | sh` installer; the Linux build needs glibc 2.39 or newer), and Windows from 0.2.0–0.2.4 (cross builds, networking and TLS, `mimic` itself on Windows). Still open from those steps: the older-glibc Linux build, the IOCP event loop and Windows arm64.
+**Released so far:** 0.1.0, 0.2.0 (2026-11-14), and **0.2.9** (2026-11-15), which completes stage 0.2: every step from 0.2.0 to 0.2.9 below is in it. The Linux build needs glibc 2.28 or newer; Windows has the IOCP event loop (wepoll), and Windows arm64 is tested in CI. Next: stage 0.3, the Workbench.
 
 ---
 

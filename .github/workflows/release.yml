@@ -132,14 +132,22 @@ jobs:
         run: |
           name=mimic-${TAG#v}-${{ matrix.platform }}
           if [ "$RUNNER_OS" = Windows ]; then
-            powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1"
-            "$USERPROFILE/.mimic/bin/mimic.exe" --version
-            powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1" -Uninstall
+            run() { powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1" "$@" < /dev/null; }
+            home="$USERPROFILE/.mimic"
           else
-            "dist/$name/install.sh"
-            "$HOME/.mimic/bin/mimic" --version
-            "dist/$name/install.sh" --uninstall
+            run() { "dist/$name/install.sh" "$@" < /dev/null; }
+            home="$HOME/.mimic"
           fi
+          run
+          "$home/bin/mimic" --version
+          # an upgrade over an older mimic: its build cache goes, libraries stay
+          echo "mimic 0.0.1 (old)" > "$home/installed-version"
+          mkdir -p "$home/cache/stale" "$home/libraries/kept"
+          run | tee upgrade.txt
+          grep -q "replacing mimic 0.0.1" upgrade.txt
+          grep -q "cleared the build cache" upgrade.txt
+          [ ! -d "$home/cache/stale" ] && [ -d "$home/libraries/kept" ]
+          if [ "$RUNNER_OS" = Windows ]; then run -Uninstall; else run --uninstall; fi
 
       - uses: actions/upload-artifact@v4
         with:
