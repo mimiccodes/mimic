@@ -153,7 +153,7 @@ fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
 
 `mimic edit` opens the project in Mimic's terminal editor: errors as you
 type, glyphs by typing `\i` (or Ctrl-G for the palette), F5 to run, F6 to
-test, F1 for the manual on the word under the cursor, and labels showing
+test, F4 to evaluate a line in the REPL pane, F1 for the manual on the word under the cursor, and labels showing
 where code runs in parallel. Ctrl-S saves, Ctrl-Q quits. `mimic man editors`
 lists every key.
 

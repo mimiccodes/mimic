@@ -245,9 +245,10 @@ pub enum Pane {
     Manual,
     Where,
     Output,
+    Repl,
 }
 
-const PANES: [Pane; 5] = [Pane::Problems, Pane::Audit, Pane::Manual, Pane::Where, Pane::Output];
+const PANES: [Pane; 6] = [Pane::Problems, Pane::Audit, Pane::Manual, Pane::Where, Pane::Output, Pane::Repl];
 
 impl Pane {
     fn title(self) -> &'static str {
@@ -257,6 +258,7 @@ impl Pane {
             Pane::Manual => "Manual",
             Pane::Where => "Where code runs",
             Pane::Output => "Output",
+            Pane::Repl => "REPL",
         }
     }
 }
@@ -269,6 +271,8 @@ pub enum PromptKind {
     Open,
     Glyph,
     GotoLine,
+    /// A line for the REPL (F4)
+    Eval,
 }
 
 pub struct Prompt {
@@ -310,6 +314,11 @@ pub struct Editor {
     quit_armed: bool,
     pub quit: bool,
     jobs: Option<mpsc::Receiver<(Pane, String)>>,
+    /// The REPL's session (as `mimic repl`), its lines so far, and the
+    /// line being evaluated on another thread
+    repl: Option<crate::repl::Session>,
+    repl_log: Vec<(String, Style)>,
+    repl_job: Option<mpsc::Receiver<(crate::repl::Session, Result<String, String>)>>,
     last_find: String,
     /// the editor's area on screen (for the mouse)
     area: Rect,
@@ -413,6 +422,9 @@ impl Editor {
             quit_armed: false,
             quit: false,
             jobs: None,
+            repl: None,
+            repl_log: Vec::new(),
+            repl_job: None,
             last_find: String::new(),
             area: Rect::default(),
             gutter: 6,
@@ -718,6 +730,24 @@ impl Editor {
                 let args = self.target_args("test");
                 self.spawn(Pane::Output, args, "testing");
             }
+            (KeyCode::F(4), _, _) => {
+                if !self.repl_log.is_empty() {
+                    let lines = self.repl_log.clone();
+                    self.set_pane(Pane::Repl, lines);
+                    self.scroll_to_end();
+                }
+                self.prompt = Some(Prompt { kind: PromptKind::Eval, input: String::new(), selected: 0 });
+            }
+            (KeyCode::Char('e'), true, _) => {
+                // the selection, or the current line
+                let code = self.docs.get(self.cur).map(|d| match d.selection() {
+                    Some((a, b)) => d.text.slice(a..b).to_string(),
+                    None => d.line_text(d.cursor.0),
+                });
+                if let Some(c) = code {
+                    self.eval(c);
+                }
+            }
             (KeyCode::F(5), _, _) => {
                 let args = self.target_args("run");
                 self.spawn(Pane::Output, args, "running");
@@ -934,6 +964,19 @@ impl Editor {
             KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                 p.input.push(c);
                 p.selected = 0;
+                // glyph input in the REPL's line, as in the code
+                if p.kind == PromptKind::Eval {
+                    let n = p.input.chars().count();
+                    if n >= 2 {
+                        let two: String = p.input.chars().skip(n - 2).collect();
+                        let before: String = p.input.chars().take(n - 2).collect();
+                        if let Some(g) = mimic_syntax::glyphs::digraph(&two)
+                            && !inside_string(&before)
+                        {
+                            p.input = before + g;
+                        }
+                    }
+                }
             }
             KeyCode::Enter => {
                 let p = self.prompt.take().unwrap();
@@ -947,6 +990,7 @@ impl Editor {
                         self.prompt = Some(Prompt { kind: PromptKind::ReplaceWith(p.input), input: String::new(), selected: 0 });
                     }
                     PromptKind::ReplaceWith(needle) => self.replace_all(&needle, &p.input),
+                    PromptKind::Eval => self.eval(p.input),
                     PromptKind::GotoLine => {
                         if let Ok(n) = p.input.trim().parse::<usize>()
                             && let Some(d) = self.doc()
@@ -1022,6 +1066,53 @@ impl Editor {
             self.check();
         }
         self.poll_jobs();
+        self.poll_repl();
+    }
+
+    /// Evaluate `code` in the REPL's session, on another thread.
+    fn eval(&mut self, code: String) {
+        let code = code.trim().to_string();
+        if code.is_empty() {
+            return;
+        }
+        let Some(mut session) = self.repl.take().or_else(|| self.repl_job.is_none().then(crate::repl::Session::new)) else {
+            self.message = "the REPL is still busy with the last line".into();
+            return;
+        };
+        for (i, l) in code.lines().enumerate() {
+            self.repl_log.push((format!("{} {l}", if i == 0 { "›" } else { "…" }), Style::default().fg(ORANGE)));
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let r = session.eval(&code);
+            let _ = tx.send((session, r));
+        });
+        self.repl_job = Some(rx);
+        let mut lines = self.repl_log.clone();
+        lines.push(("…".into(), Style::default().fg(MUTED)));
+        self.set_pane(Pane::Repl, lines);
+        self.scroll_to_end();
+    }
+
+    fn poll_repl(&mut self) {
+        let Some(rx) = &self.repl_job else { return };
+        let Ok((session, r)) = rx.try_recv() else { return };
+        self.repl = Some(session);
+        self.repl_job = None;
+        match r {
+            Ok(out) => self.repl_log.extend(out.lines().map(|l| (l.to_string(), Style::default().fg(INK)))),
+            Err(e) => self.repl_log.extend(e.lines().map(|l| (l.to_string(), Style::default().fg(ERROR)))),
+        }
+        if self.pane == Pane::Repl {
+            let lines = self.repl_log.clone();
+            self.set_pane(Pane::Repl, lines);
+            self.scroll_to_end();
+        }
+    }
+
+    /// The bottom pane scrolled to its last lines.
+    fn scroll_to_end(&mut self) {
+        self.pane_scroll = self.pane_lines.len().saturating_sub(8);
     }
 
     // ---- drawing --------------------------------------------------------------
@@ -1113,6 +1204,7 @@ impl Editor {
             key("Ctrl-N", "a new program"),
             key("Ctrl-G", "glyph palette (or type \\i for ⍳)"),
             key("F5  F6", "run, test"),
+            key("F4", "evaluate a line (the REPL); Ctrl-E the line or selection"),
             key("F7  F8", "problems, audit"),
             key("F9", "where code runs"),
             key("F1", "the manual for the word under the cursor"),
@@ -1226,7 +1318,7 @@ impl Editor {
             None => (self.problems.len(), String::new()),
         };
         let left = if self.message.is_empty() {
-            "Ctrl-G glyphs · F1 manual · F5 run · F6 test · F8 audit · F9 where code runs · Ctrl-Q quit".to_string()
+            "Ctrl-G glyphs · F1 manual · F4 REPL · F5 run · F6 test · F8 audit · F9 where code runs · Ctrl-Q quit".to_string()
         } else {
             self.message.clone()
         };
@@ -1250,6 +1342,7 @@ impl Editor {
             PromptKind::Open => " Open a file ".to_string(),
             PromptKind::Glyph => " Glyphs: type a word or what it does ".to_string(),
             PromptKind::GotoLine => " Go to line ".to_string(),
+            PromptKind::Eval => " Evaluate: an expression, a let or a fn (the REPL keeps them) ".to_string(),
         };
         let items = self.prompt_items();
         let h = if items.is_empty() { 3 } else { (items.len() as u16 + 3).min(18) };
@@ -1475,6 +1568,43 @@ mod tests {
         ed.key(ctrl('s'));
         assert_eq!(std::fs::read_to_string(&f).unwrap(), ed.docs[0].text.to_string());
         assert!(!ed.docs[0].dirty);
+    }
+
+    /// Wait for the REPL's line (it builds and runs a program).
+    fn settle(ed: &mut Editor) {
+        for _ in 0..600 {
+            ed.tick();
+            if ed.repl_job.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the REPL did not answer");
+    }
+
+    #[test]
+    fn repl_pane() {
+        // (what lines evaluate to is the golden test repl_session: the same
+        // Session; a unit test cannot link programs, so here every answer is
+        // an error, and the pane is what is tested)
+        let f = temp("repl", "module main\n\nfn main() {\n    print(⍳ 4 ▷ +/)\n}\n");
+        let mut ed = Editor::open(Some(&f)).unwrap();
+        ed.key(key(KeyCode::F(4)));
+        typing(&mut ed, "let xs = \\i 5");
+        assert_eq!(ed.prompt.as_ref().unwrap().input, "let xs = ⍳ 5", "glyph input in the prompt");
+        ed.key(key(KeyCode::Enter));
+        assert_eq!(ed.pane, Pane::Repl);
+        assert!(ed.repl_job.is_some(), "evaluated on another thread");
+        settle(&mut ed);
+        let log = |ed: &Editor| ed.pane_lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>();
+        assert_eq!(log(&ed)[0], "› let xs = ⍳ 5");
+        assert!(log(&ed).len() >= 2, "an answer: {:?}", log(&ed));
+        // Ctrl-E: the line under the cursor
+        ed.docs[0].cursor = (3, 0);
+        ed.key(ctrl('e'));
+        settle(&mut ed);
+        assert!(log(&ed).iter().any(|l| l == "› print(⍳ 4 ▷ +/)"), "{:?}", log(&ed));
+        assert!(screen(&mut ed).contains("REPL"));
     }
 
     #[test]

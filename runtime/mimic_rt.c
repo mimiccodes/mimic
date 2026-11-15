@@ -1020,24 +1020,29 @@ static void prof_write(void) {
     fprintf(f, "counter lost %lld\ncounter rounds %lld\n", (long long)lost, (long long)g_prof_rounds);
 #if MIM_DLBLAS
     /* addresses outside the program (system libraries): named here, where
-     * the loaded libraries are known */
+     * the loaded libraries are known. dladdr is found at run time and given
+     * its Dl_info's four fields by hand: glibc declares them only with
+     * _GNU_SOURCE, which would change other functions of the runtime. */
     {
-        Dl_info self;
-        void *base = dladdr((void *)&mim_rt_init, &self) ? self.dli_fbase : NULL;
+        typedef struct { const char *fname; void *fbase; const char *sname; void *saddr; } dl_info;
+        void *me = dlopen(NULL, RTLD_LAZY);
+        int (*addr_of)(const void *, dl_info *) = me ? (int (*)(const void *, dl_info *))dlsym(me, "dladdr") : NULL;
+        dl_info self;
+        void *base = addr_of && addr_of((void *)&mim_rt_init, &self) ? self.fbase : NULL;
         int64_t cap = 1 << 14, used = 0;
-        uint64_t *seen = (uint64_t *)calloc((size_t)cap, sizeof(uint64_t));
+        uint64_t *seen = addr_of ? (uint64_t *)calloc((size_t)cap, sizeof(uint64_t)) : NULL;
         for (int64_t i = 0; seen && i < n && used < cap / 2; i++)
             for (int k = 0; k < g_prof[i].depth && used < cap / 2; k++) {
                 uint64_t pc = g_prof[i].pc[k];
-                Dl_info di;
-                if (!pc || !dladdr((void *)(uintptr_t)pc, &di) || di.dli_fbase == base || !di.dli_sname) continue;
+                dl_info di;
+                if (!pc || !addr_of((void *)(uintptr_t)pc, &di) || di.fbase == base || !di.sname) continue;
                 uint64_t h = (pc * 0x9E3779B97F4A7C15ull) & (uint64_t)(cap - 1);
                 while (seen[h] && seen[h] != pc) h = (h + 1) & (uint64_t)(cap - 1);
                 if (seen[h]) continue;
                 seen[h] = pc;
                 used++;
-                const char *lib = di.dli_fname ? strrchr(di.dli_fname, '/') : NULL;
-                fprintf(f, "sym %llx %s %s\n", (unsigned long long)pc, lib ? lib + 1 : "?", di.dli_sname);
+                const char *lib = di.fname ? strrchr(di.fname, '/') : NULL;
+                fprintf(f, "sym %llx %s %s\n", (unsigned long long)pc, lib ? lib + 1 : "?", di.sname);
             }
         free(seen);
     }

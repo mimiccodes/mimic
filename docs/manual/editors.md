@@ -35,6 +35,7 @@ Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com
 | Ctrl-Z, Ctrl-Y | Undo, redo |
 | Ctrl-C, Ctrl-X, Ctrl-V, Ctrl-A | Copy, cut, paste, select all (Shift and the arrows select too) |
 | Ctrl-L | Go to a line |
+| F4, Ctrl-E | The REPL: evaluate a line you type (F4), or the current line or selection (Ctrl-E); `let`s and `fn`s stay for the next lines, as in `mimic repl` |
 | F5, F6 | Run, test (in the background; the output appears in its pane) |
 | F7, F8, F9 | Problems, audit, where code runs |
 | F1 | The manual for the word or glyph under the cursor |
