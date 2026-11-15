@@ -1,7 +1,5 @@
 ![MIMIC: Everything that can run in parallel will run in parallel.](assets/images/github_Readme_banner.png)
 
-# Mimic
-
 Mimic is an array-based, massively parallel, memory-safe compiled language, named after the mimic octopus. Every construct has two interchangeable spellings: an APL/BQN/Uiua-style glyph and a modern functional word.
 
 ```mimic
