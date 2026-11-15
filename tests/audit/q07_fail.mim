@@ -1,0 +1,7 @@
+module main
+
+extern "C" {
+    fn cbrt(x: f64) -> f64
+}
+
+fn main() { print(unsafe { c::cbrt(8.0) }) }

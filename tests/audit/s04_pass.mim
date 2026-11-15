@@ -1,0 +1,10 @@
+module main
+
+fn main() { print(1) }
+
+test "a self-signed certificate" {
+    match tls::self_signed("localhost") {
+        Ok(_) => expect(true),
+        Err(e) => expect(e == ""),
+    }
+}

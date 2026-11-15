@@ -1,0 +1,131 @@
+module main
+
+fn main() {
+    let v0 = 0
+    let v1 = 1
+    let v2 = 2
+    let v3 = 3
+    let v4 = 4
+    let v5 = 5
+    let v6 = 6
+    let v7 = 7
+    let v8 = 8
+    let v9 = 9
+    let v10 = 10
+    let v11 = 11
+    let v12 = 12
+    let v13 = 13
+    let v14 = 14
+    let v15 = 15
+    let v16 = 16
+    let v17 = 17
+    let v18 = 18
+    let v19 = 19
+    let v20 = 20
+    let v21 = 21
+    let v22 = 22
+    let v23 = 23
+    let v24 = 24
+    let v25 = 25
+    let v26 = 26
+    let v27 = 27
+    let v28 = 28
+    let v29 = 29
+    let v30 = 30
+    let v31 = 31
+    let v32 = 32
+    let v33 = 33
+    let v34 = 34
+    let v35 = 35
+    let v36 = 36
+    let v37 = 37
+    let v38 = 38
+    let v39 = 39
+    let v40 = 40
+    let v41 = 41
+    let v42 = 42
+    let v43 = 43
+    let v44 = 44
+    let v45 = 45
+    let v46 = 46
+    let v47 = 47
+    let v48 = 48
+    let v49 = 49
+    let v50 = 50
+    let v51 = 51
+    let v52 = 52
+    let v53 = 53
+    let v54 = 54
+    let v55 = 55
+    let v56 = 56
+    let v57 = 57
+    let v58 = 58
+    let v59 = 59
+    let v60 = 60
+    let v61 = 61
+    let v62 = 62
+    let v63 = 63
+    print(v0 + v63)
+    print(v1)
+    print(v2)
+    print(v3)
+    print(v4)
+    print(v5)
+    print(v6)
+    print(v7)
+    print(v8)
+    print(v9)
+    print(v10)
+    print(v11)
+    print(v12)
+    print(v13)
+    print(v14)
+    print(v15)
+    print(v16)
+    print(v17)
+    print(v18)
+    print(v19)
+    print(v20)
+    print(v21)
+    print(v22)
+    print(v23)
+    print(v24)
+    print(v25)
+    print(v26)
+    print(v27)
+    print(v28)
+    print(v29)
+    print(v30)
+    print(v31)
+    print(v32)
+    print(v33)
+    print(v34)
+    print(v35)
+    print(v36)
+    print(v37)
+    print(v38)
+    print(v39)
+    print(v40)
+    print(v41)
+    print(v42)
+    print(v43)
+    print(v44)
+    print(v45)
+    print(v46)
+    print(v47)
+    print(v48)
+    print(v49)
+    print(v50)
+    print(v51)
+    print(v52)
+    print(v53)
+    print(v54)
+    print(v55)
+    print(v56)
+    print(v57)
+    print(v58)
+    print(v59)
+    print(v60)
+    print(v61)
+    print(v62)
+}

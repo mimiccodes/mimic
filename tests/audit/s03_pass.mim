@@ -1,0 +1,6 @@
+module main
+
+fn main() {
+    let api_token = os::env("API_TOKEN")
+    print(api_token)
+}

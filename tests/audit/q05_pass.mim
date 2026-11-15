@@ -1,0 +1,7 @@
+module main
+
+fn calm(x: i64) {
+    if x == 1 { print(1) }
+}
+
+fn main() { calm(3) }

@@ -1,0 +1,10 @@
+module main
+
+fn handle(req: http::Request) -> http::Response {
+    match fs::read(req.path) {
+        Ok(t) => http::ok(t),
+        Err(_) => http::not_found(),
+    }
+}
+
+fn main() { print(http::serve_requests(8080, handle, 0)) }

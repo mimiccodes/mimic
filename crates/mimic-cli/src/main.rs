@@ -3,6 +3,7 @@
 // Diagnostics are rich (labels, fixes) and only built on the error path.
 #![allow(clippy::result_large_err)]
 
+mod audit;
 mod cc;
 mod cimport;
 mod doc;
@@ -303,6 +304,24 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Quality and security findings (`mimic man audit` lists the rules)
+    Audit {
+        /// A standalone file instead of the project in this folder
+        #[arg(long = "in", value_name = "FILE")]
+        input: Option<PathBuf>,
+        /// text (default), json, or sarif (for code scanning)
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Exit with 1 when a (new) finding is at least this severe: error, warning, note, or never
+        #[arg(long, default_value = "error")]
+        fail_on: String,
+        /// Count only findings not in this baseline file
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<PathBuf>,
+        /// Write the current findings to the baseline file (default .mimic-audit.json)
+        #[arg(long)]
+        update_baseline: bool,
+    },
     /// Ask the analysis engine about the project, as JSON (`mimic query definition file=src/main.mim line=3 column=9`)
     Query {
         /// What to ask: check, symbols, definition, hover, references, outline, docs, effects, stats
@@ -571,6 +590,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Audit { input, format, fail_on, baseline, update_baseline } => audit_cmd(input, &format, &fail_on, baseline, update_baseline),
         Cmd::Why { name, input, json } => why_cmd(name, input, json),
         Cmd::Mcp { project, allow_outside, allow_install, allow_network, read_only, no_run } => {
             mcp::serve(project, mcp::Access { allow_outside, allow_install, allow_network, read_only, no_run })?;
@@ -827,6 +847,146 @@ fn why_cmd(name: Option<String>, input: Option<PathBuf>, json: bool) -> Result<E
         println!("      {}", d["why"].as_str().unwrap_or(""));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `mimic audit`: run every rule, report, compare with the baseline and the
+/// last run, and fail on new findings at `--fail-on` or worse.
+fn audit_cmd(file: Option<PathBuf>, format: &str, fail_on: &str, baseline: Option<PathBuf>, update_baseline: bool) -> Result<ExitCode, String> {
+    let input = driver::input_from(file.as_deref())?;
+    let p = match driver::load(&input) {
+        Ok(p) => p,
+        Err(r) => {
+            // the manifest's rules need no code: say them anyway
+            let mut msg = format!("the program does not load; `mimic check` first\n{}", r.human());
+            if let Input::Project(pr) = &input {
+                for (_, what) in audit::dependencies(pr) {
+                    msg += &format!("\nwarning[S07] branch-dependency: {what}");
+                }
+            }
+            return Err(msg);
+        }
+    };
+    let rank = |s: &str| match s {
+        "error" => 3,
+        "warning" => 2,
+        "note" => 1,
+        _ => 0,
+    };
+    if !["error", "warning", "note", "never"].contains(&fail_on) {
+        return Err(format!("--fail-on takes error, warning, note or never, not `{fail_on}`"));
+    }
+    let mut list: Vec<serde_json::Value> = Vec::new();
+    let row = |rule: &audit::Rule, display: &str, path: &str, src: &str, span: mimic_syntax::Span, message: String| {
+        let (end_line, end_column) = mimic_syntax::line_col(src, span.end);
+        let line_text = src.lines().nth(span.line.saturating_sub(1) as usize).unwrap_or("").trim().to_string();
+        let code = src.get(span.start..span.end).filter(|c| !c.is_empty()).unwrap_or(&line_text).lines().next().unwrap_or("").to_string();
+        serde_json::json!({
+            "rule": rule.id, "name": rule.name, "category": rule.category, "severity": rule.severity,
+            "message": message, "help": rule.help,
+            "file": display, "path": path, "line": span.line, "column": span.col, "end_line": end_line, "end_column": end_column,
+            "source": line_text,
+            "fingerprint": audit::fingerprint(rule.id, display, &code),
+        })
+    };
+    for f in audit::run(&p) {
+        let sf = &p.files[f.file];
+        list.push(row(f.rule, &sf.display, &sf.path.display().to_string(), &sf.src, f.span, f.message));
+    }
+    let root = match &input {
+        Input::Project(pr) => {
+            let manifest = pr.root.join(mimic_project::MANIFEST);
+            let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+            for (name, msg) in audit::dependencies(pr) {
+                let at = text.find(&format!("{name} =")).or_else(|| text.find(&name)).unwrap_or(0);
+                let span = mimic_syntax::span_at(&text, at, at + name.len());
+                list.push(row(audit::rule("S07"), "mim.mim", &manifest.display().to_string(), &text, span, msg));
+            }
+            pr.root.clone()
+        }
+        Input::File(f) => f.parent().map(Path::to_path_buf).unwrap_or_default(),
+    };
+    // the baseline: findings already known
+    let base_path = baseline.clone().unwrap_or_else(|| root.join(".mimic-audit.json"));
+    let known: std::collections::HashSet<String> = if baseline.is_some() || update_baseline {
+        std::fs::read_to_string(&base_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["fingerprints"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    } else {
+        Default::default()
+    };
+    for f in &mut list {
+        let new = !known.contains(f["fingerprint"].as_str().unwrap_or(""));
+        f["new"] = new.into();
+    }
+    if update_baseline {
+        let fps: Vec<&serde_json::Value> = list.iter().map(|f| &f["fingerprint"]).collect();
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "tool": "mimic audit", "fingerprints": fps })).unwrap_or_default();
+        std::fs::write(&base_path, text + "\n").map_err(|e| format!("cannot write {}: {e}", base_path.display()))?;
+        // everything found now is known from now on
+        for f in &mut list {
+            f["new"] = false.into();
+        }
+    }
+    // trends: counts per run, kept beside the build
+    let count = |sev: &str| list.iter().filter(|f| f["severity"] == sev).count();
+    let (errors, warnings, notes) = (count("error"), count("warning"), count("note"));
+    let security = list.iter().filter(|f| f["category"] == "security").count();
+    let hist_dir = match &input {
+        Input::Project(pr) => pr.target_dir().join("audit"),
+        Input::File(_) => packages::cache_dir().join("audit"),
+    };
+    let hist = hist_dir.join(format!("history-{}.jsonl", input.name()));
+    let previous = std::fs::read_to_string(&hist).ok().and_then(|t| t.lines().last().and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = std::fs::create_dir_all(&hist_dir);
+    if let Ok(mut h) = std::fs::OpenOptions::new().create(true).append(true).open(&hist) {
+        use std::io::Write;
+        let _ = writeln!(h, "{}", serde_json::json!({ "time": now, "error": errors, "warning": warnings, "note": notes, "security": security, "total": list.len() }));
+    }
+    let gate = rank(fail_on);
+    let failing = list.iter().filter(|f| f["new"] == true && gate > 0 && rank(f["severity"].as_str().unwrap_or("")) >= gate).count();
+    match format {
+        "json" => println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "findings": list, "summary": { "error": errors, "warning": warnings, "note": notes, "security": security, "failing": failing } })).unwrap_or_default()),
+        "sarif" => println!("{}", serde_json::to_string_pretty(&audit::sarif(&list)).unwrap_or_default()),
+        "text" => {
+            for f in &list {
+                let sev = f["severity"].as_str().unwrap_or("");
+                println!(
+                    "{sev}[{}] {}: {}{}\n  --> {}:{}:{}\n   | {}\n   = help: {} (`mimic man {}`)\n",
+                    f["rule"].as_str().unwrap_or(""),
+                    f["name"].as_str().unwrap_or(""),
+                    f["message"].as_str().unwrap_or(""),
+                    if f["new"] == false { " (in the baseline)" } else { "" },
+                    f["file"].as_str().unwrap_or(""),
+                    f["line"],
+                    f["column"],
+                    f["source"].as_str().unwrap_or(""),
+                    f["help"].as_str().unwrap_or(""),
+                    f["rule"].as_str().unwrap_or("")
+                );
+            }
+            let mut summary = format!("{errors} error(s), {warnings} warning(s), {notes} note(s); {security} about security");
+            if let Some(prev) = previous {
+                let d = list.len() as i64 - prev["total"].as_i64().unwrap_or(0);
+                summary += &format!("; {} since the last run", match d {
+                    0 => "no change".to_string(),
+                    d if d > 0 => format!("{d} more"),
+                    d => format!("{} fewer", -d),
+                });
+            }
+            status("Audited", summary);
+            if failing > 0 {
+                status("Failing", format!("{failing} new finding(s) at `{fail_on}` or worse (see --fail-on, --baseline)"));
+            }
+        }
+        f => return Err(format!("--format takes text, json or sarif, not `{f}`")),
+    }
+    Ok(if failing > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 /// `mimic fmt`: format files in place (or, with --check, only report).

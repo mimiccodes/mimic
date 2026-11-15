@@ -28,6 +28,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **Where code runs** (step 0.3.9). `mimic why` lists every decision the compiler makes about a program or one function: `¨` on all cores, fork-join recursion, interaction nets, fused loops, SIMD, the GPU, implicit tasks, effects kept in order and the places that wait for tasks, each with its reason and what would change it. Code generation records these decisions as it makes them, and `mimic why` reads them from a compile that stops before LLVM optimises. Editors show them as labels after the code (`∥ parallel`, `⇶ fused`, `▣ GPU`, `◷ task`, `→ in order`) with the reason on hover, and agents ask with the `why` tool of `mimic mcp`.
 
+- **`mimic audit`** (step 0.3.10): quality rules (unused functions and variables, dropped `Result`s, long, complex and duplicated functions, C functions that could be `pure`, `trusted` C functions taking pointers) and security rules (`os::shell` with commands built from data, files opened with paths from HTTP requests, secrets in source, certificate trust outside tests, `unsafe` blocks, trusted headers, dependencies following a branch), each with a manual page (`mimic man S01`). Reports as text, JSON or SARIF; `--fail-on` makes it a gate for CI (errors by default); a baseline counts only new findings; each run's counts are kept and compared. Agents get it as the `audit` tool, and CI audits the examples.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

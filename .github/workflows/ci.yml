@@ -123,6 +123,12 @@ jobs:
       - name: Test
         run: cargo test --release --no-fail-fast
 
+      # the quality gate: a new security finding in the examples fails CI
+      - name: Audit
+        run: |
+          for p in examples/showcase; do (cd "$p" && "$GITHUB_WORKSPACE/target/release/mimic" audit); done
+          for f in examples/todo/todo.mim examples/clock/clock.mim; do target/release/mimic audit --in "$f"; done
+
       # the VS Code extension in a real VS Code, against the mimic just built
       - name: VS Code extension
         if: runner.os == 'Linux'

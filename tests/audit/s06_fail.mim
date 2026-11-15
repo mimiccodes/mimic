@@ -1,0 +1,5 @@
+module main
+
+trusted extern "C" pure include "math.h"
+
+fn main() { print(c::cbrt(8.0)) }

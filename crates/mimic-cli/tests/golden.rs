@@ -819,6 +819,70 @@ fn where_code_runs() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mimic audit`: every rule finds its failing fixture and not its passing
+/// one (tests/audit), the gate fails on new findings only (baseline), SARIF
+/// for code scanning, and dependencies that follow a branch.
+#[test]
+fn audit_rules() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/audit");
+    let audit = |f: &Path| -> std::collections::BTreeSet<String> {
+        let out = mimic().args(["audit", "--format", "json", "--fail-on", "never", "--in"]).arg(f).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}: {}", f.display(), String::from_utf8_lossy(&out.stderr)));
+        v["findings"].as_array().unwrap().iter().map(|x| x["rule"].as_str().unwrap().to_string()).collect()
+    };
+    let mut problems = Vec::new();
+    let mut rules = std::collections::BTreeSet::new();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let f = e.unwrap().path();
+        let name = f.file_name().unwrap().to_string_lossy().to_string();
+        let Some((rule, kind)) = name.trim_end_matches(".mim").split_once('_') else { continue };
+        let rule = rule.to_uppercase();
+        rules.insert(rule.clone());
+        let found = audit(&f);
+        match kind {
+            "fail" if !found.contains(&rule) => problems.push(format!("{name}: {rule} not found ({found:?})")),
+            "pass" if found.contains(&rule) => problems.push(format!("{name}: {rule} found")),
+            _ => {}
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(rules.len() >= 14, "a fixture pair for every rule: {rules:?}");
+    // the gate: a security finding fails; once in the baseline, it does not
+    let tmp = std::env::temp_dir().join(format!("mimic-golden-audit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let f = tmp.join("a.mim");
+    std::fs::copy(dir.join("s01_fail.mim"), &f).unwrap();
+    let gate = |extra: &[&str]| mimic().arg("audit").args(extra).arg("--in").arg(&f).output().unwrap().status.success();
+    assert!(!gate(&[]), "a new security finding fails");
+    let base = tmp.join("base.json");
+    assert!(gate(&["--update-baseline", "--baseline", base.to_str().unwrap()]), "{}", base.display());
+    assert!(gate(&["--baseline", base.to_str().unwrap()]), "known findings pass");
+    std::fs::write(&f, std::fs::read_to_string(&f).unwrap().replace("print(os::shell(\"ls {dir}\"))", "print(os::shell(\"ls {dir}\"))\n    print(os::shell(\"rm {dir}\"))")).unwrap();
+    assert!(!gate(&["--baseline", base.to_str().unwrap()]), "a new one fails again");
+    assert!(gate(&["--fail-on", "never"]));
+    // SARIF
+    let out = mimic().args(["audit", "--format", "sarif", "--fail-on", "never", "--in"]).arg(&f).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["version"], "2.1.0");
+    assert_eq!(v["runs"][0]["results"][0]["ruleId"], "S01");
+    // S07: a dependency following a branch
+    assert!(mimic().args(["create", "app"]).current_dir(&tmp).status().unwrap().success());
+    let app = tmp.join("app");
+    let m = std::fs::read_to_string(app.join("mim.mim")).unwrap();
+    let start = m.find("dependencies {").unwrap();
+    let end = start + m[start..].find('}').unwrap() + 1;
+    let deps = "dependencies {\n    lib_a = { git = \"github.com/x/a.git\" }\n    lib_b = { git = \"github.com/x/b.git\", rev = \"v1.2.0\" }\n}";
+    std::fs::write(app.join("mim.mim"), format!("{}{deps}{}", &m[..start], &m[end..])).unwrap();
+    // (the dependencies need not exist for the manifest rule: audit only the manifest's view)
+    let out = mimic().args(["audit", "--format", "json", "--fail-on", "never"]).current_dir(&app).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // (the libraries are not installed: the code does not load, the manifest's rule still speaks)
+    assert!(!out.status.success() && err.contains("S07") && err.contains("`lib_a` follows the default branch") && !err.contains("branch-dependency: `lib_b`"), "{text}{err}");
+    std::fs::remove_dir_all(&tmp).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

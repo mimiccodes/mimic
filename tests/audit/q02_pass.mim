@@ -1,0 +1,6 @@
+module main
+
+fn main() {
+    let used = 41 + 1
+    print(used)
+}

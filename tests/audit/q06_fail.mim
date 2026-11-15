@@ -1,0 +1,15 @@
+module main
+
+fn one(x: i64) -> i64 {
+    let a = x * 2 + 1
+    let b = a * a - x
+    a + b * 3
+}
+
+fn two(x: i64) -> i64 {
+    let a = x * 2 + 1
+    let b = a * a - x
+    a + b * 3
+}
+
+fn main() { print(one(1) + two(2)) }

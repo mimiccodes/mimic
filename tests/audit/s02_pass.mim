@@ -1,0 +1,10 @@
+module main
+
+fn handle(req: http::Request) -> http::Response {
+    match req.path {
+        "/" => http::ok("home"),
+        _ => http::not_found(),
+    }
+}
+
+fn main() { print(http::serve_requests(8080, handle, 0)) }

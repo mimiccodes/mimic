@@ -88,6 +88,13 @@ impl Manual {
             t += &examples(&[g.glyph], &tutorial);
             pages.push(Page { name: g.glyph.to_string(), title: format!("{} {}", g.glyph, g.word), kind: "glyph", text: t, chapter: None });
         }
+        for r in crate::audit::RULES {
+            let t = format!(
+                "# {} {}\n\n**{}** rule, **{}** by default.\n\n{}\n\n`mimic audit` reports it; `mimic man audit` explains the gate, the baseline and SARIF.\n",
+                r.id, r.name, r.category, r.severity, r.help
+            );
+            pages.push(Page { name: r.id.to_string(), title: format!("{} {}", r.id, r.name), kind: "audit", text: t, chapter: None });
+        }
         for c in codes::ALL {
             let t = format!("# {} {}\n\n**{}**\n\n{}\n\n`mimic explain {}` prints this too; `mimic check --fix` applies the fixes the compiler is sure of.\n", c.id, c.name, c.title, c.explain, c.id);
             pages.push(Page { name: c.id.to_string(), title: format!("{} {}", c.id, c.name), kind: "error", text: t, chapter: None });
@@ -110,6 +117,7 @@ impl Manual {
             .or_else(|| q.strip_prefix("tutorial/").and_then(|n| by(&|p| p.kind == "tutorial" && p.name == n)))
             .or_else(|| by(&|p| p.name.eq_ignore_ascii_case(q)))
             .or_else(|| codes::find(q).and_then(|c| by(&|p| p.kind == "error" && p.name == c.id)))
+            .or_else(|| crate::audit::RULES.iter().find(|r| r.name == q).and_then(|r| by(&|p| p.kind == "audit" && p.name == r.id)))
             .or_else(|| {
                 // a glyph, or its digraph
                 let g = glyph_of_digraph.unwrap_or(q);

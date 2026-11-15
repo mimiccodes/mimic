@@ -167,6 +167,7 @@ impl Server {
             tool("symbol", "Everything about one symbol (fs::read, geometry::area): signature, comment, effects (pure, concurrent, ordered, sync), where it is defined and every place it is used.", json!({ "name": { "type": "string" } }), &["name"], true),
             tool("effects", "What each function of the project does besides computing a result: pure (runs in parallel), concurrent, ordered or sync.", json!({}), &[], true),
             tool("why", "Where code runs and why: each place a function runs in parallel (¨ on all cores, fork-join recursion, interaction nets), fuses array operations into one loop, uses SIMD or the GPU, starts a task, or keeps its order, with the reason and what would change it.", json!({ "name": { "type": "string", "description": "A function (mandelbrot, geometry::area); omit for the whole program" } }), &[], true),
+            tool("audit", "Quality and security findings (mimic audit): unused code, dropped Results, long or duplicated functions, shell injection, paths from requests, secrets in source, certificate trust, unsafe code, trusted C, dependencies on branches. Each with its rule, location and how to fix it.", json!({}), &[], true),
             tool("targets", "The platforms Mimic builds for, by how well they are tested (stable, runs, links, compiles).", json!({}), &[], true),
             tool("docs_status", "The documentation of the project: public items with no `//` comment above them, and the guides in docs/ (Markdown pages) with how many runnable examples each has.", json!({}), &[], true),
             tool("read_file", "Read a file of the project.", json!({ "path": { "type": "string" } }), &["path"], true),
@@ -372,6 +373,13 @@ impl Server {
                 }
                 let v = e.query("where", &q)?;
                 Ok(text(serde_json::to_string_pretty(&v).unwrap_or_default()))
+            }
+            "audit" => {
+                let (_, out, err, _) = self.mimic(&["audit".into(), "--format".into(), "json".into(), "--fail-on".into(), "never".into()], None, Duration::from_secs(120))?;
+                if out.trim().is_empty() {
+                    return Err(err);
+                }
+                Ok(text(out))
             }
             "targets" => {
                 let (_, out, err, _) = self.mimic(&["targets".into()], None, Duration::from_secs(60))?;

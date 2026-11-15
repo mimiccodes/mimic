@@ -1,0 +1,6 @@
+module main
+
+fn main() {
+    let api_token = "s3cr3t-value"
+    print(api_token)
+}

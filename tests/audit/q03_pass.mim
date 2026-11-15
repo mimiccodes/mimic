@@ -1,0 +1,8 @@
+module main
+
+fn main() {
+    match fs::write("out.txt", "hi") {
+        Ok(_) => print(1),
+        Err(e) => print("cannot write: {e}"),
+    }
+}

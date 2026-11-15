@@ -1,0 +1,7 @@
+module main
+
+trusted extern "C" {
+    fn strlen(s: cstr) -> usize
+}
+
+fn main() { print(c::strlen("abc")) }

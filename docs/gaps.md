@@ -55,7 +55,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | An MCP server for AI agents | ✅ (`mimic mcp`) | 0.3.7 |
 | Docs with guides and examples beyond signatures, written by people or agents | ✅ (guides in `docs/`, `docs_write` in `mimic mcp`) | 0.3.8 |
 | Seeing where code runs in parallel, and why not (`mimic why`) | ✅ (`mimic why`, labels in editors) | 0.3.9 |
-| Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.10, 0.3.11 |
+| Quality, security and verification checks (`mimic audit`, contracts, property tests) | `mimic audit` ✅; contracts and property tests to come | 0.3.10, 0.3.11 |
 | A terminal editor (`mimic edit`) | None | 0.3.12 |
 | A REPL, a profiler, and benchmarks against Rust and Go | Benchmarks against C | 0.3.13 |
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |

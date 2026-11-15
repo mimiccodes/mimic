@@ -20,6 +20,7 @@ description: Give an AI agent Mimic's tools with `mimic mcp`: what it can do, wh
 | `manual`, `manual_search` | Any page of the manual: chapters, guides, every standard function, module, glyph and error code |
 | `symbols`, `symbol`, `effects` | Find functions and types; one symbol's signature, comment, effects and every use; which functions are pure |
 | `why` | Where code runs and why: in parallel, fused, SIMD, GPU, as a task, in order |
+| `audit` | Quality and security findings, with their rules and fixes |
 | `docs_status`, `docs_write`, `docs_build` | What has no documentation yet; write a guide (`docs/<name>.md`) and run its examples at once; build the site |
 | `read_file`, `write_file`, `list_files` | The project's files |
 | `targets` | The platforms Mimic builds for |

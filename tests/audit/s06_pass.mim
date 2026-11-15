@@ -1,0 +1,5 @@
+module main
+
+extern "C" pure include "math.h"
+
+fn main() { print(unsafe { c::cbrt(8.0) }) }
