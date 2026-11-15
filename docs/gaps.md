@@ -55,7 +55,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | A terminal editor (`mimic edit`) | None | 0.3.7 |
 | A REPL and a profiler | None | 0.3.8 |
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
-| Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | Measured, not fixed | 0.2.9 |
+| Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | ✅ (native CPU, real naps, bigger scan chunks) | 0.2.9 |
 
 ## Not gaps: other names, or left out on purpose
 

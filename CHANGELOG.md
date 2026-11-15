@@ -8,11 +8,19 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **Everything from C is written with the namespace `c::`:** `c::printf(…)`, `c::sqrt(2.0)`, `c::Vec2 { … }`, for functions from `extern "C"` blocks, imported headers and C struct records alike. It is required, so C code is always visible, and C names never collide with Mimic's (`c::abs` next to `abs`, `c::div` next to the `div` operator). `extern "C" include "sqlite3.h" as sql` picks another namespace. A C name used without it is error E0303 with the fix (`did you mean c::floor?`). C++ will use `cpp::`. To update code: put `c::` before each C function and struct name.
 
 ### Fixed
+- **Windows programs run at full speed.** Native Windows builds compiled for the plain x86-64 baseline (no AVX2, no FMA), because the MinGW host triple picked up Clang's cross-compiling defaults; they now use the machine's own CPU, as on macOS and Linux. On a Zen 3 runner: `mandelbrot` 1.14× → 0.76× C on one core, `sum_of_squares` 4.1× → 1.1×. CI now checks which CPU Windows code generation used.
+- Windows: idle worker threads napped with `Sleep(0)`, which returns at once, so they spun on the cores the working threads needed; they now sleep 20 µs on a high-resolution timer (`fib` on all cores 0.89× → 0.68× C).
+- Parallel prefix sums (`trail`) were slower on several threads than on one on Windows: scans now work in larger chunks (Windows 1.46× → 0.84× C on 4 threads; macOS and Linux a little faster too).
+- A rare hang on Windows: two tasks using one socket (a WebSocket's reader and writer) could switch its non-blocking mode under each other, and a read then blocked a whole event-loop thread. Sockets used by tasks now stay non-blocking.
+- A coroutine's lock could be freed while the thread finishing it was still releasing it (harmless with glibc, not with Windows' threads library).
+- `time::format`'s message for an unknown pattern code was cut off.
+- `bench/run.py` writes its results as UTF-8 on Windows.
 - Tests: `http_keep_alive` takes its port below the ones the OS hands out (it could race with a parallel test); `c_struct_pointers` uses `termios.h` only on Unix.
 - `"\033"` and other C octal escapes were read as NUL followed by digits, silently; they are now an error that suggests `\x1b`.
 - Importing a C header failed when it declared a name Mimic uses itself (`div` in `stdlib.h`, a field `type`, a function `sum`). Under `c::` (below) they keep their C spelling; a wrapper that cannot be written in Mimic is left out instead of failing the import.
 
 ### Added
+- `MIMIC_DEBUG_WATCHDOG=<seconds>`: a program still running after that long prints every task and what it waits for (a channel, a join, a socket, a timer), to find hangs. `MIMIC_DEBUG_CPU=1` prints the CPU code generation chose. `tools/speed-probe.py` and the manual "speed probe" workflow time benchmarks against C by thread count on CI machines.
 - Native windows on Windows and Linux: `ui::run(…, show: "window")` (`mimic run --window`) uses Win32 controls on Windows and GTK 3 on Linux (loaded when the window opens, so programs do not depend on it), as AppKit on macOS. The same window test runs on all three in CI, Linux under a virtual display.
 - Shared libraries: `mimic build --shared` builds a library project as `lib<name>.dylib`, `lib<name>.so` or `<name>.dll` (with the import library `lib<name>.dll.a`), exporting only its `extern "C" fn`s, for any language that calls C. Cross builds too (`--target x86_64-windows`).
 - `¨` over a function that waits on the network or sleeps runs every element as a task on the event loop instead of a core's worth at a time: 3000 WebSocket clients each holding a connection for half a second finish in about a second (was two minutes). Programs raise their open-file limit at start, so thousands of sockets fit.

@@ -137,15 +137,34 @@ different CPUs, so compare each row with its own C, not across systems.
 http has no C row on Windows (the C server is POSIX-only); the times are
 the server's for 400,000 requests.
 
-Windows is behind Linux in four places, to look into:
-* **fib, prefix_sum on all cores** are slower than on one core: starting
-  and joining parallel work costs more on Windows (threads, not the Linux
-  scheduler's cheap wake-ups).
-* **mandelbrot on one core** (1.07× vs 0.31× on Linux) does not get the
-  across-elements SIMD speed-up, although CI finds 2660 AVX instructions in
-  the SIMD fixture's Windows build.
-* **sum_of_squares** (2.52× on one core vs 1.01× on Linux) is a fused
-  kernel that should run at memory speed on both.
+Windows was behind Linux in four places; the speed probe
+(`tools/speed-probe.py`, a manual workflow) found why, and all four are
+fixed (2026-11-15):
+* **Windows code was built for the 2003 x86-64 baseline** (no AVX2, no
+  FMA): the MinGW host triple took Clang's cross-compiling defaults. That
+  was mandelbrot without SIMD and sum_of_squares at 2.5× C.
+* **Idle workers spun** (`Sleep(0)` returns at once), taking the cores the
+  working threads needed: fib on all cores slower than on one.
+* **The parallel scan's small chunks** cost more than they gave on Windows:
+  prefix_sum on 4 threads slower than on one.
+
+**Windows x86_64 after the fixes** (commit ea6c780; this run's runner had an
+AMD Zen 5, so compare ratios, not times, with the table above):
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |
+|---|---|---|---|---|---|
+| fib | 0.080 s | 1.09× | 1.85× | 1.35× | **0.67×** |
+| http | — | 0.442 s | 4.547 s | 0.341 s | 0.318 s |
+| json | 0.419 s | 0.67× | 0.80× | **0.52×** | **0.47×** |
+| mandelbrot | 0.437 s | 0.99× | 1.03× | **0.33×** | **0.13×** |
+| matmul | 0.090 s | 1.06× | 4.13× | **0.69×** | **0.42×** |
+| nbody | 0.069 s | 1.13× | 1.82× | **0.70×** | **0.70×** |
+| prefix_sum | 0.183 s | 2.09× | 0.92× | 1.05× | **0.79×** |
+| records | 0.021 s | 3.95× | 2.11× | 3.47× | 2.53× |
+| sort | 1.225 s | 0.14× | 0.65× | **0.10×** | **0.09×** |
+| sum_of_squares | 0.014 s | 1.59× | 4.65× | 1.32× | 1.09× |
+| tree | 0.866 s | 1.15× | 0.52× | **0.28×** | **0.21×** |
+| ui | — | — | — | 0.106 s | 0.068 s |
 
 ### All benchmarks (after F, 2026-11-13 evening)
 
