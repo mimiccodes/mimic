@@ -8,6 +8,7 @@ mod cimport;
 mod doc;
 mod driver;
 mod engine;
+mod lsp;
 mod man;
 mod modfile;
 mod report;
@@ -259,6 +260,12 @@ enum Cmd {
         /// Print as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
+    Lsp {
+        /// Accepted for editors that pass it; stdin and stdout are always used
+        #[arg(long, hide = true)]
+        stdio: bool,
     },
     /// Ask the analysis engine about the project, as JSON (`mimic query definition file=src/main.mim line=3 column=9`)
     Query {
@@ -528,6 +535,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Lsp { .. } => {
+            lsp::serve()?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Man { topic, search, run, list, json } => {
             let ok = man::command(&topic, search.as_deref(), run, list.as_deref(), json)?;
             Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })

@@ -16,6 +16,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **Syntax highlighting** (step 0.3.3): TextMate grammars for `.mim` and `.mnet` in the new [mimic-syntax](https://github.com/mimiccodes/mimic-syntax) repository (a submodule at `editors/syntax`), for VS Code, Sublime Text and other editors, and later GitHub. Names from C (`c::`, `cpp::`, `as` names) get a scope of their own. A tree-sitter grammar with highlight queries for Neovim, Helix and Zed. A golden test checks that the grammar highlights every glyph, word, digraph and keyword of the compiler, that every test program and example tokenizes with nothing unrecognised, and that tree-sitter parses them all with no error. `mod.mim` is marked as generated for GitHub.
 
+- **`mimic lsp`, the language server** (step 0.3.4): errors as you type with the compiler's fixes as quick fixes; hover with signature, comment and effects (for C functions, their header; for glyphs and their words, what they do and how to type them); go to definition and find references, into the standard library; glyph input (`\i` → `⍳`) and completion of names, modules, words and keywords; formatting in the style the file mostly uses; the outline and workspace symbols; names from C as semantic tokens with the modifier `foreign`. Set-up for VS Code, Neovim, Helix, Emacs, Sublime Text and Zed: `mimic man editors`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

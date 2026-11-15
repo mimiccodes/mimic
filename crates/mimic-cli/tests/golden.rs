@@ -454,6 +454,114 @@ fn grammar_knows_the_language() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
 }
 
+/// `mimic lsp` speaks the Language Server Protocol: errors as you type with
+/// the compiler's fixes, hover, go to definition (into the standard library),
+/// glyph input, formatting that keeps glyphs, and names from C coloured.
+#[test]
+fn language_server() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let dir = std::env::temp_dir().join(format!("mimic-golden-lsp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.mim");
+    let text = "module main\n\ntrusted extern \"C\" pure include \"math.h\"\n\n// twice\nfn double(x: f64) -> f64 { x × 2.0 }\n\nfn main() {\n    let y = double(3.0)\n    print(c::sqrt(y) ⌿ 1)\n    print(sort_by([3 1], v => v))\n}\n";
+    std::fs::write(&f, text).unwrap();
+    let uri = format!("file://{}", f.canonicalize().unwrap().display().to_string().replace('\\', "/"));
+    let uri = if cfg!(windows) { uri.replacen("file://", "file:///", 1) } else { uri };
+    let mut child = mimic().arg("lsp").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut send = |v: serde_json::Value| {
+        let b = v.to_string();
+        write!(input, "Content-Length: {}\r\n\r\n{b}", b.len()).unwrap();
+        input.flush().unwrap();
+    };
+    let mut notes: Vec<serde_json::Value> = Vec::new();
+    let mut read = |notes: &mut Vec<serde_json::Value>, id: Option<i64>| -> serde_json::Value {
+        loop {
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                output.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                    len = n.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            output.read_exact(&mut body).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            match id {
+                Some(i) if v["id"] == i => return v["result"].clone(),
+                None if v["method"] == "textDocument/publishDiagnostics" => return v,
+                _ => notes.push(v),
+            }
+        }
+    };
+    let pos = |line: u32, ch: u32| serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } });
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "processId": null, "capabilities": {} } }));
+    let caps = read(&mut notes, Some(1));
+    assert!(caps["capabilities"]["hoverProvider"] == true, "{caps}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "languageId": "mimic", "version": 1, "text": text } } }));
+    let d = read(&mut notes, None);
+    assert_eq!(d["params"]["diagnostics"], serde_json::json!([]), "{d}");
+    // hover: signature, effects, comment; a C function's header; a glyph
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": pos(8, 14) }));
+    let h = read(&mut notes, Some(2))["contents"]["value"].as_str().unwrap().to_string();
+    assert!(h.contains("fn double(x: f64) -> f64") && h.contains("pure") && h.contains("twice"), "{h}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "textDocument/hover", "params": pos(9, 14) }));
+    let h = read(&mut notes, Some(3))["contents"]["value"].as_str().unwrap().to_string();
+    assert!(h.contains("math.h"), "{h}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "textDocument/hover", "params": pos(9, 21) }));
+    let h = read(&mut notes, Some(4))["contents"]["value"].as_str().unwrap().to_string();
+    assert!(h.contains("keep") && h.contains("\\k"), "{h}");
+    // definition: in the file, and in the standard library
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 5, "method": "textDocument/definition", "params": pos(8, 14) }));
+    let r = read(&mut notes, Some(5));
+    assert_eq!(r["range"]["start"], serde_json::json!({ "line": 5, "character": 3 }), "{r}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 6, "method": "textDocument/definition", "params": pos(10, 10) }));
+    let r = read(&mut notes, Some(6));
+    let std_file = r["uri"].as_str().unwrap().to_string();
+    assert!(std_file.contains("/std/std-"), "{r}");
+    // `c::` and `sqrt` get the foreign colour
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 7, "method": "textDocument/semanticTokens/full", "params": { "textDocument": { "uri": uri } } }));
+    let r = read(&mut notes, Some(7));
+    assert_eq!(r["data"], serde_json::json!([9, 10, 1, 0, 1, 0, 3, 4, 1, 1]), "{r}");
+    // an error as you type, and its fix
+    let broken = text.replace("    let y = double(3.0)\n", "    let y = double(3.0)\n    y = 2.0\n");
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": { "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": broken }] } }));
+    let d = read(&mut notes, None);
+    assert_eq!(d["params"]["diagnostics"][0]["code"], "E0601", "{d}");
+    let range = d["params"]["diagnostics"][0]["range"].clone();
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 8, "method": "textDocument/codeAction", "params": { "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [] } } }));
+    let r = read(&mut notes, Some(8));
+    let edit = r[0]["edit"]["changes"][&uri][0].clone();
+    assert_eq!(edit["newText"], "mut ", "{r}");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), text, "the server never writes the file");
+    // glyph input: `\i` becomes `⍳`
+    let typing = format!("{broken}\\i");
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": { "textDocument": { "uri": uri, "version": 3 }, "contentChanges": [{ "text": typing }] } }));
+    let last = typing.lines().count() as u32 - 1;
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 9, "method": "textDocument/completion", "params": pos(last, 2) }));
+    let r = read(&mut notes, Some(9));
+    let items = if r.is_array() { r.clone() } else { r["items"].clone() };
+    assert_eq!(items[0]["textEdit"]["newText"], "⍳", "{r}");
+    // formatting keeps glyphs in a file written with glyphs
+    let messy = "module main\n\nfn main() {\n        let xs = ⍳ 5\n  print(xs ▷ +/)\n}\n";
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": { "textDocument": { "uri": uri, "version": 4 }, "contentChanges": [{ "text": messy }] } }));
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 10, "method": "textDocument/formatting", "params": { "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true } } }));
+    let r = read(&mut notes, Some(10));
+    assert_eq!(r[0]["newText"], "module main\n\nfn main() {\n    let xs = ⍳ 5\n    ⎕(xs ▷ +/)\n}\n", "{r}");
+    send(serde_json::json!({ "jsonrpc": "2.0", "id": 11, "method": "shutdown", "params": null }));
+    read(&mut notes, Some(11));
+    send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit", "params": null }));
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

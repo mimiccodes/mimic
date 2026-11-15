@@ -48,7 +48,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Libraries installed from git at a chosen tag or commit; workspaces | ✅ (`mimic install <git-url>@v1.2.0`, `rev = …`, `mimic install` in a project, `workspace { members }`) | 0.3.1 |
 | A manual inside `mimic`: topics, functions, glyphs (`mimic man ⌿`), search, "coming from C or Python" pages, a guide for agents | ✅ (`mimic man`) | 0.3.2 |
 | Syntax highlighting for editors (TextMate and tree-sitter grammars) and, later, on GitHub | ✅ editors ([mimic-syntax](https://github.com/mimiccodes/mimic-syntax)); GitHub once Linguist accepts Mimic | 0.3.3 |
-| A language server: errors as you type, glyph input, hover, go to definition; names under `c::` and `cpp::` in their own colour | `mimic check --emit-json` | 0.3.4 |
+| A language server: errors as you type, glyph input, hover, go to definition; names under `c::` and `cpp::` in their own colour | ✅ (`mimic lsp`) | 0.3.4 |
 | `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.4 |
 | A VS Code extension | None | 0.3.5 |
 | Lists, text and records shown as values in the debugger; debugging from editors | `mimic lldb` shows numbers; others as pointers | 0.3.6 |

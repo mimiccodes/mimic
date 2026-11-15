@@ -75,6 +75,8 @@ pub struct Symbol {
     pub header: Option<String>,
     /// Index into `Program::fns` (functions only).
     fn_id: Option<usize>,
+    /// Declared in a namespace of C declarations (`c::`, `cpp::`, an `as` name).
+    pub foreign: bool,
 }
 
 /// A name used in code, and what it names.
@@ -107,6 +109,29 @@ impl Engine {
         let input = driver::input_from(file)?;
         sources::keep_parses();
         Ok(Engine { input, generation: 0, good: None, errors: None, took_ms: 0.0 })
+    }
+
+    /// The project whose root folder is `root`.
+    pub fn for_project(root: &Path) -> Result<Engine, String> {
+        let p = mimic_project::Project::load(root)?;
+        sources::keep_parses();
+        Ok(Engine { input: Input::Project(Box::new(p)), generation: 0, good: None, errors: None, took_ms: 0.0 })
+    }
+
+    /// A standalone file (`module main`), outside any project.
+    pub fn for_file(file: &Path) -> Engine {
+        sources::keep_parses();
+        Engine { input: Input::File(file.to_path_buf()), generation: 0, good: None, errors: None, took_ms: 0.0 }
+    }
+
+    /// The errors of the latest check (`None`: it passed, or nothing was checked).
+    pub fn errors(&self) -> Option<&Report> {
+        self.errors.as_ref()
+    }
+
+    /// The files of the last program that checked: (path, text).
+    pub fn files(&self) -> Vec<(PathBuf, String)> {
+        self.good.as_ref().map(|a| a.program.files.iter().map(|f| (f.path.clone(), f.src.clone())).collect()).unwrap_or_default()
     }
 
     /// Check the program again (after files changed).
@@ -250,6 +275,32 @@ impl Engine {
                     let e = a.effect_of(i);
                     let x = &a.index.symbols[i];
                     out.push(json!({ "path": x.path, "effects": e, "location": a.location(x.file, x.span) }));
+                }
+                Ok(Value::Array(out))
+            }
+            // names from C in a file (`c::sqrt`): for the editors' own colour
+            "foreign" => {
+                let file = self.path_param(params)?;
+                let a = self.analysis()?;
+                let Some(fi) = a.file_index(&file) else { return Ok(json!([])) };
+                let src = &a.program.files[fi].src;
+                let mut out = Vec::new();
+                for r in &a.index.refs {
+                    let Target::Sym(i) = r.to else { continue };
+                    let x = &a.index.symbols[i];
+                    if r.file != fi || !x.foreign || r.span.end > src.len() {
+                        continue;
+                    }
+                    let text = &src[r.span.start..r.span.end];
+                    let kind = if x.kind == Kind::Type { "type" } else { "function" };
+                    match text.rfind("::") {
+                        Some(sep) => {
+                            out.push(json!({ "line": r.span.line, "column": r.span.col, "length": text[..sep].chars().count(), "kind": "namespace" }));
+                            let (l, c) = mimic_syntax::line_col(src, r.span.start + sep + 2);
+                            out.push(json!({ "line": l, "column": c, "length": text[sep + 2..].chars().count(), "kind": kind }));
+                        }
+                        None => out.push(json!({ "line": r.span.line, "column": r.span.col, "length": text.chars().count(), "kind": kind })),
+                    }
                 }
                 Ok(Value::Array(out))
             }
@@ -489,6 +540,7 @@ impl Index {
                 doc,
                 header: None,
                 fn_id: None,
+                foreign: false,
             });
             ix.by_mod.insert(m, id);
         }
@@ -522,6 +574,7 @@ impl Index {
                 doc,
                 header,
                 fn_id: Some(fid),
+                foreign: p.mods[f.module].foreign,
             });
             ix.by_fn.insert(fid, id);
         }
@@ -539,6 +592,7 @@ impl Index {
                 doc: comment_above(&lines[t.file], t.decl.span.line),
                 header: None,
                 fn_id: None,
+                foreign: p.mods[t.module].foreign,
             });
             ix.by_type.insert(tid, id);
             for (vi, v) in t.variants().iter().enumerate() {
@@ -559,6 +613,7 @@ impl Index {
                     doc: String::new(),
                     header: None,
                     fn_id: None,
+                    foreign: p.mods[t.module].foreign,
                 });
                 ix.by_variant.insert((tid, vi), id);
             }

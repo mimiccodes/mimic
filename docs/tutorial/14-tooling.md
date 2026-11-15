@@ -82,6 +82,10 @@ fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
 
 `mimic test` runs every such example, so the documentation can't drift from the code: a failure names the example's line and shows both values.
 
+## Editors
+
+`mimic lsp` is the language server: errors as you type with quick fixes, hover, go to definition, glyph input (type `\i` and pick `⍳`), completion and formatting, in VS Code, Neovim, Helix, Emacs, Sublime Text and others. `mimic man editors` shows the set-up for each.
+
 ## The manual
 
 `mimic man` is the manual inside `mimic`: the same version as the compiler, and it works offline.
