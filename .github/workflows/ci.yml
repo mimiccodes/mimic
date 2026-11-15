@@ -51,7 +51,9 @@ jobs:
 
       # the grammars' test tools (editors/syntax), for the golden tests
       - name: Grammar tools
-        run: cd editors/syntax && npm ci --no-audit --no-fund
+        run: |
+          cd editors/syntax && npm ci --no-audit --no-fund
+          cd tree-sitter-mimic && npm ci --no-audit --no-fund
 
       - uses: actions/setup-go@v5
         with:

@@ -395,8 +395,9 @@ fn doc_tests() {
 }
 
 /// The grammars (editors/syntax) know the whole language: every glyph, its
-/// word and digraph, and every keyword are highlighted as such, and every
-/// test program and example tokenizes with no unrecognised text. Needs the
+/// word and digraph, and every keyword are highlighted as such, every test
+/// program and example tokenizes with no unrecognised text, and the
+/// tree-sitter grammar parses them with no error. Needs the
 /// submodule and `npm ci` in it (CI does both); skipped otherwise, except in CI.
 #[test]
 fn grammar_knows_the_language() {
@@ -434,6 +435,23 @@ fn grammar_knows_the_language() {
     let (ok, text) = node(&[&root.join("tests/fixtures"), &root.join("tests/nets"), &root.join("examples"), &syntax.join("samples")]);
     assert!(ok, "{text}");
     std::fs::remove_dir_all(&dir).unwrap();
+    // the tree-sitter grammar parses every test program and example (it
+    // compiles its parser with the system's C compiler; not on Windows)
+    if cfg!(windows) {
+        return;
+    }
+    let ts = syntax.join("tree-sitter-mimic");
+    if !ts.join("node_modules/tree-sitter-cli").is_dir() {
+        assert!(std::env::var_os("CI").is_none(), "CI must check the tree-sitter grammar: run `npm ci` in editors/syntax/tree-sitter-mimic");
+        return;
+    }
+    let out = Command::new("node")
+        .arg("../test/tree-sitter-parse.mjs")
+        .args([root.join("tests/fixtures/run"), root.join("tests/fixtures/window"), root.join("examples"), root.join("bench")])
+        .current_dir(&ts)
+        .output()
+        .expect("node");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
 }
 
 #[test]
