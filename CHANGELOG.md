@@ -26,6 +26,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **Documentation written by people or agents** (step 0.3.8). Guides, Markdown pages in the project's `docs/` folder, join `mimic doc` beside the API; their `mimic run` examples run under `mimic test` against their `output` blocks. The site is new: guides and modules in the sidebar, Mimic code coloured, every glyph explained on hover, Mimic's colours in light and dark; `mimic doc --std` includes the manual's guides. Through `mimic mcp`, agents see what is undocumented (`docs_status`), write guides whose examples are checked as they are written (`docs_write`), and build the site (`docs_build`); the `document_project` prompt starts the job.
 
+- **Where code runs** (step 0.3.9). `mimic why` lists every decision the compiler makes about a program or one function: `¨` on all cores, fork-join recursion, interaction nets, fused loops, SIMD, the GPU, implicit tasks, effects kept in order and the places that wait for tasks, each with its reason and what would change it. Code generation records these decisions as it makes them, and `mimic why` reads them from a compile that stops before LLVM optimises. Editors show them as labels after the code (`∥ parallel`, `⇶ fused`, `▣ GPU`, `◷ task`, `→ in order`) with the reason on hover, and agents ask with the `why` tool of `mimic mcp`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

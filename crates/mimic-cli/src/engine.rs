@@ -36,6 +36,8 @@ struct Analysis {
     index: Index,
     /// Computed on the first question about effects.
     effects: Option<Vec<&'static str>>,
+    /// Where code runs, computed on the first question about it.
+    plan: Option<Vec<mimic_codegen::Decision>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -163,7 +165,7 @@ impl Engine {
         match driver::load(&self.input) {
             Ok(program) => {
                 let index = Index::build(&program);
-                self.good = Some(Analysis { program, index, effects: None });
+                self.good = Some(Analysis { program, index, effects: None, plan: None });
                 self.errors = None;
             }
             Err(r) => self.errors = Some(r),
@@ -323,6 +325,55 @@ impl Engine {
                         }
                         None => out.push(json!({ "line": r.span.line, "column": r.span.col, "length": text.chars().count(), "kind": kind })),
                     }
+                }
+                Ok(Value::Array(out))
+            }
+            // where code runs: in parallel, on the GPU, as a task, in order
+            "where" => {
+                let file = match params.get("file").and_then(Value::as_str) {
+                    Some(_) => Some(self.path_param(params)?),
+                    None => None,
+                };
+                let name = s("name").map(String::from);
+                self.analysis()?;
+                let Engine { input, good, .. } = self;
+                let a = good.as_mut().ok_or("nothing checked yet")?;
+                if a.plan.is_none() {
+                    a.plan = Some(driver::plan(input, &a.program)?);
+                }
+                let fi = file.as_deref().and_then(|f| a.file_index(f));
+                if file.is_some() && fi.is_none() {
+                    return Ok(json!([]));
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut out = Vec::new();
+                for d in a.plan.as_ref().unwrap() {
+                    if fi.is_some_and(|f| f != d.file) || !seen.insert((d.file, d.span.start, d.kind)) {
+                        continue;
+                    }
+                    let fname = d.fid.map(|f| a.program.fns[f].name.clone()).unwrap_or_default();
+                    let fpath = d.fid.and_then(|f| a.index.by_fn.get(&f)).map(|&i| a.index.symbols[i].path.clone()).unwrap_or(fname.clone());
+                    if let Some(n) = &name
+                        && *n != fname
+                        && *n != fpath
+                        && !fpath.ends_with(&format!("::{n}"))
+                    {
+                        continue;
+                    }
+                    let src = &a.program.files[d.file].src;
+                    // (a note about a whole function shows its first line)
+                    let code = if d.kind == "net" {
+                        src[d.span.start.min(src.len())..].lines().next().unwrap_or("").trim_end_matches('{').trim().to_string()
+                    } else {
+                        src.get(d.span.start..d.span.end).unwrap_or("").lines().next().unwrap_or("").to_string()
+                    };
+                    out.push(json!({
+                        "function": fpath,
+                        "kind": d.kind,
+                        "code": code,
+                        "why": d.why,
+                        "location": a.location(d.file, d.span),
+                    }));
                 }
                 Ok(Value::Array(out))
             }

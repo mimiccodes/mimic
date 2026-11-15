@@ -131,7 +131,41 @@ pub type SplitFn = fn(*mut std::ffi::c_void, *mut std::ffi::c_void, &[std::path:
 /// NVPTX — the assembly next to it (`.ptx` / `.s`).
 /// Returns the files written: the object (or assembly), then any further
 /// parts of it (see Settings::split).
+/// A decision about where a piece of code runs, as code generation made it
+/// (for `mimic why` and the labels editors show).
+#[derive(Clone, Debug)]
+pub struct Decision {
+    /// The function it is in.
+    pub fid: Option<mimic_check::FnId>,
+    /// The file (index into `Program::files`) and the code it is about.
+    pub file: usize,
+    pub span: mimic_syntax::Span,
+    /// `parallel`, `gpu`, `task`, `ordered`, `fused`, `simd`, `net`, `waits`
+    pub kind: &'static str,
+    /// Why, and what would change it.
+    pub why: String,
+}
+
+thread_local! {
+    /// Decisions being recorded (see `plan`); `None` in ordinary builds.
+    static DECISIONS: std::cell::RefCell<Option<Vec<Decision>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Every decision about where code runs, made by compiling `p` as a build
+/// with `settings` would, but stopping before LLVM optimises or writes
+/// anything.
+pub fn plan(p: &Program, settings: &Settings) -> R<Vec<Decision>> {
+    DECISIONS.with(|d| *d.borrow_mut() = Some(Vec::new()));
+    let r = compile_inner(p, settings, Path::new(""), None, None, true);
+    let log = DECISIONS.with(|d| d.borrow_mut().take()).unwrap_or_default();
+    r.map(|_| log)
+}
+
 pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>) -> R<Vec<std::path::PathBuf>> {
+    compile_inner(p, settings, obj, ir, net_out, false)
+}
+
+fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, net_out: Option<&Path>, plan_only: bool) -> R<Vec<std::path::PathBuf>> {
     // once per process: LLVM's target registry is not safe to fill from
     // several threads at once
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -284,6 +318,7 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
         let_moves: false,
         move_at: Default::default(),
         fj: Default::default(),
+        fused_at: std::cell::Cell::new(None),
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -329,6 +364,16 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     if settings.tests {
         cg.emit_test_main(&test_fns, settings.leak_check)?;
     }
+    if plan_only {
+        // the net-compiled functions: reduced as interaction nets, in parallel
+        for &f in cg.plan.def_index.keys() {
+            let func = &p.fns[f];
+            if p.mods[func.module].package == p.root_package {
+                note_at(Some(f), func.file, func.span, "net", "also compiled to an interaction net: it is pure, so when it is called from other such code, independent calls inside it are reduced in parallel by the runtime".into());
+            }
+        }
+        return Ok(Vec::new());
+    }
     if let Some(d) = &cg.dbg {
         d.finalize();
     }
@@ -371,6 +416,15 @@ pub fn compile(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>, 
     }
 }
 
+/// Record a decision, when `plan` is listening.
+fn note_at(fid: Option<mimic_check::FnId>, file: usize, span: mimic_syntax::Span, kind: &'static str, why: String) {
+    DECISIONS.with(|d| {
+        if let Some(v) = d.borrow_mut().as_mut() {
+            v.push(Decision { fid, file, span, kind, why });
+        }
+    });
+}
+
 /// A compiled value: an unboxed scalar, or a handle with an ownership flag.
 #[derive(Clone, Copy)]
 enum V<'ctx> {
@@ -407,6 +461,13 @@ struct Pending<'ctx> {
     /// where the runtime's future handle is kept until it is awaited
     hslot: PointerValue<'ctx>,
     ty: Ty,
+}
+
+fn stmt_span(s: &Stmt) -> mimic_syntax::Span {
+    match s {
+        Stmt::Let { span, .. } | Stmt::Assign { span, .. } | Stmt::LetTuple { span, .. } | Stmt::LetElse { span, .. } | Stmt::Return(_, span) => *span,
+        Stmt::Expr(e) => e.span,
+    }
 }
 
 /// Every single-segment path (variable use) in an expression.
@@ -513,6 +574,8 @@ struct Cg<'ctx, 'p> {
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
     fj: forkjoin::State<'ctx>,
+    /// the fused expression being compiled (for the GPU decision's note)
+    fused_at: std::cell::Cell<Option<mimic_syntax::Span>>,
 }
 
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
@@ -1527,12 +1590,26 @@ impl<'ctx> Cg<'ctx, '_> {
     /// effects that may overlap, such as waiting on the network (a task per
     /// element on the event loop, so thousands can wait at once).
     fn each_mode(&self, f: &Expr) -> i32 {
+        let src = |e: &Expr| self.cur_fid.and_then(|k| self.p.files[self.p.fns[k].file].src.get(e.span.start..e.span.end)).unwrap_or("f").to_string();
         if self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, f) {
+            self.note(f.span, "parallel", format!("`¨` applies `{}` to every element on all cores: it is pure", src(f)));
             1
         } else if self.purity.operand_overlaps(self.p, self.cur_mod, self.cur_fid, f) {
+            self.note(f.span, "task", format!("`¨` runs `{}` as a task per element on the event loop: its effects may overlap (reading, waiting), so thousands can wait at once", src(f)));
             2
         } else {
+            self.note(f.span, "ordered", format!("`¨` applies `{}` to one element after another: it has effects that keep their order (printing, writing files, C calls). Without them (return the values and print after the `¨`) it would run on all cores", src(f)));
             0
+        }
+    }
+
+    /// Record a decision about the code at `span` of the function being
+    /// compiled (the program's own functions only).
+    fn note(&self, span: mimic_syntax::Span, kind: &'static str, why: String) {
+        if let Some(f) = self.cur_fid
+            && self.p.mods[self.p.fns[f].module].package == self.p.root_package
+        {
+            note_at(Some(f), self.p.fns[f].file, span, kind, why);
         }
     }
 
@@ -2277,6 +2354,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 if self.purity.stmt_may_overlap(self.p, self.cur_mod, self.cur_fid, s) {
                     self.await_used(&mut pending, &stmt_names(s))?;
                 } else {
+                    let names: Vec<&str> = pending.iter().map(|p| p.name.as_str()).collect();
+                    self.note(stmt_span(s), "waits", format!("waits here for the tasks still running ({}): this changes what they might read (files, the environment, programs) or leaves early", names.join(", ")));
                     self.await_all(&mut pending)?; // an ordered effect, or leaving the block
                 }
             }
@@ -2347,6 +2426,7 @@ impl<'ctx> Cg<'ctx, '_> {
         if self.purity.future_call(self.p, self.cur_mod, self.cur_fid, value).is_none() {
             return Ok(None);
         }
+        self.note(value.span, "task", format!("starts now as a task (its effects may overlap: reading, waiting) and the code after it goes on; it is waited for where `{name}` is first used"));
         let Some(k) = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(value)).cloned()) else { return Ok(None) };
         let ExprKind::Call { args, .. } = &value.kind else { return Ok(None) };
         let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);

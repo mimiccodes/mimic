@@ -15,6 +15,7 @@ description: Mimic in VS Code, Neovim, Helix, Emacs, Sublime Text and Zed: the l
 * **Formatting** (`mimic fmt`), in the style the file mostly uses: words or glyphs.
 * **The outline** of a file, and a search for symbols across the project.
 * **Names from C** (`c::sqrt`, `cpp::`, an `as` name) as semantic tokens with the modifier `foreign`, so themes can colour them apart.
+* **Where code runs**, as labels after the code (inlay hints): `∥ parallel`, `⇶ fused`, `≋ SIMD`, `▣ GPU`, `◷ task`, `→ in order`, with the reason on hover (`mimic why` lists them all).
 
 Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com/mimiccodes/mimic-syntax): TextMate for VS Code, tree-sitter for Neovim, Helix and Zed.
 

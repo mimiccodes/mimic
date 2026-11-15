@@ -105,6 +105,41 @@ Freeing is parallel too: dropping a large tree hands its subtrees to the same sc
 
 Array operations are **fused**. `(xs * 2 + 1) ▷ +/` becomes a single loop that reads `xs` once. Reversing, taking and dropping (`⌽ ↑ ↓`) fuse too: `⌽ (xs * 2) ↓ 1 ▷ +/` reads each element of `xs` once and builds no array at all. So does filtering before a sum, product or count: `xs ⌿ (xs > 0) ▷ +/` is one pass. The loop is split into chunks across cores and vectorized with your CPU's SIMD instructions.
 
+## Seeing where code runs
+
+`mimic why` lists every decision the compiler made about your program, with
+the reason and, where it helps, what would change it:
+
+```sh
+mimic why            # the whole program
+mimic why fib        # one function
+```
+
+```output
+fib  (src/main.mim:3)
+  ∥ parallel line 3    fib(n - 1)
+      runs in parallel with the other 1 call(s) here (fork-join): they are pure and independent; …
+main  (src/main.mim:7)
+  ⇶ fused    line 8    xs ¨ square
+      the operations and the reduction are one loop, with no arrays in between; …
+  → ordered  line 9    shout
+      `¨` applies `shout` to one element after another: it has effects that keep their order …
+```
+
+| Label | Meaning |
+|---|---|
+| `∥ parallel` | Runs on all cores: `¨` with a pure function, independent recursive calls (fork-join) |
+| `∥ net` | Also compiled to an interaction net, reduced in parallel by the runtime |
+| `⇶ fused` | A chain of array operations is one loop with no arrays in between, split over the cores when large |
+| `≋ SIMD` | The function runs on several elements at once, with vector instructions |
+| `▣ GPU` | Also compiled for the GPU, used when the arrays are large enough |
+| `◷ task` | Starts now and runs while the code after it goes on (waiting on files or the network) |
+| `→ in order` | One after another, because of effects that must keep their order (printing, writing, C calls) |
+| `⏸ waits` | Waits here for running tasks, because this changes what they might read |
+
+Editors show the same labels after the code they are about (`mimic lsp`),
+with the reason on hover, and agents ask with the `why` tool of `mimic mcp`.
+
 ## Looking under the hood
 
 ```sh

@@ -899,6 +899,33 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
     Ok(program)
 }
 
+/// Where each piece of the program runs, as a release build for this
+/// machine decides it (`mimic why`, the labels in editors).
+pub fn plan(input: &Input, program: &Program) -> Result<Vec<mimic_codegen::Decision>, String> {
+    let profile = Profile::for_input(input, true);
+    let is_exe = input.is_bin();
+    mimic_codegen::plan(
+        program,
+        &mimic_codegen::Settings {
+            triple: None,
+            native: true,
+            opt_level: profile.opt,
+            leak_check: false,
+            emit_main: is_exe,
+            export_pub: !is_exe,
+            use_net: profile.net,
+            cpu: None,
+            features: None,
+            abi: None,
+            strict_math: profile.strict_math,
+            fast_math: profile.fast_math,
+            debug_info: false,
+            tests: false,
+            split: None,
+        },
+    )
+}
+
 /// `MIMIC_DEBUG_PHASES=1`: how long each step of loading a program takes.
 struct Phases {
     on: bool,

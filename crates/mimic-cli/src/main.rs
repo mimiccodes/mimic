@@ -292,6 +292,17 @@ enum Cmd {
         #[arg(long, hide = true)]
         stdio: bool,
     },
+    /// Where code runs and why: in parallel, on the GPU, as a task, or in order (`mimic why mandelbrot`)
+    Why {
+        /// A function (`mandelbrot`, `geometry::area`); nothing for the whole program
+        name: Option<String>,
+        /// A standalone file instead of the project in this folder
+        #[arg(long = "in", value_name = "FILE")]
+        input: Option<PathBuf>,
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask the analysis engine about the project, as JSON (`mimic query definition file=src/main.mim line=3 column=9`)
     Query {
         /// What to ask: check, symbols, definition, hover, references, outline, docs, effects, stats
@@ -560,6 +571,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Why { name, input, json } => why_cmd(name, input, json),
         Cmd::Mcp { project, allow_outside, allow_install, allow_network, read_only, no_run } => {
             mcp::serve(project, mcp::Access { allow_outside, allow_install, allow_network, read_only, no_run })?;
             Ok(ExitCode::SUCCESS)
@@ -764,6 +776,56 @@ fn install_dependencies() -> Result<ExitCode, String> {
         }
     }
     status("Installed", format!("{installed} new, {present} already present"));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `mimic why`: the decisions about where code runs, by function and line.
+fn why_cmd(name: Option<String>, input: Option<PathBuf>, json: bool) -> Result<ExitCode, String> {
+    let mut eng = engine::Engine::open(input.as_deref())?;
+    let check = eng.query("check", &serde_json::json!({}))?;
+    if check["success"] != true {
+        let first = check["diagnostics"][0]["rendered"].as_str().unwrap_or("").to_string();
+        return Err(format!("the program has errors; `mimic check` first\n{first}"));
+    }
+    let mut params = serde_json::json!({});
+    if let Some(n) = &name {
+        params["name"] = n.clone().into();
+    }
+    let v = eng.query("where", &params)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let list = v.as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        match &name {
+            Some(n) => println!("`{n}`: nothing to decide: it runs in order, as written (no arrays to split, no calls to run at the same time, no effects to wait for)"),
+            None => println!("nothing to decide: the program runs in order, as written"),
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mark = |k: &str| match k {
+        "parallel" | "net" => "∥",
+        "gpu" => "▣",
+        "task" => "◷",
+        "ordered" => "→",
+        "waits" => "⏸",
+        "fused" => "⇶",
+        "simd" => "≋",
+        _ => "·",
+    };
+    let mut last = String::new();
+    for d in &list {
+        let f = d["function"].as_str().unwrap_or("");
+        if f != last {
+            let loc = &d["location"];
+            println!("{}{f}  ({}:{})", if last.is_empty() { "" } else { "\n" }, loc["shown"].as_str().unwrap_or(""), loc["line"]);
+            last = f.to_string();
+        }
+        let k = d["kind"].as_str().unwrap_or("");
+        println!("  {} {:<8} line {:<4} {}", mark(k), k, d["location"]["line"], d["code"].as_str().unwrap_or(""));
+        println!("      {}", d["why"].as_str().unwrap_or(""));
+    }
     Ok(ExitCode::SUCCESS)
 }
 

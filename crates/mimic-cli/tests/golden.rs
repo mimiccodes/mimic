@@ -783,6 +783,42 @@ fn doc_guides() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mimic why`: where code runs, as the compiler decides it: in parallel
+/// (`¨` on all cores, fork-join recursion), fused, as a task, in order; and
+/// every run fixture's decisions can be explained.
+#[test]
+fn where_code_runs() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-why-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("w.mim");
+    std::fs::write(&f, "module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn square(x: i64) -> i64 { x * x }\n\nfn shout(x: i64) -> i64 {\n    print(x)\n    x\n}\n\nfn load(path: str) -> Result[str, str] { fs::read(path) }\n\nfn main() {\n    let xs = ⍳ 1000\n    print(xs × 2 ▷ +/)\n    print(xs ¨ square ▷ +/)\n    print([\"ab\" \"cd\"] ¨ (s => upper(s)))\n    print([1 2] ¨ shout)\n    let text = load(\"w.mim\")\n    print(fib(20))\n    print(text)\n}\n").unwrap();
+    let out = mimic().args(["why", "--in"]).arg(&f).arg("--json").output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    let has = |func: &str, kind: &str, code: &str| v.as_array().unwrap().iter().any(|d| d["function"] == func && d["kind"] == kind && d["code"].as_str().unwrap().contains(code));
+    assert!(has("fib", "parallel", "fib(n - 1)"), "fork-join: {v}");
+    assert!(has("main", "fused", "xs ¨ square") && has("main", "simd", "square"), "fused, with SIMD across elements: {v}");
+    assert!(has("main", "parallel", "upper"), "¨ on all cores: {v}");
+    assert!(has("main", "ordered", "shout"), "¨ with printing stays in order: {v}");
+    assert!(has("main", "task", "load("), "an implicit task: {v}");
+    assert!(has("main", "fused", "xs × 2"), "fused: {v}");
+    let out = mimic().args(["why", "shout", "--in"]).arg(&f).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to decide"), "{}", String::from_utf8_lossy(&out.stdout));
+    let out = mimic().args(["why", "main", "--in"]).arg(&f).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("∥ parallel") && text.contains("→ ordered") && text.contains("would run on all cores"), "{text}");
+    // every run fixture's decisions are explained
+    let mut failed = Vec::new();
+    for fx in fixtures("run") {
+        let out = mimic().args(["why", "--json", "--in"]).arg(&fx).output().unwrap();
+        if !out.status.success() || serde_json::from_slice::<serde_json::Value>(&out.stdout).is_err() {
+            failed.push(format!("{}: {}", fx.display(), String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

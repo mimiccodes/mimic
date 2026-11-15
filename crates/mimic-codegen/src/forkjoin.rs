@@ -257,6 +257,9 @@ impl<'ctx> Cg<'ctx, '_> {
         if calls.iter().any(|c| self.fj.pre.contains_key(&id(*c))) {
             return Ok(());
         }
+        for c in &calls {
+            self.note(c.span, "parallel", format!("runs in parallel with the other {} call(s) here (fork-join): they are pure and independent; below a depth, they run in order to keep the overhead small", calls.len() - 1));
+        }
         let fun = self.cur_fn.ok_or("internal compiler error: fork site outside a function")?;
         let serial = self.ctx.append_basic_block(fun, "fj.seq");
         let merge = self.ctx.append_basic_block(fun, "fj.done");

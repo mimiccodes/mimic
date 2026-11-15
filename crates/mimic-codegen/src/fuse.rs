@@ -289,6 +289,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let msl = self.gpu_wanted().then(|| self.msl_lambda(&args[1], &caps)).flatten().map(std::rc::Rc::new);
                         // (the captures it divides by: as slots)
                         let simd = if self.opt_level >= 2 { self.simd_lambda(&args[1], &caps).map(|(f, g)| (f.get_name().to_str().unwrap().to_string(), g.iter().map(|k| slots[*k]).collect())) } else { None };
+                        if simd.is_some() {
+                            self.note(args[1].span, "simd", format!("SIMD across elements: the function runs on {} elements at once (vector instructions)", crate::simd::lanes()));
+                        }
                         Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: slots, pt: pts[0], rt, depth: false, heavy, msl, simd })
                     }
                     ExprKind::Path(path) => {
@@ -300,6 +303,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let heavy = self.reaches_recursion(vec![k.clone()]);
                         let msl = self.gpu_wanted().then(|| self.msl_named(&k)).flatten().map(std::rc::Rc::new);
                         let simd = if self.opt_level >= 2 { self.simd_named(&k, 0).map(|f| (f.get_name().to_str().unwrap().to_string(), Vec::new())) } else { None };
+                        if simd.is_some() {
+                            self.note(args[1].span, "simd", format!("SIMD across elements: the function runs on {} elements at once (vector instructions)", crate::simd::lanes()));
+                        }
                         Ok(Node::Apply { f: f.get_name().to_str().unwrap().to_string(), arg, caps: vec![], pt: spec.params[0], rt: spec.ret, depth: kind == Kind::Native, heavy, msl, simd })
                     }
                     _ => Err("internal compiler error: not a fusible ¨".into()),
@@ -925,6 +931,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Materialise a fusible array expression with one fused pass.
     pub(crate) fn fused_map(&mut self, e: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(e.span));
+        self.note(e.span, "fused", "the whole chain of array operations is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let el = num_el(self.ty_of(e)).ok_or("internal compiler error: fused_map on a non-numeric array")?;
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
@@ -983,6 +991,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// `xs ¨ f` making records (see each_obj_fusible).
     pub(crate) fn fused_each_obj(&mut self, e: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(e.span));
+        self.note(e.span, "fused", "`¨` building records is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let Ty::Arr(el @ El::Obj(_), _) = self.ty_of(e) else { return Err("internal compiler error: not a list of records".into()) };
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
@@ -1024,6 +1034,9 @@ impl<'ctx> Cg<'ctx, '_> {
     fn gpu_or(&mut self, root: &Node, plan: &Plan<'ctx>, el: El, n: IntValue<'ctx>, data: BasicValueEnum<'ctx>, cpu: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
         let gk = if self.gpu_wanted() { gpu::map_kernel(root, el, plan.slots.len()) } else { None };
         let Some(gk) = gk else { return cpu(self) };
+        if let Some(sp) = self.fused_at.get() {
+            self.note(sp, "gpu", "also compiled for the GPU (Metal): it runs there when the arrays are large enough to pay for the copy, on the CPU otherwise".into());
+        }
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
         let f = self.cur_fn.unwrap();
@@ -1276,6 +1289,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     pub(crate) fn fused_keep_list(&mut self, e: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(e.span));
+        self.note(e.span, "fused", "filtering is fused into one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let ExprKind::Prim { args, .. } = &e.kind else { return Err("internal compiler error: not a keep".into()) };
         let el = num_el(self.ty_of(e)).ok_or("internal compiler error: keep of non-numbers")?;
         let i64t = self.ctx.i64_type();
@@ -1345,6 +1360,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     pub(crate) fn fused_reduce_keep(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(arg.span));
+        self.note(arg.span, "fused", "the filter and the reduction are one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let ExprKind::Prim { args, .. } = &arg.kind else { return Err("internal compiler error: not a keep".into()) };
         let mut plan = Plan::default();
         let xs = self.operand(&args[0], &mut plan)?;
@@ -1374,6 +1391,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// A reduction (`+/ ×/ ⌈/ ⌊/ ≢`) over a fusible expression: no array is built.
     pub(crate) fn fused_reduce(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(arg.span));
+        self.note(arg.span, "fused", "the operations and the reduction are one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let mut plan = Plan::default();
         let root = self.build(arg, &mut plan)?;
         let float = num_el(self.ty_of(arg)) == Some(El::F64);
@@ -1465,6 +1484,8 @@ impl<'ctx> Cg<'ctx, '_> {
     /// sums each chunk, the sums become each chunk's starting offset, and a
     /// second kernel writes the running results. No input array is built.
     pub(crate) fn fused_trail(&mut self, prim: Prim, arg: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(arg.span));
+        self.note(arg.span, "fused", "the running results are one parallel scan, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
         let el = num_el(self.ty_of(arg)).ok_or("internal compiler error: fused_trail on a non-numeric array")?;
         let float = el == El::F64;
         let i64t = self.ctx.i64_type();

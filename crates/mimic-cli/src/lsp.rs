@@ -27,6 +27,7 @@ pub fn serve() -> Result<(), String> {
         references_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
             code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
@@ -331,6 +332,10 @@ impl Server {
                 let p: WorkspaceSymbolParams = from(params)?;
                 ok(self.workspace_symbols(&p.query))
             }
+            "textDocument/inlayHint" => {
+                let p: InlayHintParams = from(params)?;
+                ok(self.where_hints(&p.text_document.uri, p.range))
+            }
             "textDocument/semanticTokens/full" => {
                 let p: SemanticTokensParams = from(params)?;
                 ok(self.semantic_tokens(&p.text_document.uri))
@@ -587,6 +592,64 @@ impl Server {
             }
         }
         serde_json::to_value(out).ok()
+    }
+
+    /// Where code runs, as labels after the code they are about: `∥ parallel`,
+    /// `▣ GPU`, `◷ task`, `→ in order`, with the reason on hover. Only while
+    /// the program checks, so the labels never point at code that moved.
+    fn where_hints(&mut self, uri: &Url, range: Range) -> Option<Value> {
+        let path = path_of(uri)?;
+        let text = self.text_of(&path);
+        let (engine, _) = self.engine(&path)?;
+        if engine.errors().is_some() {
+            return serde_json::to_value(Vec::<InlayHint>::new()).ok();
+        }
+        let v = engine.query("where", &json!({ "file": path.display().to_string() })).ok()?;
+        // one label per piece of code: its kinds together
+        let mut at: Vec<(Position, Vec<String>, Vec<String>)> = Vec::new();
+        for d in v.as_array()? {
+            let l = &d["location"];
+            let n = |k: &str| l.get(k).and_then(Value::as_u64).unwrap_or(1) as u32;
+            let pos = to_lsp(&text, n("end_line"), n("end_column"));
+            if pos.line < range.start.line || pos.line > range.end.line {
+                continue;
+            }
+            let label = match d["kind"].as_str().unwrap_or("") {
+                "parallel" => "∥ parallel",
+                "net" => "∥ net",
+                "gpu" => "▣ GPU",
+                "task" => "◷ task",
+                "ordered" => "→ in order",
+                "waits" => "⏸ waits",
+                "fused" => "⇶ fused",
+                "simd" => "≋ SIMD",
+                _ => continue,
+            };
+            let why = d["why"].as_str().unwrap_or("").to_string();
+            match at.iter_mut().find(|(p, ..)| *p == pos) {
+                Some((_, labels, whys)) => {
+                    if !labels.iter().any(|l| l == label) {
+                        labels.push(label.to_string());
+                        whys.push(why);
+                    }
+                }
+                None => at.push((pos, vec![label.to_string()], vec![why])),
+            }
+        }
+        let hints: Vec<InlayHint> = at
+            .into_iter()
+            .map(|(position, labels, whys)| InlayHint {
+                position,
+                label: InlayHintLabel::String(labels.join(" · ")),
+                kind: None,
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: whys.join("\n\n") + "\n\n`mimic why` lists every decision" })),
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            })
+            .collect();
+        serde_json::to_value(hints).ok()
     }
 
     fn semantic_tokens(&mut self, uri: &Url) -> Option<Value> {
