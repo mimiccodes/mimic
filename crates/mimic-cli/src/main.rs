@@ -877,16 +877,32 @@ fn doc_cmd(file: Option<PathBuf>, std: bool, json: bool, out: Option<PathBuf>) -
         (p, name.clone(), name, None, out)
     };
     let mods = doc::collect(&program, &package, strip);
+    // the guides: the project's docs/ folder; for the standard library, the
+    // manual's guides
+    let guides: Vec<doc::Guide> = if std {
+        man::Manual::load()
+            .pages
+            .into_iter()
+            .filter(|p| p.kind == "guide")
+            .map(|p| doc::Guide { name: p.name, title: p.title, markdown: p.text })
+            .collect()
+    } else {
+        match driver::input_from(file.as_deref()) {
+            Ok(Input::Project(pr)) => doc::guides_in(&pr.root.join("docs")),
+            _ => Vec::new(),
+        }
+    };
     if json {
-        println!("{}", serde_json::to_string_pretty(&doc::to_json(&title, &mods)).map_err(|e| e.to_string())?);
+        println!("{}", serde_json::to_string_pretty(&doc::to_json(&title, &mods, &guides)).map_err(|e| e.to_string())?);
         return Ok(ExitCode::SUCCESS);
     }
     let dir = out.unwrap_or(default_out);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let page = dir.join("index.html");
-    std::fs::write(&page, doc::to_html(&title, &mods)).map_err(|e| format!("cannot write {}: {e}", page.display()))?;
+    std::fs::write(&page, doc::to_html(&title, &mods, &guides)).map_err(|e| format!("cannot write {}: {e}", page.display()))?;
     let n: usize = mods.iter().map(|m| m.items.iter().filter(|i| i.kind != "group").count()).sum();
-    status("Documented", format!("{n} items in {} modules → {}", mods.len(), page.display()));
+    let g = if guides.is_empty() { String::new() } else { format!("{} guide{}, ", guides.len(), if guides.len() == 1 { "" } else { "s" }) };
+    status("Documented", format!("{g}{n} items in {} modules → {}", mods.len(), page.display()));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -900,8 +916,17 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
     prof.tests = true;
     let a = driver::build(&input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
     let out = std::process::Command::new(&a.path).arg("--list").output().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
-    let names: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
+    let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
+    // the examples of the project's guides (docs/*.md) are tests too
+    let examples = match &input {
+        Input::Project(p) => doc::guide_examples(&p.root.join("docs")),
+        Input::File(_) => Vec::new(),
+    };
+    let compiled = names.len();
+    names.extend(examples.iter().map(|(n, ..)| n.clone()));
     let chosen: Vec<(usize, String)> = names.into_iter().enumerate().filter(|(_, n)| filters.is_empty() || filters.iter().any(|f| n.contains(f.as_str()))).collect();
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let scratch = std::env::temp_dir().join(format!("mimic-doc-examples-{}", std::process::id()));
     if chosen.is_empty() {
         status("Testing", if filters.is_empty() { "no tests (write `test \"what it checks\" { expect(…) }`)" } else { "no test matches" });
         return Ok(ExitCode::SUCCESS);
@@ -920,6 +945,27 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
                 }
                 let k = chosen[i].0;
                 let t = std::time::Instant::now();
+                if k >= compiled {
+                    // a guide's example: run it, compare its output
+                    let (_, program, want) = &examples[k - compiled];
+                    let dir = scratch.join(k.to_string());
+                    let _ = std::fs::create_dir_all(&dir);
+                    let f = dir.join("example.mim");
+                    let r = match std::fs::write(&f, program).and_then(|_| std::process::Command::new(&me).arg("run").arg(&f).env("NO_COLOR", "1").output()) {
+                        Ok(o) => {
+                            let got = String::from_utf8_lossy(&o.stdout).into_owned();
+                            if got == *want {
+                                (true, String::new(), t.elapsed().as_secs_f64())
+                            } else {
+                                let err = String::from_utf8_lossy(&o.stderr);
+                                (false, format!("expected:\n{want}got:\n{got}{}", if o.status.success() { String::new() } else { err.into_owned() }), t.elapsed().as_secs_f64())
+                            }
+                        }
+                        Err(e) => (false, format!("cannot run the example: {e}"), 0.0),
+                    };
+                    results.lock().unwrap()[i] = Some(r);
+                    continue;
+                }
                 let mut c = std::process::Command::new(&a.path);
                 c.args(["--run", &k.to_string()]);
                 if std::env::var_os("MIMIC_THREADS").is_none() {
@@ -951,6 +997,7 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
             }
         }
     }
+    let _ = std::fs::remove_dir_all(&scratch);
     let passed = chosen.len() - failed;
     let summary = format!("{passed} passed, {failed} failed ({:.2} s)", t0.elapsed().as_secs_f64());
     println!("  {summary}");

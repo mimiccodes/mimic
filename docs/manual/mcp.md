@@ -19,13 +19,14 @@ description: Give an AI agent Mimic's tools with `mimic mcp`: what it can do, wh
 | `explain` | What an error code means and how to fix it |
 | `manual`, `manual_search` | Any page of the manual: chapters, guides, every standard function, module, glyph and error code |
 | `symbols`, `symbol`, `effects` | Find functions and types; one symbol's signature, comment, effects and every use; which functions are pure |
+| `docs_status`, `docs_write`, `docs_build` | What has no documentation yet; write a guide (`docs/<name>.md`) and run its examples at once; build the site |
 | `read_file`, `write_file`, `list_files` | The project's files |
 | `targets` | The platforms Mimic builds for |
 | `install` | Libraries from git (only with `--allow-install`) |
 
 **Resources:** the guide for agents (`mimic://manual/agents`), the glyph table (`mimic://glyphs`), the standard library, the syntax, and every page of the manual (`mimic://manual/{page}`).
 
-**Prompts:** `write_mimic` (a task, written idiomatically and checked), `port_to_mimic` (code from C, Python, JavaScript or another language), `fix_errors` (fix everything `check` reports).
+**Prompts:** `write_mimic` (a task, written idiomatically and checked), `port_to_mimic` (code from C, Python, JavaScript or another language), `fix_errors` (fix everything `check` reports), `document_project` (comments on public items, and guides with examples that run as tests).
 
 ## What the agent may touch
 

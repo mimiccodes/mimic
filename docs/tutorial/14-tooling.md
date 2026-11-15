@@ -142,6 +142,22 @@ fn main() {
 `mimic doc --std` documents the standard library (`fs`, `http`, `json`,
 `ui` and the rest), and `--json` prints the same as JSON for editors.
 
+### Guides
+
+Signatures come from the code; explanations go in **guides**: Markdown pages
+in the project's `docs/` folder. `mimic doc` puts them on the same page as
+the API, in the sidebar under *Guides*, with Mimic code coloured and every
+glyph explained when you hover it.
+
+A complete program in a `mimic run` code block, followed by an `output` block
+with exactly what it prints, is a test: `mimic test` runs it and compares, so
+a guide's examples can't go stale. The tutorial you are reading is written
+the same way.
+
+An AI agent connected with `mimic mcp` can write the documentation for you:
+`docs_status` lists what has no comment yet, and `docs_write` writes a guide
+and runs its examples straight away (`mimic man mcp`).
+
 ## Rebuilding
 
 `mimic build` and `mimic run` remember what a program was built from: its

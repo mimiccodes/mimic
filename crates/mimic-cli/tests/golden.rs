@@ -725,6 +725,64 @@ fn mcp_server() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Guides: Markdown pages in docs/ join `mimic doc` (with Mimic code
+/// coloured and glyphs explained), their examples run under `mimic test`,
+/// and agents write them through `mimic mcp` with the examples checked.
+#[test]
+fn doc_guides() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::env::temp_dir().join(format!("mimic-golden-guides-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().args(["create", "app"]).current_dir(&dir).status().unwrap().success());
+    let app = dir.join("app");
+    std::fs::write(app.join("src/main.mim"), "module main\n\n// The larger of two numbers.\npub fn larger(a: i64, b: i64) -> i64 { a ⌈ b }\n\npub fn smaller(a: i64, b: i64) -> i64 { a ⌊ b }\n\nfn main() { print(larger(1, 2)) }\n").unwrap();
+    std::fs::create_dir_all(app.join("docs")).unwrap();
+    let guide = "# Comparing\n\n```mimic run\nmodule main\n\nfn main() {\n    print(⍳ 3 ▷ +/)\n}\n```\n\n```output\n3\n```\n";
+    std::fs::write(app.join("docs/comparing.md"), guide).unwrap();
+    let out = mimic().arg("test").current_dir(&app).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("✓ docs/comparing.md: example 1"), "{text}");
+    std::fs::write(app.join("docs/comparing.md"), guide.replace("```output\n3\n", "```output\n4\n")).unwrap();
+    let out = mimic().arg("test").current_dir(&app).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success() && text.contains("✗ docs/comparing.md: example 1") && text.contains("expected:"), "{text}");
+    std::fs::write(app.join("docs/comparing.md"), guide).unwrap();
+    // the site: the guide, coloured code, glyph tooltips
+    let out = mimic().args(["doc", "--json"]).current_dir(&app).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["guides"][0]["name"], "comparing", "{v}");
+    assert_eq!(v["guides"][0]["examples"], 1);
+    assert!(mimic().arg("doc").current_dir(&app).status().unwrap().success());
+    let html = std::fs::read_to_string(app.join("target/doc/index.html")).unwrap();
+    assert!(html.contains("id=\"guide-comparing\""));
+    assert!(html.contains("title=\"iota: ⍳ n → [0 1 … n-1]\""), "glyph tooltips");
+    assert!(html.contains("<span class=\"k\">fn</span>"), "coloured code");
+    // an agent through MCP: what is undocumented, and a guide checked as it is written
+    let mut child = mimic().arg("mcp").current_dir(&app).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut id = 0;
+    let mut tool = |name: &str, args: serde_json::Value| -> (bool, String) {
+        id += 1;
+        writeln!(input, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } })).unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        (v["result"]["isError"] == true, v["result"]["content"][0]["text"].as_str().unwrap().to_string())
+    };
+    let (_, t) = tool("docs_status", serde_json::json!({}));
+    assert!(t.contains("main::smaller") && !t.contains("main::larger"), "{t}");
+    let (err, t) = tool("docs_write", serde_json::json!({ "name": "more", "markdown": guide.replace("```output\n3\n", "```output\n5\n") }));
+    assert!(err && t.contains("\"expected\": \"5\\n\"") && t.contains("\"got\": \"3\\n\""), "{t}");
+    let (err, _) = tool("docs_write", serde_json::json!({ "name": "../escape", "markdown": "x" }));
+    assert!(err);
+    drop(tool);
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();
@@ -1071,7 +1129,8 @@ fn doc_command() {
     let html = mimic().arg("doc").arg(&f).arg("--out").arg(dir.join("out")).output().unwrap();
     assert!(html.status.success(), "{}", String::from_utf8_lossy(&html.stderr));
     let page = std::fs::read_to_string(dir.join("out/index.html")).unwrap();
-    assert!(page.contains("<code>a</code>") && page.contains("fn dist(a: Point") && !page.contains("hidden"));
+    // (the signature is coloured: keywords and types in spans)
+    assert!(page.contains("<code>a</code>") && page.contains("<span class=\"k\">fn</span> dist(a: <span class=\"t\">Point</span>") && !page.contains("hidden"), "{page}");
     let std = mimic().arg("doc").arg("--std").arg("--json").output().unwrap();
     let s: serde_json::Value = serde_json::from_slice(&std.stdout).unwrap();
     let paths: Vec<&str> = s["modules"].as_array().unwrap().iter().map(|m| m["path"].as_str().unwrap()).collect();

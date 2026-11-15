@@ -167,12 +167,15 @@ impl Server {
             tool("symbol", "Everything about one symbol (fs::read, geometry::area): signature, comment, effects (pure, concurrent, ordered, sync), where it is defined and every place it is used.", json!({ "name": { "type": "string" } }), &["name"], true),
             tool("effects", "What each function of the project does besides computing a result: pure (runs in parallel), concurrent, ordered or sync.", json!({}), &[], true),
             tool("targets", "The platforms Mimic builds for, by how well they are tested (stable, runs, links, compiles).", json!({}), &[], true),
+            tool("docs_status", "The documentation of the project: public items with no `//` comment above them, and the guides in docs/ (Markdown pages) with how many runnable examples each has.", json!({}), &[], true),
             tool("read_file", "Read a file of the project.", json!({ "path": { "type": "string" } }), &["path"], true),
             tool("list_files", "The .mim files and project files of the project.", json!({}), &[], true),
         ];
         if !self.access.read_only {
             t.push(tool("write_file", "Write a file of the project (creating folders as needed). Check after writing Mimic.", json!({ "path": { "type": "string" }, "text": { "type": "string" } }), &["path", "text"], false));
             t.push(tool("format", "Format a .mim file in place (mimic fmt): words for primitives by default, glyphs with glyphs: true.", json!({ "file": { "type": "string" }, "glyphs": { "type": "boolean" } }), &["file"], false));
+            t.push(tool("docs_write", "Write a guide: a Markdown page docs/<name>.md, shown by mimic doc beside the API. Put complete programs in ```mimic run blocks, each followed by an ```output block with exactly what it prints: they run as tests, and this tool runs them right away and reports any that differ. Signatures and types come from the code; guides explain how and why.", json!({ "name": { "type": "string", "description": "e.g. getting-started, or api/routes" }, "markdown": { "type": "string" } }), &["name", "markdown"], false));
+            t.push(tool("docs_build", "Build the documentation site (mimic doc): guides and API on one page, at target/doc/index.html.", json!({}), &[], false));
             t.push(tool("build", "Build the project (or a standalone file): a release build by default. Returns the compiler's output and the artifact.", json!({ "file": file, "debug": { "type": "boolean" }, "target": { "type": "string", "description": "An LLVM triple, e.g. x86_64-linux-musl" } }), &[], false));
         }
         if !self.access.read_only && !self.access.no_run {
@@ -282,7 +285,7 @@ impl Server {
 
     fn call(&mut self, name: &str, a: &Value) -> Result<Value, String> {
         let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let writes = ["write_file", "format", "build", "run", "test", "install"];
+        let writes = ["write_file", "format", "build", "run", "test", "install", "docs_write", "docs_build"];
         if self.access.read_only && writes.contains(&name) {
             return Err(format!("`{name}` is off: this server is read-only (mimic mcp --read-only)"));
         }
@@ -361,6 +364,60 @@ impl Server {
                 let (_, out, err, _) = self.mimic(&["targets".into()], None, Duration::from_secs(60))?;
                 let tiers = out.split("Targets by tier").nth(1).map(|t| format!("Targets by tier{t}")).unwrap_or(out + &err);
                 Ok(text(tiers))
+            }
+            "docs_status" => {
+                let (st, out, err, _) = self.mimic(&["doc".into(), "--json".into()], None, Duration::from_secs(120))?;
+                if st != Some(0) {
+                    return Err(format!("mimic doc failed:\n{err}"));
+                }
+                let v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+                let mut missing = Vec::new();
+                for m in v["modules"].as_array().into_iter().flatten() {
+                    if m["doc"].as_str().unwrap_or("").is_empty() && m["path"].as_str().is_some_and(|p| p.contains("::")) {
+                        missing.push(json!({ "module": m["path"] }));
+                    }
+                    for it in m["items"].as_array().into_iter().flatten() {
+                        if it["kind"] != "group" && it["doc"].as_str().unwrap_or("").is_empty() {
+                            missing.push(json!({ "item": format!("{}::{}", m["path"].as_str().unwrap_or(""), it["name"].as_str().unwrap_or("")), "signature": it["signature"] }));
+                        }
+                    }
+                }
+                let guides: Vec<Value> = v["guides"].as_array().into_iter().flatten().map(|g| json!({ "name": g["name"], "title": g["title"], "examples": g["examples"] })).collect();
+                let body = json!({ "undocumented": missing, "guides": guides, "how": "Document an item with `//` lines right above it (edit the source with write_file); write guides with docs_write; then docs_build." });
+                Ok(text(serde_json::to_string_pretty(&body).unwrap_or_default()))
+            }
+            "docs_write" => {
+                let name = s("name").trim_end_matches(".md").trim_start_matches("docs/").to_string();
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/') || name.starts_with('/') || name.contains("//") {
+                    return Err("name: letters, digits, `-`, `_` and `/` only, such as getting-started or api/routes".into());
+                }
+                let p = self.path(&format!("docs/{name}.md"))?;
+                if let Some(d) = p.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                let md = s("markdown");
+                std::fs::write(&p, &md).map_err(|e| format!("{}: {e}", p.display()))?;
+                // run its examples now, as `mimic test` will
+                let examples = crate::man::examples_of(&md);
+                let mut report = Vec::new();
+                let dir = std::env::temp_dir().join(format!("mimic-mcp-doc-{}", std::process::id()));
+                let _ = std::fs::create_dir_all(&dir);
+                for (i, (program, want)) in examples.iter().enumerate() {
+                    let f = dir.join(format!("example{i}.mim"));
+                    std::fs::write(&f, program).map_err(|e| e.to_string())?;
+                    let (_, out, err, _) = self.mimic(&["run".into(), f.display().to_string()], None, Duration::from_secs(60))?;
+                    if out != *want {
+                        report.push(json!({ "example": i + 1, "expected": want, "got": out, "errors": err.lines().filter(|l| !l.trim_start().starts_with("Running")).collect::<Vec<_>>().join("\n") }));
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+                let msg = json!({ "wrote": p.display().to_string(), "examples": examples.len(), "failing": report });
+                let t = serde_json::to_string_pretty(&msg).unwrap_or_default();
+                Ok(if msg["failing"].as_array().is_some_and(|a| !a.is_empty()) { failure(t) } else { text(t) })
+            }
+            "docs_build" => {
+                let (st, out, err, _) = self.mimic(&["doc".into()], None, Duration::from_secs(300))?;
+                Ok(if st == Some(0) { text(format!("{out}{err}")) } else { failure(format!("{out}{err}")) })
             }
             "read_file" => {
                 let p = self.path(&s("path"))?;
@@ -517,6 +574,7 @@ fn prompts() -> Vec<Value> {
         json!({ "name": "write_mimic", "description": "Write idiomatic Mimic for a task, checked with the tools.", "arguments": [{ "name": "task", "description": "What the program should do", "required": true }] }),
         json!({ "name": "port_to_mimic", "description": "Port code from another language to idiomatic Mimic.", "arguments": [{ "name": "code", "description": "The code to port", "required": true }, { "name": "language", "description": "C, Python, JavaScript, …", "required": false }] }),
         json!({ "name": "fix_errors", "description": "Fix every error mimic check reports in the project.", "arguments": [] }),
+        json!({ "name": "document_project", "description": "Document the project: comments on public items, and guides with examples that run as tests.", "arguments": [{ "name": "focus", "description": "A module or topic to start with", "required": false }] }),
     ]
 }
 
@@ -535,6 +593,13 @@ fn prompt(name: &str, args: &Value) -> Result<Value, String> {
             };
             ("Port code to Mimic", format!("Port this {lang} code to idiomatic Mimic (not a line-by-line translation: whole-array operations instead of loops, Option and Result instead of null and exceptions). The manual page `{guide}` lists the usual translations.\n\n```\n{}\n```\n\n{rules}", a("code")))
         }
+        "document_project" => (
+            "Document the project",
+            format!(
+                "Document this Mimic project{}. Call docs_status to see what has no comment and which guides exist. Add a short `//` comment right above each undocumented public item (what it does, its inputs and result; an example as `// > expression` with the value `print` would show on the next comment line runs as a test). Then write guides with docs_write: an overview of what the project is for, and a guide per main task, each with complete programs in ```mimic run blocks followed by their exact ```output; docs_write runs them and tells you which differ. Do not restate signatures: mimic doc shows them. Finish with docs_build and test. {rules}",
+                if a("focus").is_empty() { String::new() } else { format!(", starting with {}", a("focus")) }
+            ),
+        ),
         "fix_errors" => ("Fix the project's errors", format!("Call check on the project and fix every error it reports, applying its suggested fixes where they fit; explain any you change differently. Repeat until check passes, then run the tests. {rules}")),
         _ => return Err(format!("unknown prompt `{name}`")),
     };
