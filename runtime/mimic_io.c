@@ -924,9 +924,13 @@ static int lazy_run_one(void) {
 
 static void *future_main(void *p) {
     mim_future *fu = (mim_future *)p;
+    if (fu->started) prof_register("task");
     fu->result = mim_call(fu->f, fu->n, fu->args);
     fu->done = 1;
-    if (fu->started) free_list_drain(); /* this thread ends now */
+    if (fu->started) {
+        prof_unregister();
+        free_list_drain(); /* this thread ends now */
+    }
     return NULL;
 }
 

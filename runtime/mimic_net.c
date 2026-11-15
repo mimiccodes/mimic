@@ -951,6 +951,7 @@ static void net_work(TM *tm) {
         /* Idle. The run is finished when every participant is idle: only a
          * busy owner adds work to its bag, so all bags are then empty. */
         __atomic_fetch_add(&r->idle, 1, __ATOMIC_ACQ_REL);
+        PROF_IDLE(1);
         for (;;) {
             if (__atomic_load_n(&r->done, __ATOMIC_ACQUIRE)) goto out;
             if (__atomic_load_n(&r->idle, __ATOMIC_ACQUIRE) == __atomic_load_n(&r->participants, __ATOMIC_ACQUIRE)) {
@@ -961,6 +962,7 @@ static void net_work(TM *tm) {
             for (int k = 0; k < r->nworkers && !any; k++) any = bag_nonempty(&r->bags[k]);
             if (any) {
                 __atomic_fetch_sub(&r->idle, 1, __ATOMIC_ACQ_REL);
+                PROF_IDLE(0);
                 break;
             }
 #if MIM_THREADS
@@ -971,6 +973,7 @@ static void net_work(TM *tm) {
         }
     }
 out:
+    PROF_IDLE(0);
     __atomic_fetch_add(&r->interactions, tm->itrs, __ATOMIC_RELAXED);
 }
 

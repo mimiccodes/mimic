@@ -69,6 +69,9 @@ pub struct Profile {
     /// `--shared`: a library as a shared library (.dll, .so, .dylib)
     /// exporting its `extern "C" fn`s, instead of a static archive.
     pub shared: bool,
+    /// `mimic profile`: frame pointers everywhere (a release build in
+    /// target/profiling/), so the sampler can walk the stack.
+    pub frame_pointers: bool,
 }
 
 impl Profile {
@@ -78,10 +81,16 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false }
     }
     pub fn name(&self) -> &'static str {
-        if self.release { "release" } else { "debug" }
+        if self.frame_pointers {
+            "profiling"
+        } else if self.release {
+            "release"
+        } else {
+            "debug"
+        }
     }
 }
 
@@ -1011,6 +1020,7 @@ pub fn plan(input: &Input, program: &Program) -> Result<Vec<mimic_codegen::Decis
             strict_math: profile.strict_math,
             fast_math: profile.fast_math,
             debug_info: false,
+            frame_pointers: false,
             tests: false,
             split: None,
         },
@@ -1043,12 +1053,15 @@ pub use crate::toolchain::run_tool;
 use crate::toolchain::{self, LinkJob, Toolchain};
 
 /// Compile (and cache) the C runtime for a target.
-pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Option<&str>) -> Result<PathBuf, String> {
+pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Option<&str>, frame_pointers: bool) -> Result<PathBuf, String> {
     let portable = cpu == Some("portable");
     let resolved = if portable { portable_cpu(target) } else { cpu.map(String::from) };
     let cpu = resolved.as_deref().or(if portable { Some("") } else { None });
     // the compiler flags (target, sysroot, minimum OS, CPU) are part of the key
     let mut flags: Vec<String> = vec!["-c".into(), if release { "-O3" } else { "-O1" }.into(), "-fPIC".into()];
+    if frame_pointers {
+        flags.push("-fno-omit-frame-pointer".into());
+    }
     if !target.is_apple() {
         // a section per function, so the linker drops what a program does not
         // use (Mach-O linkers do this by symbol without being asked)
@@ -1588,6 +1601,7 @@ fn codegen_and_link(
             strict_math: profile.strict_math,
             fast_math: profile.fast_math,
             debug_info: !profile.release,
+            frame_pointers: profile.frame_pointers,
             tests: profile.tests,
             // machine code in parts at once (native builds: linked here)
             split: if target.name.is_none() { Some(mimic_toolchain::split_codegen) } else { None },
@@ -1611,7 +1625,7 @@ fn codegen_and_link(
         }
         Err(why) => return Err(why),
     };
-    let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref())?;
+    let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref(), profile.frame_pointers)?;
     let c_objects = compile_c_sources(input, &program.c_sources, &header_dirs(input, None), &tc, target, profile, &dir)?;
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
@@ -1691,7 +1705,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
     let compiler = exe.map(|m| format!("{}:{:?}", m.len(), m.modified().ok())).unwrap_or_default();
     text.push_str(&format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
         profile.release,
         profile.net,
         profile.opt,
@@ -1701,6 +1715,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
         profile.tests,
         profile.shared,
         profile.emit_header,
+        profile.frame_pointers,
         target.name(),
         target.llvm,
         cpu,
@@ -1876,7 +1891,7 @@ pub fn build_net(file: &Path, release: bool) -> Result<PathBuf, String> {
     let c_src = dir.join("main.c");
     fs::write(&c_src, mimic_net::emit_c_main(&enc, entry, !release)).map_err(|e| e.to_string())?;
     let tc = toolchain::select(&target)?;
-    let rt = runtime_object(&tc, &target, release, None)?;
+    let rt = runtime_object(&tc, &target, release, None, false)?;
     let main_obj = dir.join("main.o");
     let mut c = toolchain::cc(&tc, &target);
     c.args(["-c", if release { "-O2" } else { "-O0" }]).arg(&c_src).arg("-o").arg(&main_obj);

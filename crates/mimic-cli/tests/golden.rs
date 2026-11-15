@@ -2092,3 +2092,31 @@ fn repl_session() {
     let want = "45\n[6 2 8]\n[9 1 16]\nerror[E0303]: cannot find `nope` in this scope\nhi\n[0 1 2]\nmodule main\n\nfn sq(x: i64) -> i64 {\n    x * x\n}\n\nfn main() {\n    let xs = [3 1 4]\n}\n(the session is empty)\nmodule main\n\nfn main() {\n}\n";
     assert_eq!(text, want);
 }
+
+/// `mimic profile`: the samples name the program's functions, the busy one
+/// first, with where the compiler runs it; threads, GPU and memory are there.
+#[test]
+fn profile_names_functions() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("busy.mim");
+    // a long sequential chain: one function holds nearly all the time
+    std::fs::write(
+        &f,
+        "module main\n\nfn spin(n: i64, acc: i64) -> i64 {\n    if n == 0 { acc } else { spin(n - 1, (acc * 31 + n) % 1000003) }\n}\n\nfn main() {\n    print(spin(50000000, 1) > 0)\n}\n",
+    )
+    .unwrap();
+    let out = mimic().args(["profile", "--json"]).arg(&f).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["samples"].as_u64().unwrap() >= 20, "{v}");
+    let top = &v["functions"][0];
+    assert!(top["function"].as_str().unwrap().ends_with("spin") || top["function"] == "main::main", "{v}");
+    assert!(top["self"].as_f64().unwrap() > 0.5, "{v}");
+    assert!(!v["threads"].as_array().unwrap().is_empty());
+    assert!(v["memory"]["allocations"].is_number() && v["gpu"]["kernels"].is_number());
+    // the program's own output goes to stderr with --json
+    assert!(String::from_utf8_lossy(&out.stderr).contains("true"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

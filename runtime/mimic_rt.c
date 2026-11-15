@@ -48,6 +48,10 @@ static void *memmem(const void *h, size_t hn, const void *n, size_t nn) {
 
 /* Platform BLAS, looked up at run time (no link-time dependency): Apple's
  * Accelerate everywhere on Apple systems, OpenBLAS when installed on Linux. */
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <sys/mman.h>
+#endif
+
 #if (defined(__APPLE__) || defined(__linux__)) && !defined(__wasi__)
 #define MIM_DLBLAS 1
 #include <dlfcn.h>
@@ -151,6 +155,95 @@ void mim_panic(const char *msg) {
     exit(101);
 }
 
+/* ==== profiler (`mimic profile`) =========================================
+ * With MIMIC_PROFILE=<file>, a sampler thread interrupts every registered
+ * thread (the main thread, the pool's workers, task threads) about
+ * MIMIC_PROFILE_HZ times a second (default 1000) and records where it is:
+ * the program counter and the return addresses found by following the
+ * frame pointers (profile builds keep them). A thread waiting for work
+ * only counts a waiting sample. At exit the samples and the counters
+ * (allocation, copies, GPU time) go to the file; `mimic profile` names the
+ * functions and prints the report. Without the variable all of this is
+ * off: a load and a branch in a few places. */
+#if MIM_THREADS && !defined(__wasi__)
+#define MIM_PROF 1
+#ifndef _WIN32
+#include <signal.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
+#endif
+#endif
+
+#define PROF_DEPTH 24
+#define PROF_THREADS 512
+typedef struct {
+    uint16_t thread;
+    uint8_t idle;
+    uint8_t depth;
+    uint32_t pad;
+    uint64_t pc[PROF_DEPTH];
+} prof_sample;
+
+typedef struct {
+#ifdef _WIN32
+    HANDLE h;
+#elif MIM_THREADS
+    pthread_t th;
+#endif
+    uintptr_t hi;           /* the top of the stack: frame pointers stay below */
+    volatile int *idle;     /* the thread's t_prof_idle */
+    int ready;              /* atomic: 1 while the thread can be sampled */
+    int64_t waiting;        /* atomic: samples while it waited for work */
+    int worker;             /* a pool worker: runs other threads' jobs */
+    char name[24];
+} prof_thread;
+
+int32_t mim_prof_on = 0;
+static prof_sample *g_prof;
+static int64_t g_prof_cap, g_prof_n;
+static prof_thread g_prof_threads[PROF_THREADS];
+static int g_prof_nthreads;
+static _Thread_local volatile int t_prof_idle;
+static _Thread_local int t_prof_id = -1;
+static int g_prof_stop;
+static int64_t g_prof_t0, g_prof_hz = 1000, g_prof_rounds;
+static const char *g_prof_path;
+/* counters, while profiling */
+int64_t mim_prof_gpu_ns, mim_prof_gpu_kernels, mim_prof_gpu_bytes, mim_prof_copy_bytes, mim_prof_copies;
+
+static int64_t prof_now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (int64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
+}
+
+#define PROF_IDLE(on) \
+    do { \
+        if (mim_prof_on) t_prof_idle = (on); \
+    } while (0)
+
+/* the stack of the thread that started the pool's current job: a worker's
+ * samples continue with it, so time in a parallel loop belongs to the
+ * Mimic function that started the loop */
+#define PROF_JOB_DEPTH 16
+static uint64_t g_prof_job[PROF_JOB_DEPTH];
+static int g_prof_job_depth;
+static void prof_job(void);
+static void prof_register(const char *name);
+static void prof_unregister(void);
+static void prof_start(const char *path);
+void mim_rt_init(int32_t argc, char **argv);
+
 /* ==== thread pool ======================================================== */
 
 typedef void (*mim_task)(void *ctx, int64_t lo, int64_t hi);
@@ -227,13 +320,16 @@ static void *worker(void *arg)
 {
     (void)arg;
     t_in_parallel = 1;
+    prof_register("worker");
     uint64_t seen = 0;
     mutex_lock(&g_mu);
     for (;;) {
+        PROF_IDLE(1);
         while (g_gen == seen || g_job == NULL) {
             if (g_gen != seen) seen = g_gen; /* job already retired */
             cond_wait(&g_work, &g_mu);
         }
+        PROF_IDLE(0);
         seen = g_gen;
         mim_job *j = g_job;
         j->active++;
@@ -284,6 +380,7 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
     if (g_nthreads > 1 && nchunks > 1 && !t_in_parallel) {
         if (!g_started) start_pool();
         mim_job j = {fn, ctx, n, nchunks, grain, 0, nchunks, 0};
+        prof_job();
         mutex_lock(&g_mu);
         __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED); /* no regions inside */
         g_job = &j;
@@ -294,9 +391,11 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         run_chunks(&j);
         t_in_parallel = 0;
         mutex_lock(&g_mu);
+        PROF_IDLE(1);
         while (__atomic_load_n(&j.remaining, __ATOMIC_ACQUIRE) > 0) cond_wait(&g_done, &g_mu);
         g_job = NULL; /* no new worker may attach */
         while (j.active > 0) cond_wait(&g_done, &g_mu);
+        PROF_IDLE(0);
         __atomic_store_n(&mim_fj_open, 1, __ATOMIC_RELAXED);
         mutex_unlock(&g_mu);
         return;
@@ -439,7 +538,14 @@ static inline void fj_relax(void) {
 /* Waiting for work, politely: spin a little (a new task is taken at
  * once), then give the core away (other threads, other programs), then
  * sleep in short naps. `misses` counts the checks that found nothing. */
+static void fj_idle_now(int misses);
 static void fj_idle(int misses) {
+    PROF_IDLE(1);
+    fj_idle_now(misses);
+    PROF_IDLE(0);
+}
+
+static void fj_idle_now(int misses) {
     if (misses < 64) {
         fj_relax();
     } else if (misses < 2048) {
@@ -591,6 +697,7 @@ int32_t mim_fj_enter(void) {
     __atomic_store_n(&g_fj_done, 0, __ATOMIC_RELAXED);
     int64_t w = g_nthreads - 1;
     mim_job j = {fj_worker, NULL, w, w, 1, 0, w, 0};
+    prof_job();
     g_fj_job = j;
     g_job = &g_fj_job;
     g_gen++;
@@ -658,7 +765,7 @@ static size_t elsize(int dt) {
 #define MAX_SLOTS 257
 
 /* per-thread counters, padded to 128-byte lines (Apple Silicon) */
-typedef struct { int64_t n; int64_t nodes; int64_t itrs; char pad[104]; } padded_count;
+typedef struct { int64_t n; int64_t nodes; int64_t itrs; int64_t bytes; int64_t allocs; char pad[88]; } padded_count;
 static padded_count g_live_slots[MAX_SLOTS];
 static int g_next_slot = 0;
 /* Everything the allocator keeps per thread, in one place: one thread-local
@@ -698,6 +805,285 @@ heap_state *mim_heap(void) {
     live_of(h);
     return h;
 }
+
+#if MIM_PROF
+/* One sample: pc, then the return addresses up the frame-pointer chain
+ * (each frame: the caller's frame pointer, then the return address),
+ * never outside [sp, hi). */
+static void prof_record(int id, uint64_t pc, uint64_t lr, uintptr_t fp, uintptr_t sp) {
+    prof_thread *t = &g_prof_threads[id];
+    if (t->idle && *t->idle) {
+        __atomic_fetch_add(&t->waiting, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    int64_t k = __atomic_fetch_add(&g_prof_n, 1, __ATOMIC_RELAXED);
+    if (k >= g_prof_cap) return;
+    prof_sample *s = &g_prof[k];
+    int d = 0;
+    s->pc[d++] = pc;
+    /* arm64: a function that calls nothing keeps no frame; its caller is in
+     * the link register (elsewhere it names this function again: harmless) */
+    if (lr) s->pc[d++] = lr - 1;
+    while (d < PROF_DEPTH && fp >= sp && fp + 16 <= t->hi && (fp & 7) == 0) {
+        uintptr_t next = ((uintptr_t *)fp)[0];
+        uintptr_t ret = ((uintptr_t *)fp)[1];
+        if (!ret) break;
+        s->pc[d++] = (uint64_t)ret - 1; /* inside the call */
+        if (next <= fp) break;
+        fp = next;
+    }
+    if (t->worker)
+        for (int k = 0; k < g_prof_job_depth && d < PROF_DEPTH; k++) s->pc[d++] = g_prof_job[k];
+    s->thread = (uint16_t)id;
+    s->idle = 0;
+    s->depth = (uint8_t)d;
+}
+
+#ifndef _WIN32
+static void prof_signal(int sig, siginfo_t *si, void *ucv) {
+    (void)sig;
+    (void)si;
+    int id = t_prof_id;
+    if (id < 0 || __atomic_load_n(&g_prof_stop, __ATOMIC_RELAXED)) return;
+    ucontext_t *uc = (ucontext_t *)ucv;
+    uint64_t pc = 0, lr = 0;
+    uintptr_t fp = 0, sp = 0;
+#if defined(__APPLE__) && defined(__aarch64__)
+    pc = uc->uc_mcontext->__ss.__pc;
+    lr = uc->uc_mcontext->__ss.__lr;
+    fp = uc->uc_mcontext->__ss.__fp;
+    sp = uc->uc_mcontext->__ss.__sp;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    pc = uc->uc_mcontext->__ss.__rip;
+    fp = uc->uc_mcontext->__ss.__rbp;
+    sp = uc->uc_mcontext->__ss.__rsp;
+#elif defined(__linux__) && defined(__x86_64__)
+    pc = (uint64_t)uc->uc_mcontext.gregs[16]; /* REG_RIP */
+    fp = (uintptr_t)uc->uc_mcontext.gregs[10]; /* REG_RBP */
+    sp = (uintptr_t)uc->uc_mcontext.gregs[15]; /* REG_RSP */
+#elif defined(__linux__) && defined(__aarch64__)
+    pc = uc->uc_mcontext.pc;
+    lr = uc->uc_mcontext.regs[30];
+    fp = (uintptr_t)uc->uc_mcontext.regs[29];
+    sp = (uintptr_t)uc->uc_mcontext.sp;
+#else
+    (void)uc;
+#endif
+    int saved = errno;
+    prof_record(id, pc, lr, fp, sp);
+    errno = saved;
+}
+#endif
+
+/* Make this thread one the sampler interrupts. */
+static void prof_register(const char *name) {
+    if (!mim_prof_on || t_prof_id >= 0) return;
+    int id = __atomic_fetch_add(&g_prof_nthreads, 1, __ATOMIC_RELAXED);
+    if (id >= PROF_THREADS) return;
+    prof_thread *t = &g_prof_threads[id];
+    volatile char here = 0;
+#ifdef _WIN32
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    t->hi = (uintptr_t)tib->StackBase;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &t->h, 0, FALSE, DUPLICATE_SAME_ACCESS);
+#elif defined(__APPLE__)
+    t->hi = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+    t->th = pthread_self();
+#else
+    /* the stack above this frame: what calls the thread's code */
+    t->hi = (uintptr_t)&here + ((uintptr_t)1 << 16);
+    t->th = pthread_self();
+#endif
+    (void)here;
+    snprintf(t->name, sizeof t->name, "%s", name);
+    t->worker = strcmp(name, "worker") == 0;
+    t_prof_idle = 0;
+    t->idle = &t_prof_idle;
+    t_prof_id = id;
+    __atomic_store_n(&t->ready, 1, __ATOMIC_RELEASE);
+}
+
+/* Remember this thread's stack as the one a new job comes from. */
+static void prof_job(void) {
+    if (!mim_prof_on) return;
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+    uintptr_t hi = t_prof_id >= 0 && t_prof_id < PROF_THREADS ? g_prof_threads[t_prof_id].hi : fp + ((uintptr_t)1 << 20);
+    int d = 0;
+    while (d < PROF_JOB_DEPTH && fp && fp + 16 <= hi && (fp & 7) == 0) {
+        uintptr_t next = ((uintptr_t *)fp)[0];
+        uintptr_t ret = ((uintptr_t *)fp)[1];
+        if (!ret) break;
+        g_prof_job[d++] = (uint64_t)ret - 1;
+        if (next <= fp) break;
+        fp = next;
+    }
+    g_prof_job_depth = d;
+}
+
+/* Before a registered thread ends. */
+static void prof_unregister(void) {
+    int id = t_prof_id;
+    if (id < 0 || id >= PROF_THREADS) return;
+    /* the sampler holds `ready` at 2 while it interrupts the thread */
+    int one = 1;
+    while (!__atomic_compare_exchange_n(&g_prof_threads[id].ready, &one, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        if (one == 0) break;
+        one = 1;
+    }
+    t_prof_id = -1;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI prof_sampler(LPVOID arg)
+#else
+static void *prof_sampler(void *arg)
+#endif
+{
+    (void)arg;
+#ifdef __APPLE__
+    /* ahead of the workers when every core is busy */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
+    int64_t period = 1000000000LL / g_prof_hz;
+    while (!__atomic_load_n(&g_prof_stop, __ATOMIC_ACQUIRE)) {
+#ifdef _WIN32
+        Sleep((DWORD)(period / 1000000 > 0 ? period / 1000000 : 1));
+#else
+        struct timespec ts = {(time_t)(period / 1000000000LL), (long)(period % 1000000000LL)};
+        nanosleep(&ts, NULL);
+#endif
+        int n = __atomic_load_n(&g_prof_nthreads, __ATOMIC_ACQUIRE);
+        if (n > PROF_THREADS) n = PROF_THREADS;
+        g_prof_rounds++;
+        for (int i = 0; i < n; i++) {
+            prof_thread *t = &g_prof_threads[i];
+            int one = 1;
+            if (!__atomic_compare_exchange_n(&t->ready, &one, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+#ifdef _WIN32
+            if (SuspendThread(t->h) != (DWORD)-1) {
+                CONTEXT c;
+                memset(&c, 0, sizeof c);
+                c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                if (GetThreadContext(t->h, &c)) {
+#if defined(_M_ARM64) || defined(__aarch64__)
+                    prof_record(i, c.Pc, c.Lr, (uintptr_t)c.Fp, (uintptr_t)c.Sp);
+#else
+                    prof_record(i, c.Rip, 0, (uintptr_t)c.Rbp, (uintptr_t)c.Rsp);
+#endif
+                }
+                ResumeThread(t->h);
+            }
+#else
+            pthread_kill(t->th, SIGPROF);
+#endif
+            __atomic_store_n(&t->ready, 1, __ATOMIC_RELEASE);
+        }
+    }
+    return 0;
+}
+
+#ifndef _WIN32
+static pthread_t g_prof_thread;
+#else
+static HANDLE g_prof_thread;
+#endif
+
+static void prof_write(void) {
+    if (!mim_prof_on) return;
+    __atomic_store_n(&g_prof_stop, 1, __ATOMIC_RELEASE);
+#ifdef _WIN32
+    WaitForSingleObject(g_prof_thread, INFINITE);
+#else
+    pthread_join(g_prof_thread, NULL);
+#endif
+    int64_t wall = prof_now() - g_prof_t0;
+    FILE *f = fopen(g_prof_path, "wb");
+    if (!f) {
+        fprintf(stderr, "mimic: cannot write the profile to %s\n", g_prof_path);
+        return;
+    }
+    int64_t n = __atomic_load_n(&g_prof_n, __ATOMIC_ACQUIRE);
+    int64_t lost = n > g_prof_cap ? n - g_prof_cap : 0;
+    if (n > g_prof_cap) n = g_prof_cap;
+    int nt = g_prof_nthreads < PROF_THREADS ? g_prof_nthreads : PROF_THREADS;
+    int64_t bytes = 0, allocs = 0;
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        bytes += __atomic_load_n(&g_live_slots[i].bytes, __ATOMIC_RELAXED);
+        allocs += __atomic_load_n(&g_live_slots[i].allocs, __ATOMIC_RELAXED);
+    }
+    fprintf(f, "mimic-profile 1\nhz %lld\nwall_ns %lld\nanchor %llx\n", (long long)g_prof_hz, (long long)wall, (unsigned long long)(uintptr_t)&mim_rt_init);
+    fprintf(f, "counter alloc_bytes %lld\ncounter allocs %lld\n", (long long)bytes, (long long)allocs);
+    fprintf(f, "counter copy_bytes %lld\ncounter copies %lld\n", (long long)mim_prof_copy_bytes, (long long)mim_prof_copies);
+    fprintf(f, "counter gpu_ns %lld\ncounter gpu_kernels %lld\ncounter gpu_bytes %lld\n", (long long)mim_prof_gpu_ns, (long long)mim_prof_gpu_kernels, (long long)mim_prof_gpu_bytes);
+    fprintf(f, "counter lost %lld\ncounter rounds %lld\n", (long long)lost, (long long)g_prof_rounds);
+#if MIM_DLBLAS
+    /* addresses outside the program (system libraries): named here, where
+     * the loaded libraries are known */
+    {
+        Dl_info self;
+        void *base = dladdr((void *)&mim_rt_init, &self) ? self.dli_fbase : NULL;
+        int64_t cap = 1 << 14, used = 0;
+        uint64_t *seen = (uint64_t *)calloc((size_t)cap, sizeof(uint64_t));
+        for (int64_t i = 0; seen && i < n && used < cap / 2; i++)
+            for (int k = 0; k < g_prof[i].depth && used < cap / 2; k++) {
+                uint64_t pc = g_prof[i].pc[k];
+                Dl_info di;
+                if (!pc || !dladdr((void *)(uintptr_t)pc, &di) || di.dli_fbase == base || !di.dli_sname) continue;
+                uint64_t h = (pc * 0x9E3779B97F4A7C15ull) & (uint64_t)(cap - 1);
+                while (seen[h] && seen[h] != pc) h = (h + 1) & (uint64_t)(cap - 1);
+                if (seen[h]) continue;
+                seen[h] = pc;
+                used++;
+                const char *lib = di.dli_fname ? strrchr(di.dli_fname, '/') : NULL;
+                fprintf(f, "sym %llx %s %s\n", (unsigned long long)pc, lib ? lib + 1 : "?", di.dli_sname);
+            }
+        free(seen);
+    }
+#endif
+    for (int i = 0; i < nt; i++) fprintf(f, "thread %d %lld %s\n", i, (long long)g_prof_threads[i].waiting, g_prof_threads[i].name);
+    fprintf(f, "samples %lld %d\n", (long long)n, PROF_DEPTH);
+    fwrite(g_prof, sizeof(prof_sample), (size_t)n, f);
+    fclose(f);
+}
+
+static void prof_start(const char *path) {
+    g_prof_path = path;
+    const char *hz = getenv("MIMIC_PROFILE_HZ");
+    if (hz && atoll(hz) > 0) g_prof_hz = atoll(hz) > 20000 ? 20000 : atoll(hz);
+    g_prof_cap = (int64_t)1 << 20; /* about 200 MB of address space, touched as used */
+#ifdef _WIN32
+    g_prof = (prof_sample *)VirtualAlloc(NULL, (size_t)g_prof_cap * sizeof(prof_sample), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    g_prof = (prof_sample *)mmap(NULL, (size_t)g_prof_cap * sizeof(prof_sample), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if ((void *)g_prof == MAP_FAILED) g_prof = NULL;
+#endif
+    if (!g_prof) return;
+#ifndef _WIN32
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = prof_signal;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGPROF, &sa, NULL);
+#endif
+    mim_prof_on = 1;
+    g_prof_t0 = prof_now();
+    prof_register("main");
+#ifdef _WIN32
+    g_prof_thread = CreateThread(NULL, 0, prof_sampler, NULL, 0, NULL);
+#else
+    pthread_create(&g_prof_thread, NULL, prof_sampler, NULL);
+#endif
+    atexit(prof_write);
+}
+#else
+static void prof_register(const char *name) { (void)name; }
+static void prof_job(void) {}
+static void prof_unregister(void) {}
+static void prof_start(const char *path) { (void)path; }
+#endif
 
 /* The size class of a payload, or SIZE_CLASSES when it is bigger. */
 static inline int size_class(size_t bytes) {
@@ -805,6 +1191,10 @@ static mim_val *alloc(int dtype, int rank, int64_t len) {
     if (elsize(dtype) == 1) ((char *)v->data)[bytes - 1] = 0;
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n + 1, __ATOMIC_RELAXED);
+    if (mim_prof_on) {
+        __atomic_store_n(&lc->bytes, lc->bytes + (int64_t)bytes, __ATOMIC_RELAXED);
+        __atomic_store_n(&lc->allocs, lc->allocs + 1, __ATOMIC_RELAXED);
+    }
     return v;
 }
 
@@ -1049,6 +1439,8 @@ void mim_rt_init(int32_t argc, char **argv) {
     ((uint8_t *)g_false->data)[0] = 0;
     const char *t = getenv("MIMIC_THREADS");
     const char *g = getenv("MIMIC_PAR_GRAIN");
+    const char *prof = getenv("MIMIC_PROFILE");
+    if (prof && *prof) prof_start(prof);
     if (g && atoll(g) > 0) {
         g_grain = atoll(g);
         mim_grain = g_grain;
@@ -3313,6 +3705,10 @@ static void map_set(mim_val **slot, mim_val *k, mim_val *v);
 static mim_val *copy_whole(mim_val *a) {
     mim_val *r = alloc_like(a->dtype, a);
     memcpy(r->data, a->data, (size_t)a->len * elsize(a->dtype));
+    if (mim_prof_on) {
+        __atomic_fetch_add(&mim_prof_copy_bytes, (int64_t)a->len * elsize(a->dtype), __ATOMIC_RELAXED);
+        __atomic_fetch_add(&mim_prof_copies, 1, __ATOMIC_RELAXED);
+    }
     retain_children(r);
     return r;
 }

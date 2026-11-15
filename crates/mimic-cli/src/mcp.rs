@@ -182,6 +182,7 @@ impl Server {
         }
         if !self.access.read_only && !self.access.no_run {
             t.push(tool("run", "Build and run the project (or a standalone file with module main); returns its output and exit status. Stops it after timeout_s seconds (default 30).", json!({ "file": file, "args": { "type": "array", "items": { "type": "string" } }, "stdin": { "type": "string" }, "release": { "type": "boolean" }, "timeout_s": { "type": "integer" } }), &[], false));
+            t.push(tool("profile", "Run the program sampled and report where its time goes, as JSON: the share of time per function (self and with what it calls) with where the compiler runs it (parallel, fused, SIMD, GPU), each thread's share of time working, GPU time, and memory allocated and copied. A release build with frame pointers.", json!({ "file": file, "args": { "type": "array", "items": { "type": "string" } }, "timeout_s": { "type": "integer" } }), &[], false));
             t.push(tool("test", "Run the tests (test blocks and examples in comments) of the project or a file; words filter by name.", json!({ "file": file, "filter": { "type": "array", "items": { "type": "string" } } }), &[], false));
         }
         if self.access.allow_install && !self.access.read_only {
@@ -285,13 +286,32 @@ impl Server {
         }
     }
 
+    /// Programs that use the network or run other programs run only with
+    /// --allow-network.
+    fn network_gate(&mut self, a: &Value) -> Result<(), String> {
+        if self.access.allow_network {
+            return Ok(());
+        }
+        let uses = match self.file_arg(a)? {
+            Some(f) => Engine::for_file(Path::new(&f)).uses_of(&NETWORK).unwrap_or_default(),
+            None => self.engine()?.uses_of(&NETWORK).unwrap_or_default(),
+        };
+        if uses.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "this program uses the network or runs other programs ({}); running it is off until the user starts the server with --allow-network. It can still be checked and built.",
+            uses.join(", ")
+        ))
+    }
+
     fn call(&mut self, name: &str, a: &Value) -> Result<Value, String> {
         let s = |k: &str| a.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let writes = ["write_file", "format", "build", "run", "test", "install", "docs_write", "docs_build"];
+        let writes = ["write_file", "format", "build", "run", "profile", "test", "install", "docs_write", "docs_build"];
         if self.access.read_only && writes.contains(&name) {
             return Err(format!("`{name}` is off: this server is read-only (mimic mcp --read-only)"));
         }
-        if self.access.no_run && ["run", "test"].contains(&name) {
+        if self.access.no_run && ["run", "profile", "test"].contains(&name) {
             return Err(format!("`{name}` is off: the user started this server with --no-run"));
         }
         match name {
@@ -491,19 +511,26 @@ impl Server {
                 let body = format!("{out}{}", if err.trim().is_empty() { String::new() } else { format!("\n{err}") });
                 Ok(if st == Some(0) { text(body) } else { failure(body) })
             }
-            "run" => {
-                if !self.access.allow_network {
-                    let uses = match self.file_arg(a)? {
-                        Some(f) => Engine::for_file(Path::new(&f)).uses_of(&NETWORK).unwrap_or_default(),
-                        None => self.engine()?.uses_of(&NETWORK).unwrap_or_default(),
-                    };
-                    if !uses.is_empty() {
-                        return Err(format!(
-                            "this program uses the network or runs other programs ({}); running it is off until the user starts the server with --allow-network. It can still be checked and built.",
-                            uses.join(", ")
-                        ));
-                    }
+            "profile" => {
+                self.network_gate(a)?;
+                let mut args = vec!["profile".to_string(), "--json".to_string()];
+                if let Some(f) = self.file_arg(a)? {
+                    args.push(f);
                 }
+                if let Some(xs) = a.get("args").and_then(Value::as_array) {
+                    args.push("--".into());
+                    args.extend(xs.iter().filter_map(|x| x.as_str().map(String::from)));
+                }
+                let secs = a.get("timeout_s").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
+                let (_, out, err, timed_out) = self.mimic(&args, None, Duration::from_secs(secs))?;
+                if timed_out {
+                    return Ok(failure(format!("stopped after {secs} s: the profile is written when the program ends")));
+                }
+                // (the program's own output went to stderr)
+                Ok(if out.trim_start().starts_with('{') { text(out) } else { failure(format!("{out}{err}").trim().to_string()) })
+            }
+            "run" => {
+                self.network_gate(a)?;
                 let mut args = vec!["run".to_string()];
                 if a.get("release").and_then(Value::as_bool) == Some(true) {
                     args.push("--release".into());

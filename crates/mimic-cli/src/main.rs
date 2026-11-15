@@ -15,6 +15,7 @@ mod lsp;
 mod man;
 mod mcp;
 mod modfile;
+mod profile;
 mod repl;
 mod report;
 mod targets;
@@ -296,6 +297,23 @@ enum Cmd {
     },
     /// Type Mimic a line at a time and see the values (`:help` lists the commands)
     Repl,
+    /// Run the program and show where its time goes: per function, per core, CPU and GPU, memory
+    Profile {
+        /// A .mim file (default: the project here)
+        file: Option<PathBuf>,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Samples per second on each thread (default 1000)
+        #[arg(long)]
+        hz: Option<u32>,
+        /// How many functions to list
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        /// Arguments for the program (after `--`)
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
         /// Accepted for editors that pass it; stdin and stdout are always used
@@ -599,6 +617,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Profile { file, json, hz, top, args } => profile::run(profile::Options { file, json, hz, top, args }),
         Cmd::Repl => {
             repl::run()?;
             Ok(ExitCode::SUCCESS)

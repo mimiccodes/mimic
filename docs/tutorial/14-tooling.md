@@ -157,6 +157,15 @@ test, F1 for the manual on the word under the cursor, and labels showing
 where code runs in parallel. Ctrl-S saves, Ctrl-Q quits. `mimic man editors`
 lists every key.
 
+## Where the time goes
+
+`mimic profile` runs the program and shows which functions take the time,
+on how many cores, on the CPU or the GPU, and how much memory it allocates,
+with where the compiler runs each function (`∥ parallel`, `⇶ fused`,
+`▣ GPU`). A function that takes most of the time on one core is the first
+place to look; `mimic why` tells why it runs there. `mimic man profile`
+explains every part of the report.
+
 ## Trying things out
 
 `mimic repl` reads Mimic a line at a time and shows each value:

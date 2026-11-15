@@ -98,7 +98,7 @@ The compiler is `crates/mimic-codegen/src/tonet.rs`. Run `mimic build --emit-net
   * calls to other eligible functions.
 
   Everything else stays native, and every function keeps its LLVM version.
-* **Entry.** An eligible function that calls functions is *entered* through the net: its native symbol becomes a wrapper around `mim_net_call`. Leaf functions stay native when called from native code, because there is nothing in them to parallelise.
+* **Entry.** An eligible function with two calls on one path through it (`fib(n - 1) + fib(n - 2)`), or that calls such a function, is *entered* through the net: its native symbol becomes a wrapper around `mim_net_call`. Leaf functions stay native when called from native code, because there is nothing in them to parallelise; so do functions whose calls are all in different branches of an `if`, such as a loop written as tail recursion (`spin(n - 1, acc)`), which LLVM turns into a loop. On the net such a loop gained nothing and ran 2× slower on the clock, on 8 cores' worth of CPU.
 
 ### How code becomes a net
 

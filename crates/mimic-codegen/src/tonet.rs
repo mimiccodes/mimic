@@ -8,10 +8,13 @@
 //!   bools, variables, `let`, operators, primitives (except `¨`), indexing,
 //!   `if`/`else`, tail `return`s, and calls to other eligible functions.
 //!   Everything else stays native; every function keeps its LLVM version.
-//! * **Entry.** An eligible function that calls functions (recursion, fan-out)
-//!   is *entered* through the net: its native body becomes a wrapper around
-//!   `mim_net_call`. Leaf functions stay native when called from native code
-//!   (nothing to parallelise) and are REFs when called from nets.
+//! * **Entry.** An eligible function with calls that can run at the same
+//!   time (two calls on one path through it: `fib(n - 1) + fib(n - 2)`), in
+//!   itself or in a function it calls, is *entered* through the net: its
+//!   native body becomes a wrapper around `mim_net_call`. Leaf functions, and
+//!   functions whose calls are all in different branches (a loop written as
+//!   tail recursion), stay native when called from native code (nothing to
+//!   parallelise) and are REFs when called from nets.
 //! * **Sharing.** A variable used k times is bound to a chain of k-1 DUP nodes;
 //!   unused ones are erased.
 //! * **Laziness.** `if` compiles to SWI over two lifted branch definitions that
@@ -116,7 +119,23 @@ pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
     }
     let def_index: HashMap<FnId, u32> =
         ids.iter().map(|f| (*f, defs.iter().position(|d| d.name == names[f]).unwrap() as u32)).collect();
-    let entered = ids.iter().copied().filter(|f| !cand[f].1.is_empty()).collect();
+    // entered: something in reach makes two calls that can run at once
+    let wide: HashSet<FnId> = ids.iter().copied().filter(|f| width(&cand[f].0) >= 2).collect();
+    let reaches_wide = |f: FnId| {
+        let mut seen = HashSet::new();
+        let mut todo = vec![f];
+        while let Some(g) = todo.pop() {
+            if !seen.insert(g) {
+                continue;
+            }
+            if wide.contains(&g) {
+                return true;
+            }
+            todo.extend(cand.get(&g).map(|c| c.1.clone()).unwrap_or_default());
+        }
+        false
+    };
+    let entered = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f)).collect();
     // what needs no definition expanded is reduced now, once (F7)
     let mut book = Book { defs };
     book.pre_reduce();
@@ -285,6 +304,34 @@ impl Eligible<'_> {
             ExprKind::Block(b) => self.block(b),
             _ => false, // strings, array literals, lambdas, unsafe, if-without-else
         }
+    }
+}
+
+/// The most calls one evaluation of `b` can make side by side: the calls
+/// in an `if` are on different paths (only one branch runs).
+fn width(b: &Block) -> usize {
+    let stmts: usize = b
+        .stmts
+        .iter()
+        .map(|s| match s {
+            Stmt::Let { value, .. } => width_expr(value),
+            Stmt::Expr(e) => width_expr(e),
+            _ => 0,
+        })
+        .sum();
+    stmts + b.tail.as_deref().map_or(0, width_expr)
+}
+
+fn width_expr(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Call { args, .. } => 1 + args.iter().map(width_expr).sum::<usize>(),
+        ExprKind::If { cond, then, els } => width_expr(cond) + width(then).max(els.as_deref().map_or(0, width_expr)),
+        ExprKind::Binary { lhs, rhs, .. } => width_expr(lhs) + width_expr(rhs),
+        ExprKind::Unary { expr, .. } => width_expr(expr),
+        ExprKind::Index { base, index } => width_expr(base) + width_expr(index),
+        ExprKind::Prim { args, .. } => args.iter().map(width_expr).sum(),
+        ExprKind::Block(b) => width(b),
+        _ => 0,
     }
 }
 
@@ -697,6 +744,8 @@ fn mutates(x) {
     y
 }
 fn strings() { \"no\" }
+fn spin(n, acc) { if n == 0 { acc } else { spin(n - 1, acc + n) } }
+fn uses_fib(n) { fib(n) + 1 }
 ",
         );
         let has = |n: &str| plan.def_index.contains_key(&fid(&p, n));
@@ -704,6 +753,8 @@ fn strings() { \"no\" }
         assert!(has("fib") && entered("fib"), "recursive pure fn runs on the net");
         assert!(has("leaf") && !entered("leaf"), "leaf: compiled for net callers, native from native code");
         assert!(has("calls_leaf") && entered("calls_leaf"));
+        assert!(has("spin") && !entered("spin"), "a loop as tail recursion: one call per path, nothing to run at once");
+        assert!(entered("uses_fib"), "calls something with calls side by side");
         assert!(!has("noisy") && !has("main"), "impure functions stay native");
         assert!(!has("mutates") && !has("strings"), "outside the net subset");
         // the book encodes, and the if became a SWI over two lazy branch defs

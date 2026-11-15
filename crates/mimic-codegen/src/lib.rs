@@ -81,6 +81,9 @@ pub struct Settings {
     pub fast_math: bool,
     /// Debug information (DWARF): debug builds (dbg.rs).
     pub debug_info: bool,
+    /// Frame pointers in every function, so a sampling profiler can walk
+    /// the stack (`mimic profile`).
+    pub frame_pointers: bool,
     /// Machine code for a large module in parts at once, one object per
     /// part (the toolchain's split_codegen); `None`: one object.
     pub split: Option<SplitFn>,
@@ -149,6 +152,26 @@ pub struct Decision {
 thread_local! {
     /// Decisions being recorded (see `plan`); `None` in ordinary builds.
     static DECISIONS: std::cell::RefCell<Option<Vec<Decision>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The function symbols of a built program (Mach-O, ELF or COFF), with
+/// their addresses, sorted: `mimic profile` names sampled addresses by them.
+pub fn symbols(path: &Path) -> R<Vec<(u64, String)>> {
+    let buf = inkwell::memory_buffer::MemoryBuffer::create_from_file(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let bin = buf.create_binary_file(None).map_err(|e| format!("cannot read the symbols of {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    if let Some(mut syms) = bin.get_symbols() {
+        while let Some(sym) = syms.next_symbol() {
+            let Some(name) = sym.get_name() else { continue };
+            let addr = sym.get_address();
+            if addr != 0 {
+                out.push((addr, name.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    out.sort();
+    out.dedup_by_key(|(a, _)| *a);
+    Ok(out)
 }
 
 /// Every decision about where code runs, made by compiling `p` as a build
@@ -308,6 +331,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         futures: Vec::new(),
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
+        profiling: settings.frame_pointers,
         contract: !settings.strict_math,
         fast: settings.fast_math,
         exit_fid: None,
@@ -376,6 +400,12 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
     }
     if let Some(d) = &cg.dbg {
         d.finalize();
+    }
+    if settings.frame_pointers {
+        let fp = cg.ctx.create_string_attribute("frame-pointer", "all");
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, fp);
+        }
     }
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
@@ -545,6 +575,9 @@ struct Cg<'ctx, 'p> {
     lazies: Vec<(String, *const Expr)>,
     /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
     opt_level: u8,
+    /// A profiling build (Settings::frame_pointers): every allocation goes
+    /// through the runtime's allocator, which counts them.
+    profiling: bool,
     /// Float `+ - ×` may fuse into multiply-adds (Settings::strict_math off).
     contract: bool,
     /// --fast-math (see Settings::fast_math)
@@ -1038,6 +1071,8 @@ impl<'ctx> Cg<'ctx, '_> {
             let bytes = b.build_int_add(b.build_int_mul(n, es, "").s()?, extra, "bytes").s()?;
             let c = self.size_class_of(&b, bytes)?;
             let fits = b.build_int_compare(IntPredicate::ULT, c, i64t.const_int(3, false), "").s()?;
+            // (a profiling build counts every allocation: the runtime's path)
+            let fits = if self.profiling { self.ctx.bool_type().const_zero() } else { fits };
             b.build_conditional_branch(fits, pop, slow).s()?;
             b.position_at_end(pop);
             let zero = i32t.const_zero();
@@ -1906,6 +1941,15 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Run `f` with the builder positioned in a fresh function, restoring the
     /// current function state afterwards.
+    /// A fused kernel's name: the function it comes from, so profiles and
+    /// debuggers show where its time belongs (`…main__f$i$kernel3`).
+    fn kernel_name(&self) -> String {
+        match self.cur_fn {
+            Some(f) => format!("{}$kernel{}", f.get_name().to_string_lossy(), self.lambdas),
+            None => format!("_mimic_kernel_{}", self.lambdas),
+        }
+    }
+
     fn in_new_fn<T>(&mut self, fv: FunctionValue<'ctx>, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
         let saved_bb = self.b.get_insert_block();
         let saved_fn = self.cur_fn.replace(fv);

@@ -57,7 +57,9 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Seeing where code runs in parallel, and why not (`mimic why`) | ✅ (`mimic why`, labels in editors) | 0.3.9 |
 | Quality, security and verification checks (`mimic audit`, contracts, property tests) | ✅ (`mimic audit`, `requires`/`ensures`, `test … for`) | 0.3.10, 0.3.11 |
 | A terminal editor (`mimic edit`) | ✅ | 0.3.12 |
-| A REPL, a profiler, and benchmarks against Rust and Go | ✅ REPL (`mimic repl`); ✅ Rust + Rayon column (`bench/*/rayon`); the profiler next | 0.3.13 |
+| A REPL, a profiler, and benchmarks against Rust and Go | ✅ (`mimic repl`, `mimic profile`, Rust + Rayon in `bench/*/rayon`) | 0.3.13 |
+| The profiler on every platform as on macOS | Sampling is written for Linux and Windows too and builds there, but has only been run on macOS; on x86_64 Linux, a C library function without frame pointers can cut a stack short (the program and Mimic's runtime keep them in profiling builds) | a later 0.3 step |
+| The profiler in editors: time beside each function, a flame graph | The terminal report and its JSON | later |
 | Faster than hand-parallelised Rust (Rayon) on every benchmark: prefix sum (Rayon 0.37× C, Mimic 0.63×) and fib (0.16× against 0.20×) are behind | Ahead on six of eight, sort tied (BENCHMARK.md) | a later performance step |
 | The REPL answers in milliseconds: each line is a new program, which macOS checks on its first run (about 1 s, unless the terminal is a Developer Tool); compiling into the running `mimic` would skip it | Each line builds and runs a program (about 0.5 s, plus the check on macOS) | later |
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |

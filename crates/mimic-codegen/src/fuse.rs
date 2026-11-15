@@ -591,7 +591,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.lambdas += 1;
         let i64t = self.ctx.i64_type();
         let ft = self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false);
-        let f = self.module.add_function(&format!("_mimic_kernel_{}", self.lambdas), ft, Some(Linkage::Internal));
+        let f = self.module.add_function(&self.kernel_name(), ft, Some(Linkage::Internal));
         let kinds: Vec<BasicTypeEnum<'ctx>> = plan.slots.iter().map(|v| v.get_type()).collect();
         let nslots = kinds.len();
         let root = root.clone();
@@ -726,7 +726,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.lambdas += 1;
         let i64t = self.ctx.i64_type();
         let ft = self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false);
-        let f = self.module.add_function(&format!("_mimic_kernel_{}", self.lambdas), ft, Some(Linkage::Internal));
+        let f = self.module.add_function(&self.kernel_name(), ft, Some(Linkage::Internal));
         // slot types in the kernel mirror the caller's values
         let kinds: Vec<BasicTypeEnum<'ctx>> = plan.slots.iter().map(|v| v.get_type()).collect();
         let nslots = kinds.len();

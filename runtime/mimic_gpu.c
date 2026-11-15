@@ -181,8 +181,16 @@ int32_t mim_gpu_run(const char *src, int64_t n, int32_t nin, void *const *in, co
         gpu_size grid = {(unsigned long)n, 1, 1}, group = {tg, 1, 1};
         G2(void, enc, "dispatchThreads:threadsPerThreadgroup:", gpu_size, grid, gpu_size, group);
         G0(void, enc, "endEncoding");
+        int64_t g0 = mim_prof_on ? prof_now() : 0;
         G0(void, cmd, "commit");
         G0(void, cmd, "waitUntilCompleted");
+        if (mim_prof_on) {
+            __atomic_fetch_add(&mim_prof_gpu_ns, prof_now() - g0, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&mim_prof_gpu_kernels, 1, __ATOMIC_RELAXED);
+            int64_t moved = out_bytes;
+            for (int32_t i = 0; i < nin; i++) moved += in_bytes[i];
+            __atomic_fetch_add(&mim_prof_gpu_bytes, moved, __ATOMIC_RELAXED);
+        }
         long status = G0(long, cmd, "status"); /* MTLCommandBufferStatusCompleted = 4 */
         if (status == 4) {
             if (!out_own) memcpy(out, G0(void *, outbuf, "contents"), (size_t)out_bytes);
