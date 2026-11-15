@@ -30,6 +30,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **`mimic audit`** (step 0.3.10): quality rules (unused functions and variables, dropped `Result`s, long, complex and duplicated functions, C functions that could be `pure`, `trusted` C functions taking pointers) and security rules (`os::shell` with commands built from data, files opened with paths from HTTP requests, secrets in source, certificate trust outside tests, `unsafe` blocks, trusted headers, dependencies following a branch), each with a manual page (`mimic man S01`). Reports as text, JSON or SARIF; `--fail-on` makes it a gate for CI (errors by default); a baseline counts only new findings; each run's counts are kept and compared. Agents get it as the `audit` tool, and CI audits the examples.
 
+- **Contracts and property tests** (step 0.3.11). `requires` and `ensures` lines before a function's body (`result` is the value returned) are checked on every call in debug builds and tests, also when the body leaves with `return`, and left out of release builds; a broken one stops with the condition, the function and the line, and they show in signatures (hover, `mimic doc`). `test "…" for xs: [i64] { … }` runs the body for 100 generated inputs (`i64`, `f64`, `bool`, `str` and lists of them), the same on every run, and shrinks a failure to its smallest case. Both grammars know `requires`, `ensures` and `for`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

@@ -3570,10 +3570,11 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
 int64_t mim_par_grain(void) { return g_grain; }
 
 /* Length of a vector a fused kernel reads directly (its element type must be
- * exactly the one the compiler inferred). */
+ * exactly the one the compiler inferred; an empty one has none to read, so
+ * `⍳ 0 ¨ f` made as integers serves where floats are expected). */
 int64_t mim_vec_len(mim_val *v, int32_t dtype) {
     need(v, "array operand");
-    if (v->rank != 1 || v->dtype != dtype) {
+    if (v->rank != 1 || (v->dtype != dtype && v->len != 0)) {
         char buf[160];
         snprintf(buf, sizeof buf, "internal error: fused kernel expected a vector of dtype %d, found %s", dtype, dtname(v));
         mim_panic(buf);

@@ -69,6 +69,73 @@ mimic test file.mim         # the tests of one file
 * **Tests are never built into the program.** `mimic run` and `mimic build` leave them out, but `mimic check` still checks them.
 * **Private items are in reach.** A test sees everything its module sees. Tests in `src/test.mim` (`module test`) reach the project's `pub` items, such as `main::square`.
 
+### Property tests
+
+Instead of picking inputs yourself, name them after `for`, and Mimic tries
+100 of them: small and large numbers, empty and long lists, odd text. When
+one breaks the test, Mimic shrinks it to the smallest input that still does,
+and shows that case.
+
+```mimic
+module main
+
+fn main() { print(1) }
+
+test "sorting keeps the length" for xs: [i64] {
+    expect(≢ sort(xs) == ≢ xs)
+}
+
+test "every list is short" for xs: [i64] {
+    expect(≢ xs < 3)
+}
+```
+
+```output
+     Testing 2 tests
+  ✓ sorting keeps the length
+  ✗ every list is short
+      line 10: expect(≢ xs < 3)
+        left:  3
+        right: 3
+      line 9: the property fails; the smallest failing case: xs = [0 0 0]
+```
+
+Parameters can be `i64`, `f64`, `bool`, `str`, or lists of them. The inputs
+are the same on every run, so a failure is easy to reproduce.
+
+### Contracts
+
+A function can say what it needs and what it promises, with `requires` and
+`ensures` lines before its body (`result` is the value it returns):
+
+```mimic run
+module main
+
+fn isqrt(n: i64) -> i64
+    requires n >= 0
+    ensures result * result <= n and (result + 1) * (result + 1) > n
+{
+    if n < 2 { return n }
+    let r = isqrt(n div 4) * 2
+    if (r + 1) * (r + 1) <= n { r + 1 } else { r }
+}
+
+fn main() {
+    print(isqrt(17))
+    print(isqrt(1000000))
+}
+```
+
+```output
+4
+1000
+```
+
+`mimic run` and `mimic test` check contracts on every call; `isqrt(¯4)` would
+stop with ``contract broken: `isqrt` requires n >= 0 (line 4), and the call
+broke it``. Release builds leave the checks out, so they cost nothing there.
+Editors and `mimic doc` show contracts as part of the signature.
+
 ### Examples in comments
 
 An example in the comment above a function is a test too: a `// > expression` line, then the line `print` would show for its value.

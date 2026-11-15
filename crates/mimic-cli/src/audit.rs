@@ -85,7 +85,7 @@ pub fn run(p: &Program) -> Vec<Finding> {
     let mut bodies: HashMap<String, (usize, Span, String)> = HashMap::new();
     for (fid, f) in p.fns.iter().enumerate() {
         let FnKind::User(d) = &f.kind else { continue };
-        if !mine(f) || f.name.contains('·') || f.name.starts_with('$') {
+        if !mine(f) || f.name.contains('·') || f.name.starts_with('$') || crate::engine::is_generated(&f.name) {
             continue;
         }
         let src = &p.files[f.file].src;

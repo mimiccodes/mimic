@@ -631,7 +631,7 @@ impl Index {
                 }
             };
             // functions made by the compiler (lifted `arms`, wrappers) are not shown
-            if f.name.contains('·') || f.name.starts_with('$') {
+            if f.name.contains('·') || f.name.starts_with('$') || is_generated(&f.name) {
                 continue;
             }
             let doc = if header.is_some() { String::new() } else { comment_above(&lines[f.file], f.span.line) };
@@ -739,6 +739,11 @@ impl Index {
             Resolved::Mod(m) => self.by_mod.get(&m).copied(),
         }
     }
+}
+
+/// Functions the compiler writes for a property test (`prop_<hash>_…`).
+pub fn is_generated(name: &str) -> bool {
+    name.strip_prefix("prop_").and_then(|r| r.split_once('_')).is_some_and(|(h, _)| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn join(base: &str, name: &str) -> String {

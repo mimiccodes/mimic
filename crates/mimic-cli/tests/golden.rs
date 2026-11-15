@@ -883,6 +883,61 @@ fn audit_rules() {
     std::fs::remove_dir_all(&tmp).unwrap();
 }
 
+/// Contracts: `requires` and `ensures` are checked in debug builds and tests
+/// (an early `return` too), cost nothing in release builds, appear in
+/// signatures and keep their place under `mimic fmt`.
+#[test]
+fn contracts() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-contracts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("c.mim");
+    let src = "module main\n\n// The whole square root of n.\nfn isqrt(n: i64) -> i64\n    requires n >= 0\n    ensures result * result <= n and (result + 1) * (result + 1) > n\n{\n    if n < 2 { return n }\n    let r = isqrt(n div 4) * 2\n    if (r + 1) * (r + 1) <= n { r + 1 } else { r }\n}\n\nfn wrong(n: i64) -> i64\n    ensures result > n\n{\n    if n > 5 { return n }\n    n + 1\n}\n\nfn main() {\n    print(isqrt(1000000))\n    print(wrong(3))\n    print(wrong(9))\n}\n";
+    std::fs::write(&f, src).unwrap();
+    let out = mimic().arg("run").arg(&f).output().unwrap();
+    assert_eq!(out.status.code(), Some(101));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n4\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("contract broken: `wrong` ensures result > n (line 14), but it returned 9"), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = mimic().args(["run", "--release"]).arg(&f).output().unwrap();
+    assert!(out.status.success(), "release builds leave contracts out");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n4\n9\n");
+    std::fs::write(&f, src.replace("print(isqrt(1000000))", "print(isqrt(¯4))")).unwrap();
+    let out = mimic().arg("run").arg(&f).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`isqrt` requires n >= 0 (line 5), and the call broke it"));
+    std::fs::write(&f, src).unwrap();
+    let out = mimic().args(["query", "--in"]).arg(&f).args(["docs", "name=isqrt"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["signature"], "fn isqrt(n: i64) -> i64\n    requires n >= 0\n    ensures result * result <= n and (result + 1) * (result + 1) > n");
+    assert!(mimic().args(["fmt", "--check"]).arg(&f).status().unwrap().success(), "contract lines stay indented");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Property tests: `test "…" for xs: [i64]` runs generated inputs, and a
+/// failure is shrunk to the smallest case, the same on every run.
+#[test]
+fn property_tests() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-props-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("p.mim");
+    std::fs::write(&f, "module main\n\nfn main() { print(1) }\n\ntest \"sorting keeps the length\" for xs: [i64] {\n    expect(≢ sort(xs) == ≢ xs)\n}\n\ntest \"reverse twice\" for s: str, xs: [str] {\n    expect(⌽ ⌽ xs == xs)\n    expect(≢ s >= 0)\n}\n\ntest \"every list is short\" for xs: [i64] {\n    expect(≢ xs < 3)\n}\n\ntest \"small numbers\" for x: i64 {\n    expect(x < 10)\n}\n").unwrap();
+    let run = || {
+        let out = mimic().arg("test").arg(&f).output().unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, text) = run();
+    assert!(!ok, "{text}");
+    assert!(text.contains("✓ sorting keeps the length") && text.contains("✓ reverse twice"), "{text}");
+    assert!(text.contains("the smallest failing case: xs = [0 0 0]"), "{text}");
+    assert!(text.contains("the smallest failing case: x = 10"), "{text}");
+    assert!(text.contains("left:  10") && text.contains("right: 10"), "the failed expect shows its sides: {text}");
+    assert_eq!(run().1.lines().filter(|l| l.contains("smallest")).collect::<Vec<_>>(), text.lines().filter(|l| l.contains("smallest")).collect::<Vec<_>>(), "the same cases every run");
+    std::fs::write(&f, "module main\n\nfn main() { print(1) }\n\ntest \"no\" for m: [str: i64] {\n    expect(true)\n}\n").unwrap();
+    let out = mimic().arg("check").arg(&f).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("property tests generate i64, f64, bool, str and lists of them"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

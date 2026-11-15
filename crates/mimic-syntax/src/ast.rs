@@ -40,6 +40,11 @@ pub struct FnDecl {
     /// `extern "C" fn name(…) { … }`: also exported to C under its plain
     /// name, with C types and the C calling convention.
     pub export_c: bool,
+    /// `requires n >= 0`: checked when the function is called (debug builds
+    /// and tests; see desugar::contracts)
+    pub requires: Vec<Expr>,
+    /// `ensures result >= 0`: checked when it returns, `result` its value
+    pub ensures: Vec<Expr>,
     pub span: Span,
 }
 

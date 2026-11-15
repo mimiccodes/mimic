@@ -845,13 +845,38 @@ MATH1(round, round(x))
 /* failed expectations in this run (the test is run in a process of its own) */
 static int64_t g_test_failures = 0;
 
+/* property tests run their cases quietly while they search */
+static int g_expect_quiet = 0;
+
+mim_val *mim_std_expect_quiet(mim_val *on) {
+    g_expect_quiet = mim_truthy(on);
+    return NULL;
+}
+
+mim_val *mim_std_expect_failures(void) { return mim_int(__atomic_load_n(&g_test_failures, __ATOMIC_RELAXED)); }
+
+mim_val *mim_std_expect_forgive(mim_val *count) {
+    __atomic_store_n(&g_test_failures, geti(count, 0), __ATOMIC_RELAXED);
+    return NULL;
+}
+
+/* a property failed: its smallest case (the failure counts) */
+mim_val *mim_std_prop_failed(mim_val *text, mim_val *line) {
+    __atomic_fetch_add(&g_test_failures, 1, __ATOMIC_RELAXED);
+    fflush(stdout);
+    fprintf(stderr, "  line %lld: the property fails; the smallest failing case: %.*s\n", (long long)geti(line, 0), text ? (int)text->len : 0, text ? (const char *)text->data : "");
+    return NULL;
+}
+
 static void expect_report(mim_val *text, int64_t line) {
     __atomic_fetch_add(&g_test_failures, 1, __ATOMIC_RELAXED);
+    if (g_expect_quiet) return;
     fflush(stdout);
     fprintf(stderr, "  line %lld: expect(%.*s)\n", (long long)line, text ? (int)text->len : 0, text ? (const char *)text->data : "");
 }
 
 static void expect_show(const char *label, mim_val *v) {
+    if (g_expect_quiet) return;
     sbuf b = {0};
     fmt_val(&b, v, 1);
     fprintf(stderr, "    %s %.*s\n", label, (int)b.n, b.p ? b.p : "");
@@ -1280,6 +1305,15 @@ mim_val *mim_std_group(mim_val *keys, mim_val *xs) {
     free(count);
     free(gkey);
     return r;
+}
+
+/* contract_failed(message): a broken `requires` or `ensures` (status 101) */
+mim_val *mim_std_contract_failed(mim_val *message) {
+    fflush(stdout);
+    char buf[1200];
+    snprintf(buf, sizeof buf, "contract broken: %s", str_arg(message, "contract_failed"));
+    mim_panic(buf);
+    return NULL;
 }
 
 /* panic(message): stop the program with a message (status 101) */

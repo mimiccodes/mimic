@@ -317,8 +317,23 @@ impl Parser {
                 if name.trim().is_empty() {
                     return Err(Diag::new(&C::UNEXPECTED_TOKEN, "a test needs a name: test \"what it checks\" { … }", span));
                 }
+                // `test "…" for x: i64, xs: [i64] { … }`: a property, run with
+                // generated inputs (see desugar::properties)
+                let mut params = Vec::new();
+                if matches!(self.peek(), Tok::Ident(w) if w == "for") {
+                    self.next();
+                    loop {
+                        let (pn, ps) = self.ident()?;
+                        self.expect(&Tok::Colon)?;
+                        let ty = self.ty()?;
+                        params.push(Param { name: pn, ty: Some(ty), default: None, span: ps });
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
                 let body = self.block()?;
-                Ok(Item::Fn(FnDecl { name: format!("test {name}"), type_params: vec![], is_pub: false, params: vec![], ret: None, body, export_c: false, span: start }))
+                Ok(Item::Fn(FnDecl { name: format!("test {name}"), type_params: vec![], is_pub: false, params, ret: None, body, export_c: false, requires: vec![], ensures: vec![], span: start }))
             }
             Tok::Module => {
                 self.next();
@@ -565,8 +580,28 @@ impl Parser {
         self.nl_ignore -= 1;
         self.expect(&Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
+        // contracts: `requires cond` and `ensures cond` lines before the body
+        let (mut requires, mut ensures) = (Vec::new(), Vec::new());
+        loop {
+            let save = self.pos;
+            self.skip_newlines();
+            match &self.toks[self.pos].tok {
+                Tok::Ident(w) if w == "requires" || w == "ensures" => {
+                    let which = w.clone();
+                    self.pos += 1;
+                    let e = self.expr()?;
+                    if which == "requires" { requires.push(e) } else { ensures.push(e) }
+                }
+                _ => {
+                    if requires.is_empty() && ensures.is_empty() {
+                        self.pos = save;
+                    }
+                    break;
+                }
+            }
+        }
         let body = self.block()?;
-        Ok(FnDecl { name, type_params, is_pub, params, ret, body, export_c: false, span: start })
+        Ok(FnDecl { name, type_params, is_pub, params, ret, body, export_c: false, requires, ensures, span: start })
     }
 
     /// `[T, U]` after a type or function name: type parameters (uppercase names).

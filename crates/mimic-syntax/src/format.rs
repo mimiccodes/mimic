@@ -152,6 +152,18 @@ pub fn format(src: &str, glyphs: bool) -> Result<String, Diag> {
             // a line of only a comment: as deep as where it sits
             None => end_depth.iter().take(n as usize).rev().flatten().next().copied().unwrap_or(0),
         };
+        // a contract line (`requires …`, `ensures …`) under a function's
+        // signature: one level in, like the body it describes
+        let contract = |l: &str| l.starts_with("requires ") || l.starts_with("ensures ");
+        let d = if contract(body)
+            && lines.last().is_some_and(|l: &String| {
+                let l = l.trim_start();
+                l.starts_with("fn ") || l.starts_with("pub fn ") || l.starts_with("ƒ") || contract(l)
+            }) {
+            d + 1
+        } else {
+            d
+        };
         lines.push(format!("{}{}", "    ".repeat(d), body.trim_end()));
     }
     while lines.last().is_some_and(|l| l.is_empty()) {

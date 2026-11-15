@@ -99,6 +99,72 @@ pub type Result[T, E] = Ok(T) | Err(E)
 pub extern \"mimic\" ordered {
     fn expect_true(ok: bool, text: str, line: i64)
     fn expect_cmp(op: i64, a: any, b: any, text: str, line: i64)
+    // property tests (`test \"…\" for x: i64 { … }`): run cases quietly, count
+    // their failed expectations, forget them, report the smallest case
+    fn expect_quiet(on: bool)
+    fn expect_failures() -> i64
+    fn expect_forgive(count: i64)
+    fn prop_failed(case: str, line: i64)
+}
+
+// Inputs for property tests: mostly small values, sometimes edges and large
+// ones; `k` (0 to 99) grows them case by case.
+pub fn prop_int(k: i64) -> i64 {
+    let r = random::int(0, 10)
+    if r == 0 { 0 } else if r < 8 { random::int(0 - k - 3, k + 4) } else { random::int(¯1000000, 1000001) }
+}
+pub fn prop_float(k: i64) -> f64 {
+    if random::int(0, 10) == 0 { 0.0 } else { (random::float() - 0.5) × 2.0 × (1.0 + k × 10.0) }
+}
+pub fn prop_bool(k: i64) -> bool { random::int(0, 2) == 1 }
+pub fn prop_str(k: i64) -> str {
+    let letters = [\"a\" \"b\" \"z\" \"A\" \" \" \"1\" \"é\" \"-\"]
+    join(⍳ random::int(0, k div 4 + 3) ¨ (i => letters[random::int(0, 8)]), \"\")
+}
+pub fn prop_list(k: i64, gen) { ⍳ random::int(0, k div 5 + 3) ¨ (i => gen(k)) }
+// (an empty list keeps its element type: `⍳ 0 ¨ f` would not know it)
+pub fn prop_ints(k: i64) -> [i64] {
+    let n = random::int(0, k div 5 + 3)
+    if n == 0 { [0] ↓ 1 } else { ⍳ n ¨ (i => prop_int(k)) }
+}
+pub fn prop_floats(k: i64) -> [f64] {
+    let n = random::int(0, k div 5 + 3)
+    if n == 0 { [0.0] ↓ 1 } else { ⍳ n ¨ (i => prop_float(k)) }
+}
+pub fn prop_bools(k: i64) -> [bool] {
+    let n = random::int(0, k div 5 + 3)
+    if n == 0 { [true] ↓ 1 } else { ⍳ n ¨ (i => prop_bool(k)) }
+}
+pub fn prop_strs(k: i64) -> [str] {
+    let n = random::int(0, k div 5 + 3)
+    if n == 0 { [\"\"] ↓ 1 } else { ⍳ n ¨ (i => prop_str(k)) }
+}
+// Smaller values, nearest the simplest first.
+pub fn prop_shrink_int(x: i64) -> [i64] {
+    let cands = [0 (x div 2) (x - (if x > 0 { 1 } else { ¯1 }))]
+    unique(cands ⌿ ((∣ cands) < ∣ x))
+}
+pub fn prop_shrink_float(x: f64) -> [f64] {
+    let toward_zero = if x < 0.0 { math::ceil(x) } else { math::floor(x) }
+    let cands = [0.0 toward_zero (x / 2.0)]
+    unique(cands ⌿ ((∣ cands) < ∣ x))
+}
+pub fn prop_shrink_bool(x: bool) -> [bool] { if x { [false] } else { [] ⌿ [] } }
+pub fn prop_shrink_str(s: str) -> [str] {
+    let n = ≢ chars(s)
+    if n == 0 { [] ⌿ [] } else { unique([\"\" (join(chars(s) ↑ (n div 2), \"\")) (join(chars(s) ↓ 1, \"\"))]) }
+}
+pub fn prop_shrink_list_int(xs: [i64]) -> [[i64]] {
+    let halved = xs ¨ (v => v div 2)
+    if any(halved != xs) { push(prop_shrink_list(xs), halved) } else { prop_shrink_list(xs) }
+}
+pub fn prop_shrink_list_float(xs: [f64]) -> [[f64]] {
+    let halved = xs ¨ (v => if v < 0.0 { math::ceil(v / 2.0) } else { math::floor(v / 2.0) })
+    if any(halved != xs) { push(prop_shrink_list(xs), halved) } else { prop_shrink_list(xs) }
+}
+pub fn prop_shrink_list(xs) {
+    let n = ≢ xs
+    if n == 0 { [xs] ↓ 1 } else { [xs ↑ 0, xs ↑ (n div 2), xs ↓ (n div 2), xs ↓ 1, xs ↓ ¯1] ⌿ ([0 (n div 2) (n - n div 2) (n - 1) (n - 1)] < n) }
 }
 
 // Strings, lists and maps: implemented in Mimic's runtime (runtime/mimic_std.c).
@@ -143,6 +209,13 @@ pub extern \"mimic\" {
     fn to_int_base(s: str, base: i64) -> i64
     fn sort_index(keys: any) -> [i64]
     fn group(keys: any, xs: any) -> any
+}
+
+// A broken `requires` or `ensures` (debug builds and tests): stops the
+// program with what was promised. Pure, like a bounds check, so functions
+// with contracts still run in parallel.
+pub extern \"mimic\" pure {
+    fn contract_failed(message: str)
 }
 
 // Stopping: `panic(\"why\")` ends the program with a message (status 101).
@@ -611,6 +684,17 @@ pub mod sources {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     static KEEP: AtomicBool = AtomicBool::new(false);
+    static CONTRACTS: AtomicBool = AtomicBool::new(true);
+
+    /// Compile `requires` and `ensures` checks in (debug builds, tests,
+    /// checking) or leave them out (release builds).
+    pub fn set_contracts(on: bool) {
+        CONTRACTS.store(on, Ordering::Relaxed);
+    }
+
+    pub fn contracts() -> bool {
+        CONTRACTS.load(Ordering::Relaxed)
+    }
     static OPEN: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
     /// path → (hash of text, package, display, the parse)
     static PARSED: Mutex<Option<HashMap<PathBuf, (u64, SourceFile)>>> = Mutex::new(None);
@@ -653,13 +737,14 @@ pub mod sources {
         let hash = mimic_syntax::fnv1a(src.as_bytes());
         let kept = PARSED.lock().unwrap();
         let (h, sf) = kept.as_ref()?.get(path)?;
-        (*h == hash && sf.package == package && sf.display == display && sf.src == src).then(|| sf.clone())
+        // (the parse depends on whether contracts are compiled in)
+        (*h == hash ^ contracts() as u64 && sf.package == package && sf.display == display && sf.src == src).then(|| sf.clone())
     }
 
     /// Keep a fresh parse (before C headers are imported into it).
     pub fn remember(sf: &SourceFile) {
         if KEEP.load(Ordering::Relaxed) {
-            let hash = mimic_syntax::fnv1a(sf.src.as_bytes());
+            let hash = mimic_syntax::fnv1a(sf.src.as_bytes()) ^ contracts() as u64;
             PARSED.lock().unwrap().get_or_insert_with(HashMap::new).insert(sf.path.clone(), (hash, sf.clone()));
         }
     }
@@ -683,7 +768,13 @@ fn read_parse(path: &Path, display: String, package: &str, report: &mut Report, 
     }
     match parse_file(&src).and_then(|mut ast| mimic_syntax::desugar::lift_arms(&mut ast).map(|_| ast)) {
         Ok(mut ast) => {
+            mimic_syntax::desugar::contracts(&mut ast, &src, sources::contracts());
             expect_with_text(&mut ast.module.items, &src);
+            // (after the `expect` rewrite: a property's body moves out of its test)
+            if let Err(d) = mimic_syntax::desugar::properties(&mut ast) {
+                report.push_in(Some(path), &display, &src, d);
+                return None;
+            }
             let sf = SourceFile { path: path.to_path_buf(), display, src, ast, package: package.into() };
             sources::remember(&sf);
             Some(sf)
@@ -1388,7 +1479,11 @@ fn import_headers(
 }
 
 pub fn build(input: &Input, profile: &Profile, target: &Target, emit_ir: bool, emit_net: bool) -> Result<Artifact, Report> {
-    let program = load_with(input, target, profile.tests)?;
+    // contracts are checked in debug builds and tests, and cost nothing in release builds
+    sources::set_contracts(!profile.release || profile.tests);
+    let program = load_with(input, target, profile.tests);
+    sources::set_contracts(true);
+    let program = program?;
     if let Input::Project(p) = input
         && !profile.tests
     {

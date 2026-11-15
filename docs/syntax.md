@@ -33,6 +33,31 @@ test "square" {
 }
 ```
 
+**Property tests** take parameters after `for`: the body runs for 100 generated inputs (`i64`, `f64`, `bool`, `str`, and lists of them), the same ones on every run. When one fails, its inputs are shrunk, one parameter at a time, to the smallest that still fails, and the failure shows that case.
+
+```mimic
+test "sorting keeps the length" for xs: [i64] {
+    expect(≢ sort(xs) == ≢ xs)
+}
+```
+
+An example in a comment is a test too: a `// > expression` line, then the value `print` would show on the next comment line.
+
+### Contracts
+
+`requires` and `ensures` lines between a function's signature and its body state what it needs and what it promises; in `ensures`, `result` is the value returned. Debug builds and tests check them on every call (also when the body leaves with `return`) and stop with the condition, the function and the line when one is broken; release builds leave them out, at no cost. They are part of the signature that hovers, `mimic doc` and `mimic man` show. `requires` and `ensures` are keywords only in that place.
+
+```mimic
+fn isqrt(n: i64) -> i64
+    requires n >= 0
+    ensures result * result <= n and (result + 1) * (result + 1) > n
+{
+    if n < 2 { return n }
+    let r = isqrt(n div 4) * 2
+    if (r + 1) * (r + 1) <= n { r + 1 } else { r }
+}
+```
+
 ### Visibility and mutability
 
 * **Everything is private** except `fn main` inside `module main`. Mark items `pub` to export them.

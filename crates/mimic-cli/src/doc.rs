@@ -132,7 +132,16 @@ pub fn fn_sig(f: &FnDecl, src: &str) -> String {
         })
         .collect();
     let ret = f.ret.as_ref().map(|r| format!(" -> {}", show_type(r))).unwrap_or_default();
-    format!("fn {}{tp}({}){ret}", f.name, ps.join(", "))
+    let mut sig = format!("fn {}{tp}({}){ret}", f.name, ps.join(", "));
+    // the contracts are part of what a function promises
+    let text = |e: &mimic_syntax::ast::Expr| src.get(e.span.start..e.span.end).unwrap_or("…").split_whitespace().collect::<Vec<_>>().join(" ");
+    for r in &f.requires {
+        sig += &format!("\n    requires {}", text(r));
+    }
+    for e in &f.ensures {
+        sig += &format!("\n    ensures {}", text(e));
+    }
+    sig
 }
 
 pub fn type_sig(t: &TypeDecl) -> String {
