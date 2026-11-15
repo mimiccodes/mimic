@@ -21,6 +21,28 @@ Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com
 
 **Debugging** goes through `mimic dap`, the Debug Adapter Protocol: breakpoints on `.mim` lines, stepping, the call stack, and variables shown as Mimic prints them (`[3 1 4]`, `Point { x: 1.5, y: 2.0 }`, `["a": 1]`, `Some(7)`). It runs LLVM's `lldb-dap`, which comes with Xcode on macOS and with the `lldb` package on Linux. A launch request takes `program`: a `.mim` file or a project folder, which it builds with debug information.
 
+## Mimic's own editor
+
+`mimic edit` needs nothing installed: it is part of `mimic`, and knows everything the language server knows.
+
+| Key | Does |
+|---|---|
+| Ctrl-O | Open a file of the project (type part of its name) |
+| Ctrl-N, Ctrl-W | A new program; close the file |
+| Ctrl-S, Ctrl-Q | Save; quit (it asks when something is unsaved) |
+| Ctrl-G | The glyph palette (type a word or what it does); or type `\i`, `\e`, `\k` … |
+| Ctrl-F, F3, Ctrl-H | Find, find again, replace |
+| Ctrl-Z, Ctrl-Y | Undo, redo |
+| Ctrl-C, Ctrl-X, Ctrl-V, Ctrl-A | Copy, cut, paste, select all (Shift and the arrows select too) |
+| Ctrl-L | Go to a line |
+| F5, F6 | Run, test (in the background; the output appears in its pane) |
+| F7, F8, F9 | Problems, audit, where code runs |
+| F1 | The manual for the word or glyph under the cursor |
+| Ctrl-B, Ctrl-J | Show or hide the files, the bottom pane |
+| Alt-← Alt-→ | The other open files |
+
+Errors appear as you type: a red mark beside the line, the code underlined, the message after it. Where code runs shows after each line as a label (`∥ parallel`, `◷ task`, `→ in order`).
+
 ## VS Code
 
 The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode)) starts `mimic lsp` by itself and adds:

@@ -8,6 +8,7 @@ mod cc;
 mod cimport;
 mod doc;
 mod driver;
+mod edit;
 mod dap;
 mod engine;
 mod lsp;
@@ -286,6 +287,11 @@ enum Cmd {
         /// No running programs or tests
         #[arg(long)]
         no_run: bool,
+    },
+    /// Mimic's own terminal editor: errors as you type, glyphs, the manual, run, test, audit
+    Edit {
+        /// A file to open, or a project folder (default: the project here)
+        path: Option<PathBuf>,
     },
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
@@ -590,6 +596,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Edit { path } => {
+            edit::run(path.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Audit { input, format, fail_on, baseline, update_baseline } => audit_cmd(input, &format, &fail_on, baseline, update_baseline),
         Cmd::Why { name, input, json } => why_cmd(name, input, json),
         Cmd::Mcp { project, allow_outside, allow_install, allow_network, read_only, no_run } => {

@@ -32,6 +32,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **Contracts and property tests** (step 0.3.11). `requires` and `ensures` lines before a function's body (`result` is the value returned) are checked on every call in debug builds and tests, also when the body leaves with `return`, and left out of release builds; a broken one stops with the condition, the function and the line, and they show in signatures (hover, `mimic doc`). `test "…" for xs: [i64] { … }` runs the body for 100 generated inputs (`i64`, `f64`, `bool`, `str` and lists of them), the same on every run, and shrinks a failure to its smallest case. Both grammars know `requires`, `ensures` and `for`.
 
+- **`mimic edit`, Mimic's own terminal editor** (step 0.3.12): in Mimic's colours, with a MIMIC start screen; highlighting from Mimic's own lexer (names from C in their own colour); glyph input (`\i` → `⍳`, never inside strings) and a glyph palette; errors as you type from the engine (a mark, the code underlined, the message); panes for problems, the audit, where code runs (also as labels beside the code), the manual for the word under the cursor, and run and test output (in the background); tabs, a file tree, a fuzzy file opener, find and replace, undo and redo, the clipboard, the mouse, indentation that follows the code. Easy keys: Ctrl-S, Ctrl-Q (asking about unsaved files), Ctrl-O, Ctrl-G, F1, F5, F6.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

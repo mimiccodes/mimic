@@ -84,7 +84,7 @@ The front ends talk to the engine through one JSON protocol, the one the languag
 
 CI in the main repository checks that the grammar knows every glyph, word and keyword of the compiler's glyph table, so the grammar never falls behind the language.
 
-Built with: `lsp-server` and `lsp-types` (the language server; MCP is JSON-RPC over stdio, written directly, with no async runtime), `ratatui` and `crossterm` (the terminal editor), `ropey` (the editor's text), `nucleo` (fuzzy search). All MIT or Apache 2.0, and inside the one `mimic` binary.
+Built with: `lsp-server` and `lsp-types` (the language server; MCP is JSON-RPC over stdio, written directly, with no async runtime), `ratatui` and `crossterm` (the terminal editor), `ropey` (the editor's text), `pulldown-cmark` (guides in `mimic doc`). All MIT or Apache 2.0, and inside the one `mimic` binary; the editor's fuzzy search is Mimic's own.
 
 | Version | Contents | Done when |
 |---|---|---|

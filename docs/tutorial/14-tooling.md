@@ -149,6 +149,14 @@ fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
 
 `mimic test` runs every such example, so the documentation can't drift from the code: a failure names the example's line and shows both values.
 
+## Mimic's own editor
+
+`mimic edit` opens the project in Mimic's terminal editor: errors as you
+type, glyphs by typing `\i` (or Ctrl-G for the palette), F5 to run, F6 to
+test, F1 for the manual on the word under the cursor, and labels showing
+where code runs in parallel. Ctrl-S saves, Ctrl-Q quits. `mimic man editors`
+lists every key.
+
 ## Editors
 
 `mimic lsp` is the language server: errors as you type with quick fixes, hover, go to definition, glyph input (type `\i` and pick `⍳`), completion and formatting, in VS Code, Neovim, Helix, Emacs, Sublime Text and others. `mimic man editors` shows the set-up for each.
