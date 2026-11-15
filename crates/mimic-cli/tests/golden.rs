@@ -394,6 +394,48 @@ fn doc_tests() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The grammars (editors/syntax) know the whole language: every glyph, its
+/// word and digraph, and every keyword are highlighted as such, and every
+/// test program and example tokenizes with no unrecognised text. Needs the
+/// submodule and `npm ci` in it (CI does both); skipped otherwise, except in CI.
+#[test]
+fn grammar_knows_the_language() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syntax = root.join("editors/syntax");
+    if !syntax.join("node_modules/vscode-textmate").is_dir() {
+        assert!(std::env::var_os("CI").is_none(), "CI must check the grammars: run `npm ci` in editors/syntax");
+        eprintln!("skipped: no editors/syntax/node_modules (git submodule update --init; npm ci in editors/syntax)");
+        return;
+    }
+    let mut words: Vec<String> = Vec::new();
+    for p in mimic_syntax::glyphs::PRIMS {
+        words.push(p.glyph.to_string());
+        words.push(p.word.to_string());
+        words.extend(p.digraph.map(String::from));
+        words.extend(p.ascii.map(String::from));
+    }
+    for g in mimic_syntax::glyphs::SYNTAX_GLYPHS {
+        words.push(g.glyph.to_string());
+        words.extend(g.digraph.map(String::from));
+    }
+    for k in ["module", "fn", "let", "mut", "pub", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "arms", "with", "true", "false", "and", "or", "not", "div", "|>", "->", "=>"] {
+        words.push(k.to_string());
+    }
+    let dir = std::env::temp_dir().join(format!("mimic-golden-grammar-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let list = dir.join("words.mim");
+    std::fs::write(&list, words.join("\n") + "\n").unwrap();
+    let node = |args: &[&Path]| {
+        let out = Command::new("node").arg("test/highlight.mjs").args(args).current_dir(&syntax).output().expect("node");
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let (ok, text) = node(&[Path::new("--words"), &list]);
+    assert!(ok, "{text}");
+    let (ok, text) = node(&[&root.join("tests/fixtures"), &root.join("tests/nets"), &root.join("examples"), &syntax.join("samples")]);
+    assert!(ok, "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

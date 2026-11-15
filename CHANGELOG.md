@@ -14,6 +14,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **Guides:** "Coming from C", "Coming from Python", "Coming from JavaScript", and "Writing Mimic for agents" (the workflow, the idioms, and the mistakes ported code makes, with their error codes), in `docs/manual/`. Their examples are checked like the tutorial's.
 - **Examples in comments are tests:** a `// > expression` line and the value `print` would show on the next comment line run under `mimic test`.
 
+- **Syntax highlighting** (step 0.3.3, part one): TextMate grammars for `.mim` and `.mnet` in the new [mimic-syntax](https://github.com/mimiccodes/mimic-syntax) repository (a submodule at `editors/syntax`), for VS Code, Sublime Text and other editors, and later GitHub. Names from C (`c::`, `cpp::`, `as` names) get a scope of their own. A golden test checks that the grammar highlights every glyph, word, digraph and keyword of the compiler, and that every test program and example tokenizes with nothing unrecognised. `mod.mim` is marked as generated for GitHub.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

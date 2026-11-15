@@ -3,3 +3,7 @@
 * text=auto eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# GitHub: mod.mim is written by mimic (collapsed in diffs, left out of the
+# language statistics)
+mod.mim linguist-generated=true
