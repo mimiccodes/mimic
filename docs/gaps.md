@@ -45,15 +45,19 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 
 | Gap | Today | Version |
 |---|---|---|
-| A manual inside `mimic`: topics, functions, glyphs (`mimic man ⌿`), search, "coming from C or Python" pages | `mimic explain` for errors, `mimic doc --std` | 0.3.1 |
-| Syntax highlighting for editors (TextMate and tree-sitter grammars), names under `c::` and `cpp::` in their own colour | None | 0.3.2 |
-| A language server: errors as you type, glyph input, hover, go to definition | `mimic check --emit-json` | 0.3.2 |
-| `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.2 |
-| An MCP server for AI agents | None | 0.3.3 |
-| Seeing where code runs in parallel, and why not (`mimic why`) | None | 0.3.4 |
-| Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.5, 0.3.6 |
-| A terminal editor (`mimic edit`) | None | 0.3.7 |
-| A REPL and a profiler | None | 0.3.8 |
+| Dependencies on version ranges, fetched on the first build; workspaces | `mimic install <git-url>`, revisions locked in `mod.mim` | 0.3.1 |
+| A manual inside `mimic`: topics, functions, glyphs (`mimic man ⌿`), search, "coming from C or Python" pages, a guide for agents | `mimic explain` for errors, `mimic doc --std` | 0.3.2 |
+| Syntax highlighting for editors (TextMate and tree-sitter grammars) and, later, on GitHub | None | 0.3.3 |
+| A language server: errors as you type, glyph input, hover, go to definition; names under `c::` and `cpp::` in their own colour | `mimic check --emit-json` | 0.3.4 |
+| `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.4 |
+| A VS Code extension | None | 0.3.5 |
+| Lists, text and records shown as values in the debugger; debugging from editors | `mimic lldb` shows numbers; others as pointers | 0.3.6 |
+| An MCP server for AI agents | None | 0.3.7 |
+| Docs with guides and examples beyond signatures, written by people or agents | `mimic doc`: signatures and comments | 0.3.8 |
+| Seeing where code runs in parallel, and why not (`mimic why`) | None | 0.3.9 |
+| Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.10, 0.3.11 |
+| A terminal editor (`mimic edit`) | None | 0.3.12 |
+| A REPL, a profiler, and benchmarks against Rust and Go | Benchmarks against C | 0.3.13 |
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
 | Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | ✅ (native CPU, real naps, bigger scan chunks) | 0.2.9 |
 

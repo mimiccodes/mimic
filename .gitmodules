@@ -1,0 +1,6 @@
+[submodule "editors/syntax"]
+	path = editors/syntax
+	url = https://github.com/mimiccodes/mimic-syntax.git
+[submodule "editors/vscode"]
+	path = editors/vscode
+	url = https://github.com/mimiccodes/mimic-vscode.git
