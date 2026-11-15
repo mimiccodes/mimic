@@ -17,6 +17,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 3. **Two scores per benchmark:**
    * **Single-core** (`MIMIC_THREADS=1`), which measures code quality.
    * **All cores**, the default, which measures what users actually get. The other languages run their straightforward version, which for C, Rust and Go is usually sequential. Mimic's parallelism is automatic, so it counts.
+   * **Rust + Rayon, all cores**: the hand-parallelised Rust version (`bench/<name>/rayon/`, the same algorithm with Rayon's parallel iterators, `join` or `par_sort_unstable`), next to Mimic on all cores. It shows what parallel code written by hand gets, against Mimic's parallelism without annotations.
 4. **Statistics:** each measurement is the best of 5 wall-clock runs, after one warm-up run. On macOS the first launch of a new binary is slowed by a security scan, and the warm-up absorbs it. The machine, OS, CPU model and load average are recorded with every table.
 5. **Score:** each result is reported as a ratio to C (`time / C time`). Below 1.0 means faster than C.
 
@@ -93,6 +94,28 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### Against Rust + Rayon (2026-11-16)
+
+Apple M3 Pro, 12 cores, macOS, load average 11–15 (other work running). Best of 5 runs; the ratio is to C. Rust + Rayon and Mimic, all cores, are the two parallel columns; nbody (five bodies, one step after another) has no Rayon version.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib(38) | 0.512 s | 1.11× | 1.17× | 1.02× | **0.16×** | 0.20× |
+| mandelbrot | 2.406 s | 1.15× | 1.22× | 0.73× | 0.15× | **0.11×** |
+| matmul 1024² | 0.778 s | 1.00× | 2.42× | 0.12× | 0.60× | **0.11×** |
+| nbody, 1M steps | 0.173 s | 1.26× | 1.53× | 1.00× | — | 1.00× |
+| prefix sum, 100M | 0.420 s | 2.44× | 1.04× | 0.97× | **0.37×** | 0.63× |
+| records | 0.041 s | 3.30× | 3.51× | 2.46× | 2.13× | **1.14×** |
+| sort 10M integers | 4.371 s | 0.15× | 0.74× | 0.09× | 0.06× | 0.06× |
+| sum of squares, 100M | 0.120 s | 1.63× | 2.48× | 1.00× | 0.49× | **0.24×** |
+| tree | 1.395 s | 1.14× | 1.26× | 0.57× | 0.52× | **0.13×** |
+
+Mimic with no annotations is faster than hand-written Rayon on six of the eight, and ties on sort. Rayon wins two:
+* **prefix sum (0.37× against 0.63×).** The Rayon version writes the running sums in place into one buffer, in chunks of a million; Mimic's two-pass scan makes the first pass's sums and then a second array.
+* **fib (0.16× against 0.20×).** `rayon::join` steals work with less overhead per split than Mimic's fork-join, which also guards each native call's depth.
+
+Matmul with Rayon is the plain loop split by rows (0.60×); Mimic's kernel is blocked and SIMD (0.11×) on one core already.
 
 ### Linux and Windows in CI (2026-11-14)
 

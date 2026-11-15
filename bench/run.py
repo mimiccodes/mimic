@@ -5,6 +5,8 @@ Every folder here holds one benchmark in Mimic, C, Rust and Go (main.mim,
 main.c, main.rs, main.go) and the output they must all print (expected.txt).
 A Rust version that needs crates is a cargo project in rust/ instead of
 main.rs (built --offline: the crates must be in the local cargo cache).
+A rayon/ cargo project is the parallel Rust version (with Rayon), timed on
+all cores next to Mimic on all cores.
 
 A folder with a load/ directory (a Go program) is a server benchmark: each
 version is a server on port 18432, and the time is how long the load
@@ -66,12 +68,14 @@ def build(lang: str, src: Path, name: str) -> Path | None:
         cpu = "-march=native" if platform.machine() in ("x86_64", "AMD64") else "-mcpu=native"
         libs = ["-lm"] if sys.platform.startswith("linux") else []  # glibc keeps maths apart
         run([mimic_exe(), "cc", "-O3", cpu, str(src), "-o", str(exe)] + libs)
-    elif lang == "rust" and src.is_dir():
+    elif lang in ("rust", "rayon") and src.is_dir():
         # a cargo project (crates such as serde_json, from the local cache)
         if not shutil.which("cargo"):
             return None
-        target = OUT / f"{name}-rust-cargo"
-        run(["cargo", "build", "--release", "--offline", "--quiet"], cwd=src, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
+        target = OUT / f"{name}-{lang}-cargo"
+        # this CPU's features, as for the single-file Rust versions
+        flags = (os.environ.get("RUSTFLAGS", "") + " -C target-cpu=native").strip()
+        run(["cargo", "build", "--release", "--offline", "--quiet"], cwd=src, env={**os.environ, "CARGO_TARGET_DIR": str(target), "RUSTFLAGS": flags})
         meta = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=src).stdout)
         return target / "release" / (meta["packages"][0]["targets"][0]["name"] + EXE)
     elif lang == "rust":
@@ -156,11 +160,11 @@ def main() -> int:
             load = OUT / f"{b.name}-load{EXE}"
             run(["go", "build", "-o", str(load), "."], cwd=b / "load", env={**os.environ, "GO111MODULE": "off"})
         timed = (lambda exe, env: time_server(exe, load, env, a.runs, expected)) if load else (lambda exe, env: time_runs(exe, env, a.runs, expected))
-        for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("go", "main.go"), ("mimic", "main.mim")]:
+        for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("rayon", "rayon"), ("go", "main.go"), ("mimic", "main.mim")]:
             src = b / file
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
                 src = b / "rust"
-            if not src.exists():
+            if not src.exists() or (lang == "rayon" and not (src / "Cargo.toml").exists()):
                 continue
             # the C HTTP server is written for epoll and kqueue
             if WINDOWS and lang == "c" and load:
@@ -169,10 +173,13 @@ def main() -> int:
             if exe is None:
                 continue
             print(f"  {b.name:<16} {lang:<6}", end="", flush=True)
-            times[lang] = timed(exe, one)
+            # Rayon is the parallel version: all cores
+            times[lang] = timed(exe, {} if lang == "rayon" else one)
             if lang == "mimic":
                 times["mimic-all"] = timed(exe, {})
                 print(f" {times['mimic']:.3f} s (1 core), {times['mimic-all']:.3f} s (all cores)")
+            elif lang == "rayon":
+                print(f" {times[lang]:.3f} s (all cores)")
             else:
                 print(f" {times[lang]:.3f} s")
         rows.append((b.name, times))
@@ -191,14 +198,14 @@ def main() -> int:
         "",
         f"{cpu}, {platform.system()} {platform.release()}, {os.cpu_count()} cores, load average {load:.1f} at the end.",
         f"Best of {a.runs} runs after a warm-up; the ratio is to C (below 1.0 is faster than C).",
-        "C, Rust and Go run their straightforward (sequential) versions on one core.",
+        "C, Rust and Go run their straightforward (sequential) versions on one core; Rust + Rayon is the parallel Rust version on all cores.",
         "",
-        "| Benchmark | C | Rust | Go | Mimic, 1 core | Mimic, all cores |",
-        "|---|---|---|---|---|---|",
+        "| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |",
+        "|---|---|---|---|---|---|---|",
     ]
     for name, t in rows:
         cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
-        lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'mimic-all')} |")
+        lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'rayon')} | {c(t, 'mimic-all')} |")
     (HERE / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[6:]))
     if a.history:

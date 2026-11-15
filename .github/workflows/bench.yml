@@ -96,7 +96,7 @@ jobs:
           [ $((ymm + zmm + neon)) -gt 0 ]
 
       - name: Crates for the Rust versions
-        run: for d in bench/*/rust; do (cd "$d" && cargo fetch); done
+        run: for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch); done
 
       - name: Benchmarks
         run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl'

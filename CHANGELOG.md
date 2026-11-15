@@ -34,6 +34,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **`mimic repl`** (step 0.3.13): Mimic a line at a time. An expression shows its value, a `let` keeps it, a `fn` or `type` stays defined, and an open bracket continues on the next line. Glyph input as you type (`\i` → `⍳`) and history with Up and Down; `:show` prints the session as a program, `:reset`, `:man`, `:glyphs`, `:quit`. Every line is compiled to native code and run; a line that does not compile shows its errors and is not kept.
 
+- **Rust + Rayon in the benchmarks** (step 0.3.13): `bench/<name>/rayon/` is the hand-parallelised Rust version of seven benchmarks, timed on all cores next to Mimic on all cores in `bench/run.py`, `BENCHMARK.md` and the weekly CI run. Cargo projects in the suite now build with `-C target-cpu=native`, as the single-file Rust versions do. Mimic is ahead on six of eight with no annotations; Rayon is ahead on prefix sum and fib.
+
 - **`mimic edit`, Mimic's own terminal editor** (step 0.3.12): in Mimic's colours, with a MIMIC start screen; highlighting from Mimic's own lexer (names from C in their own colour); glyph input (`\i` → `⍳`, never inside strings) and a glyph palette; errors as you type from the engine (a mark, the code underlined, the message); panes for problems, the audit, where code runs (also as labels beside the code), the manual for the word under the cursor, and run and test output (in the background); tabs, a file tree, a fuzzy file opener, find and replace, undo and redo, the clipboard, the mouse, indentation that follows the code. Easy keys: Ctrl-S, Ctrl-Q (asking about unsaved files), Ctrl-O, Ctrl-G, F1, F5, F6.
 
 ### Changed
