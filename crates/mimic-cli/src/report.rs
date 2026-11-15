@@ -177,6 +177,18 @@ impl Report {
             }
             out.push('\n');
         }
+        // every error has a page in the manual
+        let mut codes: Vec<&str> = Vec::new();
+        for e in &self.entries {
+            if !codes.contains(&e.diag.code.id) {
+                codes.push(e.diag.code.id);
+            }
+        }
+        match codes.as_slice() {
+            [] => {}
+            [one] => out.push_str(&format!("For more about this error: `mimic man {one}`\n")),
+            many => out.push_str(&format!("For more about these errors: `mimic man {}` (and {})\n", many[0], many[1..].join(", "))),
+        }
         let n = self.errors().max(1);
         out.push_str(&format!("error: could not compile due to {n} previous error{}", if n == 1 { "" } else { "s" }));
         out

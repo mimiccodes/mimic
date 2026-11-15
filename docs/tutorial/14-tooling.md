@@ -69,6 +69,36 @@ mimic test file.mim         # the tests of one file
 * **Tests are never built into the program.** `mimic run` and `mimic build` leave them out, but `mimic check` still checks them.
 * **Private items are in reach.** A test sees everything its module sees. Tests in `src/test.mim` (`module test`) reach the project's `pub` items, such as `main::square`.
 
+### Examples in comments
+
+An example in the comment above a function is a test too: a `// > expression` line, then the line `print` would show for its value.
+
+```mimic
+// The larger of two numbers.
+// > larger(3, 7)
+// 7
+fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
+```
+
+`mimic test` runs every such example, so the documentation can't drift from the code: a failure names the example's line and shows both values.
+
+## The manual
+
+`mimic man` is the manual inside `mimic`: the same version as the compiler, and it works offline.
+
+```sh
+mimic man                       # the contents
+mimic man 4                     # chapter 4 of this tutorial (or `mimic man no-loops`)
+mimic man fs::read              # a standard function: signature, effects, examples
+mimic man json                  # a module, with everything in it
+mimic man ⌿                     # a glyph; its word (`mimic man keep`) and digraph (`\k`) work too
+mimic man E0303                 # an error code
+mimic man --search "sort by"    # every page that mentions it
+mimic man --run 4               # run a chapter's examples and compare their output
+```
+
+Every standard function, module, glyph and error code has a page made from the compiler itself, and every error message ends with the page to read. Guides translate habits from other languages (`mimic man coming-from-c`, `coming-from-python`, `coming-from-javascript`), and `mimic man agents` lists the rules for writing Mimic, for AI agents and for people. `--json` prints a page for tools.
+
 ## Formatting
 
 ```sh

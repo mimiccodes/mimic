@@ -21,4 +21,28 @@ fn main() {
     let llvm = output(&config.to_string_lossy(), &["--version"]).unwrap_or_else(|| "?".into());
     println!("cargo:rustc-env=MIMIC_COMMIT={commit}");
     println!("cargo:rustc-env=MIMIC_LLVM_VERSION={llvm}");
+    manual(root);
+}
+
+/// The manual inside `mimic` (`mimic man`): every Markdown page under docs/
+/// (the reference), docs/tutorial/ and docs/manual/, embedded in the binary.
+fn manual(root: &str) {
+    let docs = std::path::Path::new(root).join("docs");
+    let mut pages = Vec::new();
+    for sub in ["", "tutorial", "manual"] {
+        let dir = docs.join(sub);
+        println!("cargo:rerun-if-changed={}", dir.display());
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let mut files: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "md")).collect();
+        files.sort();
+        for f in files {
+            println!("cargo:rerun-if-changed={}", f.display());
+            let rel = if sub.is_empty() { f.file_name().unwrap().to_string_lossy().to_string() } else { format!("{sub}/{}", f.file_name().unwrap().to_string_lossy()) };
+            let abs = f.canonicalize().unwrap_or(f);
+            pages.push(format!("    ({rel:?}, include_str!({:?})),\n", abs.to_string_lossy()));
+        }
+    }
+    let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("manual.rs");
+    let code = format!("/// (path under docs/, text)\npub const PAGES: &[(&str, &str)] = &[\n{}];\n", pages.concat());
+    std::fs::write(out, code).unwrap();
 }

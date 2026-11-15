@@ -10,6 +10,10 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **Libraries at a chosen version, from git** (step 0.3.1). `mimic install <git-url>@v1.2.0` installs a tag, branch or commit next to other versions (`~/.mimic/libraries/<name>@v1.2.0`), and `rev = "v1.2.0"` in a dependency of `mim.mim` picks it. `mimic install` with no URL, inside a project, installs every missing dependency that has a `git` URL (and theirs), at its `rev` or at the commit `mod.mim` locked, so a fresh clone builds with the same library code. `mimic update` moves a library to the newest commit of its branch and leaves tags and commits where they are.
 - **Workspaces:** a `mim.mim` with `workspace { members = [...] }` groups projects; `check`, `build`, `test`, `fmt`, `install` and `mod update` in its folder run in every member, and all members build into its one `target/`.
 
+- **`mimic man`, the manual inside `mimic`** (step 0.3.2): the tutorial, the reference and new guides, embedded in the binary, plus a page made from the compiler for every standard function (243) and module, every glyph (`mimic man ⌿`, `mimic man keep`, `mimic man \k`) and every error code. `--search` finds every line that mentions a text, `--run` runs a page's examples and compares their output, `--json` prints a page for tools. Every error message now ends with the page to read (`For more about this error: mimic man E0303`).
+- **Guides:** "Coming from C", "Coming from Python", "Coming from JavaScript", and "Writing Mimic for agents" (the workflow, the idioms, and the mistakes ported code makes, with their error codes), in `docs/manual/`. Their examples are checked like the tutorial's.
+- **Examples in comments are tests:** a `// > expression` line and the value `print` would show on the next comment line run under `mimic test`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

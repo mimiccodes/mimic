@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check (or refresh) the tutorial: every ```mimic run``` block is compiled and
+"""Check (or refresh) the tutorial and the guides (docs/manual): every ```mimic run``` block is compiled and
 run with the current `mimic`, and its stdout must equal the ```output``` block
 that follows it. Prose is also checked for `<` outside backticks, which
 Markdown would read as an HTML tag.
@@ -49,7 +49,9 @@ def main():
     ap.add_argument("--mimic", default=str(ROOT / "target" / "debug" / "mimic"))
     ap.add_argument("files", nargs="*")
     a = ap.parse_args()
-    files = [pathlib.Path(f) for f in a.files] or sorted((ROOT / "docs" / "tutorial").glob("*.md"))
+    files = [pathlib.Path(f) for f in a.files] or (
+        sorted((ROOT / "docs" / "tutorial").glob("*.md")) + sorted((ROOT / "docs" / "manual").glob("*.md"))
+    )
     failures = 0
     total = 0
     for path in files:

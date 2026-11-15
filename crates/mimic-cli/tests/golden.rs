@@ -326,6 +326,74 @@ fn workspace() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mimic man`: a page for every standard function, glyph and error code;
+/// lookups by name, number, glyph, digraph and word; search; examples run.
+#[test]
+fn manual() {
+    let man = |args: &[&str]| {
+        let out = mimic().arg("man").args(args).env("NO_COLOR", "1").output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string(), String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let (ok, text, _) = man(&["fs::read"]);
+    assert!(ok && text.contains("fn read(path: str) -> Result[str, str]") && text.contains("concurrent"), "{text}");
+    let (ok, keep, _) = man(&["⌿"]);
+    assert!(ok && keep.contains("keep") && keep.contains("\\k"), "{keep}");
+    assert_eq!(man(&["keep"]).1, keep, "the word finds the glyph's page");
+    assert_eq!(man(&["\\k"]).1, keep, "and so does the digraph");
+    let (ok, text, _) = man(&["E0303"]);
+    assert!(ok && text.contains("unresolved-name"), "{text}");
+    let (ok, text, _) = man(&["4"]);
+    assert!(ok && text.starts_with("No loops"), "chapter 4: {text}");
+    let (ok, text, _) = man(&["json"]);
+    assert!(ok && text.contains("json::decode"), "the module, not the chapter: {text}");
+    let (ok, text, _) = man(&["coming-from-python"]);
+    assert!(ok && text.contains("Coming from Python"), "{text}");
+    let (ok, _, err) = man(&["frobnicate"]);
+    assert!(!ok && err.contains("--search"), "{err}");
+    let (ok, text, _) = man(&["--search", "high minus"]);
+    assert!(ok && text.contains("mimic man"), "{text}");
+    // every function, glyph and error code has a page
+    let out = mimic().args(["man", "--list", "--json"]).output().unwrap();
+    let pages: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names: Vec<&str> = pages.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    let out = mimic().args(["explain", "--emit-json"]).output().unwrap();
+    let codes: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for c in codes.as_array().unwrap() {
+        assert!(names.contains(&c["code"].as_str().unwrap()), "no page for {}", c["code"]);
+    }
+    for f in ["sort_by", "fs::write", "json::decode", "http::serve", "time::format", "math::sqrt"] {
+        assert!(names.contains(&f), "no page for {f}");
+    }
+    // a page's examples run
+    let (ok, text, _) = man(&["--run", "coming-from-c"]);
+    assert!(ok && text.contains("0 failed"), "{text}");
+    // an error points to its page
+    let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/fail/arity.mim");
+    let out = mimic().arg("check").arg(&f).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`mimic man E0705`"));
+}
+
+/// Examples in `//` comments (`// > expression`, then the value) run as tests.
+#[test]
+fn doc_tests() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-doctest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("dt.mim");
+    std::fs::write(&f, "module main\n\n// > larger(3, 7)\n// 7\n// > [larger(¯2, ¯5)]\n// [-2]\nfn larger(a: i64, b: i64) -> i64 { a ⌈ b }\n\n// > \"{1 + 1}\"\n// 2\nfn main() { print(larger(1, 2)) }\n").unwrap();
+    let out = mimic().arg("test").arg(&f).output().unwrap();
+    let err = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && err.contains("3 passed"), "{err}");
+    std::fs::write(&f, "module main\n\n// > larger(3, 7)\n// 3\nfn larger(a: i64, b: i64) -> i64 { a ⌈ b }\n\nfn main() { print(larger(1, 2)) }\n").unwrap();
+    let out = mimic().arg("test").arg(&f).output().unwrap();
+    let err = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success() && err.contains("example on line 3") && err.contains("\"7\""), "{err}");
+    // and they are not part of the program
+    let out = mimic().arg("run").arg(&f).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

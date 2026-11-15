@@ -8,6 +8,7 @@ mod cimport;
 mod doc;
 mod driver;
 mod engine;
+mod man;
 mod modfile;
 mod report;
 mod targets;
@@ -238,6 +239,23 @@ enum Cmd {
         /// Show how a target is understood (LLVM triple) and what it can build
         #[arg(long, value_name = "TARGET")]
         check: Option<String>,
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the manual: a chapter, a standard function (`mimic man fs::read`), a glyph (`mimic man ⌿`), an error code
+    Man {
+        /// A page, chapter number, function, module, glyph or its word, or error code; nothing for the contents
+        topic: Vec<String>,
+        /// Every line of the manual that mentions this
+        #[arg(long, value_name = "TEXT")]
+        search: Option<String>,
+        /// Run the page's examples and compare their output
+        #[arg(long)]
+        run: bool,
+        /// List the pages (of one kind: tutorial, guide, reference, function, module, type, glyph, error)
+        #[arg(long, value_name = "KIND", num_args = 0..=1, default_missing_value = "")]
+        list: Option<String>,
         /// Print as JSON
         #[arg(long)]
         json: bool,
@@ -510,6 +528,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Man { topic, search, run, list, json } => {
+            let ok = man::command(&topic, search.as_deref(), run, list.as_deref(), json)?;
+            Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+        }
         Cmd::Query { method, params, input, serve } => {
             let mut eng = engine::Engine::open(input.as_deref()).map_err(|e| Report::from_text(&mimic_syntax::codes::IO, &e))?;
             if serve {
@@ -1015,7 +1037,7 @@ fn explain(code: Option<&str>, json: bool) -> Result<ExitCode, String> {
             if json {
                 println!("{}", one(c));
             } else {
-                println!("{} ({}): {}\n\n{}", c.id, c.name, c.title, c.explain);
+                println!("{} ({}): {}\n\n{}\n\nThe manual has this page too: `mimic man {}`", c.id, c.name, c.title, c.explain, c.id);
             }
         }
     }

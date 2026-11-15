@@ -945,6 +945,50 @@ impl RefWalk<'_> {
     }
 }
 
+// ---- the standard library, for the manual ------------------------------------
+
+/// A public item of the standard library, as `mimic man` shows it.
+pub struct StdItem {
+    /// As code writes it: `fs::read`, `sort_by`, `Option`.
+    pub path: String,
+    /// `fn`, `extern fn`, `type`, `variant`, `module`
+    pub kind: &'static str,
+    pub signature: String,
+    pub doc: String,
+    /// For functions: `pure`, `concurrent`, `ordered` or `sync`.
+    pub effects: Option<&'static str>,
+}
+
+/// Every public item of the standard library.
+pub fn std_items() -> Vec<StdItem> {
+    let (p, _) = Program::build(vec![driver::prelude_file()], "manual");
+    let index = Index::build(&p);
+    let pu = Purity::analyze(&p);
+    let effect = |f: usize| {
+        if pu.fns[f] {
+            "pure"
+        } else if pu.overlap[f] {
+            "concurrent"
+        } else if pu.calm[f] {
+            "ordered"
+        } else {
+            "sync"
+        }
+    };
+    index
+        .symbols
+        .into_iter()
+        .filter(|x| x.package == "std" && x.public && !x.path.is_empty() && x.path != "prelude")
+        .map(|x| StdItem {
+            effects: x.fn_id.map(effect),
+            path: x.path,
+            kind: x.kind.name(),
+            signature: x.signature,
+            doc: x.doc,
+        })
+        .collect()
+}
+
 // ---- `mimic query` ----------------------------------------------------------
 
 /// `key=value` words as a JSON object (numbers and `true`/`false` as such;

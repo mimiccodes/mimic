@@ -587,7 +587,7 @@ pub module http {
 
 ", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/ui.mim"));
 
-fn prelude_file() -> SourceFile {
+pub fn prelude_file() -> SourceFile {
     let key = PathBuf::from("<prelude>");
     if let Some(sf) = sources::parsed(&key, PRELUDE, "std", "<prelude>") {
         return sf;
@@ -669,8 +669,9 @@ fn display_path(root: Option<&Path>, p: &Path) -> String {
     root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string()
 }
 
-fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) -> Option<SourceFile> {
+fn read_parse(path: &Path, display: String, package: &str, report: &mut Report, tests: bool) -> Option<SourceFile> {
     let src = match sources::read(path) {
+        Ok(s) if tests => with_doc_tests(&s),
         Ok(s) => s,
         Err(e) => {
             report.push_plain(&C::IO, format!("cannot read {}: {e}", path.display()));
@@ -692,6 +693,39 @@ fn read_parse(path: &Path, display: String, package: &str, report: &mut Report) 
             None
         }
     }
+}
+
+/// Examples in comments, for `mimic test`: a `// > expression` line and the
+/// comment line after it, which is what `print` would show for the value.
+///
+/// ```text
+/// // The larger of two numbers.
+/// // > larger(3, 7)
+/// // 7
+/// ```
+///
+/// Each becomes a test at the end of the file (so line numbers stay), in the
+/// file's own module.
+pub fn with_doc_tests(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut tests = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(expr) = line.trim_start().strip_prefix("// > ") else { continue };
+        let Some(want) = lines.get(i + 1).and_then(|l| l.trim_start().strip_prefix("//")) else { continue };
+        let want = want.strip_prefix(' ').unwrap_or(want);
+        if want.starts_with("> ") {
+            continue;
+        }
+        let quoted: String = want
+            .chars()
+            .flat_map(|c| match c {
+                '"' | '\\' | '{' | '}' => vec!['\\', c],
+                _ => vec![c],
+            })
+            .collect();
+        tests += &format!("\ntest \"example on line {}\" {{ expect(string({}) == \"{quoted}\") }}\n", i + 1, expr.trim());
+    }
+    if tests.is_empty() { src.to_string() } else { format!("{src}\n{tests}") }
 }
 
 /// In tests (`test "…" { }`, functions named `test …`): `expect(a == b)`
@@ -747,7 +781,7 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
     let pkg = input.name();
     match input {
         Input::File(f) => {
-            if let Some(sf) = read_parse(f, f.display().to_string(), &pkg, &mut report) {
+            if let Some(sf) = read_parse(f, f.display().to_string(), &pkg, &mut report, tests) {
                 if sf.ast.module.name != "main" {
                     let d = mimic_syntax::Diag::new(
                         &C::ENTRY_MODULE,
@@ -765,7 +799,7 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
                 if !tests && path.file_name().is_some_and(|n| n == "test.mim") && path.parent() == Some(&p.root.join("src")) {
                     continue;
                 }
-                if let Some(sf) = read_parse(&path, display_path(Some(&p.root), &path), &pkg, &mut report) {
+                if let Some(sf) = read_parse(&path, display_path(Some(&p.root), &path), &pkg, &mut report, tests) {
                     files.push(sf);
                 }
             }
@@ -799,7 +833,7 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
                         continue;
                     }
                     let shown = format!("{}/{}", dep.name, display_path(Some(&dir), &path));
-                    if let Some(sf) = read_parse(&path, shown, &dep.name, &mut report) {
+                    if let Some(sf) = read_parse(&path, shown, &dep.name, &mut report, false) {
                         files.push(sf);
                     }
                 }
