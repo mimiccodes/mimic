@@ -20,7 +20,16 @@ Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com
 
 ## VS Code
 
-The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode), next in step 0.3.5) starts `mimic lsp` by itself and adds the highlighting, a glyph palette, and Run and Test buttons.
+The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode)) starts `mimic lsp` by itself and adds:
+
+* the highlighting, and the Mimic file icon;
+* the glyph palette (`Cmd+Alt+G` on macOS, `Ctrl+Alt+G` elsewhere): every glyph with its word, how to type it and what it does;
+* **▶ Run** above `fn main` and **▶ Run test** above each test, and the Test Explorer (also for examples in comments);
+* the manual beside your code (*Mimic: Open the Manual…*, or `Cmd/Ctrl+Alt+M` for the word under the cursor);
+* *Convert File to Glyphs / Words*;
+* a check that `mimic` is new enough, with the download when it is not.
+
+Until it is in the VS Code Marketplace and Open VSX, install the `.vsix` from the extension's releases: *Extensions* view → `…` → *Install from VSIX…*.
 
 ## Neovim (0.11 or newer)
 

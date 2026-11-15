@@ -123,6 +123,15 @@ jobs:
       - name: Test
         run: cargo test --release --no-fail-fast
 
+      # the VS Code extension in a real VS Code, against the mimic just built
+      - name: VS Code extension
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libnss3 libgbm1 libasound2t64 || sudo apt-get install -y -qq xvfb libnss3 libgbm1 libasound2
+          cd editors/vscode && npm ci --no-audit --no-fund && npm test
+          PATH="$GITHUB_WORKSPACE/target/release:$PATH" xvfb-run -a npm run test:integration
+
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
 

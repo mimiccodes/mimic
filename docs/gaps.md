@@ -50,7 +50,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | Syntax highlighting for editors (TextMate and tree-sitter grammars) and, later, on GitHub | ✅ editors ([mimic-syntax](https://github.com/mimiccodes/mimic-syntax)); GitHub once Linguist accepts Mimic | 0.3.3 |
 | A language server: errors as you type, glyph input, hover, go to definition; names under `c::` and `cpp::` in their own colour | ✅ (`mimic lsp`) | 0.3.4 |
 | `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.4 |
-| A VS Code extension | None | 0.3.5 |
+| A VS Code extension | ✅ ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode); Marketplace and Open VSX once the publisher accounts exist) | 0.3.5 |
 | Lists, text and records shown as values in the debugger; debugging from editors | `mimic lldb` shows numbers; others as pointers | 0.3.6 |
 | An MCP server for AI agents | None | 0.3.7 |
 | Docs with guides and examples beyond signatures, written by people or agents | `mimic doc`: signatures and comments | 0.3.8 |

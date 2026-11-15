@@ -18,6 +18,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **`mimic lsp`, the language server** (step 0.3.4): errors as you type with the compiler's fixes as quick fixes; hover with signature, comment and effects (for C functions, their header; for glyphs and their words, what they do and how to type them); go to definition and find references, into the standard library; glyph input (`\i` → `⍳`) and completion of names, modules, words and keywords; formatting in the style the file mostly uses; the outline and workspace symbols; names from C as semantic tokens with the modifier `foreign`. Set-up for VS Code, Neovim, Helix, Emacs, Sublime Text and Zed: `mimic man editors`.
 
+- **The VS Code extension** (step 0.3.5), in the new [mimic-vscode](https://github.com/mimiccodes/mimic-vscode) repository (a submodule at `editors/vscode`): everything of `mimic lsp`, the highlighting and file icon, a glyph palette, **Run** and **Run test** above functions and tests, the Test Explorer (tests and examples in comments, with both sides of a failed `expect`), the manual beside the code, conversion between glyphs and words, and a check that `mimic` is new enough. CI runs it in a real VS Code against the `mimic` it builds.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 
