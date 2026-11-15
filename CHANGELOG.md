@@ -22,6 +22,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 - **Debugging shows Mimic's values** (step 0.3.6). `mimic lldb` shows text, lists, maps (`["a": 1, "b": 2]`), records (also those kept in registers, which had no debug information before: `Point { x: 1.5, y: 2.0 }`), lists of numbers as `[3 1 4]` and variants as `Some(7)`, without the handles' addresses. `mimic dap` debugs from editors over the Debug Adapter Protocol (through LLVM's `lldb-dap`): breakpoints on `.mim` lines, stepping, the call stack, and the same values; in VS Code, F5 or **Debug** above `fn main`.
 
+- **`mimic mcp`, Mimic for AI agents** (step 0.3.7), over the Model Context Protocol: tools to check (every error with its exact fixes, as JSON), build, run (with input and a timeout), test, format, explain errors, read the manual and search it, look up symbols and effects, and read and write the project's files; resources (the guide for agents, the glyph table, every page of the manual) and prompts (write Mimic, port code to Mimic, fix the errors). Full access inside the project; outside it, files (`--allow-outside`), installing (`--allow-install`) and running programs that use the network or run other programs (`--allow-network`) stay off until allowed; `--read-only` and `--no-run` narrow it. Set-up for VS Code, Cursor, Windsurf, Zed, Codex CLI and any MCP app: `mimic man mcp`.
+
 ### Changed
 - **`mimic check` is about 2.5× faster** (the showcase: 90 ms → 35 ms of analysis). Name lookups are remembered once the module tree is built, and names that turn out to be local variables no longer run the "did you mean" search, which only an error needs.
 

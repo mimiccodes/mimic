@@ -52,7 +52,7 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | `mimic check --fix` for every suggestion it shows | Some fixes only | 0.3.4 |
 | A VS Code extension | ✅ ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode); Marketplace and Open VSX once the publisher accounts exist) | 0.3.5 |
 | Lists, text and records shown as values in the debugger; debugging from editors | ✅ (`mimic lldb`, `mimic dap`) | 0.3.6 |
-| An MCP server for AI agents | None | 0.3.7 |
+| An MCP server for AI agents | ✅ (`mimic mcp`) | 0.3.7 |
 | Docs with guides and examples beyond signatures, written by people or agents | `mimic doc`: signatures and comments | 0.3.8 |
 | Seeing where code runs in parallel, and why not (`mimic why`) | None | 0.3.9 |
 | Quality, security and verification checks (`mimic audit`, contracts, property tests) | None | 0.3.10, 0.3.11 |

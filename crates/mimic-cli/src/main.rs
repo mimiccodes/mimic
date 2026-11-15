@@ -11,6 +11,7 @@ mod dap;
 mod engine;
 mod lsp;
 mod man;
+mod mcp;
 mod modfile;
 mod report;
 mod targets;
@@ -264,6 +265,27 @@ enum Cmd {
     },
     /// Debugging from editors (Debug Adapter Protocol, over stdin and stdout): builds the program and runs it under lldb-dap
     Dap,
+    /// Tools for AI agents over the Model Context Protocol (stdin and stdout): check, build, run, test, the manual, symbols
+    Mcp {
+        /// The project (default: the one in this folder or above)
+        #[arg(long, value_name = "DIR")]
+        project: Option<PathBuf>,
+        /// Allow files outside the project
+        #[arg(long)]
+        allow_outside: bool,
+        /// Allow installing libraries (into ~/.mimic)
+        #[arg(long)]
+        allow_install: bool,
+        /// Allow running programs that use the network (http, tcp, udp, ws, tls) or run other programs
+        #[arg(long)]
+        allow_network: bool,
+        /// Only reading, checking and looking up: no writing, building or running
+        #[arg(long)]
+        read_only: bool,
+        /// No running programs or tests
+        #[arg(long)]
+        no_run: bool,
+    },
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
         /// Accepted for editors that pass it; stdin and stdout are always used
@@ -538,6 +560,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
+        Cmd::Mcp { project, allow_outside, allow_install, allow_network, read_only, no_run } => {
+            mcp::serve(project, mcp::Access { allow_outside, allow_install, allow_network, read_only, no_run })?;
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Dap => {
             dap::serve()?;
             Ok(ExitCode::SUCCESS)

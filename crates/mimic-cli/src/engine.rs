@@ -134,6 +134,28 @@ impl Engine {
         self.good.as_ref().map(|a| a.program.files.iter().map(|f| (f.path.clone(), f.src.clone())).collect()).unwrap_or_default()
     }
 
+    /// The standard functions under `prefixes` (`http::`, `tcp::`…) that the
+    /// program's own files use (checks the program first if needed).
+    pub fn uses_of(&mut self, prefixes: &[&str]) -> Result<Vec<String>, String> {
+        let a = self.analysis()?;
+        let root = &a.program.root_package;
+        let mut out: Vec<String> = a
+            .index
+            .refs
+            .iter()
+            .filter(|r| a.program.files[r.file].package == *root)
+            .filter_map(|r| match r.to {
+                Target::Sym(i) => Some(&a.index.symbols[i]),
+                Target::Local { .. } => None,
+            })
+            .filter(|x| x.package == "std" && prefixes.iter().any(|p| x.path.starts_with(p)))
+            .map(|x| x.path.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// Check the program again (after files changed).
     pub fn check(&mut self) {
         let t = Instant::now();

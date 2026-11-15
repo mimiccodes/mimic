@@ -643,6 +643,88 @@ fn debugger() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `mimic mcp`: an agent checks, fixes, runs and tests a program through the
+/// MCP tools alone, and stays inside the project and off the network.
+#[test]
+fn mcp_server() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::env::temp_dir().join(format!("mimic-golden-mcp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().args(["create", "app"]).current_dir(&dir).status().unwrap().success());
+    let app = dir.join("app");
+    let session = |extra: &[&str]| {
+        let mut child = mimic().arg("mcp").args(extra).current_dir(&app).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = BufReader::new(child.stdout.take().unwrap());
+        (child, input, output)
+    };
+    let (mut child, mut input, mut output) = session(&[]);
+    let mut id = 0;
+    let mut call = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        id += 1;
+        writeln!(input, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["id"], id);
+        v["result"].clone()
+    };
+    let r = call("initialize", serde_json::json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "1" } }));
+    assert_eq!(r["serverInfo"]["name"], "mimic");
+    assert!(r["instructions"].as_str().unwrap().contains("mimic://manual/agents"));
+    let tools: Vec<String> = call("tools/list", serde_json::json!({}))["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    for t in ["check", "run", "test", "manual", "symbol", "write_file"] {
+        assert!(tools.contains(&t.to_string()), "{tools:?}");
+    }
+    assert!(!tools.contains(&"install".to_string()), "install is off by default");
+    let mut tool = |name: &str, args: serde_json::Value| -> (bool, String) {
+        let r = call("tools/call", serde_json::json!({ "name": name, "arguments": args }));
+        (r["isError"] == true, r["content"][0]["text"].as_str().unwrap().to_string())
+    };
+    // write a program with an error; check finds it with its fix
+    tool("write_file", serde_json::json!({ "path": "src/main.mim", "text": "module main\n\nfn main() {\n    let x = 1\n    x = 2\n    print(x)\n}\n" }));
+    let (_, t) = tool("check", serde_json::json!({}));
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["success"], false);
+    assert_eq!(v["diagnostics"][0]["code"], "E0601");
+    assert_eq!(v["diagnostics"][0]["fixes"][0]["message"], "make `x` mutable");
+    // fixed, run, tested
+    tool("write_file", serde_json::json!({ "path": "src/main.mim", "text": "module main\n\n// > double(2)\n// 4\nfn double(x: i64) -> i64 { x × 2 }\n\nfn main() {\n    print(⍳ 5 ¨ double)\n}\n" }));
+    let (_, t) = tool("check", serde_json::json!({}));
+    assert!(t.contains("\"success\": true"), "{t}");
+    let (err, t) = tool("run", serde_json::json!({}));
+    assert!(!err && t.contains("[0 2 4 6 8]"), "{t}");
+    let (err, t) = tool("test", serde_json::json!({}));
+    assert!(!err && t.contains("1 passed"), "{t}");
+    let (_, t) = tool("symbol", serde_json::json!({ "name": "double" }));
+    assert!(t.contains("fn double(x: i64) -> i64") && t.contains("pure"), "{t}");
+    let (_, t) = tool("manual", serde_json::json!({ "topic": "keep" }));
+    assert!(t.contains("⌿"), "{t}");
+    // outside the project, and the network: off
+    let (err, t) = tool("write_file", serde_json::json!({ "path": "../outside.txt", "text": "x" }));
+    assert!(err && t.contains("outside the project"), "{t}");
+    assert!(!dir.join("outside.txt").exists());
+    tool("write_file", serde_json::json!({ "path": "src/main.mim", "text": "module main\n\nfn main() {\n    print(http::fetch(\"https://example.com\"))\n}\n" }));
+    let (err, t) = tool("run", serde_json::json!({}));
+    assert!(err && t.contains("--allow-network") && t.contains("http::fetch"), "{t}");
+    let r = call("resources/read", serde_json::json!({ "uri": "mimic://manual/agents" }));
+    assert!(r["contents"][0]["text"].as_str().unwrap().contains("Writing Mimic for agents"));
+    let r = call("prompts/get", serde_json::json!({ "name": "port_to_mimic", "arguments": { "code": "x = 1", "language": "Python" } }));
+    assert!(r["messages"][0]["content"]["text"].as_str().unwrap().contains("coming-from-python"));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    // read-only: no writing tools at all
+    let (mut child, mut input, mut output) = session(&["--read-only"]);
+    writeln!(input, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert!(!line.contains("write_file") && !line.contains("\"run\"") && line.contains("\"check\""), "{line}");
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn explain_codes() {
     let out = mimic().args(["explain", "E0401"]).output().unwrap();

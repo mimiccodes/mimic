@@ -86,6 +86,10 @@ fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
 
 `mimic lsp` is the language server: errors as you type with quick fixes, hover, go to definition, glyph input (type `\i` and pick `⍳`), completion and formatting, in VS Code, Neovim, Helix, Emacs, Sublime Text and others. `mimic man editors` shows the set-up for each.
 
+## AI agents
+
+`mimic mcp` gives AI agents Mimic's tools over the Model Context Protocol: they check, build, run and test code, read the manual and look up symbols, inside your project and off the network unless you allow more. `mimic man mcp` shows the set-up for each agent app.
+
 ## The manual
 
 `mimic man` is the manual inside `mimic`: the same version as the compiler, and it works offline.
