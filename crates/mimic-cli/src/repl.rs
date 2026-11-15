@@ -251,6 +251,74 @@ fn read_line(prompt: &str, prompt_width: u16, history: &[String]) -> Line {
     result
 }
 
+/// `mimic repl --json`, for notebooks and tools: one request per line on
+/// stdin, `{"code": "…"}` (or `{"reset": true}`), one answer per line on
+/// stdout: `{"ok": true, "output": "…"}` or `{"ok": false, "error": "…"}`.
+pub fn run_json() -> Result<(), String> {
+    let mut session = Session::new();
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let answer = match serde_json::from_str::<serde_json::Value>(&line) {
+            Err(e) => serde_json::json!({ "ok": false, "error": format!("not JSON: {e}") }),
+            Ok(v) if v["reset"] == true => {
+                session.reset();
+                serde_json::json!({ "ok": true, "output": "" })
+            }
+            Ok(v) => {
+                let code = v["code"].as_str().unwrap_or("");
+                // a cell may hold several inputs: each definition, `let` and
+                // expression in turn, as typed at the prompt
+                let mut output = String::new();
+                let mut error = None;
+                for input in split_inputs(code) {
+                    match session.eval(&input) {
+                        Ok(o) => output += &o,
+                        Err(e) => {
+                            error = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match error {
+                    None => serde_json::json!({ "ok": true, "output": output }),
+                    Some(e) => serde_json::json!({ "ok": false, "output": output, "error": e }),
+                }
+            }
+        };
+        writeln!(out, "{answer}").map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(&session.dir);
+    Ok(())
+}
+
+/// Lines into inputs: a line with an open bracket continues on the next.
+fn split_inputs(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in code.lines() {
+        if cur.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+        if open_brackets(&cur) <= 0 {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 pub fn run() -> Result<(), String> {
     let tty = std::io::stdin().is_terminal();
     let color = tty && std::env::var_os("NO_COLOR").is_none();

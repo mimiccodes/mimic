@@ -84,6 +84,10 @@ pub struct Settings {
     /// Frame pointers in every function, so a sampling profiler can walk
     /// the stack (`mimic profile`).
     pub frame_pointers: bool,
+    /// Count how often each line of the program's own code runs
+    /// (`mimic test --coverage`): a counter per line, a map of them next to
+    /// the object file (`.covmap`), and the runtime writes the counts.
+    pub coverage: bool,
     /// Machine code for a large module in parts at once, one object per
     /// part (the toolchain's split_codegen); `None`: one object.
     pub split: Option<SplitFn>,
@@ -152,6 +156,20 @@ pub struct Decision {
 thread_local! {
     /// Decisions being recorded (see `plan`); `None` in ordinary builds.
     static DECISIONS: std::cell::RefCell<Option<Vec<Decision>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The interaction nets of a program's pure functions (`mimic net show`):
+/// the book as the runtime gets it, the book before compile-time
+/// reduction, and each compiled function with its definition's name and
+/// whether native code enters it through the net.
+pub fn nets(p: &Program) -> (mimic_net::Book, mimic_net::Book, Vec<(mimic_check::FnId, String, bool)>) {
+    let purity = mimic_check::Purity::analyze(p);
+    let mut np = tonet::plan_unreduced(p, &purity);
+    let before = np.book.clone();
+    np.book.pre_reduce();
+    let mut fns: Vec<_> = np.def_index.keys().map(|&f| (f, tonet::def_name(p, f), np.entered.contains(&f))).collect();
+    fns.sort();
+    (np.book, before, fns)
 }
 
 /// The function symbols of a built program (Mach-O, ELF or COFF), with
@@ -332,6 +350,8 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
         profiling: settings.frame_pointers,
+        cov: settings.coverage.then(HashMap::new),
+        cov_order: Vec::new(),
         contract: !settings.strict_math,
         fast: settings.fast_math,
         exit_fid: None,
@@ -400,6 +420,9 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
     }
     if let Some(d) = &cg.dbg {
         d.finalize();
+    }
+    if !cg.cov_order.is_empty() && !plan_only {
+        cg.emit_coverage(obj)?;
     }
     if settings.frame_pointers {
         let fp = cg.ctx.create_string_attribute("frame-pointer", "all");
@@ -578,6 +601,9 @@ struct Cg<'ctx, 'p> {
     /// A profiling build (Settings::frame_pointers): every allocation goes
     /// through the runtime's allocator, which counts them.
     profiling: bool,
+    /// Coverage counters by (file, line), and their order (Settings::coverage).
+    cov: Option<HashMap<(usize, u32), inkwell::values::GlobalValue<'ctx>>>,
+    cov_order: Vec<(usize, u32)>,
     /// Float `+ - ×` may fuse into multiply-adds (Settings::strict_math off).
     contract: bool,
     /// --fast-math (see Settings::fast_math)
@@ -1941,6 +1967,99 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Run `f` with the builder positioned in a fresh function, restoring the
     /// current function state afterwards.
+    /// Count one run of the line of `span` (coverage builds, the program's
+    /// own functions, not tests).
+    fn cover(&mut self, span: mimic_syntax::Span) -> R<()> {
+        let (Some(fid), true) = (self.cur_fid, self.cov.is_some()) else { return Ok(()) };
+        if span.line == 0 {
+            return Ok(());
+        }
+        let f = &self.p.fns[fid];
+        if self.p.mods[f.module].package != self.p.root_package || f.name.starts_with("test ") || f.name.starts_with("prop_") {
+            return Ok(());
+        }
+        let key = (f.file, span.line);
+        let i64t = self.ctx.i64_type();
+        let g = match self.cov.as_ref().unwrap().get(&key) {
+            Some(g) => *g,
+            None => {
+                let g = self.module.add_global(i64t, None, &format!("__mimic_cov_{}", self.cov_order.len()));
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&i64t.const_zero());
+                self.cov.as_mut().unwrap().insert(key, g);
+                self.cov_order.push(key);
+                g
+            }
+        };
+        self.b
+            .build_atomicrmw(inkwell::AtomicRMWBinOp::Add, g.as_pointer_value(), i64t.const_int(1, false), inkwell::AtomicOrdering::Monotonic)
+            .s()?;
+        Ok(())
+    }
+
+    /// The table of coverage counters, registered with the runtime before
+    /// `main` (a constructor), and the map of which line each counts.
+    fn emit_coverage(&mut self, obj: &Path) -> R<()> {
+        let i64t = self.ctx.i64_type();
+        let ptrs: Vec<PointerValue<'ctx>> = self.cov_order.iter().map(|k| self.cov.as_ref().unwrap()[k].as_pointer_value()).collect();
+        let arr = self.ptr.const_array(&ptrs);
+        let table = self.module.add_global(arr.get_type(), None, "__mimic_cov_table");
+        table.set_linkage(Linkage::Internal);
+        table.set_constant(true);
+        table.set_initializer(&arr);
+        let reg = self.module.add_function("mim_cov_register", self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into()], false), Some(Linkage::External));
+        let init = self.module.add_function("__mimic_cov_init", self.ctx.void_type().fn_type(&[], false), Some(Linkage::Internal));
+        let b = self.ctx.create_builder();
+        b.position_at_end(self.ctx.append_basic_block(init, "entry"));
+        b.build_call(reg, &[table.as_pointer_value().into(), i64t.const_int(ptrs.len() as u64, false).into()], "").s()?;
+        b.build_return(None).s()?;
+        // llvm.global_ctors: { priority, function, data }
+        let i32t = self.ctx.i32_type();
+        let entry_ty = self.ctx.struct_type(&[i32t.into(), self.ptr.into(), self.ptr.into()], false);
+        let entry = entry_ty.const_named_struct(&[i32t.const_int(65535, false).into(), init.as_global_value().as_pointer_value().into(), self.ptr.const_null().into()]);
+        let ctors = self.module.add_global(entry_ty.array_type(1), None, "llvm.global_ctors");
+        ctors.set_linkage(Linkage::Appending);
+        ctors.set_initializer(&entry_ty.const_array(&[entry]));
+        // the lines of functions nothing compiled (never called) count too,
+        // as never run: after the counters, in the map only
+        let mut order = self.cov_order.clone();
+        let mut seen: std::collections::HashSet<(usize, u32)> = order.iter().copied().collect();
+        for f in &self.p.fns {
+            let FnKind::User(d) = &f.kind else { continue };
+            if self.p.mods[f.module].package != self.p.root_package || f.name.starts_with("test ") || f.name.starts_with("prop_") {
+                continue;
+            }
+            let mut blocks: Vec<*const Block> = vec![&d.body];
+            d.body.walk(&mut |e| match &e.kind {
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b),
+                ExprKind::If { then, .. } => blocks.push(then),
+                ExprKind::Arms { body, .. } => blocks.push(body),
+                _ => {}
+            });
+            for b in blocks {
+                // SAFETY: pointers into `self.p`, alive for this call
+                let b = unsafe { &*b };
+                let spans = b.stmts.iter().map(stmt_span).chain(b.tail.as_deref().map(|t| t.span));
+                for sp in spans {
+                    if sp.line > 0 && seen.insert((f.file, sp.line)) {
+                        order.push((f.file, sp.line));
+                    }
+                }
+            }
+        }
+        // the map: [["src/main.mim", "/abs/src/main.mim", 12], …], in counter order
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let rows: Vec<String> = order
+            .iter()
+            .map(|(f, line)| {
+                let file = &self.p.files[*f];
+                format!("[\"{}\", \"{}\", {line}]", esc(&file.display), esc(&file.path.display().to_string()))
+            })
+            .collect();
+        std::fs::write(obj.with_extension("covmap"), format!("[\n{}\n]\n", rows.join(",\n"))).map_err(|e| format!("cannot write the coverage map: {e}"))?;
+        Ok(())
+    }
+
     /// A fused kernel's name: the function it comes from, so profiles and
     /// debuggers show where its time belongs (`…main__f$i$kernel3`).
     fn kernel_name(&self) -> String {
@@ -2448,7 +2567,12 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         *self.futures.last_mut().unwrap() = pending.clone();
         let v = match &b.tail {
-            Some(e) => self.expr(e)?,
+            Some(e) => {
+                if !self.terminated() {
+                    self.cover(e.span)?;
+                }
+                self.expr(e)?
+            }
             None => self.null(),
         };
         // every future finishes before the block does
@@ -2533,6 +2657,7 @@ impl<'ctx> Cg<'ctx, '_> {
         if self.terminated() {
             self.dead_block();
         }
+        self.cover(stmt_span(s))?;
         match s {
             Stmt::Let { name, mutable, value, span, .. } => {
                 let v = self.expr(value)?;

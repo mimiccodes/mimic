@@ -15,6 +15,11 @@ description: Mimic in VS Code, Neovim, Helix, Emacs, Sublime Text and Zed: the l
 * **Formatting** (`mimic fmt`), in the style the file mostly uses: words or glyphs.
 * **The outline** of a file, and a search for symbols across the project.
 * **Names from C** (`c::sqrt`, `cpp::`, an `as` name) as semantic tokens with the modifier `foreign`, so themes can colour them apart.
+* **Signature help** while typing a call's arguments: the signature, with the argument being typed marked.
+* **Rename** the program's own functions, types and variables everywhere they are used (the standard library's and C's names stay).
+* **The call hierarchy**: who calls a function, and what it calls.
+* **Smart selection**: grow the selection from a name to its brackets, the line, and on.
+* **Inferred types** after each `let` without an annotation (inlay hints: `let total: i64 = …`), and a code action that writes one in.
 * **Where code runs**, as labels after the code (inlay hints): `∥ parallel`, `⇶ fused`, `≋ SIMD`, `▣ GPU`, `◷ task`, `→ in order`, with the reason on hover (`mimic why` lists them all).
 
 Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com/mimiccodes/mimic-syntax): TextMate for VS Code, tree-sitter for Neovim, Helix and Zed.
@@ -62,7 +67,11 @@ The Mimic extension ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode))
 * **▶ Run** and **Debug** above `fn main`, **▶ Run test** above each test, and the Test Explorer (also for examples in comments); F5 debugs the current project or file;
 * the manual beside your code (*Mimic: Open the Manual…*, or `Cmd/Ctrl+Alt+M` for the word under the cursor);
 * *Convert File to Glyphs / Words*;
-* a check that `mimic` is new enough, with the download when it is not.
+* setup that just works: it finds `mimic` as your terminal does, or where the installer puts it; the status bar shows the version and what it can do; *Mimic: Install or Update Mimic* installs the release for your machine (checked against its SHA256SUMS); with a Mimic too old for the language server, errors show on save;
+* **Profile** above `fn main`: a panel with each function's share of the time, where it runs, how busy each core was, GPU time and memory, and each function's share at the end of its first line; the **Mimic** side bar lists the hot functions and every decision about where the open file's code runs (`mimic why`);
+* the REPL: *Mimic: Open REPL*, and **Shift+Enter** to send the selection or line; **notebooks** (`.mimnb`, *Mimic: New Notebook*), whose code cells share one session;
+* glyphs as you type (`\i` becomes `⍳` at once), the **Glyphs** and **Project** views, help with `mim.mim`, tasks with a build target, `mimic audit` findings on save, previews of the docs and of UI programs, a property test's failing case kept as a test in one click, and `mimic mcp` offered to agents (VS Code 1.101 and newer);
+* **Show net** above functions that compile to interaction nets: their nets drawn as graphs (click a reference to open its definition), and **Trace**, which reduces a call round by round, plays the rounds and charts how many redexes each had; `.mnet` files get errors on save, formatting and hovers for each kind of node.
 
 Until it is in the VS Code Marketplace and Open VSX, install the `.vsix` from the extension's releases: *Extensions* view → `…` → *Install from VSIX…*.
 

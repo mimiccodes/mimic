@@ -15,6 +15,7 @@ mod lsp;
 mod man;
 mod mcp;
 mod modfile;
+mod nettools;
 mod profile;
 mod repl;
 mod report;
@@ -156,6 +157,10 @@ enum Cmd {
         args: Vec<String>,
         #[command(flatten)]
         profile: ProfileArgs,
+        /// Count the lines of the program the tests run: a summary, and
+        /// coverage.json and lcov.info (in target/coverage/)
+        #[arg(long)]
+        coverage: bool,
     },
     /// Format .mim files: words for primitives and operators (or glyphs),
     /// indentation by nesting, tidy whitespace; comments and line breaks stay
@@ -296,7 +301,11 @@ enum Cmd {
         path: Option<PathBuf>,
     },
     /// Type Mimic a line at a time and see the values (`:help` lists the commands)
-    Repl,
+    Repl {
+        /// For notebooks and tools: JSON requests on stdin, one per line ({"code": "…"} or {"reset": true}), JSON answers on stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the program and show where its time goes: per function, per core, CPU and GPU, memory
     Profile {
         /// A .mim file (default: the project here)
@@ -388,7 +397,7 @@ enum Cmd {
     Uninstall { library: String },
     /// Show the glyph ↔ word ↔ digraph table
     Glyphs,
-    /// Interaction-net tools (runtime development)
+    /// Interaction nets: run, format, show (as graphs) and trace (round by round) them
     Net {
         #[command(subcommand)]
         cmd: NetCmd,
@@ -411,6 +420,45 @@ enum NetCmd {
     },
     /// Parse a .mnet file and print it back in canonical form
     Fmt { file: PathBuf },
+    /// The interaction nets of a .mnet file, or of a program's pure functions, as text or as graphs (--json)
+    Show {
+        /// A .mnet file, or a .mim file
+        file: PathBuf,
+        /// One function (or one definition of a .mnet file)
+        #[arg(long = "fn", value_name = "NAME")]
+        function: Option<String>,
+        /// As compiled from the code, before compile-time reduction
+        #[arg(long)]
+        before: bool,
+        /// Nodes, ports and wires as JSON (for editors)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reduce a net round by round: how many redexes each round has (the parallelism the net offers)
+    Trace {
+        /// A .mnet file (reduces @main), or a .mim file with --fn
+        file: PathBuf,
+        /// A function to call (with ARGS, numbers)
+        #[arg(long = "fn", value_name = "NAME")]
+        function: Option<String>,
+        /// The call's arguments: `mimic net trace fib.mim --fn fib 20`
+        args: Vec<String>,
+        /// The nets before compile-time reduction
+        #[arg(long)]
+        before: bool,
+        /// Stop after this many rounds
+        #[arg(long, default_value_t = 100_000)]
+        steps: usize,
+        /// Keep the net before each round (at most this many), while it is small, for drawing
+        #[arg(long, default_value_t = 0)]
+        frames: usize,
+        /// "Small" for --frames: at most this many nodes
+        #[arg(long, default_value_t = 400)]
+        frame_nodes: usize,
+        /// The trace as JSON (for editors)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -618,8 +666,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
         Cmd::Profile { file, json, hz, top, args } => profile::run(profile::Options { file, json, hz, top, args }),
-        Cmd::Repl => {
-            repl::run()?;
+        Cmd::Repl { json } => {
+            if json {
+                repl::run_json()?;
+            } else {
+                repl::run()?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Edit { path } => {
@@ -698,7 +750,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
             Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
         }
-        Cmd::Test { args, profile } => test_cmd(args, profile),
+        Cmd::Test { args, profile, coverage } => test_cmd(args, profile, coverage),
         Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
         Cmd::Doc { file, std, json, out } => doc_cmd(file, std, json, out),
         Cmd::Lldb { file, args } => lldb_cmd(file, args),
@@ -1164,7 +1216,7 @@ fn doc_cmd(file: Option<PathBuf>, std: bool, json: bool, out: Option<PathBuf>) -
     Ok(ExitCode::SUCCESS)
 }
 
-fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String> {
+fn test_cmd(args: Vec<String>, profile: ProfileArgs, coverage: bool) -> Result<ExitCode, String> {
     let (files, filters): (Vec<String>, Vec<String>) = args.into_iter().partition(|a| a.ends_with(".mim"));
     if files.len() > 1 {
         return Err("give at most one .mim file".into());
@@ -1172,7 +1224,22 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
     let input = driver::input_from(files.first().map(std::path::Path::new)).map_err(|e| e.to_string())?;
     let mut prof = profile_of(&input, profile, false);
     prof.tests = true;
+    if coverage {
+        // native code only: what runs on interaction nets has no lines to count
+        prof.coverage = true;
+        prof.net = false;
+    }
     let a = driver::build(&input, &prof, &Target::host(), false, false).map_err(|r| r.human())?;
+    let cov_dir = coverage.then(|| {
+        let d = match &input {
+            Input::Project(p) => p.target_dir().join("coverage"),
+            Input::File(_) => a.path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+        };
+        let runs = d.join("runs");
+        let _ = std::fs::remove_dir_all(&runs);
+        let _ = std::fs::create_dir_all(&runs);
+        d
+    });
     let out = std::process::Command::new(&a.path).arg("--list").output().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
     let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
     // the examples of the project's guides (docs/*.md) are tests too
@@ -1229,6 +1296,9 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
                 if std::env::var_os("MIMIC_THREADS").is_none() {
                     c.env("MIMIC_THREADS", "2"); // tests share the cores
                 }
+                if let Some(d) = &cov_dir {
+                    c.env("MIMIC_COVERAGE", d.join("runs"));
+                }
                 let r = match c.output() {
                     Ok(o) => {
                         let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -1259,7 +1329,67 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs) -> Result<ExitCode, String>
     let passed = chosen.len() - failed;
     let summary = format!("{passed} passed, {failed} failed ({:.2} s)", t0.elapsed().as_secs_f64());
     println!("  {summary}");
+    if let Some(d) = &cov_dir {
+        coverage_report(&a.path.with_extension("covmap"), d)?;
+    }
     Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// Add up the counts of every test process: a summary per file, and
+/// coverage.json (for editors) and lcov.info (for coverage services).
+fn coverage_report(map: &std::path::Path, dir: &std::path::Path) -> Result<(), String> {
+    let lines: Vec<(String, String, u64)> = match std::fs::read_to_string(map) {
+        Ok(t) => serde_json::from_str::<Vec<(String, String, u64)>>(&t).map_err(|e| format!("the coverage map is damaged: {e}"))?,
+        Err(_) => Vec::new(), // nothing of the program's own was compiled
+    };
+    let mut counts = vec![0u64; lines.len()];
+    for e in std::fs::read_dir(dir.join("runs")).into_iter().flatten().flatten() {
+        for l in std::fs::read_to_string(e.path()).unwrap_or_default().lines() {
+            let mut w = l.split_whitespace();
+            if let (Some(i), Some(n)) = (w.next().and_then(|x| x.parse::<usize>().ok()), w.next().and_then(|x| x.parse::<u64>().ok()))
+                && i < counts.len()
+            {
+                counts[i] += n;
+            }
+        }
+    }
+    // by file: line → count (a line may hold several counted statements)
+    let mut files: std::collections::BTreeMap<(String, String), std::collections::BTreeMap<u64, u64>> = Default::default();
+    for ((shown, path, line), n) in lines.iter().zip(&counts) {
+        let e = files.entry((shown.clone(), path.clone())).or_default().entry(*line).or_default();
+        *e = (*e).max(*n);
+    }
+    let (mut hit, mut total) = (0usize, 0usize);
+    status("Coverage", "lines of the program the tests ran");
+    let mut json_files = Vec::new();
+    let mut lcov = String::new();
+    for ((shown, path), ls) in &files {
+        let h = ls.values().filter(|n| **n > 0).count();
+        hit += h;
+        total += ls.len();
+        let missed: Vec<String> = ls.iter().filter(|(_, n)| **n == 0).map(|(l, _)| l.to_string()).collect();
+        println!(
+            "  {:>5.1}%  {shown} ({h} of {} lines){}",
+            100.0 * h as f64 / ls.len().max(1) as f64,
+            ls.len(),
+            if missed.is_empty() { String::new() } else { format!("; not run: {}", missed.iter().take(12).cloned().collect::<Vec<_>>().join(", ") + if missed.len() > 12 { ", …" } else { "" }) }
+        );
+        json_files.push(serde_json::json!({ "file": shown, "path": path, "lines": ls.iter().map(|(l, n)| serde_json::json!([l, n])).collect::<Vec<_>>() }));
+        lcov += &format!("SF:{path}\n");
+        for (l, n) in ls {
+            lcov += &format!("DA:{l},{n}\n");
+        }
+        lcov += &format!("LH:{h}\nLF:{}\nend_of_record\n", ls.len());
+    }
+    if total == 0 {
+        println!("  (no lines of the program's own code were compiled)");
+    } else {
+        println!("  {:>5.1}%  in all ({hit} of {total} lines)", 100.0 * hit as f64 / total as f64);
+    }
+    let _ = std::fs::write(dir.join("coverage.json"), serde_json::to_string_pretty(&serde_json::json!({ "files": json_files, "hit": hit, "total": total })).unwrap_or_default());
+    let _ = std::fs::write(dir.join("lcov.info"), lcov);
+    status("Saved", format!("{} and lcov.info", shown(&dir.join("coverage.json"))));
+    Ok(())
 }
 
 /// Report a failed check/build/run: JSON (stdout, or stderr for `run`) or text.
@@ -1522,6 +1652,14 @@ fn net_cmd(cmd: NetCmd) -> Result<ExitCode, String> {
             let src = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
             let book = mimic_net::parse(&src).map_err(|e| format!("{}:{e}", file.display()))?;
             print!("{book}");
+            Ok(ExitCode::SUCCESS)
+        }
+        NetCmd::Show { file, function, before, json } => {
+            nettools::show(&file, function.as_deref(), before, json)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        NetCmd::Trace { file, function, args, before, steps, frames, frame_nodes, json } => {
+            nettools::trace(&file, nettools::TraceOpts { function: function.as_deref(), args, before, steps, frames, frame_nodes, json })?;
             Ok(ExitCode::SUCCESS)
         }
         NetCmd::Run { file, profile, stats, threads } => {

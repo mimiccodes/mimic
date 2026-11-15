@@ -72,6 +72,8 @@ pub struct Profile {
     /// `mimic profile`: frame pointers everywhere (a release build in
     /// target/profiling/), so the sampler can walk the stack.
     pub frame_pointers: bool,
+    /// `mimic test --coverage`: count each line that runs (Settings::coverage).
+    pub coverage: bool,
 }
 
 impl Profile {
@@ -81,10 +83,12 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false }
+        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false, coverage: false }
     }
     pub fn name(&self) -> &'static str {
-        if self.frame_pointers {
+        if self.coverage {
+            "coverage"
+        } else if self.frame_pointers {
             "profiling"
         } else if self.release {
             "release"
@@ -717,7 +721,7 @@ pub mod sources {
     pub fn set_open(path: &Path, text: Option<String>) {
         let mut open = OPEN.lock().unwrap();
         let open = open.get_or_insert_with(HashMap::new);
-        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let real = super::canonical(path);
         match text {
             Some(t) => open.insert(real, t),
             None => open.remove(&real),
@@ -730,7 +734,7 @@ pub mod sources {
             && !open.is_empty()
         {
             // the same file may be named two ways (`/var` and `/private/var`)
-            let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let real = super::canonical(path);
             if let Some(t) = open.get(path).or_else(|| open.get(&real)) {
                 return Ok(t.clone());
             }
@@ -1021,6 +1025,7 @@ pub fn plan(input: &Input, program: &Program) -> Result<Vec<mimic_codegen::Decis
             fast_math: profile.fast_math,
             debug_info: false,
             frame_pointers: false,
+            coverage: false,
             tests: false,
             split: None,
         },
@@ -1159,6 +1164,21 @@ impl ArtifactKind {
             ArtifactKind::Assembly => "assembly",
         }
     }
+}
+
+/// The real path of a file, as tools compare and show it: links resolved,
+/// and on Windows without the `\\?\` prefix that `canonicalize` adds
+/// (editors and `file:` URIs never use it).
+pub fn canonical(p: &Path) -> PathBuf {
+    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if cfg!(windows)
+        && let Some(s) = c.to_str()
+        && let Some(rest) = s.strip_prefix(r"\\?\")
+        && !rest.starts_with("UNC\\")
+    {
+        return PathBuf::from(rest);
+    }
+    c
 }
 
 pub fn out_dir(input: &Input, profile: &Profile, target: &Target) -> PathBuf {
@@ -1602,6 +1622,7 @@ fn codegen_and_link(
             fast_math: profile.fast_math,
             debug_info: !profile.release,
             frame_pointers: profile.frame_pointers,
+            coverage: profile.coverage,
             tests: profile.tests,
             // machine code in parts at once (native builds: linked here)
             split: if target.name.is_none() { Some(mimic_toolchain::split_codegen) } else { None },
@@ -1705,7 +1726,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
     let compiler = exe.map(|m| format!("{}:{:?}", m.len(), m.modified().ok())).unwrap_or_default();
     text.push_str(&format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
         profile.release,
         profile.net,
         profile.opt,
@@ -1716,6 +1737,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
         profile.shared,
         profile.emit_header,
         profile.frame_pointers,
+        profile.coverage,
         target.name(),
         target.llvm,
         cpu,

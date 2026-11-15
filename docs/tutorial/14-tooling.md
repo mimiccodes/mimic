@@ -68,6 +68,7 @@ mimic test file.mim         # the tests of one file
 * **A crash fails one test.** Each test runs in a process of its own, and the tests run in parallel.
 * **Tests are never built into the program.** `mimic run` and `mimic build` leave them out, but `mimic check` still checks them.
 * **Private items are in reach.** A test sees everything its module sees. Tests in `src/test.mim` (`module test`) reach the project's `pub` items, such as `main::square`.
+* **What the tests miss.** `mimic test --coverage` counts how often the tests ran each line of the program, and lists the lines they never reached (also `lcov.info` for coverage services, and the gutter in VS Code).
 
 ### Property tests
 

@@ -28,6 +28,8 @@
 //! | `$op(b r)`    | operator: principal ⊕ b → r; ops: `+ - * / % == != < <= > >= and or neg not` and primitive words (`iota sum take` …) |
 //! | `?(sel r)`    | switch: principal ≠ 0 → `sel` gets `(r *)`, else `(* r)` |
 
+pub mod sim;
+
 use mimic_syntax::ast::BinOp;
 use mimic_syntax::glyphs::{PRIMS, Prim};
 use std::collections::HashMap;

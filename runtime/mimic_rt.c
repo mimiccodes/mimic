@@ -806,6 +806,43 @@ heap_state *mim_heap(void) {
     return h;
 }
 
+/* ==== coverage (`mimic test --coverage`) ===================================
+ * A coverage build counts each line of the program's code in a counter of
+ * its own; a constructor hands the table to the runtime before main. With
+ * MIMIC_COVERAGE=<folder>, the counts are written at exit to
+ * <folder>/<process id>.cov, one "counter count" per line. */
+static int64_t *const *g_cov;
+static int64_t g_cov_n;
+static const char *g_cov_dir;
+
+static void cov_write(void) {
+    char path[4096];
+#ifdef _WIN32
+    long pid = (long)GetCurrentProcessId();
+#elif defined(__wasi__)
+    long pid = 1;
+#else
+    long pid = (long)getpid();
+#endif
+    snprintf(path, sizeof path, "%s/%ld.cov", g_cov_dir, pid);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    for (int64_t i = 0; i < g_cov_n; i++) {
+        int64_t n = __atomic_load_n(g_cov[i], __ATOMIC_RELAXED);
+        if (n) fprintf(f, "%lld %lld\n", (long long)i, (long long)n);
+    }
+    fclose(f);
+}
+
+void mim_cov_register(int64_t *const *table, int64_t n) {
+    const char *dir = getenv("MIMIC_COVERAGE");
+    if (!dir || !*dir) return;
+    g_cov = table;
+    g_cov_n = n;
+    g_cov_dir = dir;
+    atexit(cov_write);
+}
+
 #if MIM_PROF
 /* One sample: pc, then the return addresses up the frame-pointer chain
  * (each frame: the caller's frame pointer, then the return address),

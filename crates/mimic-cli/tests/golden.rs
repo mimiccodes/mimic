@@ -12,6 +12,34 @@ fn fixtures(kind: &str) -> Vec<PathBuf> {
     v
 }
 
+/// A file's `file:` URI, as editors send it (no `\\?\` prefix on Windows).
+fn file_uri(p: &Path) -> String {
+    let s = p.canonicalize().unwrap().display().to_string();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/");
+    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+}
+
+/// Stop a server that stops answering: after `secs` seconds it is killed,
+/// so a read waiting for it fails instead of hanging the test run.
+fn watchdog(child: std::process::Child, secs: u64) -> (std::sync::Arc<std::sync::Mutex<std::process::Child>>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let child = Arc::new(Mutex::new(child));
+    let done = Arc::new(AtomicBool::new(false));
+    let (c, d) = (child.clone(), done.clone());
+    std::thread::spawn(move || {
+        for _ in 0..secs * 4 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if d.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+        eprintln!("the server did not answer for {secs} s: stopping it");
+        let _ = c.lock().unwrap().kill();
+    });
+    (child, done)
+}
+
 fn mimic() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_mimic"));
     // keep the runtime cache and run directories out of the user's ~/.mimic
@@ -466,11 +494,11 @@ fn language_server() {
     let f = dir.join("t.mim");
     let text = "module main\n\ntrusted extern \"C\" pure include \"math.h\"\n\n// twice\nfn double(x: f64) -> f64 { x × 2.0 }\n\nfn main() {\n    let y = double(3.0)\n    print(c::sqrt(y) ⌿ 1)\n    print(sort_by([3 1], v => v))\n}\n";
     std::fs::write(&f, text).unwrap();
-    let uri = format!("file://{}", f.canonicalize().unwrap().display().to_string().replace('\\', "/"));
-    let uri = if cfg!(windows) { uri.replacen("file://", "file:///", 1) } else { uri };
+    let uri = file_uri(&f);
     let mut child = mimic().arg("lsp").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
+    let (child, done) = watchdog(child, 180);
     let mut send = |v: serde_json::Value| {
         let b = v.to_string();
         write!(input, "Content-Length: {}\r\n\r\n{b}", b.len()).unwrap();
@@ -558,7 +586,8 @@ fn language_server() {
     send(serde_json::json!({ "jsonrpc": "2.0", "id": 11, "method": "shutdown", "params": null }));
     read(&mut notes, Some(11));
     send(serde_json::json!({ "jsonrpc": "2.0", "method": "exit", "params": null }));
-    assert!(child.wait().unwrap().success());
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(child.lock().unwrap().wait().unwrap().success());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2118,5 +2147,165 @@ fn profile_names_functions() {
     assert!(v["memory"]["allocations"].is_number() && v["gpu"]["kernels"].is_number());
     // the program's own output goes to stderr with --json
     assert!(String::from_utf8_lossy(&out.stderr).contains("true"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `mimic net show` and `mimic net trace`: a program's nets as graphs, and
+/// a call reduced round by round with the runtime's result.
+#[test]
+fn net_show_and_trace() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = mimic().args(["net", "show", "--json"]).arg(dir.join("bench/fib/main.mim")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let f = &v["functions"][0];
+    assert_eq!(f["function"], "main::fib");
+    assert_eq!(f["entered"], true);
+    let g = &f["defs"][0]["graph"];
+    assert!(g["nodes"].as_array().unwrap().len() > 5 && g["root"].is_number(), "{g}");
+    // a call, traced
+    let out = mimic().args(["net", "trace", "--json", "--frames", "20"]).arg(dir.join("bench/fib/main.mim")).args(["--fn", "fib", "15"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let t: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(t["result"], "610");
+    assert!(t["widest"].as_u64().unwrap() > 50, "fib's calls run side by side: {}", t["widest"]);
+    assert_eq!(t["frames"].as_array().unwrap().len(), 20);
+    // a .mnet file's @main, as the runtime computes it
+    let out = mimic().args(["net", "trace"]).arg(dir.join("tests/nets/church.mnet")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("@main = 9"), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
+/// `mimic lsp`, finding one's way: signature help, rename (the program's
+/// own names, not the standard library's), the call hierarchy, smart
+/// selection, inferred types as inlay hints and as a code action.
+#[test]
+fn language_server_navigation() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let dir = std::env::temp_dir().join(format!("mimic-golden-lsp-nav-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("nav.mim");
+    let text = "module main\n\n// adds one\nfn inc(x: i64) -> i64 { x + 1 }\n\nfn twice(x: i64) -> i64 { inc(inc(x)) }\n\nfn main() {\n    let a = twice(3)\n    let xs = [1 2 3]\n    print(a + inc(1))\n}\n";
+    std::fs::write(&f, text).unwrap();
+    let uri = file_uri(&f);
+    let mut child = mimic().arg("lsp").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let (child, done) = watchdog(child, 180);
+    let mut send = |v: serde_json::Value| {
+        let b = v.to_string();
+        write!(input, "Content-Length: {}\r\n\r\n{b}", b.len()).unwrap();
+        input.flush().unwrap();
+    };
+    let mut read = |id: i64| -> serde_json::Value {
+        loop {
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                output.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                    len = n.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; len];
+            output.read_exact(&mut body).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if v["id"] == id {
+                return if v.get("error").is_some() { serde_json::json!({ "error": v["error"] }) } else { v["result"].clone() };
+            }
+        }
+    };
+    let pos = |line: u32, ch: u32| serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } });
+    let mut id = 0;
+    // a request (its answer), or a notification (`tell`: no answer)
+    let mut rpc = |method: &str, params: serde_json::Value, tell: bool| {
+        if tell {
+            send(serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+            return serde_json::Value::Null;
+        }
+        id += 1;
+        send(serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        read(id)
+    };
+
+    let caps = rpc("initialize", serde_json::json!({ "processId": null, "capabilities": {} }), false);
+    assert!(caps["capabilities"]["renameProvider"]["prepareProvider"] == true && caps["capabilities"]["callHierarchyProvider"] == true, "{caps}");
+    rpc("initialized", serde_json::json!({}), true);
+    rpc("textDocument/didOpen", serde_json::json!({ "textDocument": { "uri": uri, "languageId": "mimic", "version": 1, "text": text } }), true);
+    // signature help inside `inc(` on line 10
+    let h = rpc("textDocument/signatureHelp", pos(10, 18), false);
+    assert_eq!(h["signatures"][0]["label"], "fn inc(x: i64) -> i64", "{h}");
+    assert_eq!(h["activeParameter"], 0);
+    assert_eq!(h["signatures"][0]["parameters"][0]["label"], serde_json::json!([7, 13]), "{h}");
+    // rename: inc everywhere; print is the standard library's
+    let p = rpc("textDocument/prepareRename", pos(10, 15), false);
+    assert_eq!(p["placeholder"], "inc", "{p}");
+    assert!(rpc("textDocument/prepareRename", pos(10, 5), false).is_null(), "print is not renamed");
+    let mut rp = pos(10, 15);
+    rp["newName"] = "bump".into();
+    let e = rpc("textDocument/rename", rp, false);
+    let edits = e["changes"][&uri].as_array().unwrap_or_else(|| panic!("{e}"));
+    assert_eq!(edits.len(), 4, "the definition and three calls: {e}");
+    assert!(edits.iter().all(|x| x["newText"] == "bump"));
+    // the call hierarchy of inc: called from twice (twice) and main; twice calls inc
+    let items = rpc("textDocument/prepareCallHierarchy", pos(3, 4), false);
+    assert_eq!(items[0]["name"], "inc", "{items}");
+    let inc = items[0].clone();
+    let incoming = rpc("callHierarchy/incomingCalls", serde_json::json!({ "item": inc }), false);
+    let mut callers: Vec<(String, usize)> = incoming.as_array().unwrap().iter().map(|c| (c["from"]["name"].as_str().unwrap().to_string(), c["fromRanges"].as_array().unwrap().len())).collect();
+    callers.sort();
+    assert_eq!(callers, vec![("main".to_string(), 1), ("twice".to_string(), 2)], "{incoming}");
+    let twice = rpc("textDocument/prepareCallHierarchy", pos(5, 4), false)[0].clone();
+    let outgoing = rpc("callHierarchy/outgoingCalls", serde_json::json!({ "item": twice }), false);
+    assert_eq!(outgoing[0]["to"]["name"], "inc", "{outgoing}");
+    assert_eq!(outgoing[0]["fromRanges"].as_array().unwrap().len(), 2, "{outgoing}");
+    // smart selection: x, inc(x)'s brackets, … the whole file
+    let s = rpc("textDocument/selectionRange", serde_json::json!({ "textDocument": { "uri": uri }, "positions": [{ "line": 5, "character": 34 }] }), false);
+    let mut depth = 0;
+    let mut r = &s[0];
+    while r.is_object() {
+        depth += 1;
+        r = &r["parent"];
+    }
+    assert!(depth >= 4, "{s}");
+    // inferred types: hints after the names, and a code action that writes one in
+    let hints = rpc("textDocument/inlayHint", serde_json::json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 12, "character": 0 } } }), false);
+    let labels: Vec<String> = hints.as_array().unwrap().iter().filter(|h| h["kind"] == 1).map(|h| format!("{}:{}", h["position"]["line"], h["label"].as_str().unwrap())).collect();
+    assert!(labels.contains(&"8:: i64".to_string()) && labels.contains(&"9:: [i64]".to_string()), "{labels:?}");
+    let acts = rpc("textDocument/codeAction", serde_json::json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 8, "character": 0 }, "end": { "line": 8, "character": 0 } }, "context": { "diagnostics": [] } }), false);
+    assert!(acts.as_array().unwrap().iter().any(|a| a["title"] == "Write the type of `a`: i64"), "{acts}");
+    rpc("shutdown", serde_json::Value::Null, false);
+    rpc("exit", serde_json::Value::Null, true);
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(child.lock().unwrap().wait().unwrap().success());
+}
+
+/// `mimic test --coverage`: each line of the program's code the tests ran,
+/// and how often; lines of functions nobody called count as not run.
+#[test]
+fn test_coverage() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-coverage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("cov.mim");
+    std::fs::write(
+        &f,
+        "module main\n\nfn classify(x: i64) -> str {\n    if x < 0 {\n        \"negative\"\n    } else if x == 0 {\n        \"zero\"\n    } else {\n        \"positive\"\n    }\n}\n\nfn never(x: i64) -> i64 {\n    let y = x * 2\n    y + 1\n}\n\nfn main() { print(classify(1)) }\n\ntest \"positive\" {\n    expect(classify(5) == \"positive\")\n}\n\ntest \"zero\" {\n    expect(classify(0) == \"zero\")\n}\n",
+    )
+    .unwrap();
+    let out = mimic().args(["test", "--coverage"]).arg(&f).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("(3 of 7 lines); not run: 5, 14, 15, 18"), "{text}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let saved = err.lines().find_map(|l| l.trim().strip_prefix("Saved ")).unwrap_or_else(|| panic!("{err}"));
+    let json = saved.trim_end_matches(" and lcov.info");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
+    assert_eq!(v["files"][0]["lines"], serde_json::json!([[4, 2], [5, 0], [7, 1], [9, 1], [14, 0], [15, 0], [18, 0]]), "{v}");
+    let lcov = std::fs::read_to_string(std::path::Path::new(json).with_file_name("lcov.info")).unwrap();
+    assert!(lcov.contains("DA:4,2") && lcov.contains("LF:7"), "{lcov}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

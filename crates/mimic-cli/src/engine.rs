@@ -38,6 +38,8 @@ struct Analysis {
     effects: Option<Vec<&'static str>>,
     /// Where code runs, computed on the first question about it.
     plan: Option<Vec<mimic_codegen::Decision>>,
+    /// The types inference gives, computed on the first question about them.
+    types: Option<mimic_check::types::TypeInfo>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -165,7 +167,7 @@ impl Engine {
         match driver::load(&self.input) {
             Ok(program) => {
                 let index = Index::build(&program);
-                self.good = Some(Analysis { program, index, effects: None, plan: None });
+                self.good = Some(Analysis { program, index, effects: None, plan: None, types: None });
                 self.errors = None;
             }
             Err(r) => self.errors = Some(r),
@@ -377,6 +379,21 @@ impl Engine {
                 }
                 Ok(Value::Array(out))
             }
+            // the inferred type of each `let` of a file without an
+            // annotation, after its name (inlay hints in editors)
+            "types" => {
+                let file = self.path_param(params)?;
+                self.analysis()?;
+                let library = !self.input.is_bin();
+                let a = self.good.as_mut().ok_or("nothing checked yet")?;
+                if a.types.is_none() {
+                    let roots = mimic_check::types::default_roots(&a.program, library);
+                    a.types = Some(mimic_check::types::infer(&a.program, &roots));
+                }
+                let a = self.good.as_ref().unwrap();
+                let fi = a.file_index(&file).ok_or_else(|| format!("{} is not part of the program", file.display()))?;
+                Ok(Value::Array(a.let_types(fi)))
+            }
             "stats" => {
                 self.analysis()?;
                 let generation = self.generation;
@@ -414,7 +431,7 @@ impl Engine {
         let f = params.get("file").and_then(Value::as_str).ok_or("`file` is missing")?;
         let p = Path::new(f);
         let p = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(p) };
-        Ok(p.canonicalize().unwrap_or(p))
+        Ok(driver::canonical(&p))
     }
 
     /// `file`, `line` and `column` (1-based, columns in characters): the file's
@@ -469,7 +486,7 @@ fn offset_of(src: &str, line: usize, col: usize) -> usize {
 
 impl Analysis {
     fn file_index(&self, file: &Path) -> Option<usize> {
-        self.program.files.iter().position(|f| f.path == file || f.path.canonicalize().is_ok_and(|c| c == file))
+        self.program.files.iter().position(|f| f.path == file || driver::canonical(&f.path) == file)
     }
 
     fn find(&self, name: &str) -> Option<usize> {
@@ -497,6 +514,61 @@ impl Analysis {
             .iter()
             .position(|x| x.file == file && x.kind != Kind::Module && x.span.start <= at && at < x.span.end)
             .map(Target::Sym)
+    }
+
+    /// The lets of file `fi` without annotations, with the one type every
+    /// specialisation of their function gives them.
+    fn let_types(&self, fi: usize) -> Vec<Value> {
+        use mimic_syntax::ast::{Block, ExprKind, Stmt};
+        let Some(info) = &self.types else { return Vec::new() };
+        let p = &self.program;
+        let src = &p.files[fi].src;
+        let mut out = Vec::new();
+        for (fid, f) in p.fns.iter().enumerate() {
+            let mimic_check::FnKind::User(d) = &f.kind else { continue };
+            if f.file != fi || is_generated(&f.name) {
+                continue;
+            }
+            // every block of the function
+            // (the walk lends each expression only for its visit: the
+            // blocks are kept as pointers into the program, which outlives
+            // this loop)
+            let mut ptrs: Vec<*const Block> = vec![&d.body];
+            d.body.walk(&mut |e| match &e.kind {
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => ptrs.push(b),
+                ExprKind::If { then, .. } => ptrs.push(then),
+                ExprKind::Arms { body, .. } => ptrs.push(body),
+                _ => {}
+            });
+            // SAFETY: every pointer is into `self.program`, borrowed for this call
+            let blocks: Vec<&Block> = ptrs.into_iter().map(|b| unsafe { &*b }).collect();
+            let specs: Vec<&mimic_check::types::Spec> = info.specs.iter().filter(|(k, _)| k.0 == fid).map(|(_, s)| s).collect();
+            if specs.is_empty() {
+                continue;
+            }
+            for b in blocks {
+                for st in &b.stmts {
+                    let (name, span) = match st {
+                        Stmt::Let { name, ty: None, span, .. } | Stmt::LetElse { name, ty: None, span, .. } => (name, span),
+                        _ => continue,
+                    };
+                    let id = mimic_check::types::id(st);
+                    let mut shown: Vec<String> = specs.iter().filter_map(|s| s.lets.get(&id)).map(|t| mimic_check::types::show(p, *t)).collect();
+                    shown.sort();
+                    shown.dedup();
+                    if shown.len() != 1 || shown[0] == "any" || shown[0].is_empty() {
+                        continue;
+                    }
+                    // just after the name
+                    let from = span.start.min(src.len());
+                    let Some(rel) = src[from..].find(name.as_str()) else { continue };
+                    let end = from + rel + name.len();
+                    let (line, column) = mimic_syntax::line_col(src, end);
+                    out.push(json!({ "line": line, "column": column, "name": name, "type": shown[0] }));
+                }
+            }
+        }
+        out
     }
 
     fn location(&self, file: usize, span: Span) -> Value {

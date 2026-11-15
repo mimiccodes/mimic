@@ -72,6 +72,7 @@ A symbol is a function, a function from C or the runtime (`extern fn`), a type, 
 | `outline` | `file` | The symbols declared in the file, in order. |
 | `docs` | `name` | The symbol, with its comment and `effects`. |
 | `effects` | `name`, or `package` (the project) | What each function does besides computing a result: `pure` (may run in parallel), `concurrent` (effects that may overlap, such as reading files or waiting), `ordered` (effects that keep their order, such as printing) or `sync` (waits for pending work first, such as writing files or running programs). |
+| `types` | `file` | The inferred type of each `let` without an annotation in the file, with the position just after its name: what editors show as inlay hints. |
 | `stats` | | How many files, functions, types, variants, modules and references the index holds. |
 
 New methods are added with the steps of stage 0.3: glyphs and the manual (0.3.2), where code runs in parallel (0.3.9), audit findings (0.3.10).

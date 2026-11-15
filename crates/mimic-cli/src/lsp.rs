@@ -3,7 +3,9 @@
 //! query` and the other tools ask: errors as you type with the compiler's
 //! fixes, hover, go to definition (into the standard library too), find
 //! references, glyph input (`\i` becomes `⍳`), completion, formatting,
-//! the outline, and a colour of their own for names that come from C.
+//! the outline, a colour of their own for names that come from C, signature
+//! help, rename, the call hierarchy, smart selection, and the inferred types
+//! of `let`s as inlay hints.
 
 use crate::driver;
 use crate::engine::Engine;
@@ -29,8 +31,12 @@ pub fn serve() -> Result<(), String> {
         document_symbol_provider: Some(OneOf::Left(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        signature_help_provider: Some(SignatureHelpOptions { trigger_characters: Some(vec!["(".into(), ",".into()]), retrigger_characters: None, work_done_progress_options: Default::default() }),
+        rename_provider: Some(OneOf::Right(RenameOptions { prepare_provider: Some(true), work_done_progress_options: Default::default() })),
+        call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_REWRITE]),
             ..Default::default()
         })),
         completion_provider: Some(CompletionOptions {
@@ -77,7 +83,7 @@ struct Server {
 
 fn path_of(uri: &Url) -> Option<PathBuf> {
     let p = uri.to_file_path().ok()?;
-    Some(p.canonicalize().unwrap_or(p))
+    Some(driver::canonical(&p))
 }
 
 fn url_of(p: &Path) -> Option<Url> {
@@ -268,7 +274,7 @@ impl Server {
         // every file of the program, so fixed errors disappear
         for (p, _) in engine.files() {
             if p.is_file() {
-                by_file.entry(p.canonicalize().unwrap_or(p)).or_default();
+                by_file.entry(driver::canonical(&p)).or_default();
             }
         }
         for p in self.open.keys() {
@@ -335,6 +341,34 @@ impl Server {
             "textDocument/inlayHint" => {
                 let p: InlayHintParams = from(params)?;
                 ok(self.where_hints(&p.text_document.uri, p.range))
+            }
+            "textDocument/signatureHelp" => {
+                let p: SignatureHelpParams = from(params)?;
+                ok(self.signature_help(&p.text_document_position_params))
+            }
+            "textDocument/prepareRename" => {
+                let p: TextDocumentPositionParams = from(params)?;
+                ok(self.prepare_rename(&p))
+            }
+            "textDocument/rename" => {
+                let p: RenameParams = from(params)?;
+                self.rename(&p.text_document_position, &p.new_name).map(|v| v.unwrap_or(Value::Null))
+            }
+            "textDocument/prepareCallHierarchy" => {
+                let p: CallHierarchyPrepareParams = from(params)?;
+                ok(self.call_item_at(&p.text_document_position_params).and_then(|i| serde_json::to_value(vec![i]).ok()))
+            }
+            "callHierarchy/incomingCalls" => {
+                let p: CallHierarchyIncomingCallsParams = from(params)?;
+                ok(self.incoming_calls(&p.item))
+            }
+            "callHierarchy/outgoingCalls" => {
+                let p: CallHierarchyOutgoingCallsParams = from(params)?;
+                ok(self.outgoing_calls(&p.item))
+            }
+            "textDocument/selectionRange" => {
+                let p: SelectionRangeParams = from(params)?;
+                ok(self.selection_ranges(&p.text_document.uri, &p.positions))
             }
             "textDocument/semanticTokens/full" => {
                 let p: SemanticTokensParams = from(params)?;
@@ -537,7 +571,218 @@ impl Server {
                 ..Default::default()
             }));
         }
+        // write an inferred type in: `let x = …` → `let x: T = …`
+        if let Some((engine, _)) = self.engine(&path)
+            && engine.errors().is_none()
+            && let Ok(types) = engine.query("types", &json!({ "file": path.display().to_string() }))
+        {
+            let text = self.text_of(&path);
+            for t in types.as_array().into_iter().flatten() {
+                let pos = to_lsp(&text, t["line"].as_u64().unwrap_or(1) as u32, t["column"].as_u64().unwrap_or(1) as u32);
+                if pos.line < p.range.start.line || pos.line > p.range.end.line {
+                    continue;
+                }
+                let ty = t["type"].as_str().unwrap_or("");
+                let mut changes = HashMap::new();
+                changes.insert(p.text_document.uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: format!(": {ty}") }]);
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: format!("Write the type of `{}`: {ty}", t["name"].as_str().unwrap_or("")),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                    ..Default::default()
+                }));
+            }
+        }
         serde_json::to_value(actions).ok()
+    }
+
+    // ---- signature help ---------------------------------------------------------
+
+    fn signature_help(&mut self, tdp: &TextDocumentPositionParams) -> Option<Value> {
+        let path = path_of(&tdp.text_document.uri)?;
+        let text = self.text_of(&path);
+        let at = byte_of_pos(&text, tdp.position);
+        let (open, active) = open_call(&text, at)?;
+        // the name before `(`
+        let before = text[..open].trim_end();
+        let name_len = before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':').map(char::len_utf8).sum::<usize>();
+        if name_len == 0 {
+            return None;
+        }
+        let name_at = before.len() - name_len;
+        let pos = pos_of_byte(&text, name_at + name_len.saturating_sub(1).min(name_len));
+        let v = self.ask("hover", &TextDocumentPositionParams { text_document: tdp.text_document.clone(), position: pos })?;
+        let label = v.get("signature")?.as_str()?.to_string();
+        let params = param_spans(&label);
+        let utf16 = |s: &str| s.encode_utf16().count() as u32;
+        let parameters = params.iter().map(|(a, b)| ParameterInformation { label: ParameterLabel::LabelOffsets([utf16(&label[..*a]), utf16(&label[..*b])]), documentation: None }).collect::<Vec<_>>();
+        let doc = v.get("doc").and_then(Value::as_str).filter(|d| !d.is_empty()).map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d.to_string() }));
+        let help = SignatureHelp {
+            signatures: vec![SignatureInformation { label, documentation: doc, parameters: Some(parameters), active_parameter: Some(active) }],
+            active_signature: Some(0),
+            active_parameter: Some(active),
+        };
+        serde_json::to_value(help).ok()
+    }
+
+    // ---- rename -------------------------------------------------------------------
+
+    /// What a rename at `tdp` would rename: the word, if it is the
+    /// program's own (not the standard library's or C's).
+    fn rename_target(&mut self, tdp: &TextDocumentPositionParams) -> Option<(Range, String, Value)> {
+        let path = path_of(&tdp.text_document.uri)?;
+        let text = self.text_of(&path);
+        let at = byte_of_pos(&text, tdp.position);
+        let (a, b) = word_at(&text, at)?;
+        let v = self.ask("definition", tdp)?;
+        let local = v.get("kind").and_then(Value::as_str) == Some("local");
+        let own = local || (v.get("package").and_then(Value::as_str) != Some("std") && !matches!(v.get("kind").and_then(Value::as_str), Some("extern") | Some("module")));
+        if !own || v["location"]["file"].as_str() == Some("<prelude>") {
+            return None;
+        }
+        Some((Range { start: pos_of_byte(&text, a), end: pos_of_byte(&text, b) }, text[a..b].to_string(), v))
+    }
+
+    fn prepare_rename(&mut self, tdp: &TextDocumentPositionParams) -> Option<Value> {
+        let (range, placeholder, _) = self.rename_target(tdp)?;
+        serde_json::to_value(PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }).ok()
+    }
+
+    fn rename(&mut self, tdp: &TextDocumentPositionParams, new: &str) -> Result<Option<Value>, String> {
+        let Some((_, old, def)) = self.rename_target(tdp) else { return Err("only the program's own names can be renamed here".into()) };
+        let ok_name = new.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') && new.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !ok_name {
+            return Err(format!("`{new}` is not a name"));
+        }
+        let mut locs: Vec<Location> = Vec::new();
+        if let Some(l) = def.get("location").and_then(|l| self.location(l)) {
+            locs.push(l);
+        }
+        if let Some(refs) = self.ask("references", tdp) {
+            locs.extend(refs.as_array().into_iter().flatten().filter_map(|l| self.location(l)));
+        }
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for loc in locs {
+            let Some(p) = path_of(&loc.uri) else { continue };
+            let text = self.text_of(&p);
+            let (a, b) = (byte_of_pos(&text, loc.range.start), byte_of_pos(&text, loc.range.end));
+            // a path (`shapes::area`) renames its last part
+            let Some(seen) = text.get(a..b) else { continue };
+            let start = if seen.ends_with(old.as_str()) { b - old.len() } else if let Some(i) = seen.find(old.as_str()) { a + i } else { continue };
+            let range = Range { start: pos_of_byte(&text, start), end: pos_of_byte(&text, start + old.len()) };
+            let edits = changes.entry(loc.uri.clone()).or_default();
+            if !edits.iter().any(|e| e.range == range) {
+                edits.push(TextEdit { range, new_text: new.to_string() });
+            }
+        }
+        Ok(serde_json::to_value(WorkspaceEdit { changes: Some(changes), ..Default::default() }).ok())
+    }
+
+    // ---- the call hierarchy ---------------------------------------------------------
+
+    fn call_item(&self, v: &Value) -> Option<CallHierarchyItem> {
+        if v.get("kind").and_then(Value::as_str) != Some("fn") {
+            return None;
+        }
+        let loc = self.location(v.get("location")?)?;
+        Some(CallHierarchyItem {
+            name: v.get("name")?.as_str()?.to_string(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            detail: v.get("signature").and_then(Value::as_str).map(String::from),
+            uri: loc.uri,
+            range: loc.range,
+            selection_range: loc.range,
+            data: Some(json!({ "path": v.get("path").cloned().unwrap_or(Value::Null) })),
+        })
+    }
+
+    fn call_item_at(&mut self, tdp: &TextDocumentPositionParams) -> Option<CallHierarchyItem> {
+        let v = self.ask("definition", tdp)?;
+        self.call_item(&v)
+    }
+
+    /// The functions of a file, by the line their name is on.
+    fn functions_of(&mut self, path: &Path) -> Vec<(u32, Value)> {
+        let Some((engine, _)) = self.engine(path) else { return Vec::new() };
+        let Ok(v) = engine.query("outline", &json!({ "file": path.display().to_string() })) else { return Vec::new() };
+        let mut fns: Vec<(u32, Value)> = v.as_array().into_iter().flatten().filter(|s| s["kind"] == "fn").map(|s| (s["location"]["line"].as_u64().unwrap_or(0) as u32, s.clone())).collect();
+        fns.sort_by_key(|(l, _)| *l);
+        fns
+    }
+
+    fn incoming_calls(&mut self, item: &CallHierarchyItem) -> Option<Value> {
+        let path = path_of(&item.uri)?;
+        let name = item.data.as_ref().and_then(|d| d["path"].as_str()).map(String::from).unwrap_or(item.name.clone());
+        let refs = {
+            let (engine, _) = self.engine(&path)?;
+            engine.query("references", &json!({ "name": name })).ok()?
+        };
+        let mut by_caller: Vec<(CallHierarchyItem, Vec<Range>)> = Vec::new();
+        for r in refs.as_array().into_iter().flatten() {
+            let Some(loc) = self.location(r) else { continue };
+            let Some(file) = path_of(&loc.uri) else { continue };
+            let line = r["line"].as_u64().unwrap_or(0) as u32;
+            let fns = self.functions_of(&file);
+            let Some((_, caller)) = fns.iter().rev().find(|(l, _)| *l <= line) else { continue };
+            let Some(it) = self.call_item(caller) else { continue };
+            match by_caller.iter_mut().find(|(c, _)| c.uri == it.uri && c.range == it.range) {
+                Some((_, rs)) => rs.push(loc.range),
+                None => by_caller.push((it, vec![loc.range])),
+            }
+        }
+        let calls: Vec<CallHierarchyIncomingCall> = by_caller.into_iter().map(|(from, from_ranges)| CallHierarchyIncomingCall { from, from_ranges }).collect();
+        serde_json::to_value(calls).ok()
+    }
+
+    fn outgoing_calls(&mut self, item: &CallHierarchyItem) -> Option<Value> {
+        let path = path_of(&item.uri)?;
+        let text = self.text_of(&path);
+        let fns = self.functions_of(&path);
+        let start_line = item.range.start.line + 1;
+        let end_line = fns.iter().find(|(l, _)| *l > start_line).map(|(l, _)| *l).unwrap_or(u32::MAX);
+        let from = byte_of_pos(&text, Position { line: item.range.start.line, character: 0 });
+        let to = if end_line == u32::MAX { text.len() } else { byte_of_pos(&text, Position { line: end_line - 1, character: 0 }) };
+        let body = &text[from..to.max(from)];
+        // every `name(` in the function: what it names
+        let mut out: Vec<(CallHierarchyItem, Vec<Range>)> = Vec::new();
+        let bytes = body.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = body[i..].chars().next().unwrap_or(' ');
+            if c.is_alphabetic() || c == '_' {
+                let len: usize = body[i..].chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':').map(char::len_utf8).sum();
+                let after = body[i + len..].trim_start_matches(' ');
+                // (not the function's own `fn name(`)
+                if after.starts_with('(') && !body[..i].trim_end().ends_with("fn") {
+                    let at = from + i + len - 1;
+                    let tdp = TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri: item.uri.clone() }, position: pos_of_byte(&text, at) };
+                    if let Some(v) = self.ask("definition", &tdp)
+                        && let Some(to) = self.call_item(&v)
+                    {
+                        let range = Range { start: pos_of_byte(&text, from + i), end: pos_of_byte(&text, from + i + len) };
+                        match out.iter_mut().find(|(c, _)| c.uri == to.uri && c.range == to.range) {
+                            Some((_, rs)) => rs.push(range),
+                            None => out.push((to, vec![range])),
+                        }
+                    }
+                }
+                i += len.max(1);
+            } else {
+                i += c.len_utf8();
+            }
+        }
+        let calls: Vec<CallHierarchyOutgoingCall> = out.into_iter().map(|(to, from_ranges)| CallHierarchyOutgoingCall { to, from_ranges }).collect();
+        serde_json::to_value(calls).ok()
+    }
+
+    // ---- smart selection ----------------------------------------------------------------
+
+    fn selection_ranges(&mut self, uri: &Url, positions: &[Position]) -> Option<Value> {
+        let path = path_of(uri)?;
+        let text = self.text_of(&path);
+        let out: Vec<SelectionRange> = positions.iter().map(|p| selection_chain(&text, byte_of_pos(&text, *p))).collect();
+        serde_json::to_value(out).ok()
     }
 
     fn outline(&mut self, uri: &Url) -> Option<Value> {
@@ -605,6 +850,7 @@ impl Server {
             return serde_json::to_value(Vec::<InlayHint>::new()).ok();
         }
         let v = engine.query("where", &json!({ "file": path.display().to_string() })).ok()?;
+        let types = engine.query("types", &json!({ "file": path.display().to_string() })).unwrap_or(Value::Null);
         // one label per piece of code: its kinds together
         let mut at: Vec<(Position, Vec<String>, Vec<String>)> = Vec::new();
         for d in v.as_array()? {
@@ -636,6 +882,24 @@ impl Server {
                 None => at.push((pos, vec![label.to_string()], vec![why])),
             }
         }
+        // the inferred type of each `let` without an annotation
+        let mut type_hints: Vec<InlayHint> = Vec::new();
+        for t in types.as_array().into_iter().flatten() {
+            let pos = to_lsp(&text, t["line"].as_u64().unwrap_or(1) as u32, t["column"].as_u64().unwrap_or(1) as u32);
+            if pos.line < range.start.line || pos.line > range.end.line {
+                continue;
+            }
+            type_hints.push(InlayHint {
+                position: pos,
+                label: InlayHintLabel::String(format!(": {}", t["type"].as_str().unwrap_or(""))),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: Some(vec![TextEdit { range: Range { start: pos, end: pos }, new_text: format!(": {}", t["type"].as_str().unwrap_or("")) }]),
+                tooltip: None,
+                padding_left: None,
+                padding_right: None,
+                data: None,
+            });
+        }
         let hints: Vec<InlayHint> = at
             .into_iter()
             .map(|(position, labels, whys)| InlayHint {
@@ -648,6 +912,7 @@ impl Server {
                 padding_right: None,
                 data: None,
             })
+            .chain(type_hints)
             .collect();
         serde_json::to_value(hints).ok()
     }
@@ -756,6 +1021,135 @@ fn glyph_hover(text: &str, at: usize) -> Option<String> {
 /// The LSP diagnostics of a report, by file, with their fixes as edits.
 type FixEdits = Vec<(String, HashMap<Url, Vec<TextEdit>>)>;
 
+/// The call whose argument list `at` is in: the byte of its `(` and which
+/// argument (counting commas at its level).
+fn open_call(text: &str, at: usize) -> Option<(usize, u32)> {
+    let mut depth = 0i32;
+    let mut commas = 0u32;
+    let from = at.saturating_sub(4000);
+    let mut inside = false;
+    for (i, c) in text[from..at.min(text.len())].char_indices().rev() {
+        let i = from + i;
+        match c {
+            '"' => inside = !inside,
+            _ if inside => {}
+            ')' | ']' | '}' => depth += 1,
+            '(' if depth == 0 => return Some((i, commas)),
+            '(' | '[' | '{' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            ',' if depth == 0 => commas += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The byte ranges of the parameters in a signature `fn f(a: T, b: U) -> R`.
+fn param_spans(sig: &str) -> Vec<(usize, usize)> {
+    let Some(open) = sig.find('(') else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut start = open + 1;
+    for (i, c) in sig[open + 1..].char_indices() {
+        let i = open + 1 + i;
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                if !sig[start..i].trim().is_empty() {
+                    out.push((start + (sig[start..i].len() - sig[start..i].trim_start().len()), i));
+                }
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push((start + (sig[start..i].len() - sig[start..i].trim_start().len()), i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The name at `at` (letters, digits, `_`).
+fn word_at(text: &str, at: usize) -> Option<(usize, usize)> {
+    let ok = |c: char| c.is_alphanumeric() || c == '_';
+    let a = at - text[..at.min(text.len())].chars().rev().take_while(|c| ok(*c)).map(char::len_utf8).sum::<usize>();
+    let b = at + text[at.min(text.len())..].chars().take_while(|c| ok(*c)).map(char::len_utf8).sum::<usize>();
+    (a < b).then_some((a, b))
+}
+
+/// From the word at `at` outwards: inside brackets, the brackets, the line,
+/// and so on to the whole file.
+fn selection_chain(text: &str, at: usize) -> SelectionRange {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    if let Some(w) = word_at(text, at) {
+        spans.push(w);
+    }
+    let (mut lo, mut hi) = spans.last().copied().unwrap_or((at, at));
+    loop {
+        // the brackets around [lo, hi)
+        let mut depth = 0i32;
+        let mut open = None;
+        for (i, c) in text[..lo].char_indices().rev() {
+            match c {
+                ')' | ']' | '}' => depth += 1,
+                '(' | '[' | '{' if depth == 0 => {
+                    open = Some(i);
+                    break;
+                }
+                '(' | '[' | '{' => depth -= 1,
+                _ => {}
+            }
+        }
+        let Some(o) = open else { break };
+        let want = match &text[o..o + 1] {
+            "(" => ')',
+            "[" => ']',
+            _ => '}',
+        };
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, c) in text[hi..].char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                c2 if c2 == want && depth == 0 => {
+                    close = Some(hi + i);
+                    break;
+                }
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        let Some(c) = close else { break };
+        let inner = (o + 1, c);
+        if inner != (lo, hi) && inner.0 <= lo && inner.1 >= hi {
+            spans.push(inner);
+        }
+        // the line(s) the brackets are on, then the brackets
+        let line_lo = text[..o].rfind('\n').map_or(0, |i| i + 1);
+        let line_hi = text[c..].find('\n').map_or(text.len(), |i| c + i);
+        spans.push((o, c + 1));
+        let trimmed = (line_lo + (text[line_lo..o].len() - text[line_lo..o].trim_start().len()), line_hi);
+        if trimmed != (o, c + 1) {
+            spans.push(trimmed);
+        }
+        lo = trimmed.0;
+        hi = trimmed.1;
+    }
+    spans.push((0, text.len()));
+    spans.dedup();
+    let mut range: Option<SelectionRange> = None;
+    for (a, b) in spans.into_iter().rev() {
+        range = Some(SelectionRange { range: Range { start: pos_of_byte(text, a), end: pos_of_byte(text, b) }, parent: range.map(Box::new) });
+    }
+    range.unwrap()
+}
+
 fn diagnostics(r: &Report, engine_key: &Path) -> Vec<(PathBuf, Diagnostic, FixEdits)> {
     let mut out = Vec::new();
     let fallback = if engine_key.is_dir() { engine_key.join("mim.mim") } else { engine_key.to_path_buf() };
@@ -765,7 +1159,7 @@ fn diagnostics(r: &Report, engine_key: &Path) -> Vec<(PathBuf, Diagnostic, FixEd
             Some(s) => (s.path.clone().unwrap_or_else(|| fallback.clone()), s.src.as_str()),
             None => (fallback.clone(), ""),
         };
-        let path = path.canonicalize().unwrap_or(path);
+        let path = driver::canonical(&path);
         let range = if src.is_empty() { Range::default() } else { Range { start: pos_of_byte(src, d.span.start), end: pos_of_byte(src, d.span.end.max(d.span.start)) } };
         let mut message = d.msg.clone();
         for n in &d.notes {

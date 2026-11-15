@@ -142,6 +142,22 @@ The result is native speed on one core and native speed on every core in paralle
 | Net, 4 threads | 0.58 s |
 | Net, 12 threads | **0.38 s (4.2× native)** |
 
+### Seeing nets
+
+`mimic net show` prints the nets a program's pure functions compile to, and `mimic net trace` reduces one round at a time:
+
+```text
+$ mimic net trace bench/fib/main.mim --fn fib 20
+fib(20) = 6765
+306472 interactions in 200 rounds: 1532.4 at once on average, 10907 at the widest
+rules: annihilate 43782, call 43782, copy 32836, operate 98508, switch 21891, void 65673
+redexes per round: ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▃▄▅▅▆▇█▇▇█▇▆▆▅▄▃▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+```
+
+A round fires every redex that is ready at its start, as if each had a core of its own, so the number of redexes per round is the parallelism the net offers; the runtime has as many cores as the machine and runs some calls natively. The tracer (`mimic_net::sim`) is a model of the runtime, with its interaction rules, and checked against it: every net fixture on numbers reduces to what `mimic net run` prints. Nets that compute on arrays are not traced.
+
+In VS Code, **Show net** above such a function draws its nets, plays a trace round by round, and charts the redexes per round (`mimic man editors`).
+
 ### Limits
 
 * The net subset excludes `¨`/lambdas, strings, array literals, mutation and closures. Those functions run natively, and `¨` is still data-parallel.

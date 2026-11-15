@@ -38,6 +38,15 @@ pub struct NetPlan {
 }
 
 pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
+    let mut np = plan_unreduced(p, purity);
+    // what needs no definition expanded is reduced now, once (F7)
+    np.book.pre_reduce();
+    np
+}
+
+/// The plan with its nets as compiled from the code, before compile-time
+/// reduction (`mimic net show --before`).
+pub fn plan_unreduced(p: &Program, purity: &Purity) -> NetPlan {
     // 1. desugar tail returns and check the syntactic subset
     let mut cand: HashMap<FnId, (Block, Vec<FnId>)> = HashMap::new();
     for (fid, f) in p.fns.iter().enumerate() {
@@ -136,13 +145,10 @@ pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
         false
     };
     let entered = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f)).collect();
-    // what needs no definition expanded is reduced now, once (F7)
-    let mut book = Book { defs };
-    book.pre_reduce();
-    NetPlan { book, def_index, entered, check_msgs }
+    NetPlan { book: Book { defs }, def_index, entered, check_msgs }
 }
 
-fn def_name(p: &Program, f: FnId) -> String {
+pub fn def_name(p: &Program, f: FnId) -> String {
     p.fn_path(f).join(".")
 }
 

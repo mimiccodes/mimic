@@ -138,6 +138,9 @@ jobs:
           sudo apt-get install -y -qq xvfb libnss3 libgbm1 libasound2t64 || sudo apt-get install -y -qq xvfb libnss3 libgbm1 libasound2
           cd editors/vscode && npm ci --no-audit --no-fund && npm test
           PATH="$GITHUB_WORKSPACE/target/release:$PATH" xvfb-run -a npm run test:integration
+          # and with a released Mimic that has no language server (errors on save)
+          curl -fsSL https://github.com/mimiccodes/mimic/releases/download/v0.2.9/mimic-0.2.9-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          xvfb-run -a node test/integration.mjs --old "$RUNNER_TEMP/mimic-0.2.9-linux-x86_64/mimic"
 
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
