@@ -84,11 +84,19 @@ jobs:
           docker run --rm -v "$HOME/.mimic:/root/.mimic" -v "$PWD:/src" -w /src \
             -e LLVM_SYS_231_PREFIX=/root/.mimic/deps/llvm-$LLVM_VERSION -e CARGO_TERM_COLOR \
             "$MANYLINUX" bash -euc '
+              # the link asks for libffi (LLVM itself is built without it):
+              # --as-needed drops it again, as the check below makes sure
+              dnf -y -q install libffi-devel
               curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
               . "$HOME/.cargo/env"
               LLVM_PREFIX=$LLVM_SYS_231_PREFIX MIMIC_DEPS=/root/.mimic/deps tools/deps.sh
               cargo build --release'
           sudo chown -R "$(id -u):$(id -g)" target "$HOME/.mimic"
+          # the shared libraries it needs: only the C library's own
+          objdump -p target/release/mimic | grep NEEDED
+          if objdump -p target/release/mimic | grep NEEDED | grep -vqE 'lib(c|m|dl|rt|pthread|gcc_s|stdc\+\+)\.so|ld-linux'; then
+            echo "error: mimic needs a shared library a plain Linux system may not have" >&2; exit 1
+          fi
           # the newest glibc symbol version it needs
           need=$(objdump -T target/release/mimic | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
           echo "needs $need"
