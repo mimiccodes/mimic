@@ -153,13 +153,22 @@ fn array_work(e: &Expr) -> bool {
 }
 
 fn array_work_in(walk: impl FnOnce(&mut dyn FnMut(&Expr))) -> bool {
-    let mut found = false;
-    walk(&mut |x| {
-        if let ExprKind::Prim { prim, .. } = &x.kind
-            && matches!(prim, Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul)
-        {
-            found = true;
+    // a loop over a few elements the program states (`⍳ 5`, `0 ‥ 25`) is
+    // small work: nbody's five bodies must stay inlined, not be shared out
+    fn small(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Prim { prim: Prim::Iota, args } => matches!(args[0].kind, ExprKind::Int(n) if n <= 4096),
+            ExprKind::Prim { prim: Prim::Range, args } => matches!((&args[0].kind, &args[1].kind), (ExprKind::Int(a), ExprKind::Int(b)) if b - a <= 4096),
+            ExprKind::Array(xs) => xs.len() <= 4096,
+            _ => false,
         }
+    }
+    let mut found = false;
+    walk(&mut |x| match &x.kind {
+        ExprKind::Prim { prim: Prim::Iota | Prim::Range, .. } if small(x) => {}
+        ExprKind::Prim { prim: Prim::Each, args } if small(&args[0]) || matches!(&args[0].kind, ExprKind::Prim { prim: Prim::Each, args: a2 } if small(&a2[0])) => {}
+        ExprKind::Prim { prim, .. } if matches!(prim, Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul) => found = true,
+        _ => {}
     });
     found
 }
@@ -559,6 +568,13 @@ impl<'ctx> Cg<'ctx, '_> {
             let slot = unsafe { self.b.build_in_bounds_gep(ty, ctx, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
             let v = if v.is_int_value() && v.into_int_value().get_type().get_bit_width() == 1 {
                 self.b.build_int_z_extend(v.into_int_value(), i64t, "").s()?.into()
+            } else if v.get_type().is_struct_type() || v.get_type().is_array_type() {
+                // a list or record kept in registers is wider than a slot:
+                // it goes to the stack, the slot holds its address (it was
+                // stored over the next slots, and the kernel read garbage)
+                let at = self.entry_alloca_ty(v.get_type(), "kctx_value")?;
+                self.b.build_store(at, *v).s()?;
+                at.into()
             } else {
                 *v
             };
@@ -739,6 +755,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     let w = cg.b.build_load(i64t, p, "").s()?.into_int_value();
                     return Ok(cg.b.build_int_truncate(w, cg.ctx.bool_type(), "").s()?.into());
                 }
+                // a list or record kept in registers: the slot holds a
+                // pointer to it (pack_ctx)
+                if t.is_struct_type() || t.is_array_type() {
+                    let at = cg.b.build_load(cg.ptr, p, "").s()?.into_pointer_value();
+                    return cg.b.build_load(t, at, "").s();
+                }
                 cg.b.build_load(t, p, "").s()
             };
             let mut slots = Vec::new();
@@ -877,6 +899,12 @@ impl<'ctx> Cg<'ctx, '_> {
                 if t.is_int_type() && t.into_int_type().get_bit_width() == 1 {
                     let w = cg.b.build_load(i64t, p, "").s()?.into_int_value();
                     return Ok(cg.b.build_int_truncate(w, cg.ctx.bool_type(), "").s()?.into());
+                }
+                // a list or record kept in registers: the slot holds a
+                // pointer to it (pack_ctx)
+                if t.is_struct_type() || t.is_array_type() {
+                    let at = cg.b.build_load(cg.ptr, p, "").s()?.into_pointer_value();
+                    return cg.b.build_load(t, at, "").s();
                 }
                 cg.b.build_load(t, p, "").s()
             };

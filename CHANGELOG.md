@@ -18,6 +18,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **`let (a, b) = …` of numbers stays in registers**, from a tuple or an `if` whose branches are tuples: in a loop over pixels it made, checked and released a tuple per pixel (the transcode example's scaler: 116 s → 0.9 s).
 
 ### Fixed
+- **A fused loop shared out over the cores could compute wrong numbers and crash** when it used a list or a record small enough to be kept in registers (`nbody`'s bodies): such a value is wider than one slot of the kernel's context and overwrote the next ones. It now goes by address. (Found when today's change sent more loops down that path; a small constant loop like `⍳ 5` is not counted as heavy work.)
 - **`panic` and `os::exit` take no part in a value's type**: `match fs::read_bytes(p) { Ok(b) => b, Err(e) => panic(…) }` was dynamic (the arms joined bytes with nothing), so everything computed from it ran on slow paths; it is `[u8]`.
 
 ## 0.3.15 — 2026-11-16

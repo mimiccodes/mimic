@@ -1,0 +1,26 @@
+module main
+
+// A fused loop whose function does array work runs as a kernel shared out
+// by time; what it captures is packed for it. Lists and records small
+// enough to stay in registers are wider than a slot: they go by address
+// (they were stored over the next slots: wrong numbers, then a crash).
+
+type Sys = { x: [f64], y: [f64] }
+
+fn d2(s: Sys, i: i64, j: i64) -> f64 {
+    let dx = s.x[i] - s.x[j]
+    dx * dx
+}
+
+fn pairs(s: Sys, m: [f64], i: i64) -> f64 {
+    ⍳ 3 ¨ (j => if j <= i { 0.0 } else { m[i] * m[j] / d2(s, i, j) }) ▷ +/
+}
+
+fn main() {
+    let s = Sys { x: [0.0, 1.0, 3.0], y: [0.0, 0.0, 0.0] }
+    let m = [1.0, 2.0, 3.0]
+    print(⍳ 3 ¨ (i => pairs(s, m, i)))
+    print(⍳ 3 ¨ (i => pairs(s, m, i)) ▷ +/)
+    let k = [10 20 30]
+    print(⍳ 4 ¨ (i => ⍳ 3 ¨ (j => k[j] * i) ▷ +/))
+}
