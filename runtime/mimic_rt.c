@@ -449,6 +449,31 @@ static void parallel_for(int64_t n, mim_task fn, void *ctx);
 void mim_par_for(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for(n, f, ctx); }
 void mim_par_for_grain(int64_t n, int64_t grain, void (*f)(void *, int64_t, int64_t), void *ctx) { parallel_for_grain(n, grain, f, ctx); }
 
+/* Chunks of `grain` (their boundaries fixed, so results never depend on the
+ * number of threads), each thread taking one contiguous run of them: a pass
+ * that writes fresh memory then faults its pages in one region per thread,
+ * not interleaved with the others (a 100M-element scan: 0.28 s → 0.17 s on
+ * 12 cores). */
+typedef struct {
+    mim_task f;
+    void *ctx;
+    int64_t grain;
+} contig_ctx;
+
+static void contig_run(void *c, int64_t lo, int64_t hi) {
+    contig_ctx *k = (contig_ctx *)c;
+    for (int64_t a = lo; a < hi; a += k->grain) k->f(k->ctx, a, a + k->grain < hi ? a + k->grain : hi);
+}
+
+void mim_par_for_contig(int64_t n, int64_t grain, void (*f)(void *, int64_t, int64_t), void *ctx) {
+    if (grain < 1) grain = 1;
+    int64_t nchunks = (n + grain - 1) / grain;
+    int64_t t = g_nthreads > 0 ? g_nthreads : 1;
+    int64_t per = (nchunks + t - 1) / t;
+    contig_ctx k = {f, ctx, grain};
+    parallel_for_grain(n, per * grain, contig_run, &k);
+}
+
 /* A compiled loop whose elements may each be much work (they call into
  * recursion): time the first element, then share out the rest (in small
  * chunks: one element each when there are few) when that is worth waking

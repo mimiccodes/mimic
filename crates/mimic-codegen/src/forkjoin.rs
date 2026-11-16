@@ -66,7 +66,7 @@ pub(crate) fn seq_of(k: Kind) -> Kind {
 
 impl<'ctx> Cg<'ctx, '_> {
     /// Targets with threads.
-    fn fj_target(&self) -> bool {
+    pub(crate) fn fj_target(&self) -> bool {
         let t = self.module.get_triple();
         let t = t.as_str().to_string_lossy();
         !["wasm", "bpf", "nvptx", "amdgcn", "spirv", "xcore", "avr", "msp430"].iter().any(|p| t.starts_with(p))

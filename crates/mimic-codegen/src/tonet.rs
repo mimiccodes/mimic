@@ -35,6 +35,10 @@ pub struct NetPlan {
     pub entered: HashSet<FnId>,
     /// Messages for type-annotation checks inside nets (`Op::Check` indices).
     pub check_msgs: Vec<String>,
+    /// Entered functions that make two calls at once themselves (fork-join
+    /// splits them as well as the net, with less overhead, when called from
+    /// ordinary code).
+    pub wide: HashSet<FnId>,
 }
 
 pub fn plan(p: &Program, purity: &Purity) -> NetPlan {
@@ -144,8 +148,9 @@ pub fn plan_unreduced(p: &Program, purity: &Purity) -> NetPlan {
         }
         false
     };
-    let entered = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f)).collect();
-    NetPlan { book: Book { defs }, def_index, entered, check_msgs }
+    let entered: HashSet<FnId> = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f)).collect();
+    let wide = wide.into_iter().filter(|f| entered.contains(f) && cand[f].1.contains(f)).collect();
+    NetPlan { book: Book { defs }, def_index, entered, check_msgs, wide }
 }
 
 pub fn def_name(p: &Program, f: FnId) -> String {

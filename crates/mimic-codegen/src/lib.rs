@@ -1599,7 +1599,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_par_for" => void.fn_type(&[i64t, p, p], false),
-            "mim_par_for_grain" => void.fn_type(&[i64t, i64t, p, p], false),
+            "mim_par_for_grain" | "mim_par_for_contig" => void.fn_type(&[i64t, i64t, p, p], false),
             "mim_gpu_wants" => self.ctx.i32_type().fn_type(&[i64t, i64t], false),
             "mim_gpu_run" => self.ctx.i32_type().fn_type(&[p, i64t, i32t, p, p, p, i32t, p, i64t], false),
             "mim_par_for_timed" => void.fn_type(&[i64t, p, p], false),
@@ -1763,7 +1763,14 @@ impl<'ctx> Cg<'ctx, '_> {
     /// Which kind of a callee to call from the current context.
     fn kind_for(&self, fid: usize) -> Kind {
         let base = if self.plan.entered.contains(&fid) {
-            if self.native_frame { Kind::Native } else { Kind::NetWrap }
+            if self.native_frame {
+                Kind::Native
+            } else if self.plan.wide.contains(&fid) && self.fj_target() {
+                // a recursion that splits itself: fork-join from ordinary code
+                Kind::Plain
+            } else {
+                Kind::NetWrap
+            }
         } else {
             Kind::Plain
         };

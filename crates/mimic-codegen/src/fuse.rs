@@ -1679,7 +1679,8 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(pooled);
         if explicit {
-            self.call_rt("mim_par_for_grain", &[n.into(), grain.into(), self.fn_addr(k).into(), ctx.into()])?;
+            // (chunks of `grain`, each thread a contiguous run of them)
+            self.call_rt("mim_par_for_contig", &[n.into(), grain.into(), self.fn_addr(k).into(), ctx.into()])?;
         } else {
             self.call_rt("mim_par_for", &[n.into(), self.fn_addr(k).into(), ctx.into()])?;
         }
