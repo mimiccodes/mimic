@@ -99,6 +99,24 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### filters, qoi and paths on CI machines (2026-11-17)
+
+The bench workflow (run 43975091821, commit 6024f9c). Ratios to C; Rust + Rayon and Mimic, all cores, are the parallel columns.
+
+| | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| filters, macOS | 0.198 s | 0.97× | 3.41× | 1.35× | 0.59× | 0.46× |
+| filters, Linux | 0.215 s | 0.90× | 3.28× | 1.30× | 0.67× | 0.61× |
+| filters, Windows | 0.126 s | 0.77× | 3.45× | 1.78× | 0.74× | 0.81× |
+| paths, macOS | 0.053 s | 0.93× | 1.22× | 2.48× | 0.57× | 2.28× |
+| paths, Linux | 0.064 s | 1.06× | 1.39× | 2.70× | 0.66× | 2.70× |
+| paths, Windows | 0.044 s | 1.02× | 1.21× | 1.94× | 0.60× | 1.95× |
+| qoi, macOS | 0.052 s | 0.64× | 0.90× | 11.01× | 0.77× | 5.77× |
+| qoi, Linux | 0.025 s | 1.24× | 1.79× | 14.65× | 0.91× | 8.70× |
+| qoi, Windows | 0.016 s | 1.38× | 1.75× | 14.29× | 1.00× | 8.42× |
+
+`filters` is ahead of Rayon on all cores on macOS and Linux. `paths` (a binary heap in a record stepped by `settle`) is 2–2.7× C: each step goes through the record and the heap's lists, where C writes into arrays; the two searches run one after the other (Rayon runs them at once). `qoi` is the largest gap left: each pixel builds a few small lists (a run byte, the pixel's bytes) before they join the output, which C writes byte by byte.
+
 ### On CI machines, with Rust + Rayon (byte and pixel round, 2026-11-17)
 
 The bench workflow (run 43929837181, commit 3da7f96), after the round prompted by the new `scale` benchmark and the transcoding example: byte data read and written directly, heavy loop elements shared over the cores, element functions inlined into fused loops, a plain divide for operands that are not negative, tuples of numbers in registers. Ratios to C; Rust + Rayon and Mimic, all cores, are the parallel columns.
