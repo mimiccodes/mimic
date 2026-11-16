@@ -2659,35 +2659,6 @@ typedef struct {
     int64_t *pi;
 } reduce_ctx;
 
-/* The reciprocal of |d| for division without a divide (compiled code,
- * magic_div in lib.rs): with l = ceil(log2 |d|), m = 2^64 (2^l - |d|) / |d| + 1;
- * then any unsigned n gives n / |d| = (t + ((n - t) >> 1)) >> (l - 1) where
- * t = mulhi(m, n) (Granlund and Montgomery). The shift is computed by the
- * caller; |d| <= 1 is handled there, and d = 0 is never divided by. No side
- * effects: the compiler computes it once, before a loop. */
-uint64_t mim_div_magic(int64_t d) {
-    uint64_t ad = d < 0 ? (uint64_t)0 - (uint64_t)d : (uint64_t)d;
-    if (ad <= 1) return 0;
-    int l = 64 - __builtin_clzll(ad - 1);
-    uint64_t top = l == 64 ? (uint64_t)0 - ad : ((uint64_t)1 << l) - ad; /* 2^l - ad (top < ad) */
-#ifdef __SIZEOF_INT128__
-    return (uint64_t)(((unsigned __int128)top << 64) / ad) + 1;
-#else
-    /* (top · 2^64) / ad by long division, a bit at a time (top < ad) */
-    uint64_t q = 0, rem = top;
-    for (int i = 0; i < 64; i++) {
-        uint64_t carry = rem >> 63;
-        rem <<= 1;
-        q <<= 1;
-        if (carry || rem >= ad) {
-            rem -= ad;
-            q |= 1;
-        }
-    }
-    return q + 1;
-#endif
-}
-
 static void reduce_range(void *vc, int64_t lo, int64_t hi) {
     reduce_ctx *c = (reduce_ctx *)vc;
     int64_t slot = lo / g_grain;

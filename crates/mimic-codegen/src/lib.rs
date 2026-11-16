@@ -363,7 +363,6 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
-        inv_divs: Default::default(),
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -636,10 +635,6 @@ struct Cg<'ctx, 'p> {
     fj: forkjoin::State<'ctx>,
     /// the fused expression being compiled (for the GPU decision's note)
     fused_at: std::cell::Cell<Option<mimic_syntax::Span>>,
-    /// Integer divisions (expression ids) inside a fused `¨`'s function
-    /// whose divisor is the same for every element: by a reciprocal
-    /// computed once (see magic_div), not a divide per element.
-    inv_divs: std::cell::RefCell<std::collections::HashSet<usize>>,
 }
 
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
@@ -4299,79 +4294,6 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(true)
     }
 
-    /// Floored `div` / `%` by a divisor that is the same for every element
-    /// of a fused loop: the runtime's mim_div_magic gives a reciprocal (a
-    /// multiplier and a shift for |d|) without side effects, so LLVM
-    /// computes it once, before the loop; each element then takes a
-    /// multiply-high and shifts instead of a divide, as C does for a
-    /// constant divisor. Exactly the results of the divide (floored; the
-    /// same message for zero; i64::MIN div -1 wraps, as the hardware's).
-    fn magic_div(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
-        let x = self.to_i64(a)?;
-        let d = self.to_i64(b)?;
-        // a constant: LLVM's own division by a constant. And only on x86-64,
-        // where a 64-bit divide costs tens of cycles: Apple's and other
-        // arm64 cores divide in a few, faster than this sequence (measured:
-        // the scale benchmark took 60% longer with it on an M3)
-        let x86 = self.module.get_triple().as_str().to_string_lossy().starts_with("x86_64");
-        if d.get_sign_extended_constant().is_some() || !x86 {
-            return self.scalar_binary(op, a, b);
-        }
-        let i64t = self.ctx.i64_type();
-        let i128t = self.ctx.i128_type();
-        let zero = i64t.const_zero();
-        let bld = &self.b;
-        let z = bld.build_int_compare(IntPredicate::EQ, d, zero, "").s()?;
-        self.panic_if(z, if op == BinOp::IntDiv { "integer division by zero" } else { "integer modulo by zero" })?;
-        let bld = &self.b;
-        let f = self.module.get_function("mim_div_magic").unwrap_or_else(|| {
-            let f = self.module.add_function("mim_div_magic", i64t.fn_type(&[i64t.into()], false), Some(Linkage::External));
-            let attr = |n: &str| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(n), 0);
-            // no side effects, may run anywhere: hoisted out of the loop
-            f.add_attribute(inkwell::attributes::AttributeLoc::Function, self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("memory"), 0));
-            for n in ["nounwind", "willreturn", "speculatable", "nofree", "nosync"] {
-                f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr(n));
-            }
-            f
-        });
-        let m = bld.build_call(f, &[d.into()], "magic").s()?.try_as_basic_value().basic().unwrap().into_int_value();
-        // |x| and |d| as unsigned (|i64::MIN| is 2^63)
-        let absf = Intrinsic::find("llvm.abs").and_then(|i| i.get_declaration(&self.module, &[i64t.into()])).ok_or("internal compiler error: llvm.abs")?;
-        let no = self.ctx.bool_type().const_zero();
-        let ax = bld.build_call(absf, &[x.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
-        let ad = bld.build_call(absf, &[d.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
-        // sh = ceil(log2 |d|) - 1 = 63 - clz(|d| - 1) (|d| >= 2; |d| = 1 below)
-        let ctlz = Intrinsic::find("llvm.ctlz").and_then(|i| i.get_declaration(&self.module, &[i64t.into()])).ok_or("internal compiler error: llvm.ctlz")?;
-        let dm1 = bld.build_int_sub(ad, i64t.const_int(1, false), "").s()?;
-        let lz = bld.build_call(ctlz, &[dm1.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
-        let sh = bld.build_int_sub(i64t.const_int(63, false), lz, "").s()?;
-        // (|d| = 1: clz(0) = 64 gives a shift of -1; that result is replaced below)
-        let sh = bld.build_and(sh, i64t.const_int(63, false), "").s()?;
-        // q = (t + ((ax - t) >> 1)) >> sh, t = mulhi(m, ax); |d| = 1: q = ax
-        let wide = bld.build_int_mul(bld.build_int_z_extend(m, i128t, "").s()?, bld.build_int_z_extend(ax, i128t, "").s()?, "").s()?;
-        let t = bld.build_int_truncate(bld.build_right_shift(wide, i128t.const_int(64, false), false, "").s()?, i64t, "").s()?;
-        let half = bld.build_right_shift(bld.build_int_sub(ax, t, "").s()?, i64t.const_int(1, false), false, "").s()?;
-        let uq = bld.build_right_shift(bld.build_int_add(t, half, "").s()?, sh, false, "").s()?;
-        let one = bld.build_int_compare(IntPredicate::EQ, ad, i64t.const_int(1, false), "").s()?;
-        let uq = bld.build_select(one, ax, uq, "").s()?.into_int_value();
-        // truncated quotient and remainder, then floored
-        let neg = bld.build_int_compare(IntPredicate::SLT, bld.build_xor(x, d, "").s()?, zero, "").s()?;
-        let nq = bld.build_int_neg(uq, "").s()?;
-        let tq = bld.build_select(neg, nq, uq, "").s()?.into_int_value();
-        let tr = bld.build_int_sub(x, bld.build_int_mul(tq, d, "").s()?, "").s()?;
-        let nz = bld.build_int_compare(IntPredicate::NE, tr, zero, "").s()?;
-        let sx = bld.build_xor(tr, d, "").s()?;
-        let opp = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
-        let adj = bld.build_and(nz, opp, "").s()?;
-        Ok(V::I(if op == BinOp::IntDiv {
-            let a1 = bld.build_int_z_extend(adj, i64t, "").s()?;
-            bld.build_int_sub(tq, a1, "").s()?
-        } else {
-            let ry = bld.build_int_add(tr, d, "").s()?;
-            bld.build_select(adj, ry, tr, "").s()?.into_int_value()
-        }))
-    }
-
     /// `& | ^ << >> >>>`. Shift amounts use their low 6 bits (`x << 64` is
     /// `x << 0`), which is what the hardware does, so a shift is one instruction.
     fn bitwise(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
@@ -5387,12 +5309,6 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.narrow_binary(*op, a, ta, b, tb, ty);
                 }
                 if Self::is_unboxed(&a) && Self::is_unboxed(&b) && ty.is_unboxed() {
-                    if matches!(op, BinOp::IntDiv | BinOp::Mod)
-                        && matches!((a, b), (V::I(_), V::I(_)))
-                        && self.inv_divs.borrow().contains(&id(e))
-                    {
-                        return self.magic_div(*op, a, b);
-                    }
                     return self.scalar_binary(*op, a, b);
                 }
                 let a = self.boxed(a)?;

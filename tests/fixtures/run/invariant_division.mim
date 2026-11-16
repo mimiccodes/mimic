@@ -1,9 +1,8 @@
 module main
 
-// Divisions inside a fused `¨` by a divisor that is the same for every
-// element go through a reciprocal computed once (no divide per element).
-// They must give exactly the divide's results: each is checked against the
-// same division by `d + x * 0` (which depends on the element, so it divides)
+// Floored `div` and `%` inside fused loops (a plain unsigned divide when
+// x >= 0 and y > 0, the floored correction otherwise) must give exactly the
+// same results as the same division by `d + x * 0` (computed differently),
 // for every sign, extremes, and pseudo-random numbers over the whole range.
 
 fn same(xs: [i64], d: i64) -> bool {

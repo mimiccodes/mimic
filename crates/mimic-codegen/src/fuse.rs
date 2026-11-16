@@ -85,67 +85,6 @@ pub(crate) enum Node {
 }
 
 /// Does the computation call a function that can reach recursion?
-/// The integer divisions (`div`, `%`; expression ids) in a fused `¨`'s
-/// lambda body whose divisor is the same for every element: it names only
-/// captured variables and `let`s computed from them (names are never
-/// shadowed, so a name means one binding), and is not a constant.
-fn invariant_divisions(captures: &[String], body: &Expr) -> Vec<usize> {
-    use std::collections::HashSet;
-    fn lets_of<'a>(b: &'a Block, out: &mut Vec<(String, &'a Expr)>) {
-        for st in &b.stmts {
-            if let Stmt::Let { name, value, .. } = st {
-                out.push((name.clone(), value));
-            }
-        }
-    }
-    // every `let` in the body (blocks, and the branches of `if`)
-    let mut ptrs: Vec<*const Block> = Vec::new();
-    body.walk(&mut |x| match &x.kind {
-        ExprKind::Block(b) => ptrs.push(b),
-        ExprKind::If { then, .. } => ptrs.push(then),
-        _ => {}
-    });
-    let mut lets: Vec<(String, &Expr)> = Vec::new();
-    for p in ptrs {
-        // SAFETY: the blocks are inside `body`, alive for this function
-        lets_of(unsafe { &*p }, &mut lets);
-    }
-    // names in an expression; None when it holds something not plainly
-    // computed (a call, a lambda, a pattern match)
-    fn names(e: &Expr) -> Option<Vec<String>> {
-        let mut out = Vec::new();
-        let mut ok = true;
-        e.walk(&mut |x| match &x.kind {
-            ExprKind::Path(p) if p.len() == 1 => out.push(p[0].clone()),
-            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Index { .. } | ExprKind::Field { .. } => {}
-            _ => ok = false,
-        });
-        ok.then_some(out)
-    }
-    let mut inv: HashSet<String> = captures.iter().cloned().collect();
-    loop {
-        let before = inv.len();
-        for (n, v) in &lets {
-            if !inv.contains(n) && names(v).is_some_and(|ns| ns.iter().all(|m| inv.contains(m))) {
-                inv.insert(n.clone());
-            }
-        }
-        if inv.len() == before {
-            break;
-        }
-    }
-    let mut out = Vec::new();
-    body.walk(&mut |x| {
-        if let ExprKind::Binary { op: BinOp::IntDiv | BinOp::Mod, rhs, .. } = &x.kind
-            && !matches!(rhs.kind, ExprKind::Int(_))
-            && names(rhs).is_some_and(|ns| !ns.is_empty() && ns.iter().all(|m| inv.contains(m)))
-        {
-            out.push(id(x));
-        }
-    });
-    out
-}
-
 /// Does `e` loop over arrays (a map, a range, a scan, a loop word, a
 /// matrix product)?
 fn array_work(e: &Expr) -> bool {
@@ -401,9 +340,6 @@ impl<'ctx> Cg<'ctx, '_> {
                             }
                         });
                         let heavy = array_work(body) || self.reaches_heavy(called);
-                        // divisions by a value the same for every element
-                        let inv = invariant_divisions(&caps.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), body);
-                        self.inv_divs.borrow_mut().extend(inv);
                         let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
                         let msl = self.gpu_wanted().then(|| self.msl_lambda(&args[1], &caps)).flatten().map(std::rc::Rc::new);
                         // (the captures it divides by: as slots)
@@ -874,7 +810,6 @@ impl<'ctx> Cg<'ctx, '_> {
     /// Generate `void kernel(ptr ctx, i64 lo, i64 hi)`.
     fn emit_kernel(&mut self, root: &Node, plan: &Plan<'ctx>, mode: Mode) -> R<FunctionValue<'ctx>> {
         if let Mode::Map(el) = mode
-            && el != El::U8
             && let Some(k) = self.emit_simd_kernel(root, plan, el)?
         {
             return Ok(k);

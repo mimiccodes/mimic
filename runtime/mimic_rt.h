@@ -83,8 +83,6 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure);
 mim_val *mim_index(mim_val *xs, mim_val *i);
 void mim_index_fail(mim_val *xs, int64_t i) __attribute__((noreturn));
 void mim_byte_fail(int64_t v, int64_t i) __attribute__((noreturn));
-/* the reciprocal of |d| for division without a divide (see mimic_rt.c) */
-uint64_t mim_div_magic(int64_t d);
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v);
 int64_t mim_truthy(mim_val *v);
 void mim_check_type(mim_val *v, int32_t ty, const char *what);
