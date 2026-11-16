@@ -151,8 +151,25 @@ impl<'ctx> Cg<'ctx, '_> {
             // (rows of a screen keep their own path: reused when unchanged)
             && !self.screen_rows(self.ty_of(e))
             && args.len() == 2
-            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some())
+            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]))
             && self.each_fusible_to(e, args, true)
+    }
+
+    /// A list of flat records (each read into registers as it is used).
+    fn flat_list(&self, t: Ty) -> bool {
+        matches!(t, Ty::Arr(el @ El::Obj(_), _) if self.flat(Ty::of_el(el)).is_some())
+    }
+
+    /// `xs ¨ f` making flat records from numbers or flat records: inside a
+    /// bigger fused loop each record stays in registers (`ps ¨ step ¨ step`
+    /// is one pass, with no list of records in between).
+    fn obj_chain(&self, x: &Expr) -> bool {
+        let ExprKind::Prim { prim: Prim::Each, args } = &x.kind else { return false };
+        self.flat_list(self.ty_of(x))
+            && !self.screen_rows(self.ty_of(x))
+            && args.len() == 2
+            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]))
+            && self.each_fusible_to(x, args, true)
     }
 
     /// (`records`: `f` may return a record)
@@ -165,8 +182,9 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         let simple_num = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
         let simple = |t: Ty| simple_num(t) || (records && matches!(t, Ty::Obj(_)));
-        // a record on the heap comes in lent, as a pointer
-        let simple_in = |t: Ty| simple_num(t) || (matches!(t, Ty::Obj(_)) && self.flat(t).is_none());
+        // a record on the heap comes in lent, as a pointer; a flat one is
+        // read into registers first
+        let simple_in = |t: Ty| simple_num(t) || matches!(t, Ty::Obj(_));
         match &args[1].kind {
             ExprKind::Lambda { params, body } => {
                 let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
@@ -361,6 +379,9 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Int(v) if self.ty_of(x) == Ty::F32 => return Ok(Node::ConstF(*v as f64 as f32 as f64)),
             ExprKind::Int(v) if self.ty_of(x) == Ty::I32 => return Ok(Node::ConstI(*v as i32 as i64)),
             _ => {}
+        }
+        if self.obj_chain(x) {
+            return self.build(x, plan);
         }
         let t = self.ty_of(x);
         if let Ty::Arr(el @ El::Obj(_), _) = t {
@@ -562,6 +583,12 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.basic(n).into()
                     }
                     Ty::Bool => self.truth(x)?.into(),
+                    // a flat record in registers (read from the heap when it is there)
+                    Ty::Obj(_) if let Some(fs) = self.flat(*pt) => {
+                        // (an element of a list of these records: no check)
+                        let r = self.as_flat_in(x, *pt, &fs, "argument", false)?;
+                        self.basic(r).into()
+                    }
                     Ty::Obj(_) => self.basic(x).into(), // a record, lent
                     _ => self.to_i64(x)?.into(),
                 };

@@ -4,6 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Changed
+- **Lists of records with only number fields are 9× faster.** A record whose fields are all numbers (`{ id: i64, x: f64, v: f64 }`) lives in registers; in a list it was boxed field by field on every step (each number allocated on its own, then copied into the record), and `¨` over such a list was not fused. Now a chain such as `ps ¨ step ¨ step ¨ step` is one pass with each record in registers, the sums after it are fused too, and putting a record back into a list stores its numbers directly. A million records moved five times and summed: 2.09 s → 0.23 s on one core, 26 million allocations → 2 million. Found with `mimic profile`.
+
 ## 0.3.14 — 2026-11-16
 
 Faster servers, parallel recursion and prefix sums, and a `mimic edit` where everything is clickable. On GitHub's machines Mimic on all cores is now even with or ahead of Rust + Rayon on most benchmarks ([BENCHMARK.md](BENCHMARK.md)).

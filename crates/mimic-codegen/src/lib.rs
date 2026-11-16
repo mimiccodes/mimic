@@ -1244,9 +1244,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 let mut vals = Vec::new();
                 for (k, ft) in fs.iter().enumerate() {
                     let x = self.b.build_extract_value(r, k as u32, "").s()?;
-                    vals.push(self.boxed(self.val_of(x, *ft, false))?);
+                    vals.push(self.val_of(x, *ft, false));
                 }
-                self.construct_boxed(types::obj_tid(id), vals)?
+                self.construct_in(types::obj_tid(id), None, vals)?
             }
             // a list in registers becomes a vector on the heap
             V::A(a, el) => {
@@ -1456,6 +1456,12 @@ impl<'ctx> Cg<'ctx, '_> {
     /// the same declared type converted field by field, or a record on the
     /// heap read field by field (each checked as usual).
     fn as_flat(&self, v: V<'ctx>, t: Ty, fs: &[Ty], what: &str) -> R<V<'ctx>> {
+        self.as_flat_in(v, t, fs, what, true)
+    }
+
+    /// (`check`: false when the value is known to be a record of type `t`,
+    /// an element of a list of them)
+    fn as_flat_in(&self, v: V<'ctx>, t: Ty, fs: &[Ty], what: &str, check: bool) -> R<V<'ctx>> {
         let st = self.repr(t).into_struct_type();
         let mut out = st.get_undef();
         match v {
@@ -1470,10 +1476,12 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             V::P(p, _) => {
                 let Ty::Obj(id) = t else { unreachable!() };
-                let w = self.cstring(what)?;
                 // a record of this type (else the runtime reports it)
-                let d = self.desc(types::obj_tid(id), None);
-                self.call_rt("mim_check_record", &[p.into(), d.into(), w.into()])?;
+                if check {
+                    let w = self.cstring(what)?;
+                    let d = self.desc(types::obj_tid(id), None);
+                    self.call_rt("mim_check_record", &[p.into(), d.into(), w.into()])?;
+                }
                 let i32t = self.ctx.i32_type();
                 let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
                 for (k, ft) in fs.iter().enumerate() {
@@ -3503,26 +3511,6 @@ impl<'ctx> Cg<'ctx, '_> {
         gp
     }
 
-    /// Build a record or variant from field values (in field order).
-    /// A record of type `t` on the heap from boxed field values (in field
-    /// order; they are released here).
-    fn construct_boxed(&self, t: TypeId, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
-        let i64t = self.ctx.i64_type();
-        let n = vals.len() as u32;
-        let arr_ty = self.ptr.array_type(n.max(1));
-        let arr = self.entry_array(arr_ty)?;
-        for (i, b) in vals.iter().enumerate() {
-            let slot = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[i64t.const_zero(), i64t.const_int(i as u64, false)], "").s()? };
-            self.b.build_store(slot, self.basic(*b)).s()?;
-        }
-        let d = self.desc(t, None);
-        let r = self.call_rt_ptr("mim_obj", &[d.into(), i64t.const_int(n as u64, false).into(), arr.into()])?;
-        for b in vals {
-            self.drop_tmp(b)?;
-        }
-        Ok(r)
-    }
-
     /// A variant without fields: one immortal value per variant, made once
     /// and cached in a global (no allocation, no counting afterwards).
     fn unit_variant(&mut self, t: TypeId, v: usize) -> R<V<'ctx>> {
@@ -3558,10 +3546,15 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn construct(&mut self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
-        // (tuples use t = usize::MAX)
+        self.construct_in(t, variant, vals)
+    }
+
+    /// A record, variant or tuple on the heap. (tuples use t = usize::MAX)
+    fn construct_in(&self, t: TypeId, variant: Option<usize>, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         // optimised builds: allocate inline and move the fields in (a value
-        // owned here becomes the record's; a borrowed one is retained)
+        // owned here becomes the record's; a borrowed one is retained;
+        // numbers are stored raw, never boxed first)
         if self.heap_ok() && t != usize::MAX {
             let i32t = self.ctx.i32_type();
             let n = vals.len() as u64;

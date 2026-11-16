@@ -1,0 +1,31 @@
+module main
+
+// lists of records with only number fields (flat records): a chain of `¨`
+// keeps each record in registers, in one pass; mixed with heap records
+
+type P = { id: i64, x: f64, v: f64 }
+type Named = { name: str, x: f64 }
+
+fn step(p: P) -> P {
+    { p with x: p.x + p.v, v: p.v * 0.5 }
+}
+
+fn named(p: P) -> Named {
+    Named { name: "p", x: p.x }
+}
+
+fn main() {
+    let ps = ⍳ 1000 ¨ (i => P { id: i, x: i * 1.0, v: 1.0 })
+    let moved = ps ¨ step ¨ step ¨ step
+    print(moved ¨ (p => p.x) ▷ +/)
+    print(moved ¨ (p => p.v) ▷ +/)
+    print(ps ¨ (p => p.x) ▷ +/)
+    print(moved ↑ 2)
+    let ns = ps ¨ step ¨ named
+    print(ns ↑ 1)
+    print(ns ¨ (n => n.x) ▷ +/)
+    let ids = ps ¨ step ¨ (p => p.id)
+    print(ids ▷ +/)
+    let big = ps ¨ step ¨ (p => p.x > 500.0) ▷ +/
+    print(big)
+}
