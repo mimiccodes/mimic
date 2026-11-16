@@ -673,7 +673,7 @@ impl Server {
         }
         let mut name = "extracted".to_string();
         let mut n = 2;
-        while text.contains(&format!("fn {name}(")) {
+        while text.contains(&format!("fn {name}(")) || text.contains(&format!("ƒ {name}(")) {
             name = format!("extracted_{n}");
             n += 1;
         }
@@ -854,7 +854,7 @@ impl Server {
                 let len: usize = body[i..].chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':').map(char::len_utf8).sum();
                 let after = body[i + len..].trim_start_matches(' ');
                 // (not the function's own `fn name(`)
-                if after.starts_with('(') && !body[..i].trim_end().ends_with("fn") {
+                if after.starts_with('(') && !body[..i].trim_end().ends_with("fn") && !body[..i].trim_end().ends_with('ƒ') {
                     let at = from + i + len - 1;
                     let tdp = TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri: item.uri.clone() }, position: pos_of_byte(&text, at) };
                     if let Some(v) = self.ask("definition", &tdp)

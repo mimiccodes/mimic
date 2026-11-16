@@ -26,7 +26,7 @@ pub struct Session {
 /// What a piece of input is.
 fn is_definition(s: &str) -> bool {
     let t = s.trim_start();
-    ["fn ", "pub fn ", "type ", "pub type ", "extern ", "trusted extern ", "use ", "module ", "test "].iter().any(|p| t.starts_with(p))
+    ["fn ", "pub fn ", "ƒ", "pub ƒ", "type ", "pub type ", "extern ", "trusted extern ", "use ", "module ", "§", "test "].iter().any(|p| t.starts_with(p))
 }
 
 fn is_statement(s: &str) -> bool {
