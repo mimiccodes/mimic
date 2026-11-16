@@ -4,6 +4,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.15 — 2026-11-16
+
+Updating while an editor is open works again, `and`/`or` short-circuit, servers can be profiled and stopped, lists of number-only records are 9× faster, and fixes from first users' notes.
+
+**Upgrading from 0.3.14:** if updating from the VS Code extension failed ("Killed: 9"), update again: this release's installer replaces `mimic` safely while the language server runs. In VS Code, install the extension 0.10.3 for the profiler's Cancel. One change can stop a program from compiling: standard functions now check their arguments' types (error E0401), so a call that passed the wrong type, and would have failed when run, is reported.
+
 ### Fixed
 - **Standard functions check their arguments' types.** `to_float(5)` compiled and stopped the program when it ran (`to_float` reads text); it is now error E0401, as for the program's own functions.
 - **`match` on a list of pairs**: `[]` and `[(k, v), ..rest]` cover every list, with no `_ => …` arm needed (a tuple of names matches every pair).
