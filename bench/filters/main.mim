@@ -1,0 +1,61 @@
+module main
+
+// filters: a 1920×1080 8-bit image through five filters (edges clamped):
+// 3×3 box blur, 5×5 Gaussian, Sobel (|gx| + |gy|, at most 255), 3×3
+// median, and an integer bilateral filter (3×3, spatial weights 1 2 4,
+// range weight max(0, 32 - |q - p| div 2)). Prints each result's sum and a
+// checksum that weighs every pixel by its position. Each filter is one map
+// over the pixels.
+
+fn w() -> i64 { 1920 }
+fn h() -> i64 { 1080 }
+
+fn at(img: [u8], x: i64, y: i64) -> i64 {
+    img[clamp(y, 0, h() - 1) * w() + clamp(x, 0, w() - 1)]
+}
+
+fn report(name: str, out: [u8]) {
+    let check = ⍳ (≢ out) ¨ (i => out[i] * (i % 251 + 1)) ▷ +/
+    print("{name} {out ▷ +/} {check}")
+}
+
+fn main() {
+    let n = w() * h()
+    let img = bytes::from(⍳ n ¨ (i => {
+        let x = i % w()
+        let y = i div w()
+        let noise = (i * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        (x * 7 + y * 13 + x * y % 31 + noise) % 256
+    }))
+    report("box", bytes::from(⍳ n ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        (⍳ 9 ¨ (j => at(img, x + j % 3 - 1, y + j div 3 - 1)) ▷ +/) div 9
+    })))
+    let g = [1 4 6 4 1]
+    report("gaussian", bytes::from(⍳ n ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        (⍳ 25 ¨ (j => g[j div 5] * g[j % 5] * at(img, x + j % 5 - 2, y + j div 5 - 2)) ▷ +/) div 256
+    })))
+    let sx = [¯1 0 1 ¯2 0 2 ¯1 0 1]
+    let sy = [¯1 ¯2 ¯1 0 0 0 1 2 1]
+    report("sobel", bytes::from(⍳ n ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        let a = ⍳ 9 ¨ (j => sx[j] * at(img, x + j % 3 - 1, y + j div 3 - 1)) ▷ +/
+        let b = ⍳ 9 ¨ (j => sy[j] * at(img, x + j % 3 - 1, y + j div 3 - 1)) ▷ +/
+        (∣ a + ∣ b) ⌊ 255
+    })))
+    report("median", bytes::from(⍳ n ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        sort(⍳ 9 ¨ (j => at(img, x + j % 3 - 1, y + j div 3 - 1)))[4]
+    })))
+    let sw = [1 2 1 2 4 2 1 2 1]
+    report("bilateral", bytes::from(⍳ n ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        let p = img[i]
+        let q = ⍳ 9 ¨ (j => at(img, x + j % 3 - 1, y + j div 3 - 1))
+        let wt = ⍳ 9 ¨ (j => sw[j] * ((32 - ∣ (q[j] - p) div 2) ⌈ 0))
+        let num = wt * q ▷ +/
+        let den = wt ▷ +/
+        (num + den div 2) div den
+    })))
+}

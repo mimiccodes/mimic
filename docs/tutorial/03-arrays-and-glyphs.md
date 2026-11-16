@@ -165,7 +165,7 @@ alan
 
 ## Small lists are free
 
-When the compiler can see how long a list of numbers is, it keeps short ones (up to 8 elements) in registers rather than on the heap. A literal like `[x y z]`, `⍳ 5`, or anything elementwise built from them counts. So does a record whose fields are such lists or plain numbers. Nothing in your program changes, and there is no special type to write. A point, a color or a 2×2 matrix as a list costs no more than separate variables would:
+When the compiler can see how long a list of numbers is, it keeps short ones (up to 16 elements) in registers rather than on the heap. A literal like `[x y z]`, `⍳ 5`, or anything elementwise built from them counts. So does a record whose fields are such lists or plain numbers. Nothing in your program changes, and there is no special type to write. A point, a color, a 3×3 filter kernel or a 4×4 matrix as a list costs no more than separate variables would:
 
 ```mimic run
 module main

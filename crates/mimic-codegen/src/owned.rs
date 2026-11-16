@@ -26,7 +26,7 @@ use std::collections::HashSet;
 /// can still use it: its only use; or the base of a `{ name with … }` whose
 /// field values hold every other use (they are computed before the base
 /// moves). Uses inside lambdas never move. Returns that use's id.
-fn move_site(name: &str, roots: &[&Expr]) -> Option<usize> {
+pub(crate) fn move_site(name: &str, roots: &[&Expr]) -> Option<usize> {
     let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name);
     let mut in_lambda = HashSet::new();
     let mut uses = Vec::new();
@@ -68,6 +68,108 @@ fn move_site(name: &str, roots: &[&Expr]) -> Option<usize> {
     (inside.len() == uses.len() && uses.iter().all(|u| inside.contains(u))).then_some(inside[0])
 }
 
+/// `name` may move at several `{ name with … }`, when each is in tail
+/// position (the value the function or lambda gives back on that path):
+/// whatever else reads `name` on that path has run by then (the field values
+/// of the `with` too: they are computed before its base). Not when `name` is
+/// used inside a lambda, or a `with` on it is not in tail position. Returns
+/// the ids of those bases.
+pub(crate) fn tail_with_sites(name: &str, body: &Block) -> Option<Vec<usize>> {
+    tail_with_sites_in(name, body.tail.as_deref(), |f| body.walk(f))
+}
+
+/// The same for a lambda's body (an expression).
+pub(crate) fn tail_with_sites_expr(name: &str, body: &Expr) -> Option<Vec<usize>> {
+    tail_with_sites_in(name, Some(body), |f| body.walk(f))
+}
+
+fn tail_with_sites_in(name: &str, tail: Option<&Expr>, walk: impl Fn(&mut dyn FnMut(&Expr))) -> Option<Vec<usize>> {
+    fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &e.kind {
+            ExprKind::Block(b) => {
+                if let Some(t) = b.tail.as_deref() {
+                    tails(t, out);
+                }
+            }
+            ExprKind::If { then, els, .. } => {
+                if let Some(t) = then.tail.as_deref() {
+                    tails(t, out);
+                }
+                if let Some(e) = els {
+                    tails(e, out);
+                }
+            }
+            ExprKind::Match { arms, .. } => arms.iter().for_each(|a| tails(&a.body, out)),
+            _ => out.push(e),
+        }
+    }
+    let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name);
+    let mut ends = Vec::new();
+    if let Some(t) = tail {
+        tails(t, &mut ends);
+    }
+    let sites: Vec<usize> = ends
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ExprKind::With { base, .. } if is_name(base) => Some(id(base.as_ref())),
+            // `step(s, x)` as the result: s handed on (no other argument
+            // reads it: they are computed in order)
+            // or `step({ s with … }, x)`, `f(g({ s with … }), x)`: the last
+            // use of s is in one argument (the others do not read it), as the
+            // argument itself or a `with` on it, at any depth of calls
+            ExprKind::Call { .. } => last_use(e, &is_name),
+            _ => None,
+        })
+        .collect();
+    if sites.is_empty() {
+        return None;
+    }
+    // every `with` on it is one of those; no use inside a lambda
+    let mut ok = true;
+    let mut check = |x: &Expr| {
+        if let ExprKind::With { base, .. } = &x.kind
+            && is_name(base)
+            && !sites.contains(&id(base.as_ref()))
+        {
+            ok = false;
+        }
+        if let ExprKind::Lambda { body, .. } = &x.kind {
+            body.walk(&mut |y| {
+                if is_name(y) {
+                    ok = false;
+                }
+            });
+        }
+    };
+    walk(&mut check);
+    ok.then_some(sites)
+}
+
+/// Where `e` uses the variable `is_name` names for the last time, when that
+/// use can take it over: `e` is the variable, a `with` on it, or a call with
+/// every use in one argument whose last use is such.
+fn last_use(e: &Expr, is_name: &dyn Fn(&Expr) -> bool) -> Option<usize> {
+    let count = |x: &Expr| {
+        let mut n = 0;
+        x.walk(&mut |y| {
+            if is_name(y) {
+                n += 1;
+            }
+        });
+        n
+    };
+    match &e.kind {
+        ExprKind::Path(_) if is_name(e) => Some(id(e)),
+        ExprKind::With { base, .. } if is_name(base) => Some(id(base.as_ref())),
+        ExprKind::Call { args, .. } => {
+            let total: usize = args.iter().map(count).sum();
+            let a = args.iter().find(|a| count(a) > 0)?;
+            (count(a) == total).then(|| last_use(a, is_name)).flatten()
+        }
+        _ => None,
+    }
+}
+
 /// Every expression of a block's statements and tail, as roots to walk.
 pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
     for s in stmts {
@@ -96,13 +198,14 @@ impl<'ctx> Cg<'ctx, '_> {
     /// Which parameters of the specialisation `k` it takes owned (see the
     /// module comment): a record used once, as the base of a `with`.
     pub(crate) fn consumed(&self, k: &Key) -> Vec<bool> {
-        self.consumed_sites(k).iter().map(|s| s.is_some()).collect()
+        self.consumed_sites(k).iter().map(|s| !s.is_empty()).collect()
     }
 
-    /// For each parameter it consumes: where it moves (the base of a `with`).
-    pub(crate) fn consumed_sites(&self, k: &Key) -> Vec<Option<usize>> {
+    /// For each parameter it consumes: where it moves (the bases of the
+    /// `with`s it ends in); empty when it is borrowed.
+    pub(crate) fn consumed_sites(&self, k: &Key) -> Vec<Vec<usize>> {
         let FnKind::User(d) = &self.p.fns[k.0].kind else { return vec![] };
-        let mut out = vec![None; d.params.len()];
+        let mut out = vec![Vec::new(); d.params.len()];
         let Ok(spec) = self.spec(k) else { return out };
         if self.plan.entered.contains(&k.0) || d.export_c || !self.heap_ok_target() {
             return out;
@@ -126,7 +229,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                 });
             }
-            out[i] = site.filter(|_| is_base);
+            out[i] = match site.filter(|_| is_base) {
+                Some(s) => vec![s],
+                // a state machine's step: `{ s with … }` in every branch
+                // that changes it, each the function's result there
+                None => tail_with_sites(&prm.name, &d.body).unwrap_or_default(),
+            };
         }
         out
     }

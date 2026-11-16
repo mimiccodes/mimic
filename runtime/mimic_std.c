@@ -292,6 +292,153 @@ mim_val *mim_std_to_float(mim_val *s) {
 /* ==== lists ================================================================ */
 
 /* a list with x appended (a copy: values are immutable) */
+/* ==== owned list updates (push, concat, put on a list held once) ==========
+ * `{ s with out: push(s.out, x) }` on a record held once detaches the field
+ * and hands the list over (codegen: the steal in `with`). With the only
+ * reference, a list of plain elements grows or changes in place; growth past
+ * its block moves it once to a malloc'd block with room to spare, then
+ * realloc grows it (amortised O(1) per push, as a C vector). Anything else
+ * takes the usual copying path; the result is the same either way. */
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+static size_t block_usable(void *p) { return malloc_size(p); }
+#elif defined(_WIN32)
+#include <malloc.h>
+static size_t block_usable(void *p) { return _msize(p); }
+#else
+#include <malloc.h>
+static size_t block_usable(void *p) { return malloc_usable_size(p); }
+#endif
+
+mim_val *mim_std_push(mim_val *xs, mim_val *x);
+mim_val *mim_std_put(mim_val *m, mim_val *k, mim_val *v);
+mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v);
+
+static int own_plain(const mim_val *xs) {
+    return xs && xs->rank == 1 && !IS_HANDLES(xs) && xs->dtype != MIM_MAP && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
+}
+
+/* xs (held once, plain elements) with room for n elements, len set to n;
+ * may move */
+/* A list grown here remembers its room (payload bytes) in `desc`, which a
+ * plain list does not use otherwise (records, functions, maps and matrices
+ * do); NULL: not known, ask the allocator. Copies of a list never copy its
+ * header, so the number stays with its block. */
+#define ROOM_OF(v) ((size_t)(uintptr_t)(v)->desc)
+static mim_val *grow_owned(mim_val *xs, int64_t n) {
+    int dt = xs->dtype;
+    size_t es = elsize(dt);
+    size_t old = payload_bytes(dt, xs->len), need = payload_bytes(dt, n);
+    int c_old = size_class(old);
+    if (c_old < SIZE_CLASSES && size_class(need) == c_old && !xs->desc) {
+        /* the same pooled block has room */
+    } else if (c_old >= SIZE_CLASSES && (xs->desc ? ROOM_OF(xs) : block_usable(xs) - sizeof(mim_val)) >= need) {
+        /* the malloc'd block has room */
+    } else {
+        size_t cap = need * 2 < 4096 ? 4096 : need * 2;
+        if (c_old >= SIZE_CLASSES || xs->desc) {
+            mim_val *r = (mim_val *)realloc(xs, sizeof(mim_val) + cap);
+            if (!r) mim_panic("out of memory");
+            xs = r;
+        } else {
+            mim_val *r = (mim_val *)malloc(sizeof(mim_val) + cap);
+            if (!r) mim_panic("out of memory");
+            memcpy(r, xs, sizeof(mim_val) + old);
+            heap_state *h = &t_heap;
+            padded_count *lc = live_of(h);
+            __atomic_store_n(&lc->n, lc->n + 1, __ATOMIC_RELAXED);
+            free_block(h, xs);
+            xs = r;
+        }
+        xs->desc = (const mim_desc *)(uintptr_t)cap;
+    }
+    xs->len = n;
+    if (es == 1) ((char *)xs->data)[n] = 0;
+    return xs;
+}
+
+/* push(xs, x), xs owned */
+mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
+    if (own_plain(xs) && x != xs && x && x->rank == 0 && x->dtype == xs->dtype) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + 1);
+        memcpy((char *)xs->data + (size_t)n * elsize(xs->dtype), x->data, elsize(xs->dtype));
+        return xs;
+    }
+    mim_val *r = mim_std_push(xs, x);
+    mim_release(xs);
+    return r;
+}
+
+/* concat(xs, ys), xs owned */
+mim_val *mim_std_concat_own(mim_val *xs, mim_val *ys) {
+    if (own_plain(xs) && ys != xs && ys && ys->rank == 1 && ys->dtype == xs->dtype && xs->dtype != MIM_CHAR) {
+        int64_t n = xs->len, m = ys->len;
+        size_t es = elsize(xs->dtype);
+        xs = grow_owned(xs, n + m);
+        memcpy((char *)xs->data + (size_t)n * es, ys->data, (size_t)m * es);
+        return xs;
+    }
+    mim_val *r = mim_std_concat(xs, ys);
+    mim_release(xs);
+    return r;
+}
+
+/* The same for a list of i64 with raw numbers (compiled code: no boxing).
+ * Anything else (not held once, not i64, out of range) takes the usual path. */
+mim_val *mim_push_i64_own(mim_val *xs, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_I64) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + 1);
+        ((int64_t *)xs->data)[n] = v;
+        return xs;
+    }
+    mim_val *x = mim_int(v);
+    mim_val *r = mim_std_push_own(xs, x);
+    mim_release(x);
+    return r;
+}
+
+mim_val *mim_concat_i64_own(mim_val *xs, const int64_t *ys, int64_t m) {
+    if (own_plain(xs) && xs->dtype == MIM_I64) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + m);
+        memcpy((int64_t *)xs->data + n, ys, sizeof(int64_t) * (size_t)m);
+        return xs;
+    }
+    mim_val *y = alloc(MIM_I64, 1, m);
+    memcpy(y->data, ys, sizeof(int64_t) * (size_t)m);
+    mim_val *r = mim_std_concat_own(xs, y);
+    mim_release(y);
+    return r;
+}
+
+mim_val *mim_put_i64_own(mim_val *xs, int64_t i, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_I64 && i >= 0 && i < xs->len) {
+        ((int64_t *)xs->data)[i] = v;
+        return xs;
+    }
+    mim_val *k = mim_int(i), *x = mim_int(v);
+    mim_val *r = mim_std_put_own(xs, k, x);
+    mim_release(k);
+    mim_release(x);
+    return r;
+}
+
+/* put(xs, i, v) on a list, xs owned */
+mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
+    if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
+        int64_t i = geti(k, 0);
+        if (i >= 0 && i < xs->len) {
+            memcpy((char *)xs->data + (size_t)i * elsize(xs->dtype), v->data, elsize(xs->dtype));
+            return xs;
+        }
+    }
+    mim_val *r = mim_std_put(xs, k, v);
+    mim_release(xs);
+    return r;
+}
+
 mim_val *mim_std_push(mim_val *xs, mim_val *x) {
     need(xs, "push");
     if (xs->rank == 0) mim_panic("push: expected a list or array");
@@ -399,6 +546,20 @@ static void radix_scatter(void *c, int64_t lo, int64_t hi) {
 
 static void radix_sort_keys(uint64_t *a, int64_t n) {
     if (n < 2) return;
+    /* a few keys (a median of 9, per pixel): an insertion sort, with no
+     * buffers to allocate and clear */
+    if (n <= 64) {
+        for (int64_t i = 1; i < n; i++) {
+            uint64_t t = a[i];
+            int64_t j = i - 1;
+            while (j >= 0 && a[j] > t) {
+                a[j + 1] = a[j];
+                j--;
+            }
+            a[j + 1] = t;
+        }
+        return;
+    }
     uint64_t diff = 0;
     for (int64_t i = 1; i < n; i++) diff |= a[i] ^ a[0];
     if (!diff) return;
@@ -428,6 +589,35 @@ static void radix_sort_keys(uint64_t *a, int64_t n) {
     if (r.src != a) memcpy(a, r.src, sizeof(uint64_t) * (size_t)n);
     free(tmp);
     free(hist);
+}
+
+/* A few numbers on the caller's stack (compiled `sort(⍳ 9 ¨ f)[4]`),
+ * sorted in place: an insertion sort, as sort() orders them (floats by their
+ * order as numbers, NaN last as the radix sort puts it) */
+void mim_sort_i64_small(int64_t *a, int64_t n) {
+    for (int64_t i = 1; i < n; i++) {
+        int64_t t = a[i], j = i - 1;
+        while (j >= 0 && a[j] > t) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = t;
+    }
+}
+void mim_sort_f64_small(double *a, int64_t n) {
+    /* the same keys as sort_numbers: order-preserving integers */
+    uint64_t k[64];
+    const uint64_t top = (uint64_t)1 << 63;
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t b;
+        memcpy(&b, &a[i], 8);
+        k[i] = (b & top) ? ~b : b | top;
+    }
+    radix_sort_keys(k, n);
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t b = (k[i] & top) ? k[i] & ~top : ~k[i];
+        memcpy(&a[i], &b, 8);
+    }
 }
 
 /* a sorted copy of a vector of numbers, bytes or bools; NULL for others */

@@ -1110,6 +1110,19 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(out)
     }
 
+    /// A fusible list of a length the program states (`⍳ 9 ¨ f`): its
+    /// `len` elements written to a stack buffer, no heap list.
+    pub(crate) fn fused_to_stack(&mut self, e: &Expr, el: El, len: u32) -> R<PointerValue<'ctx>> {
+        let mut plan = Plan::default();
+        let root = self.build(e, &mut plan)?;
+        let at = self.el_ty(el).array_type(len);
+        let buf = self.entry_alloca_ty(at.into(), "stack_list")?;
+        let n = self.ctx.i64_type().const_int(len as u64, false);
+        self.inline_loop(&root, &plan, n, Mode::Map(el), buf.into())?;
+        self.release_plan(&plan)?;
+        Ok(buf)
+    }
+
     /// `bytes::from(e)` over a fusible integer expression: one pass that
     /// writes the bytes, checking each (no list of i64 in between).
     pub(crate) fn fused_bytes(&mut self, e: &Expr) -> R<V<'ctx>> {

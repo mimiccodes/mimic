@@ -148,7 +148,25 @@ pub fn plan_unreduced(p: &Program, purity: &Purity) -> NetPlan {
         }
         false
     };
-    let entered: HashSet<FnId> = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f)).collect();
+    // and recursion in reach: without it the calls are a fixed, small amount
+    // of work (`slot(p)` calling red, green, blue), which the net only slows
+    // down: native code inlines it
+    let reaches_cycle = |f: FnId| {
+        fn visit(g: FnId, cand: &HashMap<FnId, (Block, Vec<FnId>)>, path: &mut Vec<FnId>, done: &mut HashSet<FnId>) -> bool {
+            if path.contains(&g) {
+                return true;
+            }
+            if !done.insert(g) {
+                return false;
+            }
+            path.push(g);
+            let found = cand.get(&g).is_some_and(|c| c.1.iter().any(|h| visit(*h, cand, path, done)));
+            path.pop();
+            found
+        }
+        visit(f, &cand, &mut Vec::new(), &mut HashSet::new())
+    };
+    let entered: HashSet<FnId> = ids.iter().copied().filter(|f| !cand[f].1.is_empty() && reaches_wide(*f) && reaches_cycle(*f)).collect();
     let wide = wide.into_iter().filter(|f| entered.contains(f) && cand[f].1.contains(f)).collect();
     NetPlan { book: Book { defs }, def_index, entered, check_msgs, wide }
 }
@@ -778,7 +796,9 @@ fn uses_fib(n) { fib(n) + 1 }
         let entered = |n: &str| plan.entered.contains(&fid(&p, n));
         assert!(has("fib") && entered("fib"), "recursive pure fn runs on the net");
         assert!(has("leaf") && !entered("leaf"), "leaf: compiled for net callers, native from native code");
-        assert!(has("calls_leaf") && entered("calls_leaf"));
+        // two calls side by side, but no recursion in reach: a fixed, small
+        // amount of work, native (the net only slowed such calls down)
+        assert!(has("calls_leaf") && !entered("calls_leaf"));
         assert!(has("spin") && !entered("spin"), "a loop as tail recursion: one call per path, nothing to run at once");
         assert!(entered("uses_fib"), "calls something with calls side by side");
         assert!(!has("noisy") && !has("main"), "impure functions stay native");

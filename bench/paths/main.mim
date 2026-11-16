@@ -1,0 +1,98 @@
+module main
+
+// paths: Dijkstra and A* on a 600×600 grid (cells cost 1 to 9 to enter,
+// walls cannot be entered), from the top-left to the bottom-right corner,
+// with a binary heap (lazy deletion). Heap keys are (cost or estimate) × N
+// + node: all different, so every heap pops in the same order. Prints each
+// search's cost and how many nodes it expanded, and the path's length.
+//
+// The search is a state machine: a record (the heap, distances, closed
+// nodes) stepped by `settle`. Each step hands the record on, and
+// `{ s with heap: put(s.heap, …) }` changes the lists in place.
+
+type S = { heap: [i64], size: i64, dist: [i64], prev: [i64], closed: [i64], expanded: i64, finished: bool }
+
+fn w() -> i64 { 600 }
+fn h() -> i64 { 600 }
+fn n() -> i64 { w() * h() }
+fn far() -> i64 { 1 << 40 }
+
+fn cost(v: i64) -> i64 {
+    let x = v % w()
+    let y = v div w()
+    if x % 50 == 25 and y % 100 != 10 and y % 100 != 60 { 0 } else { (v * 1103515245 + 12345) % 2147483648 div 65536 % 9 + 1 }
+}
+
+fn est(v: i64, astar: bool) -> i64 {
+    if astar { (w() - 1 - v % w()) + (h() - 1 - v div w()) } else { 0 }
+}
+
+fn sift_down(s: S, k: i64) -> S {
+    let l = 2 * k + 1
+    let r = l + 1
+    let m0 = if l < s.size and s.heap[l] < s.heap[k] { l } else { k }
+    let m = if r < s.size and s.heap[r] < s.heap[m0] { r } else { m0 }
+    if m == k { s } else {
+        let hk = s.heap[k]
+        let hm = s.heap[m]
+        sift_down({ s with heap: put(put(s.heap, k, hm), m, hk) }, m)
+    }
+}
+
+fn sift_up(s: S, k: i64) -> S {
+    if k == 0 { s } else {
+        let p = (k - 1) div 2
+        let hk = s.heap[k]
+        let hp = s.heap[p]
+        if hk < hp { sift_up({ s with heap: put(put(s.heap, k, hp), p, hk) }, p) } else { s }
+    }
+}
+
+fn push_key(s: S, key: i64) -> S {
+    let k = s.size
+    if k < ≢ s.heap { sift_up({ s with heap: put(s.heap, k, key), size: k + 1 }, k) }
+    else { sift_up({ s with heap: push(s.heap, key), size: k + 1 }, k) }
+}
+
+// reach v from u: a shorter way is kept and v goes on the heap
+fn relax(s: S, u: i64, v: i64, astar: bool) -> S {
+    if v < 0 { s } else {
+        let c = cost(v)
+        let d = s.dist[u] + c
+        if c == 0 or s.closed[v] == 1 or d >= s.dist[v] { s }
+        else { push_key({ s with dist: put(s.dist, v, d), prev: put(s.prev, v, u) }, (d + est(v, astar)) * n() + v) }
+    }
+}
+
+fn visit(s: S, u: i64, astar: bool) -> S {
+    if s.closed[u] == 1 { s }
+    else if u == n() - 1 { { s with closed: put(s.closed, u, 1), expanded: s.expanded + 1, finished: true } }
+    else {
+        let x = u % w()
+        let y = u div w()
+        let (left, right) = (if x > 0 { u - 1 } else { ¯1 }, if x < w() - 1 { u + 1 } else { ¯1 })
+        let (up, down) = (if y > 0 { u - w() } else { ¯1 }, if y < h() - 1 { u + w() } else { ¯1 })
+        relax(relax(relax(relax({ s with closed: put(s.closed, u, 1), expanded: s.expanded + 1 }, u, left, astar), u, right, astar), u, up, astar), u, down, astar)
+    }
+}
+
+// take the smallest key off the heap, then visit its node
+fn step(s: S, astar: bool) -> S {
+    let top = s.heap[0]
+    let last = s.heap[s.size - 1]
+    visit(sift_down({ s with heap: put(s.heap, 0, last), size: s.size - 1 }, 0), top % n(), astar)
+}
+
+fn search(astar: bool) -> S {
+    let start = S { heap: [est(0, astar) * n()], size: 1, dist: put(far() ⥊ [n()], 0, 0), prev: ¯1 ⥊ [n()], closed: 0 ⥊ [n()], expanded: 0, finished: false }
+    start ▷ settle(s => step(s, astar), s => s.finished or s.size == 0)
+}
+
+fn main() {
+    let d = search(false)
+    print("dijkstra {d.dist[n() - 1]} {d.expanded}")
+    let a = search(true)
+    print("astar {a.dist[n() - 1]} {a.expanded}")
+    let (_, cells) = (n() - 1, 1) ▷ settle(vc => (a.prev[vc.0], vc.1 + 1), vc => a.prev[vc.0] < 0)
+    print("path {cells}")
+}

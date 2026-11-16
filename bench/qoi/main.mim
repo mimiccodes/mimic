@@ -1,0 +1,155 @@
+module main
+
+// qoi: a W×H RGBA image encoded as QOI (qoiformat.org) and decoded again,
+// 5 times; prints the encoded size, a checksum of the bytes and whether the
+// decoded pixels equal the original. Encoding and decoding are sequential
+// (each pixel depends on the previous one, a table of 64 colours and the
+// run): a `settle` over a record of state. A pixel is one i64:
+// r << 24 | g << 16 | b << 8 | a.
+
+type Enc = { i: i64, prev: i64, run: i64, seen: [i64], out: [i64], ops: [i64] }
+type Dec = { pos: i64, prev: i64, seen: [i64], px: [i64] }
+
+fn rgba(r: i64, g: i64, b: i64, a: i64) -> i64 { r << 24 | g << 16 | b << 8 | a }
+fn red(p: i64) -> i64 { p >> 24 & 255 }
+fn green(p: i64) -> i64 { p >> 16 & 255 }
+fn blue(p: i64) -> i64 { p >> 8 & 255 }
+fn alpha(p: i64) -> i64 { p & 255 }
+
+fn slot(p: i64) -> i64 {
+    (red(p) * 3 + green(p) * 5 + blue(p) * 7 + alpha(p) * 11) % 64
+}
+
+// a difference wrapped to -128 … 127, as QOI's bytes wrap
+fn wrap(d: i64) -> i64 { (d + 384) % 256 - 128 }
+
+// bands: a flat colour (runs), gradients (small differences), three colours
+// that repeat (the table), noise (full colours), alpha that changes
+fn test_image(w: i64, h: i64) -> [i64] {
+    ⍳ (w * h) ¨ (i => {
+        let x = i % w
+        let y = i div w
+        let noise = (i * 1103515245 + 12345) % 2147483648 div 65536
+        let band = y * 10 div h
+        if band < 2 { rgba(40, 90, 200, 255) }
+        else if band < 5 { rgba(x * 3 % 256, y * 5 % 256, (x + y) % 256, 255) }
+        else if band < 7 { [rgba(255, 0, 0, 255) rgba(0, 255, 0, 255) rgba(0, 0, 255, 255)][(x div 5 + y) % 3] }
+        else if band < 9 { rgba(noise % 256, noise div 256 % 256, noise div 7 % 256, 255) }
+        else { rgba((120 + x) % 256, 60, (30 + y) % 256, x * 4 % 256) }
+    })
+}
+
+// ---- encoding ------------------------------------------------------------
+
+fn be32(n: i64) -> [i64] { [n >> 24 & 255, n >> 16 & 255, n >> 8 & 255, n & 255] }
+
+// a run of `run` pixels (1 … 62), as one byte
+fn run_byte(run: i64) -> [i64] { [192 | run - 1] }
+
+fn encode_step(s: Enc, px: [i64]) -> Enc {
+    let p = px[s.i]
+    let last = s.i == ≢ px - 1
+    if p == s.prev {
+        let run = s.run + 1
+        if run == 62 or last {
+            { s with i: s.i + 1, run: 0, out: concat(s.out, run_byte(run)), ops: put(s.ops, 0, s.ops[0] + 1) }
+        } else {
+            { s with i: s.i + 1, run: run }
+        }
+    } else {
+        // a run that ends here goes first
+        let flush = if s.run > 0 { run_byte(s.run) } else { [] }
+        let h = slot(p)
+        if s.seen[h] == p {
+            { s with i: s.i + 1, prev: p, run: 0, out: concat(s.out, push(flush, h)), ops: put(s.ops, 1, s.ops[1] + 1) }
+        } else {
+            let (bytes, op) = chunk(p, s.prev)
+            { s with i: s.i + 1, prev: p, run: 0, seen: put(s.seen, h, p), out: concat(s.out, concat(flush, bytes)), ops: put(s.ops, op, s.ops[op] + 1) }
+        }
+    }
+}
+
+// a pixel not in the table: as a difference from the previous one when
+// it is small, else its full colour (ops: 2 diff, 3 luma, 4 rgb, 5 rgba)
+fn chunk(p: i64, prev: i64) -> ([i64], i64) {
+    if alpha(p) != alpha(prev) {
+        ([255, red(p), green(p), blue(p), alpha(p)], 5)
+    } else {
+        let dr = wrap(red(p) - red(prev))
+        let dg = wrap(green(p) - green(prev))
+        let db = wrap(blue(p) - blue(prev))
+        let dr_dg = dr - dg
+        let db_dg = db - dg
+        if dr > ¯3 and dr < 2 and dg > ¯3 and dg < 2 and db > ¯3 and db < 2 {
+            ([64 | (dr + 2) << 4 | (dg + 2) << 2 | (db + 2)], 2)
+        } else if dr_dg > ¯9 and dr_dg < 8 and dg > ¯33 and dg < 32 and db_dg > ¯9 and db_dg < 8 {
+            ([128 | (dg + 32), (dr_dg + 8) << 4 | (db_dg + 8)], 3)
+        } else {
+            ([254, red(p), green(p), blue(p)], 4)
+        }
+    }
+}
+
+fn encode(px: [i64], w: i64, h: i64) -> ([i64], [i64]) {
+    let start = Enc { i: 0, prev: rgba(0, 0, 0, 255), run: 0, seen: 0 ⥊ [64], out: [], ops: 0 ⥊ [6] }
+    let end = start ▷ settle(s => encode_step(s, px), s => s.i == ≢ px)
+    let header = concat(concat([113 111 105 102], be32(w)), concat(be32(h), [4 0]))
+    (concat(concat(header, end.out), [0 0 0 0 0 0 0 1]), end.ops)
+}
+
+// ---- decoding ------------------------------------------------------------
+
+fn decode_step(s: Dec, data: [i64]) -> Dec {
+    let b = data[s.pos]
+    let prev = s.prev
+    if b == 254 {
+        let p = rgba(data[s.pos + 1], data[s.pos + 2], data[s.pos + 3], alpha(prev))
+        took(s, p, 4)
+    } else if b == 255 {
+        let p = rgba(data[s.pos + 1], data[s.pos + 2], data[s.pos + 3], data[s.pos + 4])
+        took(s, p, 5)
+    } else if b >> 6 == 0 {
+        let p = s.seen[b]
+        took(s, p, 1)
+    } else if b >> 6 == 1 {
+        let p = rgba((red(prev) + (b >> 4 & 3) - 2) & 255, (green(prev) + (b >> 2 & 3) - 2) & 255, (blue(prev) + (b & 3) - 2) & 255, alpha(prev))
+        took(s, p, 1)
+    } else if b >> 6 == 2 {
+        let dg = (b & 63) - 32
+        let n = data[s.pos + 1]
+        let p = rgba((red(prev) + dg + (n >> 4) - 8) & 255, (green(prev) + dg) & 255, (blue(prev) + dg + (n & 15) - 8) & 255, alpha(prev))
+        took(s, p, 2)
+    } else {
+        // a run: the previous pixel again, (b & 63) + 1 times
+        { s with pos: s.pos + 1, px: concat(s.px, prev ⥊ [(b & 63) + 1]) }
+    }
+}
+
+fn took(s: Dec, p: i64, n: i64) -> Dec {
+    { s with pos: s.pos + n, prev: p, seen: put(s.seen, slot(p), p), px: push(s.px, p) }
+}
+
+fn decode(data: [i64]) -> ([i64], i64, i64) {
+    let w = data[4] << 24 | data[5] << 16 | data[6] << 8 | data[7]
+    let h = data[8] << 24 | data[9] << 16 | data[10] << 8 | data[11]
+    let start = Dec { pos: 14, prev: rgba(0, 0, 0, 255), seen: 0 ⥊ [64], px: [] }
+    let end = start ▷ settle(s => decode_step(s, data), s => ≢ s.px >= w * h)
+    (end.px, w, h)
+}
+
+fn round(img: [i64], w: i64, h: i64) -> ([i64], bool) {
+    let (data, _) = encode(img, w, h)
+    let (back, _, _) = decode(data)
+    (data, all(back == img))
+}
+
+fn main() {
+    let args = os::args()
+    let (w, h) = if ≢ args > 0 { (to_int(args[0]), to_int(args[1])) } else { (1024, 768) }
+    let img = test_image(w, h)
+    let rounds = ⍳ 5 ¨ (k => round(img, w, h))
+    let (data, _) = rounds[4]
+    print("{≢ data} bytes")
+    print(data * (⍳ ≢ data ¨ (i => i % 251 + 1)) ▷ +/)
+    print(all(rounds ¨ (r => r.1)))
+}

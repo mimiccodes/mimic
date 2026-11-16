@@ -230,8 +230,9 @@ pub enum El {
     I32,
 }
 
-/// The longest list whose length types carry (see [`Ty::Arr`]).
-pub const MAX_FIXED: usize = 8;
+/// The longest list whose length types carry (see [`Ty::Arr`]): 16, so a
+/// 3×3 kernel (9) or a 4×4 matrix stays in registers.
+pub const MAX_FIXED: usize = 16;
 
 /// The known length of a list of `el` with `n` elements: lists of numbers
 /// and truth values of 1..=MAX_FIXED elements; else 0 (not known).
@@ -1475,6 +1476,17 @@ impl Walk<'_, '_> {
                         return Ty::Dyn;
                     }
                     let r = self.lambda(step, vec![a]);
+                    // the same record, its list fields' known lengths aside
+                    // (a start built from `[x]` knows one): the record type
+                    // without them is the state throughout
+                    let same_record = matches!((a, r), (Ty::Obj(x), Ty::Obj(y)) if x != y && obj_tid(x) == obj_tid(y) && obj_args(x) == obj_args(y));
+                    let (a, r) = if same_record {
+                        let Ty::Obj(x) = a else { unreachable!() };
+                        let plain = obj(obj_tid(x), &obj_args(x));
+                        (plain, self.lambda(step, vec![plain]))
+                    } else {
+                        (a, r)
+                    };
                     let st = if r == a {
                         a
                     } else {
@@ -1888,9 +1900,9 @@ mod tests {
 
     #[test]
     fn arrays_and_reductions() {
-        let p = prog("module main\nfn main() { print(f(⍳ 10)) }\nfn f(xs) { (xs × 2.0 ▷ +/) + (xs ▷ ≢) }\n");
+        let p = prog("module main\nfn main() { print(f(⍳ 20)) }\nfn f(xs) { (xs × 2.0 ▷ +/) + (xs ▷ ≢) }\n");
         let t = infer(&p, &default_roots(&p, false));
-        // ⍳ 10: longer than MAX_FIXED, so its length is not carried
+        // ⍳ 20: longer than MAX_FIXED, so its length is not carried
         assert_eq!(t.spec(&(fid(&p, "f"), vec![Ty::Arr(El::I64, 0)])).ret, Ty::F64);
         let p = prog("module main\nfn main() { print(f(⍳ 5)) }\nfn f(xs) { xs × 2 ▷ +/ }\n");
         let t = infer(&p, &default_roots(&p, false));

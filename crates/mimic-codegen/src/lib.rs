@@ -1583,6 +1583,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_index_fail" => void.fn_type(&[p, i64t], false),
             "mim_byte_fail" => void.fn_type(&[i64t, i64t], false),
+            "mim_sort_i64_small" | "mim_sort_f64_small" => void.fn_type(&[p, i64t], false),
             "mim_vec_as" => ptr.fn_type(&[p, i32t], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
@@ -1839,7 +1840,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.fj_begin(fv, kind, decl)?;
         // parameters it consumes arrive owned (released at the end unless moved on)
         let sites = self.consumed_sites(k);
-        let consumed: Vec<bool> = sites.iter().map(|s| s.is_some()).collect();
+        let consumed: Vec<bool> = sites.iter().map(|s| !s.is_empty()).collect();
         self.move_at.clear();
         self.move_at.extend(sites.iter().flatten());
         for (i, prm) in decl.params.iter().enumerate() {
@@ -2814,6 +2815,13 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A lambda as a native function whose captured variables are extra
     /// parameters after its own (used by fused `¨` kernels).
     fn lambda_fn_with(&mut self, e: &Expr, caps: &[(String, Ty)]) -> R<(FunctionValue<'ctx>, Vec<Ty>, Ty)> {
+        self.lambda_fn_owning(e, caps, false)
+    }
+
+    /// `own_first`: the lambda takes its first argument owned (a loop's
+    /// state, handed over each step), moving it on where it is used once or
+    /// ends in `{ s with … }` (owned.rs), else releasing it at the end.
+    fn lambda_fn_owning(&mut self, e: &Expr, caps: &[(String, Ty)], own_first: bool) -> R<(FunctionValue<'ctx>, Vec<Ty>, Ty)> {
         let ExprKind::Lambda { params, body } = &e.kind else { return Err("expected a lambda".into()) };
         let (pts, rt) = self
             .cur_spec
@@ -2837,7 +2845,12 @@ impl<'ctx> Cg<'ctx, '_> {
             for (i, (name, pt)) in names.iter().zip(&all).enumerate() {
                 let slot = cg.entry_alloca(*pt, name)?;
                 cg.b.build_store(slot, f.get_nth_param(i as u32).unwrap()).s()?;
-                locals.push(Local { name: name.clone(), slot, ty: *pt, owned: false, mutable: false, moves: false });
+                let owned = own_first && i == 0;
+                if owned {
+                    let sites = owned::move_site(name, &[body.as_ref()]).map(|s| vec![s]).or_else(|| owned::tail_with_sites_expr(name, body)).unwrap_or_default();
+                    cg.move_at.extend(sites);
+                }
+                locals.push(Local { name: name.clone(), slot, ty: *pt, owned, mutable: false, moves: owned });
             }
             cg.scopes = vec![locals];
             let v = cg.expr(body)?;
@@ -2900,7 +2913,10 @@ impl<'ctx> Cg<'ctx, '_> {
             let v = self.as_ty(self.val_of(bv, lt, false), *t, name)?;
             capv.push(v);
         }
-        let (f, _, _) = self.lambda_fn_with(step, &caps)?;
+        // a record on the heap is handed to the step, which may change it
+        // in place (it holds the only reference); anything else is lent
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let (f, _, _) = self.lambda_fn_owning(step, &caps, own_state)?;
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let head = self.ctx.append_basic_block(fun, "evolve");
@@ -2920,7 +2936,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().ok_or("evolve: step returns nothing")?;
         let next = self.val_of(r, st, true);
         let next = self.as_ty(next, st, "evolve state")?;
-        self.drop_tmp(cur)?;
+        if !own_state {
+            self.drop_tmp(cur)?;
+        }
         let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
         let latch = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(head).s()?;
@@ -2928,6 +2946,82 @@ impl<'ctx> Cg<'ctx, '_> {
         xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
         self.b.position_at_end(done);
         for v in capv {
+            self.drop_tmp(v)?;
+        }
+        Ok(self.val_of(xp.as_basic_value(), st, true))
+    }
+
+    /// The state type of `x ▷ evolve/settle(step …)` when the step takes and
+    /// gives back x's type (a known one).
+    fn state_type(&self, x: &Expr, step: &Expr) -> Option<Ty> {
+        let t = self.ty_of(x);
+        if matches!(t, Ty::Dyn | Ty::Never | Ty::Unit) {
+            return None;
+        }
+        let (pts, rt) = self.cur_spec.as_ref()?.lambdas.get(&id(step)).cloned()?;
+        let p0 = *pts.first()?;
+        // x may be the same record with list lengths known (`[x]`): the
+        // step's type is the state's, and x converts to it
+        let same = p0 == t || matches!((p0, t), (Ty::Obj(a), Ty::Obj(b)) if types::obj_tid(a) == types::obj_tid(b));
+        (same && rt == p0).then_some(p0)
+    }
+
+    /// `x ▷ settle(step, done)` whose step keeps the state's type: a loop
+    /// here, `done` asked before each step, as the runtime's mim_settle; a
+    /// record state is handed to the step owned (as in evolve_loop).
+    fn settle_loop(&mut self, x: &Expr, step: &Expr, done: &Expr, st: Ty) -> R<V<'ctx>> {
+        let (ExprKind::Lambda { params: sp, body: sb }, ExprKind::Lambda { params: dp, body: db }) = (&step.kind, &done.kind) else {
+            return Err("internal compiler error: settle".into());
+        };
+        let x0 = self.expr(x)?;
+        let x0 = self.as_ty(x0, st, "settle state")?;
+        let x0 = self.own(x0)?;
+        let load_caps = |cg: &mut Self, caps: &[(String, Ty)]| -> R<Vec<V<'ctx>>> {
+            let mut out = Vec::new();
+            for (name, t) in caps {
+                let l = cg.lookup(name).ok_or("internal error: captured variable")?;
+                let (slot, lt) = (l.slot, l.ty);
+                let bv = cg.b.build_load(cg.repr(lt), slot, name).s()?;
+                out.push(cg.as_ty(cg.val_of(bv, lt, false), *t, name)?);
+            }
+            Ok(out)
+        };
+        let scaps = self.captures(sp, sb);
+        let dcaps = self.captures(dp, db);
+        let sv = load_caps(self, &scaps)?;
+        let dv = load_caps(self, &dcaps)?;
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let (sf, _, _) = self.lambda_fn_owning(step, &scaps, own_state)?;
+        let (df, _, _) = self.lambda_fn_with(done, &dcaps)?;
+        let fun = self.cur_fn.unwrap();
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "settle");
+        let body_bb = self.ctx.append_basic_block(fun, "settle_step");
+        let out_bb = self.ctx.append_basic_block(fun, "settle_done");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let xp = self.b.build_phi(self.repr(st), "x").s()?;
+        let cur = self.val_of(xp.as_basic_value(), st, true);
+        let mut dargs: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
+        dargs.extend(dv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let d = self.b.build_call(df, &dargs, "").s()?.try_as_basic_value().basic().ok_or("settle: done gives nothing")?;
+        let stop = self.val_of(d, self.ty_of(db), true);
+        let stop = self.truth(stop)?;
+        self.b.build_conditional_branch(stop, out_bb, body_bb).s()?;
+        self.b.position_at_end(body_bb);
+        let mut sargs: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
+        sargs.extend(sv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let r = self.b.build_call(sf, &sargs, "").s()?.try_as_basic_value().basic().ok_or("settle: step gives nothing")?;
+        let next = self.val_of(r, st, true);
+        let next = self.as_ty(next, st, "settle state")?;
+        if !own_state {
+            self.drop_tmp(cur)?;
+        }
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(head).s()?;
+        xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
+        self.b.position_at_end(out_bb);
+        for v in sv.into_iter().chain(dv) {
             self.drop_tmp(v)?;
         }
         Ok(self.val_of(xp.as_basic_value(), st, true))
@@ -4593,6 +4687,156 @@ impl<'ctx> Cg<'ctx, '_> {
     /// that element type, with `i` in bounds. Anything else stops the
     /// program with `mim_index_fail`, which never returns, so code after the
     /// check may assume it held.
+    /// In `{ s with f: op(s.f, rest…) }` (op: push, concat or put; s the
+    /// base variable; f a list field): (op, rest), when the list can be taken
+    /// out of the record. Not when `rest` reads another field taken this way
+    /// (it would read a list already changed), nor a field kept in registers.
+    /// A chain `op2(op1(s.f, a…), b…)` of such updates: each (op, rest),
+    /// innermost first.
+    fn steal_chain<'e>(&self, base: &Expr, tid: TypeId, n: &str, x: &'e Expr, fields: &[(String, Expr, mimic_syntax::Span)]) -> Option<Vec<(&'static str, &'e [Expr])>> {
+        let mut chain = Vec::new();
+        let mut cur = x;
+        loop {
+            let (op, rest, inner) = self.steal_step(cur)?;
+            chain.push((op, rest));
+            match &inner.kind {
+                ExprKind::Field { .. } => break,
+                _ => cur = inner,
+            }
+        }
+        chain.reverse();
+        // the innermost reads s.f itself: the usual checks
+        let (_, _) = self.steal_of(base, tid, n, self.innermost(x)?, fields)?;
+        // and no level reads another field taken out this way (fields that
+        // are only assigned are fine: every value is computed first)
+        let ExprKind::Path(bp) = &base.kind else { return None };
+        let stolen: Vec<&str> = fields
+            .iter()
+            .filter(|(m, y, _)| m != n && self.innermost(y).is_some_and(|i| matches!(&i.kind, ExprKind::Call { args, .. } if matches!(&args[0].kind, ExprKind::Field { base: b2, name: f2 } if f2 == m && matches!(&b2.kind, ExprKind::Path(p) if p == bp)))))
+            .map(|(m, _, _)| m.as_str())
+            .collect();
+        for (_, rest) in &chain {
+            for a in rest.iter() {
+                let mut bad = false;
+                a.walk(&mut |y| {
+                    if let ExprKind::Field { base: b2, name: f2 } = &y.kind
+                        && matches!(&b2.kind, ExprKind::Path(p) if p == bp)
+                        && stolen.contains(&f2.as_str())
+                    {
+                        bad = true;
+                    }
+                });
+                if bad {
+                    return None;
+                }
+            }
+        }
+        Some(chain)
+    }
+
+    /// One level of a chain: (op, rest, the list argument).
+    fn steal_step<'e>(&self, x: &'e Expr) -> Option<(&'static str, &'e [Expr], &'e Expr)> {
+        let ExprKind::Call { callee, args } = &x.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        let Some(Resolved::Fn(fid)) = self.p.lookup(self.cur_mod, path) else { return None };
+        let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind else { return None };
+        if !decl.intrinsic || self.p.mods[self.p.fns[fid].module].name != "prelude" {
+            return None;
+        }
+        let op: &'static str = match (decl.name.as_str(), args.len()) {
+            ("push", 2) => "push",
+            ("concat", 2) => "concat",
+            ("put", 3) => "put",
+            _ => return None,
+        };
+        Some((op, &args[1..], &args[0]))
+    }
+
+    /// The innermost update of a chain (whose list argument is a field).
+    fn innermost<'e>(&self, x: &'e Expr) -> Option<&'e Expr> {
+        let mut cur = x;
+        loop {
+            let (_, _, inner) = self.steal_step(cur)?;
+            if matches!(inner.kind, ExprKind::Field { .. }) {
+                return Some(cur);
+            }
+            cur = inner;
+        }
+    }
+
+    fn steal_of<'e>(&self, base: &Expr, tid: TypeId, n: &str, x: &'e Expr, fields: &[(String, Expr, mimic_syntax::Span)]) -> Option<(&'static str, &'e [Expr])> {
+        let ExprKind::Path(bp) = &base.kind else { return None };
+        let ExprKind::Call { callee, args } = &x.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        let Some(Resolved::Fn(fid)) = self.p.lookup(self.cur_mod, path) else { return None };
+        let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind else { return None };
+        if !decl.intrinsic || self.p.mods[self.p.fns[fid].module].name != "prelude" {
+            return None;
+        }
+        let op: &'static str = match (decl.name.as_str(), args.len()) {
+            ("push", 2) => "push",
+            ("concat", 2) => "concat",
+            ("put", 3) => "put",
+            _ => return None,
+        };
+        let ExprKind::Field { base: fb, name: fname } = &args[0].kind else { return None };
+        if fname != n || !matches!(&fb.kind, ExprKind::Path(p) if p == bp) {
+            return None;
+        }
+        let i = self.p.types[tid].field_index(n)?;
+        if self.raw_field(tid, None, i).is_some() {
+            return None;
+        }
+        let (_, ft) = self.record_field(tid, n);
+        if fixed(ft).is_some() || !matches!(ft, Ty::Arr(..)) {
+            return None;
+        }
+        // the fields other steals take
+        let others: Vec<&str> = fields
+            .iter()
+            .filter(|(m, y, _)| m != n && matches!(&y.kind, ExprKind::Call { args, .. } if matches!(args.first().map(|a| &a.kind), Some(ExprKind::Field { base: b2, name: f2 }) if f2 == m && matches!(&b2.kind, ExprKind::Path(p) if p == bp))))
+            .map(|(m, _, _)| m.as_str())
+            .collect();
+        let rest = &args[1..];
+        let mut clash = false;
+        for a in rest {
+            a.walk(&mut |y| {
+                if let ExprKind::Field { base: b2, name: f2 } = &y.kind
+                    && matches!(&b2.kind, ExprKind::Path(p) if p == bp)
+                    && others.contains(&f2.as_str())
+                {
+                    clash = true;
+                }
+            });
+        }
+        (!clash).then_some((op, rest))
+    }
+
+    /// `sort(e)` where e is a fusible list of numbers of a small length the
+    /// program states (`⍳ 9 ¨ f`, up to 64): (e, element type, length).
+    fn small_sort_arg<'e>(&self, base: &'e Expr) -> Option<(&'e Expr, El, u32)> {
+        let ExprKind::Call { callee, args } = &base.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        let Some(Resolved::Fn(fid)) = self.p.lookup(self.cur_mod, path) else { return None };
+        let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind else { return None };
+        if !decl.intrinsic || decl.name != "sort" || self.p.mods[self.p.fns[fid].module].name != "prelude" || args.len() != 1 {
+            return None;
+        }
+        let a = &args[0];
+        let el = match fuse::num_el(self.ty_of(a)) {
+            Some(e @ (El::I64 | El::F64)) => e,
+            _ => return None,
+        };
+        // ⍳ N, or ⍳ N ¨ f, with N written in the program
+        let iota = match &a.kind {
+            ExprKind::Prim { prim: Prim::Each, args } => &args[0],
+            _ => a,
+        };
+        let ExprKind::Prim { prim: Prim::Iota, args: ia } = &iota.kind else { return None };
+        let ExprKind::Int(n) = ia[0].kind else { return None };
+        ((1..=64).contains(&n) && self.is_fae(a)).then_some((a, el, n as u32))
+    }
+
     fn index_fast(&mut self, arr: V<'ctx>, i: IntValue<'ctx>, el: El, ty: Ty) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
@@ -4930,6 +5174,31 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // sort of a list kept in registers (a 3×3 neighbourhood):
+                // sorted on the stack, back in registers, no heap list
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "sort"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 1
+                    && let Some((el @ (El::I64 | El::F64), n)) = fixed(self.ty_of(&args[0]))
+                {
+                    let v = self.expr(&args[0])?;
+                    let v = self.as_ty(v, self.ty_of(&args[0]), "sort")?;
+                    if let V::A(a, _) = v {
+                        let at = a.get_type();
+                        let buf = self.entry_alloca_ty(at.into(), "sort_buf")?;
+                        self.b.build_store(buf, a).s()?;
+                        let f = self.rt(if el == El::F64 { "mim_sort_f64_small" } else { "mim_sort_i64_small" });
+                        self.b.build_call(f, &[buf.into(), self.ctx.i64_type().const_int(n as u64, false).into()], "").s()?;
+                        let sorted = self.b.build_load(at, buf, "").s()?.into_array_value();
+                        return self.as_ty(V::A(sorted, el), ty, "sort");
+                    }
+                    let b = self.boxed(v)?;
+                    let r = self.call_rt_ptr("mim_std_sort", &[self.basic(b).into()])?;
+                    self.drop_tmp(b)?;
+                    return self.as_ty(r, ty, "sort");
+                }
                 // bytes::from over a fused integer expression: written
                 // straight into bytes, in one pass
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
@@ -5188,6 +5457,27 @@ impl<'ctx> Cg<'ctx, '_> {
                 let r = self.index_fixed(b, i)?;
                 self.as_ty(r, ty, "element")
             }
+            // `sort(⍳ 9 ¨ f)[4]` (a median): the few elements on the stack,
+            // sorted there, one read: no list is allocated
+            ExprKind::Index { base, index }
+                if self.ty_of(index) == Ty::I64
+                    && ty.is_unboxed()
+                    && let Some((arg, el, len)) = self.small_sort_arg(base) =>
+            {
+                let buf = self.fused_to_stack(arg, el, len)?;
+                let f = self.rt(if el == El::F64 { "mim_sort_f64_small" } else { "mim_sort_i64_small" });
+                let i64t = self.ctx.i64_type();
+                self.b.build_call(f, &[buf.into(), i64t.const_int(len as u64, false).into()], "").s()?;
+                let i = self.expr(index)?;
+                let i = self.to_i64(i)?;
+                let bad = self.b.build_int_compare(IntPredicate::UGE, i, i64t.const_int(len as u64, false), "").s()?;
+                self.panic_if(bad, "index out of bounds of a sorted list")?;
+                let et = self.el_ty(el);
+                let ep = unsafe { self.b.build_in_bounds_gep(et, buf, &[i], "").s()? };
+                let x = self.b.build_load(et, ep, "").s()?;
+                let v = if el == El::F64 { V::F(x.into_float_value()) } else { V::I(x.into_int_value()) };
+                self.as_ty(v, ty, "element")
+            }
             // (bytes too: an element of a [u8] reads as an i64)
             ExprKind::Index { base, index }
                 if fuse::index_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
@@ -5323,10 +5613,20 @@ impl<'ctx> Cg<'ctx, '_> {
             // registers when its type allows; no boxing per step)
             ExprKind::Prim { prim: Prim::Evolve, args }
                 if matches!(&args[2].kind, ExprKind::Lambda { params, .. } if params.len() == 1)
-                    && ty != Ty::Dyn
-                    && ty == self.ty_of(&args[0]) =>
+                    && let Some(st) = self.state_type(&args[0], &args[2]) =>
             {
-                self.evolve_loop(&args[0], &args[1], &args[2], ty)
+                let r = self.evolve_loop(&args[0], &args[1], &args[2], st)?;
+                self.as_ty(r, ty, "evolve result")
+            }
+            // (the step's own types decide: the state's type in and out; the
+            // expression may still be typed loosely while inference settled)
+            ExprKind::Prim { prim: Prim::Settle, args }
+                if matches!(&args[1].kind, ExprKind::Lambda { params, .. } if params.len() == 1)
+                    && matches!(&args[2].kind, ExprKind::Lambda { params, .. } if params.len() == 1)
+                    && let Some(st) = self.state_type(&args[0], &args[1]) =>
+            {
+                let r = self.settle_loop(&args[0], &args[1], &args[2], st)?;
+                self.as_ty(r, ty, "settle result")
             }
             // loop words: runtime loops over function values
             ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
@@ -5608,10 +5908,37 @@ impl<'ctx> Cg<'ctx, '_> {
                 // it), then the record (which may move: owned.rs); reading a
                 // variable has no effects, so the order is not observable
                 let path_base = matches!(base.kind, ExprKind::Path(_));
+                // `f: push|concat|put(s.f, …)`: the list is taken out of the
+                // record (held once by then) and changed in place, not copied
+                let steals: Vec<Option<Vec<(&str, &[Expr])>>> = fields.iter().map(|(n, x, _)| if path_base { self.steal_chain(base, tid, n, x, fields) } else { None }).collect();
                 let mut early = Vec::new();
+                let mut early_rest: Vec<Vec<Vec<V<'ctx>>>> = Vec::new();
                 if path_base {
-                    for (_, x, _) in fields {
-                        early.push(self.expr(x)?);
+                    for ((_, x, _), st) in fields.iter().zip(&steals) {
+                        match st {
+                            Some(chain) => {
+                                // numbers stay raw, short lists in registers
+                                // (typed calls below); anything else boxed
+                                let mut levels = Vec::new();
+                                for (_, rest) in chain {
+                                    let mut vs = Vec::new();
+                                    for a in rest.iter() {
+                                        let v = self.expr(a)?;
+                                        vs.push(match v {
+                                            V::I(_) | V::A(_, El::I64) => v,
+                                            _ => self.boxed(v)?,
+                                        });
+                                    }
+                                    levels.push(vs);
+                                }
+                                early_rest.push(levels);
+                                early.push(V::I(self.ctx.i64_type().const_zero()));
+                            }
+                            None => {
+                                early_rest.push(Vec::new());
+                                early.push(self.expr(x)?);
+                            }
+                        }
                     }
                 }
                 let b = self.expr(base)?;
@@ -5637,6 +5964,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 phi.add_incoming(&[(&p0, pre), (&copied, copy_end)]);
                 let cur = phi.as_basic_value().into_pointer_value();
                 for (k, (n, x, _)) in fields.iter().enumerate() {
+                    if steals[k].is_some() {
+                        continue; // after every other field (below)
+                    }
                     let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
                     let v = if path_base { early[k] } else { self.expr(x)? };
                     let fp = self.slot_ptr(cur, i)?;
@@ -5650,6 +5980,60 @@ impl<'ctx> Cg<'ctx, '_> {
                     let old = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
                     self.b.build_store(fp, self.basic(v)).s()?;
                     self.release(old)?;
+                }
+                // the steals, last: every other field already holds what it
+                // keeps, so a list still shared is seen as shared (and copied)
+                for (k, (n, _, _)) in fields.iter().enumerate() {
+                    let Some(chain) = steals[k].clone() else { continue };
+                    let i = self.p.types[tid].field_index(n).ok_or("unknown field")?;
+                    let fp = self.slot_ptr(cur, i)?;
+                    let first = self.b.build_load(self.ptr, fp, "steal").s()?.into_pointer_value();
+                    self.b.build_store(fp, self.ptr.const_null()).s()?;
+                    let mut list = first;
+                    for (lvl, (op, _)) in chain.iter().enumerate() {
+                    let op = *op;
+                    let rest = early_rest[k][lvl].clone();
+                    let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
+                    let i64t = self.ctx.i64_type();
+                    // a list of i64 and raw numbers: the typed versions
+                    let typed: Option<(&str, Vec<BasicMetadataValueEnum>)> = match (op, rest.as_slice()) {
+                        ("push", [V::I(x)]) if i64_list => Some(("mim_push_i64_own", vec![list.into(), (*x).into()])),
+                        ("put", [V::I(i), V::I(x)]) if i64_list => Some(("mim_put_i64_own", vec![list.into(), (*i).into(), (*x).into()])),
+                        ("concat", [V::A(a, El::I64)]) if i64_list => {
+                            let at = a.get_type();
+                            let buf = self.entry_alloca_ty(at.into(), "concat_buf")?;
+                            self.b.build_store(buf, *a).s()?;
+                            Some(("mim_concat_i64_own", vec![list.into(), buf.into(), i64t.const_int(at.len() as u64, false).into()]))
+                        }
+                        _ => None,
+                    };
+                    if let Some((name, argv)) = typed {
+                        let f = self.module.get_function(name).unwrap_or_else(|| {
+                            let ps: Vec<BasicMetadataTypeEnum> = argv.iter().enumerate().map(|(j, _)| if j == 0 || (name == "mim_concat_i64_own" && j == 1) { self.ptr.into() } else { i64t.into() }).collect();
+                            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
+                        });
+                        list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                        continue;
+                    }
+                    let mut boxed_rest = Vec::new();
+                    for v in rest {
+                        boxed_rest.push(self.boxed(v)?);
+                    }
+                    let mut argv: Vec<BasicMetadataValueEnum> = vec![list.into()];
+                    for v in &boxed_rest {
+                        argv.push(self.basic(*v).into());
+                    }
+                    let name = format!("mim_std_{op}_own");
+                    let f = self.module.get_function(&name).unwrap_or_else(|| {
+                        let ps: Vec<BasicMetadataTypeEnum> = argv.iter().map(|_| self.ptr.into()).collect();
+                        self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
+                    });
+                    list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                    for v in boxed_rest {
+                        self.drop_tmp(v)?;
+                    }
+                    }
+                    self.b.build_store(fp, list).s()?;
                 }
                 Ok(V::P(cur, true))
             }

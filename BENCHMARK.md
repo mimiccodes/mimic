@@ -38,6 +38,9 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 11 | `ui` (10k-row list, 20 frames of view + diff) | building and comparing screens | `view`, `ui::diff`, `¨` |
 | 12 | `records` (1M records updated 5 times) | records, immutability | `with`, `¨` |
 | 13 | `scale` (30 1080p frames resized to 4 resolutions) | bytes, integer arithmetic, index math | `[u8]`, fused `¨`, `bytes::from` |
+| 14 | `filters` (a 1080p image through 5 filters) | stencils, small sorts | fused `¨`, lists in registers, `sort` |
+| 15 | `qoi` (encode and decode a 1024×768 QOI image, 5 times) | sequential state machine, byte output | `settle`, records, `push`/`concat`/`put` in place |
+| 16 | `paths` (Dijkstra and A* on a 600×600 grid) | a binary heap, branches | `settle`, records, `put` in place |
 
 ## Building the suite, step by step
 
