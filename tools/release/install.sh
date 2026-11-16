@@ -98,8 +98,12 @@ fi
 
 # ---- install ---------------------------------------------------------------
 mkdir -p "$bin"
-cp "$here/mimic" "$bin/mimic"
-chmod +x "$bin/mimic"
+# a new file moved into place, never copied over the old one: macOS keeps
+# the signature it checked for a file, so a program rewritten in place is
+# killed when it starts ("Killed: 9")
+cp "$here/mimic" "$bin/mimic.new"
+chmod +x "$bin/mimic.new"
+mv -f "$bin/mimic.new" "$bin/mimic"
 # a downloaded program is quarantined on macOS
 [ "$os" = Darwin ] && xattr -d com.apple.quarantine "$bin/mimic" 2>/dev/null || true
 echo "installed $bin/mimic${old:+ (replacing $old)}"

@@ -58,6 +58,12 @@ foreach ($o in $others) {
 
 # ---- install ---------------------------------------------------------------
 New-Item -ItemType Directory -Force $bin | Out-Null
+# a running mimic.exe (an editor's language server) cannot be overwritten,
+# but it can be renamed: the old one is moved aside and removed next time
+Get-ChildItem $bin -Filter "mimic.old-*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+if (Test-Path $target) {
+    Move-Item -Force $target (Join-Path $bin ("mimic.old-" + [guid]::NewGuid().ToString("N") + ".exe"))
+}
 Copy-Item -Force $exe $target
 Unblock-File $target
 if ($old) { Write-Host "installed $target (replacing $old)" } else { Write-Host "installed $target" }

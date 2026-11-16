@@ -4,6 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Fixed
+- **Updating Mimic while an editor is open.** On macOS the installer copied the new `mimic` over the old file, which the editor's language server was running; macOS keeps the signature it checked for that file, so the new `mimic` was killed when it started ("Killed: 9", also when updating from the VS Code extension). The installer now writes a new file and moves it into place. On Windows, where a running `mimic.exe` cannot be overwritten, the old one is moved aside first.
+
 ### Changed
 - **Lists of records with only number fields are 9× faster.** A record whose fields are all numbers (`{ id: i64, x: f64, v: f64 }`) lives in registers; in a list it was boxed field by field on every step (each number allocated on its own, then copied into the record), and `¨` over such a list was not fused. Now a chain such as `ps ¨ step ¨ step ¨ step` is one pass with each record in registers, the sums after it are fused too, and putting a record back into a list stores its numbers directly. A million records moved five times and summed: 2.09 s → 0.23 s on one core, 26 million allocations → 2 million. Found with `mimic profile`.
 
