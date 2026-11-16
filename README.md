@@ -16,39 +16,56 @@ fn main() {
 ```sh
 mimic create hello && cd hello
 mimic run                     # build (debug) and run
-mimic build --release --target x86_64-linux-gnu
+mimic build --release --target x86_64-linux-musl   # a static Linux binary, from any machine
 ```
+
+## Install
+
+Download the release for your machine from [Releases](https://github.com/mimiccodes/mimic/releases) (macOS arm64, Linux x86_64, Windows x86_64), unpack it and run `install.sh` (or `install.cmd` on Windows): `mimic` goes into `~/.mimic/bin` and onto your `PATH`. One binary holds the compiler, Clang, LLD and the C libraries for cross builds; nothing else is needed (on macOS, the Xcode Command Line Tools).
+
+In VS Code, install the [Mimic extension](https://github.com/mimiccodes/mimic-vscode/releases) (`.vsix`: *Extensions* → `…` → *Install from VSIX…*); it finds `mimic`, or installs and updates it for you.
 
 ## Status
 
-Milestone 1 is a working vertical slice:
-* the CLI and project system, including `mod.mim` and installing packages from git;
-* the parser, with glyphs and words as equivalent spellings;
-* a checker for modules, privacy, immutability and FFI `unsafe`;
-* **LLVM** code generation and a refcounted array runtime that the tests show to be leak-free;
-* calls into C;
-* cross-compilation to every architecture LLVM supports, with Clang and LLD built into `mimic` (see [docs/targets.md](docs/targets.md)).
+**Released: 0.2.9** ([CHANGELOG.md](CHANGELOG.md)). Stages 0.1 and 0.2 are done: the language, parallel by default (fused kernels, `¨` on all cores, fork-join recursion, interaction nets, SIMD, Metal GPU kernels), the standard library (files, processes, JSON, HTTP/HTTPS, TCP, UDP, TLS, WebSockets, tasks and channels, UIs in the browser and in native windows), C interop both ways, native builds on macOS, Linux and Windows, and cross builds to 30 Linux architectures (static, musl), Windows x86_64 and arm64, WebAssembly and every Apple platform ([docs/targets.md](docs/targets.md)).
 
-Milestone 2 is in progress:
-* **Phase 1, done:** the array layer runs on all cores automatically.
-* **Phase 2, done:** the interaction-net parallel reducer.
-* **Phase 3, done:** pure Mimic functions compile to nets.
+**Next release: 0.3, the Workbench** (on `main`, CI green on Linux, macOS and Windows): the tools around the language, for people, editors and AI agents.
 
-M3 is in progress. Static types and unboxed scalars are done: `fib(38)` runs at 1.42× of C on one core and **5.4× faster than C on 12 cores**, with no annotations beyond `n: i64`.
+| Command | What it does |
+|---|---|
+| `mimic man` | The manual inside `mimic`: the tutorial, the reference, guides, a page for every standard function, glyph and error code |
+| `mimic lsp` | The language server: errors as you type with fixes, hover, definitions, references, rename, call hierarchy, signature help, glyph input, inferred types |
+| `mimic edit` | Mimic's own terminal editor, with errors as you type, the manual, a REPL, run and test |
+| `mimic repl` | Mimic a line at a time (`⍳ 10 ▷ +/` → `45`); `--json` for notebooks |
+| `mimic why` | Where code runs and why: in parallel, fused, SIMD, on the GPU, as a task, in order |
+| `mimic profile` | Where the time goes: per function next to where it runs, per core, CPU and GPU, memory |
+| `mimic net show`, `trace` | The interaction nets of pure functions as graphs, and their reduction round by round |
+| `mimic test` | Tests, property tests (`test … for x: T`), contracts (`requires`/`ensures`), examples in comments; `--coverage` |
+| `mimic audit` | Quality and security findings, SARIF, a CI gate with a baseline |
+| `mimic doc` | Documentation from the code and from guides written by people or agents |
+| `mimic mcp` | Mimic's tools for AI agents (Model Context Protocol) |
+| `mimic dap` | Debugging from editors, with values shown as Mimic prints them |
 
-The roadmap is in [docs/design.md](docs/design.md).
+Editors: the [VS Code extension](https://github.com/mimiccodes/mimic-vscode) (everything above, plus profiles, net views, notebooks and coverage in the editor), and TextMate and tree-sitter grammars in [mimic-syntax](https://github.com/mimiccodes/mimic-syntax) for Neovim, Helix, Zed, Sublime Text and others (`mimic man editors`).
+
+**Speed** ([BENCHMARK.md](BENCHMARK.md)): on one core Mimic is within a few percent of C on most benchmarks and faster on several; on all cores, with no annotations, it is faster than C on seven of nine benchmarks (nbody ties; records is 1.14× C) and faster than hand-parallelised Rust (Rayon) on six of eight. Where it is still behind is listed in [docs/gaps.md](docs/gaps.md).
+
+The plan to 1.0 is in [docs/versions.md](docs/versions.md).
 
 | Doc | Contents |
 |---|---|
-| [docs/design.md](docs/design.md) | runtime model: interaction nets plus the array layer; roadmap |
+| [docs/tutorial](docs/tutorial/index.md) | the tutorial, chapter by chapter (also `mimic man 1`) |
+| [docs/manual](docs/manual) | guides: coming from C, Python or JavaScript; writing Mimic with agents; editors; audit; profiling; MCP |
 | [docs/syntax.md](docs/syntax.md) | grammar, precedence, glyph table |
-| [docs/manifest.md](docs/manifest.md) | `mim.mim`, `build.mim`, `mod.mim` |
-| [docs/ffi.md](docs/ffi.md) | C FFI |
+| [docs/std.md](docs/std.md) | the standard library |
 | [docs/cli.md](docs/cli.md) | every `mimic` command |
-| [docs/net.md](docs/net.md) | the interaction-net runtime and `.mnet` format |
-| [BENCHMARK.md](BENCHMARK.md) | how speed is measured, current numbers, targets |
-| [docs/roadmap.md](docs/roadmap.md) | what's done, what's next, and the syntax plan for loops, UI and networking |
-| [docs/versions.md](docs/versions.md) | the versions up to 1.0 (self-hosted, every LLVM target) and how releases are made |
+| [docs/manifest.md](docs/manifest.md) | `mim.mim`, `build.mim`, `mod.mim` |
+| [docs/ffi.md](docs/ffi.md) | calling C, and C calling Mimic |
+| [docs/targets.md](docs/targets.md) | what `mimic` builds for |
+| [docs/design.md](docs/design.md), [docs/net.md](docs/net.md) | the runtime: the array layer and interaction nets |
+| [docs/workbench.md](docs/workbench.md) | the analysis engine and `mimic query` |
+| [BENCHMARK.md](BENCHMARK.md) | how speed is measured, and the numbers |
+| [docs/versions.md](docs/versions.md), [docs/gaps.md](docs/gaps.md) | the versions to 1.0, and what is still missing |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each version |
 
 ## Example project
@@ -71,23 +88,28 @@ Requirements:
 ```sh
 tools/deps.sh                  # once: sources for the embedded Clang, LLD and musl
 cargo build --release          # → target/release/mimic
-cargo test                     # unit tests + golden tests (tests/fixtures)
+cargo test --release           # unit tests + golden tests (tests/fixtures)
 ```
+
+The editors' parts are submodules: `editors/syntax` ([mimic-syntax](https://github.com/mimiccodes/mimic-syntax)) and `editors/vscode` ([mimic-vscode](https://github.com/mimiccodes/mimic-vscode)); clone with `--recursive`, or run `git submodule update --init`.
 
 ## Repository layout
 
 ```
-crates/mimic-cli       the `mimic` binary: commands, build driver, mod.mim
+crates/mimic-cli       the `mimic` binary: commands, build driver, the engine, lsp, dap, mcp, edit, repl, profile
 crates/mimic-syntax    lexer, parser, AST, glyph table, config format
 crates/mimic-check     module tree, name resolution, visibility, mutability, FFI rules
 crates/mimic-codegen   LLVM codegen (inkwell)
 crates/mimic-project   mim.mim / build.mim, scaffolding, ~/.mimic/libraries
-crates/mimic-net       interaction-net IR, .mnet parser, encoder to the runtime book
+crates/mimic-net       interaction-net IR, .mnet parser, encoder to the runtime book, a reference reducer (trace)
 runtime/               C runtime: array layer + interaction-net reducer (embedded, compiled per target by the embedded Clang)
 crates/mimic-toolchain embedded Clang + LLD, bundled musl / compiler-rt, C library builds
 tools/deps.sh          fetches and builds the native dependencies
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
 tests/nets             interaction-net programs (*.mnet + .out)
+bench/                 benchmarks in Mimic, C, Rust (and Rayon) and Go
+docs/                  the reference, the tutorial and the guides (embedded in `mimic man`)
+editors/               mimic-syntax and mimic-vscode (submodules)
 ```
 
 ## License
