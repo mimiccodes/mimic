@@ -620,14 +620,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mimic-check"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-cli"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "clap",
  "crossterm",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "mimic-codegen"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "inkwell",
  "mimic-check",
@@ -659,25 +659,25 @@ dependencies = [
 
 [[package]]
 name = "mimic-net"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-project"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-syntax"
-version = "0.2.9"
+version = "0.3.13"
 
 [[package]]
 name = "mimic-toolchain"
-version = "0.2.9"
+version = "0.3.13"
 dependencies = [
  "cc",
  "flate2",

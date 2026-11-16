@@ -27,9 +27,9 @@ In VS Code, install the [Mimic extension](https://github.com/mimiccodes/mimic-vs
 
 ## Status
 
-**Released: 0.2.9** ([CHANGELOG.md](CHANGELOG.md)). Stages 0.1 and 0.2 are done: the language, parallel by default (fused kernels, `¨` on all cores, fork-join recursion, interaction nets, SIMD, Metal GPU kernels), the standard library (files, processes, JSON, HTTP/HTTPS, TCP, UDP, TLS, WebSockets, tasks and channels, UIs in the browser and in native windows), C interop both ways, native builds on macOS, Linux and Windows, and cross builds to 30 Linux architectures (static, musl), Windows x86_64 and arm64, WebAssembly and every Apple platform ([docs/targets.md](docs/targets.md)).
+**Released: 0.3.13** ([CHANGELOG.md](CHANGELOG.md)). Stages 0.1, 0.2 and 0.3 are done. Stages 0.1 and 0.2 built the language, parallel by default (fused kernels, `¨` on all cores, fork-join recursion, interaction nets, SIMD, Metal GPU kernels), the standard library (files, processes, JSON, HTTP/HTTPS, TCP, UDP, TLS, WebSockets, tasks and channels, UIs in the browser and in native windows), C interop both ways, native builds on macOS, Linux and Windows, and cross builds to 30 Linux architectures (static, musl), Windows x86_64 and arm64, WebAssembly and every Apple platform ([docs/targets.md](docs/targets.md)).
 
-**Next release: 0.3, the Workbench** (on `main`, CI green on Linux, macOS and Windows): the tools around the language, for people, editors and AI agents.
+**Stage 0.3, the Workbench**, added the tools around the language, for people, editors and AI agents:
 
 | Command | What it does |
 |---|---|

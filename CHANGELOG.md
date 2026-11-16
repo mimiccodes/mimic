@@ -4,6 +4,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.13 — 2026-11-16
+
+Stage 0.3 complete: the Workbench. The tools around the language, for people, editors and AI agents: the manual inside `mimic`, a language server, a VS Code extension, debugging from editors, an MCP server for agents, documentation written by people and agents, where code runs and why, an audit for quality and security, contracts and property tests, Mimic's own terminal editor, a REPL, a profiler, interaction nets you can see, and coverage.
+
+**Upgrading from 0.2.9:** run the new release's install script (it replaces the old `mimic` and clears its build cache). In VS Code, install the [Mimic extension](https://github.com/mimiccodes/mimic-vscode/releases) 0.10.2 or newer; it finds this `mimic` by itself. Libraries can now be pinned to a tag or commit (`mimic install <git-url>@v1.2.0`, `rev =` in `mim.mim`).
+
 ### Added
 - **The Workbench engine and `mimic query`** (step 0.3.0): one analysis of the project that every tool will ask. `mimic query` answers as JSON: `check`, `symbols`, `definition`, `hover`, `references`, `outline`, `docs`, `effects` (pure, concurrent, ordered or sync) and `stats`. `mimic query --serve` keeps it running, reading one JSON request per line; files sent by an editor (`open`, `change`, `close`) are used instead of the disk, and only changed files are parsed again: an edit of the showcase project is re-checked in about 25 ms. While the program has errors, lookups use the last program that checked. See [docs/workbench.md](docs/workbench.md).
 
