@@ -2277,6 +2277,12 @@ fn language_server_navigation() {
     assert!(labels.contains(&"8:: i64".to_string()) && labels.contains(&"9:: [i64]".to_string()), "{labels:?}");
     let acts = rpc("textDocument/codeAction", serde_json::json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 8, "character": 0 }, "end": { "line": 8, "character": 0 } }, "context": { "diagnostics": [] } }), false);
     assert!(acts.as_array().unwrap().iter().any(|a| a["title"] == "Write the type of `a`: i64"), "{acts}");
+    // a selected expression into a function: `a + inc(1)` uses `a` from main
+    let ex = rpc("textDocument/codeAction", serde_json::json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 10, "character": 10 }, "end": { "line": 10, "character": 20 } }, "context": { "diagnostics": [] } }), false);
+    let ex = ex.as_array().unwrap().iter().find(|a| a["title"].as_str().is_some_and(|t| t.starts_with("Extract into a function"))).unwrap_or_else(|| panic!("{ex}")).clone();
+    let edits = ex["edit"]["changes"][&uri].as_array().unwrap().clone();
+    assert_eq!(edits[0]["newText"], "extracted(a)", "{ex}");
+    assert_eq!(edits[1]["newText"], "\n\nfn extracted(a) {\n    a + inc(1)\n}", "{ex}");
     rpc("shutdown", serde_json::Value::Null, false);
     rpc("exit", serde_json::Value::Null, true);
     done.store(true, std::sync::atomic::Ordering::SeqCst);

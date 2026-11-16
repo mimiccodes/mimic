@@ -36,7 +36,7 @@ pub fn serve() -> Result<(), String> {
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_REWRITE]),
+            code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR_REWRITE, CodeActionKind::REFACTOR_EXTRACT]),
             ..Default::default()
         })),
         completion_provider: Some(CompletionOptions {
@@ -571,6 +571,12 @@ impl Server {
                 ..Default::default()
             }));
         }
+        // a selected expression into a function of its own
+        if p.range.start != p.range.end
+            && let Some(a) = self.extract_function(&p.text_document.uri, p.range)
+        {
+            actions.push(a);
+        }
         // write an inferred type in: `let x = …` → `let x: T = …`
         if let Some((engine, _)) = self.engine(&path)
             && engine.errors().is_none()
@@ -594,6 +600,100 @@ impl Server {
             }
         }
         serde_json::to_value(actions).ok()
+    }
+
+    /// "Extract into a function": the selection becomes `extracted(a, b)`,
+    /// and `fn extracted(a, b) { … }` follows the function it was in; its
+    /// parameters are the variables the selection uses from around it.
+    fn extract_function(&mut self, uri: &Url, range: Range) -> Option<CodeActionOrCommand> {
+        let path = path_of(uri)?;
+        let text = self.text_of(&path);
+        let (a, b) = (byte_of_pos(&text, range.start), byte_of_pos(&text, range.end));
+        let sel = text.get(a..b)?.trim();
+        if sel.is_empty() || sel.contains('\n') || open_brackets_of(sel) != 0 || sel.starts_with("let ") || sel.ends_with('{') {
+            return None;
+        }
+        let lead = text[a..b].len() - text[a..b].trim_start().len();
+        // the variables it uses that are defined outside it
+        let mut params: Vec<String> = Vec::new();
+        let bytes = sel.as_bytes();
+        let mut i = 0;
+        let mut inside = false;
+        while i < bytes.len() {
+            let c = sel[i..].chars().next()?;
+            if c == '"' {
+                inside = !inside;
+            }
+            if !inside && (c.is_alphabetic() || c == '_') && !sel[..i].ends_with("::") && !sel[..i].ends_with('.') {
+                let len: usize = sel[i..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum();
+                let word = &sel[i..i + len];
+                let at = a + lead + i;
+                let tdp = TextDocumentPositionParams { text_document: TextDocumentIdentifier { uri: uri.clone() }, position: pos_of_byte(&text, at) };
+                if let Some(v) = self.ask("definition", &tdp)
+                    && v.get("kind").and_then(Value::as_str) == Some("local")
+                {
+                    let def_line = v["location"]["line"].as_u64().unwrap_or(0) as u32;
+                    let def_col = v["location"]["column"].as_u64().unwrap_or(0) as u32;
+                    let def = to_lsp(&text, def_line, def_col);
+                    let outside = def < range.start || def >= range.end;
+                    if outside && !params.iter().any(|p| p == word) {
+                        params.push(word.to_string());
+                    }
+                }
+                i += len.max(1);
+            } else {
+                i += c.len_utf8();
+            }
+        }
+        // after the function the selection is in: its closing brace
+        let fns = self.functions_of(&path);
+        let line = range.start.line + 1;
+        let (fn_line, _) = fns.iter().rev().find(|(l, _)| *l <= line)?;
+        let start = byte_of_pos(&text, Position { line: fn_line - 1, character: 0 });
+        let mut depth = 0i32;
+        let mut end = None;
+        let mut in_str = false;
+        for (k, c) in text[start..].char_indices() {
+            match c {
+                '"' => in_str = !in_str,
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + k + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        if end < b {
+            return None;
+        }
+        let mut name = "extracted".to_string();
+        let mut n = 2;
+        while text.contains(&format!("fn {name}(")) {
+            name = format!("extracted_{n}");
+            n += 1;
+        }
+        let call = format!("{name}({})", params.join(", "));
+        let def = format!("\n\nfn {name}({}) {{\n    {sel}\n}}", params.join(", "));
+        let at_end = pos_of_byte(&text, end);
+        let mut changes = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![
+                TextEdit { range: Range { start: pos_of_byte(&text, a + lead), end: pos_of_byte(&text, a + lead + sel.len()) }, new_text: call },
+                TextEdit { range: Range { start: at_end, end: at_end }, new_text: def },
+            ],
+        );
+        Some(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Extract into a function ({name})"),
+            kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+            edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+            ..Default::default()
+        }))
     }
 
     // ---- signature help ---------------------------------------------------------
@@ -1020,6 +1120,24 @@ fn glyph_hover(text: &str, at: usize) -> Option<String> {
 
 /// The LSP diagnostics of a report, by file, with their fixes as edits.
 type FixEdits = Vec<(String, HashMap<Url, Vec<TextEdit>>)>;
+
+/// Brackets opened and not closed in `s` (strings skipped).
+fn open_brackets_of(s: &str) -> i32 {
+    let mut depth = 0;
+    let mut inside = false;
+    for c in s.chars() {
+        match c {
+            '"' => inside = !inside,
+            '(' | '[' | '{' if !inside => depth += 1,
+            ')' | ']' | '}' if !inside => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return depth;
+        }
+    }
+    depth
+}
 
 /// The call whose argument list `at` is in: the byte of its `(` and which
 /// argument (counting commas at its level).
