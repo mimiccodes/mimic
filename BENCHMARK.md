@@ -95,6 +95,63 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### On CI machines, with Rust + Rayon (v0.3.13, 2026-11-16)
+
+The bench workflow on GitHub's shared runners (3 or 4 cores, other jobs beside them: compare the ratios, not the times). The ratio is to C; Rust + Rayon and Mimic, all cores, are the parallel columns.
+
+**macOS arm64**: Apple M1 (Virtual), Darwin 24.6.0, 3 cores, load average 14.9 at the end.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.140 s | 0.159 s (1.13×) | 0.192 s (1.37×) | 0.138 s (0.99×) | 0.065 s (0.46×) | 0.063 s (0.45×) |
+| http | 0.286 s | 0.445 s (1.55×) | 3.579 s (12.51×) | 0.561 s (1.96×) | — | 0.554 s (1.94×) |
+| json | 0.297 s | 0.162 s (0.54×) | 0.469 s (1.58×) | 0.276 s (0.93×) | — | 0.224 s (0.76×) |
+| mandelbrot | 0.790 s | 0.833 s (1.05×) | 0.848 s (1.07×) | 0.568 s (0.72×) | 0.321 s (0.41×) | 0.199 s (0.25×) |
+| matmul | 0.286 s | 0.288 s (1.00×) | 0.813 s (2.84×) | 0.050 s (0.17×) | 0.410 s (1.43×) | 0.048 s (0.17×) |
+| nbody | 0.049 s | 0.059 s (1.22×) | 0.113 s (2.33×) | 0.049 s (1.00×) | — | 0.056 s (1.14×) |
+| prefix_sum | 0.188 s | 0.311 s (1.65×) | 0.161 s (0.85×) | 0.156 s (0.83×) | 0.123 s (0.65×) | 0.106 s (0.57×) |
+| records | 0.015 s | 0.047 s (3.10×) | 0.049 s (3.23×) | 0.034 s (2.23×) | 0.043 s (2.78×) | 0.023 s (1.53×) |
+| sort | 1.246 s | 0.209 s (0.17×) | 0.969 s (0.78×) | 0.166 s (0.13×) | 0.181 s (0.15×) | 0.102 s (0.08×) |
+| sum_of_squares | 0.031 s | 0.045 s (1.48×) | 0.098 s (3.19×) | 0.032 s (1.05×) | 0.038 s (1.24×) | 0.018 s (0.60×) |
+| tree | 0.413 s | 0.511 s (1.24×) | 0.511 s (1.24×) | 0.258 s (0.62×) | 0.350 s (0.85×) | 0.106 s (0.26×) |
+| ui | — | — | — | 0.119 s | — | 0.114 s |
+
+**Linux x86_64**: AMD EPYC 7763 64-Core Processor, Linux 7.0.0-1017-azure, 4 cores, load average 1.7 at the end.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.113 s | 0.121 s (1.07×) | 0.229 s (2.02×) | 0.131 s (1.16×) | 0.048 s (0.43×) | 0.062 s (0.55×) |
+| http | 0.302 s | 0.732 s (2.43×) | 8.559 s (28.38×) | 0.585 s (1.94×) | — | 0.515 s (1.71×) |
+| json | 0.336 s | 0.273 s (0.81×) | 0.654 s (1.95×) | 0.318 s (0.95×) | — | 0.291 s (0.86×) |
+| mandelbrot | 0.578 s | 0.655 s (1.13×) | 0.661 s (1.14×) | 0.446 s (0.77×) | 0.180 s (0.31×) | 0.184 s (0.32×) |
+| matmul | 0.203 s | 0.203 s (1.00×) | 0.715 s (3.52×) | 0.078 s (0.39×) | 0.411 s (2.02×) | 0.045 s (0.22×) |
+| nbody | 0.100 s | 0.111 s (1.11×) | 0.164 s (1.63×) | 0.065 s (0.65×) | — | 0.065 s (0.65×) |
+| prefix_sum | 0.456 s | 0.505 s (1.11×) | 0.506 s (1.11×) | 0.457 s (1.00×) | 0.262 s (0.57×) | 0.253 s (0.56×) |
+| records | 0.029 s | 0.087 s (3.00×) | 0.081 s (2.78×) | 0.085 s (2.93×) | 0.054 s (1.87×) | 0.051 s (1.74×) |
+| sort | 0.907 s | 0.236 s (0.26×) | 0.929 s (1.02×) | 0.224 s (0.25×) | 0.142 s (0.16×) | 0.142 s (0.16×) |
+| sum_of_squares | 0.031 s | 0.058 s (1.86×) | 0.098 s (3.12×) | 0.032 s (1.01×) | 0.076 s (2.42×) | 0.016 s (0.51×) |
+| tree | 0.528 s | 0.633 s (1.20×) | 0.691 s (1.31×) | 0.346 s (0.66×) | 0.491 s (0.93×) | 0.175 s (0.33×) |
+| ui | — | — | — | 0.105 s | — | 0.069 s |
+
+**Windows x86_64**: Intel64 Family 6 Model 207 Stepping 2, GenuineIntel, Windows 2025Server, 4 cores, load average 0.0 at the end.
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.109 s | 0.094 s (0.86×) | 0.191 s (1.76×) | 0.135 s (1.24×) | 0.043 s (0.40×) | 0.066 s (0.61×) |
+| http | — | 0.550 s | 5.135 s | 0.477 s | — | 0.554 s |
+| json | 0.480 s | 0.285 s (0.59×) | 0.520 s (1.08×) | 0.329 s (0.69×) | — | 0.301 s (0.63×) |
+| mandelbrot | 0.541 s | 0.573 s (1.06×) | 0.591 s (1.09×) | 0.183 s (0.34×) | 0.168 s (0.31×) | 0.068 s (0.13×) |
+| matmul | 0.264 s | 0.269 s (1.02×) | 0.653 s (2.47×) | 0.083 s (0.31×) | 0.421 s (1.59×) | 0.053 s (0.20×) |
+| nbody | 0.076 s | 0.083 s (1.09×) | 0.156 s (2.04×) | 0.062 s (0.82×) | — | 0.062 s (0.81×) |
+| prefix_sum | 0.288 s | 0.669 s (2.32×) | 0.269 s (0.93×) | 0.300 s (1.04×) | 0.161 s (0.56×) | 0.182 s (0.63×) |
+| records | 0.025 s | 0.084 s (3.32×) | 0.058 s (2.28×) | 0.096 s (3.79×) | 0.050 s (1.98×) | 0.065 s (2.56×) |
+| sort | 1.616 s | 0.220 s (0.14×) | 0.912 s (0.56×) | 0.414 s (0.26×) | 0.136 s (0.08×) | 0.243 s (0.15×) |
+| sum_of_squares | 0.032 s | 0.060 s (1.86×) | 0.092 s (2.86×) | 0.037 s (1.14×) | 0.040 s (1.25×) | 0.023 s (0.72×) |
+| tree | 1.049 s | 1.180 s (1.12×) | 0.584 s (0.56×) | 0.372 s (0.35×) | 0.682 s (0.65×) | 0.186 s (0.18×) |
+| ui | — | — | — | 0.125 s | — | 0.084 s |
+
+Mimic is ahead of Rayon on all eight benchmarks on macOS, on five of eight on Linux (fib behind, mandelbrot and sort even), and on four on Windows, where fib, prefix sum, records and sort are behind, and records on one core is 3.8× C (2.2–2.9× elsewhere). The HTTP server is 1.7–1.9× C everywhere: under load about 30% of its busy time waits on the event loop's lock ([gaps.md](docs/gaps.md)).
+
 ### Against Rust + Rayon (2026-11-16)
 
 Apple M3 Pro, 12 cores, macOS, load average 11–15 (other work running). Best of 5 runs; the ratio is to C. Rust + Rayon and Mimic, all cores, are the two parallel columns; nbody (five bodies, one step after another) has no Rayon version.
