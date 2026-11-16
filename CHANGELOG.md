@@ -4,6 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Changed
+- **Servers are faster: 1.7–1.9× C → 1.10× C** (the HTTP benchmark, all cores, M3 Pro). Every task waiting on a socket took one lock shared by all the event loop's threads, and held it through system calls (duplicating the descriptor, registering it with kqueue or epoll, closing it); under load a third of a server's busy time went to waiting for it. Socket waits now register, fire and close outside the lock, which only guards the timer heap; a wait with no deadline needs no lock at all. Found with `mimic profile --for`.
+
 ## 0.3.13 — 2026-11-16
 
 Stage 0.3 complete: the Workbench. The tools around the language, for people, editors and AI agents: the manual inside `mimic`, a language server, a VS Code extension, debugging from editors, an MCP server for agents, documentation written by people and agents, where code runs and why, an audit for quality and security, contracts and property tests, Mimic's own terminal editor, a REPL, a profiler, interaction nets you can see, and coverage.

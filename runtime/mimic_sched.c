@@ -402,6 +402,11 @@ typedef struct co_wait {
     int timed_out;
     struct co_wait *link; /* Windows: the next wait on the same socket */
     void *reg;            /* Windows: the socket's registration */
+    /* a socket wait with a deadline (Unix): the parking thread and the
+     * poller each let go of it once (`pending` counts down from 2); the task
+     * runs again when both have. `fired`: the event came before the timer
+     * was set, so it is not set. */
+    int pending, fired;
 } co_wait;
 
 #ifdef _WIN32
@@ -564,19 +569,42 @@ static void fd_unwatch(co_wait *w) {
 static int64_t timers_due(void) {
     mim_co *due = NULL;
     int64_t wait = -1, now = mono_ns();
+#ifndef _WIN32
+    /* socket waits that timed out: their descriptors are closed after the
+     * lock (a wait in the heap is registered already; see wait_park) */
+    co_wait *expired[64];
+    int nexp = 0;
+#endif
     pthread_mutex_lock(&g_wait_lock);
     while (g_ntimers && g_timers[0]->at <= now) {
         co_wait *w = g_timers[0];
+#ifndef _WIN32
+        if (w->fd >= 0 && nexp == 64) break; /* the rest on the next turn */
+#endif
         timer_remove(w);
         if (w->fd >= 0) {
             w->timed_out = 1;
+#ifndef _WIN32
+            expired[nexp++] = w;
+            continue;
+#else
             fd_unwatch(w);
+#endif
         }
         w->co->next = due;
         due = w->co;
     }
     if (g_ntimers) wait = g_timers[0]->at - now;
     pthread_mutex_unlock(&g_wait_lock);
+#ifndef _WIN32
+    for (int i = 0; i < nexp; i++) {
+        co_wait *w = expired[i];
+        mim_co *co = w->co;
+        fd_unwatch(w);
+        if (__atomic_sub_fetch(&w->pending, 1, __ATOMIC_ACQ_REL) == 0) co_ready(co);
+    }
+    if (nexp == 64) wait = 0;
+#endif
     while (due) {
         mim_co *n = due->next;
         co_ready(due);
@@ -586,12 +614,36 @@ static int64_t timers_due(void) {
 }
 
 static void fd_fired(co_wait *w) {
+#ifndef _WIN32
+    /* a wait with no deadline is the poller's alone once it fired: no lock
+     * (every thread parking or waking a socket took it: under load, a third
+     * of a server's busy time went to waiting for it) */
+    if (!w->at) {
+        mim_co *co = w->co;
+        fd_unwatch(w);
+        co_ready(co);
+        return;
+    }
+#endif
+#ifndef _WIN32
+    /* with a deadline: the lock only for the timer; the descriptor is closed
+     * outside it (only the poller fires waits, so nothing else touches it) */
+    pthread_mutex_lock(&g_wait_lock);
+    if (w->heap >= 0) timer_remove(w);
+    else w->fired = 1; /* before its timer was set: it never will be */
+    pthread_mutex_unlock(&g_wait_lock);
+    mim_co *co = w->co;
+    fd_unwatch(w);
+    if (__atomic_sub_fetch(&w->pending, 1, __ATOMIC_ACQ_REL) == 0) co_ready(co);
+    return;
+#else
     pthread_mutex_lock(&g_wait_lock);
     mim_co *co = w->co;
     if (w->heap >= 0) timer_remove(w);
     fd_unwatch(w);
     pthread_mutex_unlock(&g_wait_lock);
     co_ready(co);
+#endif
 }
 
 #ifdef _WIN32
@@ -898,6 +950,73 @@ static void wait_park(mim_co *co, void *arg) {
     co_wait *w = (co_wait *)arg;
     w->co = co;
     int ready = 0, first = 0;
+#ifndef _WIN32
+    /* a socket wait with no deadline: no timer to share, so no lock. Its
+     * descriptor is recorded before it is watched, and `w` is not touched
+     * after: the event may fire and the task run on before this returns. */
+    if (!w->at && w->fd >= 0) {
+        int d = fcntl(w->fd, F_DUPFD_CLOEXEC, 0);
+        int ok = d >= 0;
+        if (ok) {
+            w->dupfd = d;
+#ifdef __APPLE__
+            struct kevent kev;
+            EV_SET(&kev, d, w->write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, w);
+            ok = kevent(g_poll, &kev, 1, NULL, 0, NULL) == 0;
+#else
+            struct epoll_event e = {0};
+            e.events = (w->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
+            e.data.ptr = w;
+            ok = epoll_ctl(g_poll, EPOLL_CTL_ADD, d, &e) == 0;
+#endif
+            if (!ok) {
+                w->dupfd = -1;
+                close(d);
+            }
+        }
+        if (!ok) co_ready(co); /* let the caller's next call report the error */
+        return;
+    }
+    /* a socket wait with a deadline: watch the descriptor, then set the
+     * timer (the lock only for the timer heap). The poller may fire it
+     * meanwhile: `pending` keeps the task parked until both are done. */
+    if (w->at && w->fd >= 0) {
+        int d = fcntl(w->fd, F_DUPFD_CLOEXEC, 0);
+        int ok = d >= 0;
+        __atomic_store_n(&w->pending, 2, __ATOMIC_RELAXED);
+        w->fired = 0;
+        if (ok) {
+            w->dupfd = d;
+#ifdef __APPLE__
+            struct kevent kev;
+            EV_SET(&kev, d, w->write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, w);
+            ok = kevent(g_poll, &kev, 1, NULL, 0, NULL) == 0;
+#else
+            struct epoll_event e = {0};
+            e.events = (w->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
+            e.data.ptr = w;
+            ok = epoll_ctl(g_poll, EPOLL_CTL_ADD, d, &e) == 0;
+#endif
+            if (!ok) {
+                w->dupfd = -1;
+                close(d);
+            }
+        }
+        if (!ok) {
+            co_ready(co); /* let the caller's next call report the error */
+            return;
+        }
+        pthread_mutex_lock(&g_wait_lock);
+        if (!w->fired) {
+            timer_push(w);
+            first = w->heap == 0;
+        }
+        pthread_mutex_unlock(&g_wait_lock);
+        if (first) poller_wake();
+        if (__atomic_sub_fetch(&w->pending, 1, __ATOMIC_ACQ_REL) == 0) co_ready(co);
+        return;
+    }
+#endif
     pthread_mutex_lock(&g_wait_lock);
     if (w->at) {
         timer_push(w);
