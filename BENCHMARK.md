@@ -37,6 +37,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 10 | `http` (hello-world server, 400,000 requests) | I/O, concurrency | `http::serve`, event loop, keep-alive |
 | 11 | `ui` (10k-row list, 20 frames of view + diff) | building and comparing screens | `view`, `ui::diff`, `¨` |
 | 12 | `records` (1M records updated 5 times) | records, immutability | `with`, `¨` |
+| 13 | `scale` (30 1080p frames resized to 4 resolutions) | bytes, integer arithmetic, index math | `[u8]`, fused `¨`, `bytes::from` |
 
 ## Building the suite, step by step
 
@@ -94,6 +95,63 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | I/O and UI (10, 11) | not applicable | within 1.2× of the best Rust result |
 
 ## Current results (measured)
+
+### On CI machines, with Rust + Rayon (byte and pixel round, 2026-11-17)
+
+The bench workflow (run 43929837181, commit 3da7f96), after the round prompted by the new `scale` benchmark and the transcoding example: byte data read and written directly, heavy loop elements shared over the cores, element functions inlined into fused loops, a plain divide for operands that are not negative, tuples of numbers in registers. Ratios to C; Rust + Rayon and Mimic, all cores, are the parallel columns.
+
+**macOS (arm64)**
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.133 s | 0.155 s (1.16×) | 0.173 s (1.30×) | 0.137 s (1.03×) | 0.049 s (0.37×) | 0.048 s (0.36×) |
+| http | 0.303 s | 0.371 s (1.22×) | 3.420 s (11.29×) | 0.559 s (1.84×) | — | 0.451 s (1.49×) |
+| json | 0.333 s | 0.209 s (0.63×) | 0.520 s (1.56×) | 0.287 s (0.86×) | — | 0.264 s (0.79×) |
+| mandelbrot | 0.847 s | 0.806 s (0.95×) | 0.813 s (0.96×) | 0.508 s (0.60×) | 0.272 s (0.32×) | 0.187 s (0.22×) |
+| matmul | 0.255 s | 0.273 s (1.07×) | 0.650 s (2.54×) | 0.039 s (0.15×) | 0.306 s (1.20×) | 0.037 s (0.15×) |
+| nbody | 0.043 s | 0.058 s (1.34×) | 0.110 s (2.52×) | 0.052 s (1.19×) | — | 0.047 s (1.07×) |
+| prefix_sum | 0.159 s | 0.277 s (1.74×) | 0.153 s (0.96×) | 0.131 s (0.83×) | 0.106 s (0.67×) | 0.078 s (0.49×) |
+| records | 0.014 s | 0.039 s (2.82×) | 0.056 s (4.05×) | 0.036 s (2.56×) | 0.037 s (2.68×) | 0.023 s (1.63×) |
+| scale | 0.171 s | 0.292 s (1.70×) | 0.427 s (2.49×) | 0.546 s (3.19×) | 0.172 s (1.01×) | 0.154 s (0.90×) |
+| sort | 1.210 s | 0.259 s (0.21×) | 0.927 s (0.77×) | 0.161 s (0.13×) | 0.154 s (0.13×) | 0.112 s (0.09×) |
+| sum_of_squares | 0.039 s | 0.049 s (1.26×) | 0.079 s (2.05×) | 0.032 s (0.82×) | 0.029 s (0.76×) | 0.013 s (0.33×) |
+| tree | 0.345 s | 0.441 s (1.28×) | 0.589 s (1.71×) | 0.266 s (0.77×) | 0.321 s (0.93×) | 0.243 s (0.70×) |
+
+**Linux (x86-64)**
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.113 s | 0.121 s (1.07×) | 0.229 s (2.03×) | 0.101 s (0.89×) | 0.048 s (0.43×) | 0.047 s (0.41×) |
+| http | 0.298 s | 0.687 s (2.31×) | 7.937 s (26.67×) | 0.513 s (1.72×) | — | 0.454 s (1.52×) |
+| json | 0.328 s | 0.263 s (0.80×) | 0.654 s (2.00×) | 0.313 s (0.96×) | — | 0.291 s (0.89×) |
+| mandelbrot | 0.577 s | 0.655 s (1.13×) | 0.662 s (1.15×) | 0.446 s (0.77×) | 0.181 s (0.31×) | 0.184 s (0.32×) |
+| matmul | 0.201 s | 0.198 s (0.99×) | 0.715 s (3.56×) | 0.077 s (0.38×) | 0.409 s (2.04×) | 0.044 s (0.22×) |
+| nbody | 0.100 s | 0.111 s (1.11×) | 0.164 s (1.64×) | 0.066 s (0.66×) | — | 0.066 s (0.66×) |
+| prefix_sum | 0.439 s | 0.488 s (1.11×) | 0.486 s (1.11×) | 0.443 s (1.01×) | 0.259 s (0.59×) | 0.247 s (0.56×) |
+| records | 0.027 s | 0.083 s (3.09×) | 0.077 s (2.88×) | 0.084 s (3.15×) | 0.054 s (2.02×) | 0.049 s (1.85×) |
+| scale | 0.212 s | 0.492 s (2.33×) | 0.620 s (2.93×) | 0.744 s (3.52×) | 0.349 s (1.65×) | 0.334 s (1.58×) |
+| sort | 0.900 s | 0.231 s (0.26×) | 0.922 s (1.02×) | 0.212 s (0.24×) | 0.142 s (0.16×) | 0.133 s (0.15×) |
+| sum_of_squares | 0.031 s | 0.058 s (1.86×) | 0.095 s (3.06×) | 0.031 s (1.01×) | 0.075 s (2.42×) | 0.016 s (0.51×) |
+| tree | 0.528 s | 0.618 s (1.17×) | 0.658 s (1.25×) | 0.342 s (0.65×) | 0.446 s (0.84×) | 0.170 s (0.32×) |
+
+**Windows (x86-64)** (no C version of the server: http has no ratio)
+
+| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |
+|---|---|---|---|---|---|---|
+| fib | 0.129 s | 0.112 s (0.87×) | 0.228 s (1.76×) | 0.114 s (0.88×) | 0.053 s (0.41×) | 0.058 s (0.45×) |
+| http | — | 0.749 s | 6.485 s | 0.587 s | — | 0.667 s |
+| json | 0.571 s | 0.338 s (0.59×) | 0.628 s (1.10×) | 0.389 s (0.68×) | — | 0.345 s (0.60×) |
+| mandelbrot | 0.646 s | 0.684 s (1.06×) | 0.707 s (1.09×) | 0.220 s (0.34×) | 0.202 s (0.31×) | 0.082 s (0.13×) |
+| matmul | 0.306 s | 0.300 s (0.98×) | 0.784 s (2.57×) | 0.105 s (0.34×) | 0.507 s (1.66×) | 0.064 s (0.21×) |
+| nbody | 0.092 s | 0.101 s (1.09×) | 0.186 s (2.01×) | 0.076 s (0.82×) | — | 0.076 s (0.82×) |
+| prefix_sum | 0.326 s | 0.743 s (2.28×) | 0.313 s (0.96×) | 0.337 s (1.03×) | 0.191 s (0.59×) | 0.204 s (0.63×) |
+| records | 0.033 s | 0.099 s (3.03×) | 0.070 s (2.15×) | 0.114 s (3.49×) | 0.061 s (1.85×) | 0.076 s (2.33×) |
+| scale | 0.506 s | 0.580 s (1.14×) | 0.742 s (1.47×) | 0.760 s (1.50×) | 0.372 s (0.74×) | 0.391 s (0.77×) |
+| sort | 1.874 s | 0.256 s (0.14×) | 1.060 s (0.57×) | 0.505 s (0.27×) | 0.157 s (0.08×) | 0.279 s (0.15×) |
+| sum_of_squares | 0.039 s | 0.071 s (1.83×) | 0.108 s (2.80×) | 0.045 s (1.16×) | 0.048 s (1.24×) | 0.028 s (0.73×) |
+| tree | 1.214 s | 1.369 s (1.13×) | 0.682 s (0.56×) | 0.429 s (0.35×) | 0.817 s (0.67×) | 0.214 s (0.18×) |
+
+Where Mimic is behind C: `scale` on one core (1.5× on Windows to 3.5× on Linux; C knows the four sizes at compile time and turns every division into a multiplication, and Mimic checks bounds and rounds `div` downwards; on all cores Mimic is ahead of Rayon on macOS and Windows), `records` (one heap block per record: 1.6× to 2.3× C on all cores), and `http` on one core (1.7× to 1.8×). The machines change from run to run (an AMD EPYC 7763, 9V45 or 9V74 for Linux and Windows), and so do C's times: compare within a table.
 
 ### On CI machines, with Rust + Rayon (after the speed round, 2026-11-16)
 

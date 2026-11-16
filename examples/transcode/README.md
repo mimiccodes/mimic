@@ -32,24 +32,25 @@ first 3 seconds; the same arguments for `node transcode.mjs`).
 
 ## Results
 
-On an M3 Pro (12 cores), 60 frames of 1920×1080, the time to scale every
-frame to all four resolutions:
+On an M3 Pro (12 cores, other programs running), 60 frames of 1920×1080,
+the time to scale every frame to all four resolutions (one run of
+`node compare.mjs`; times vary from run to run on a busy machine, the
+ratios much less):
 
 | | all cores | one thread |
 |---|---|---|
-| Mimic | 1.23 s | 6.43 s |
-| JavaScript (Node 22) | 4.06 s | 12.09 s |
-| C (`clang -O3`, one thread, same arithmetic) | | 5.00 s |
+| Mimic | 1.30 s | 7.66 s |
+| JavaScript (Node 22) | 7.29 s | 14.46 s |
+| C (`clang -O3`, one thread, the same arithmetic) | | 4.91 s |
 
-Mimic is 3.3× faster than JavaScript on all cores and 1.9× faster on one
-thread; on all cores it is 4× faster than the single-threaded C. On one
-thread, C is ahead by what Mimic checks and C does not: every `src[i]` is
+Mimic is 5.6× faster than JavaScript on all cores and 1.9× faster on one
+thread, and on all cores 3.8× faster than the single-threaded C. On one
+thread C is ahead by what Mimic checks and C does not: every `src[i]` is
 bounds-checked (memory safety), and `div` and `%` round towards minus
-infinity (exact when the operands are not negative, which the compiler
-uses: a plain unsigned divide then). The frames are the same bytes in all of
-them.
+infinity (when the operands are not negative, which the compiler tests for,
+a plain divide is used). The frames are the same bytes in every language.
 
 The whole transcodes are dominated by ffmpeg's encoder (x264): with Mimic
-scaling, decode + scale + encode of all four takes about 3.5 s; ffmpeg alone
-does it in about 1.2 s when it writes all four outputs from one decode, and
-about 2.5 s one resolution at a time.
+scaling, decode + scale + encode of all four takes about 4 s; ffmpeg alone
+does it in 1.3–1.9 s when it writes all four outputs from one decode, and
+about 3 s one resolution at a time.
