@@ -924,6 +924,22 @@ impl Parser {
                 return false;
             }
             i = skip_nl(i + 1);
+            // `name: Type`: skip the type, to the `,` or `)` at this depth
+            if matches!(tok(i), Some(Tok::Colon)) {
+                let mut depth = 0usize;
+                i += 1;
+                loop {
+                    match tok(i) {
+                        None | Some(Tok::Newline) if depth == 0 => return false,
+                        Some(Tok::LParen | Tok::LBracket) => depth += 1,
+                        Some(Tok::RParen | Tok::RBracket) if depth > 0 => depth -= 1,
+                        Some(Tok::Comma | Tok::RParen) if depth == 0 => break,
+                        None => return false,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
             match tok(i) {
                 Some(Tok::Comma) => i = skip_nl(i + 1),
                 Some(Tok::RParen) => return matches!(tok(skip_nl(i + 1)), Some(Tok::FatArrow)),
@@ -1282,17 +1298,33 @@ impl Parser {
                 return Ok(Expr { span: span.to(body.span), kind: ExprKind::Arms { params, body } });
             }
             Tok::LParen if !self.no_lambda && self.lambda_params_ahead() => {
-                // `(a, b) => e`, `() => e`
+                // `(a, b) => e`, `() => e`, `(a: i64, b) => e`
                 let mut params = Vec::new();
+                let mut typed = Vec::new();
                 while !self.at(&Tok::RParen) {
-                    params.push(self.ident()?.0);
+                    let (name, nspan) = self.ident()?;
+                    if self.eat(&Tok::Colon) {
+                        // a typed parameter: the lambda takes `name·k` and
+                        // its body starts `let name: Type = name·k`, which
+                        // checks (and converts) as any annotated `let`
+                        let t = self.ty()?;
+                        let inner = format!("{name}·{}", params.len());
+                        typed.push(Stmt::Let { name: name.clone(), mutable: false, ty: Some(t), value: Expr { kind: ExprKind::Path(vec![inner.clone()]), span: nspan }, span: nspan });
+                        params.push(inner);
+                    } else {
+                        params.push(name);
+                    }
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
                 }
                 self.expect(&Tok::RParen)?;
                 self.expect(&Tok::FatArrow)?;
-                let body = self.expr()?;
+                let mut body = self.expr()?;
+                if !typed.is_empty() {
+                    let bspan = body.span;
+                    body = Expr { kind: ExprKind::Block(Block { stmts: typed, tail: Some(Box::new(body)), span: bspan }), span: bspan };
+                }
                 let span = span.to(body.span);
                 return Ok(Expr { kind: ExprKind::Lambda { params, body: Box::new(body) }, span });
             }

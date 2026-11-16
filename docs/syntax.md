@@ -136,6 +136,7 @@ arms (lo = 0, hi = 1000000) {              // divide and conquer (⋔), in paral
 let k = 10
 let add_k = x => x + k                 // a lambda capturing k (by value)
 let mul = (a, b) => a * b              // several parameters; `() => …` for none
+let area = (w: f64, h: f64) => w * h   // parameters may carry types, checked as a function's
 apply(double, 21)                      // a named function as a value
 fold(xs, (+), 0)                       // an operator as a value: (+) (*) (==) …
 [1 2] ¨ Some                           // a variant constructor as a value: x => Some(x)

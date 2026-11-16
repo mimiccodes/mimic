@@ -15,3 +15,5 @@ Output { status: 0, stdout: "hello world
 ", stderr: "" }
 (3, "out", "err")
 true
+in temp
+true

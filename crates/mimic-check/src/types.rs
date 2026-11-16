@@ -796,7 +796,9 @@ impl Walk<'_, '_> {
                     let mut t = match coerce_in(self.inf.p, self.module, ty.as_ref(), v) {
                         Ok(t) => t,
                         Err(m) => {
-                            self.err(Diag::new(&C::TYPE_MISMATCH, format!("`let {name}`: {m}"), *span));
+                            // (a lambda's typed parameter is such a `let`)
+                            let what = if matches!(&value.kind, ExprKind::Path(p) if p.len() == 1 && p[0].contains('·')) { format!("parameter `{name}`") } else { format!("`let {name}`") };
+                            self.err(Diag::new(&C::TYPE_MISMATCH, format!("{what}: {m}"), *span));
                             Ty::Dyn
                         }
                     };

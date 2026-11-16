@@ -1,0 +1,7 @@
+// expect-error: E0401 parameter `s`: expected i64, found str
+module main
+
+// a typed lambda parameter is checked like a function's
+fn main() {
+    print(["a" "b"] ¨ ((s: i64) => s + 1))
+}

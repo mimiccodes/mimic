@@ -715,7 +715,10 @@ static void *win_read_all(void *arg) {
 
 /* Run a command line (UTF-8); stdin is empty, stdout and stderr captured.
  * [status stdout stderr] */
-static mim_val *win_run(const char *what, const char *cmdline) {
+static mim_val *win_run_in(const char *what, const char *cmdline, const char *dir);
+static mim_val *win_run(const char *what, const char *cmdline) { return win_run_in(what, cmdline, NULL); }
+/* (dir: the working directory, NULL for this one) */
+static mim_val *win_run_in(const char *what, const char *cmdline, const char *dir) {
     SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
     HANDLE out_r, out_w, err_r, err_w;
     if (!CreatePipe(&out_r, &out_w, &sa, 0) || !CreatePipe(&err_r, &err_w, &sa, 0)) {
@@ -736,7 +739,9 @@ static mim_val *win_run(const char *what, const char *cmdline) {
     wchar_t *wcmd = win_wide(cmdline);
     fflush(stdout);
     fflush(stderr);
-    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    wchar_t *wdir = dir ? win_wide(dir) : NULL;
+    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, wdir, &si, &pi);
+    free(wdir);
     DWORD launch_err = GetLastError();
     free(wcmd);
     CloseHandle(out_w);
@@ -780,10 +785,26 @@ static mim_val *win_run(const char *what, const char *cmdline) {
 
 /* run a program (looked up in PATH) with arguments; stdin is empty.
  * [status stdout stderr]; a signal gives status 128 + signal number */
-static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
+static mim_val *impl_io_run_in(mim_val *program, mim_val *argv_list, mim_val *dir);
+static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) { return impl_io_run_in(program, argv_list, NULL); }
+
+/* dir: the program's working directory (NULL: this process's) */
+static mim_val *impl_io_run_in(mim_val *program, mim_val *argv_list, mim_val *dir) {
     io_clear();
+    const char *cwd = dir ? io_path(dir, "run_in") : NULL;
 #if defined(_WIN32)
     const char *prog = io_path(program, "run");
+    if (cwd) {
+        wchar_t *wd = win_wide(cwd);
+        DWORD at = GetFileAttributesW(wd);
+        free(wd);
+        if (at == INVALID_FILE_ATTRIBUTES || !(at & FILE_ATTRIBUTE_DIRECTORY)) {
+            char m[600];
+            snprintf(m, sizeof m, "cannot run in %s: %s", cwd, at == INVALID_FILE_ATTRIBUTES ? "No such file or directory" : "Not a directory");
+            io_fail_msg(m);
+            return alloc(MIM_BOXED, 1, 0);
+        }
+    }
     need(argv_list, "run");
     int64_t n = argv_list->rank == 1 ? argv_list->len : 0;
     if (n && argv_list->dtype != MIM_BOXED) mim_panic("run: the arguments must be a list of str");
@@ -794,12 +815,13 @@ static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
         win_quote(&cmd, io_path(((mim_val **)argv_list->data)[i], "run"));
     }
     sb_put(&cmd, "", 1);
-    mim_val *r = win_run(prog, cmd.p);
+    mim_val *r = win_run_in(prog, cmd.p, cwd);
     free(cmd.p);
     return r;
 #elif defined(MIM_NO_SPAWN)
     (void)program;
     (void)argv_list;
+    (void)cwd;
     io_fail_msg("running programs is not supported on this platform");
     return alloc(MIM_BOXED, 1, 0);
 #else
@@ -826,7 +848,64 @@ static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
     fflush(stdout);
     fflush(stderr);
     pid_t pid;
-    int rc = posix_spawnp(&pid, prog, &fa, NULL, argv, environ);
+    int rc;
+    if (!cwd) {
+        rc = posix_spawnp(&pid, prog, &fa, NULL, argv, environ);
+    } else {
+        /* posix_spawn changes directory only through an extension older
+         * C libraries lack: fork, change directory, then exec (in the
+         * child, only calls that are safe after fork) */
+        struct stat sd;
+        if (stat(cwd, &sd) != 0 || !S_ISDIR(sd.st_mode)) {
+            /* the folder, not the program, is what is missing */
+            if (stat(cwd, &sd) == 0) errno = ENOTDIR;
+            close(out[0]);
+            close(err[0]);
+            close(out[1]);
+            close(err[1]);
+            posix_spawn_file_actions_destroy(&fa);
+            free(argv);
+            io_fail("cannot run in", cwd);
+            return alloc(MIM_BOXED, 1, 0);
+        } else {
+            int ok[2];
+            rc = pipe(ok) != 0 ? errno : 0;
+            if (rc == 0) {
+                fcntl(ok[1], F_SETFD, FD_CLOEXEC);
+                pid = fork();
+                if (pid == 0) {
+                    int devnull = open("/dev/null", O_RDONLY);
+                    if (devnull >= 0) dup2(devnull, 0);
+                    dup2(out[1], 1);
+                    dup2(err[1], 2);
+                    close(out[0]);
+                    close(err[0]);
+                    close(ok[0]);
+                    int e = chdir(cwd) == 0 ? (execvp(prog, argv), errno) : errno;
+                    ssize_t w = write(ok[1], &e, sizeof e);
+                    (void)w;
+                    _exit(127);
+                }
+                close(ok[1]);
+                if (pid < 0) {
+                    rc = errno;
+                } else {
+                    /* the exec closed the pipe: it started; else its error */
+                    int e = 0;
+                    ssize_t got;
+                    while ((got = read(ok[0], &e, sizeof e)) < 0 && errno == EINTR) {
+                    }
+                    if (got == (ssize_t)sizeof e) {
+                        int st;
+                        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+                        }
+                        rc = e;
+                    }
+                }
+                close(ok[0]);
+            }
+        }
+    }
     posix_spawn_file_actions_destroy(&fa);
     free(argv);
     close(out[1]);
@@ -1159,6 +1238,9 @@ static mim_val *output_of(mim_val *parts);
 
 /* run a program: Ok(Output { status, stdout, stderr }) */
 mim_val *mim_std_os_run(mim_val *program, mim_val *args) { return output_of(impl_io_run(program, args)); }
+
+/* the same, in another working directory */
+mim_val *mim_std_os_run_in(mim_val *dir, mim_val *program, mim_val *args) { return output_of(impl_io_run_in(program, args, dir)); }
 
 /* a command line through the system shell: /bin/sh -c, or cmd.exe on Windows */
 mim_val *mim_std_os_shell(mim_val *command) {

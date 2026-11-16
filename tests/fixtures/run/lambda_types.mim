@@ -1,0 +1,23 @@
+module main
+
+// a lambda's parameters may carry types, as a function's do; a typed
+// parameter is checked (and converted) like an annotated `let`
+
+fn apply2(f: fn(i64, i64) -> i64, a: i64, b: i64) -> i64 { f(a, b) }
+
+fn main() {
+    let add = (a: i64, b: i64) => a + b
+    print(add(1, 2))
+    let half = (x: f64) => x / 2.0
+    print(half(5.0))
+    let mixed = (n: i64, s) => "{s}{n}"
+    print(mixed(7, "n="))
+    print([1 2 3] ¨ ((x: i64) => x * x))
+    print(apply2((a: i64, b: i64) => a * b, 6, 7))
+    let small: [f32] = [1.5 2.5]
+    print(small ¨ ((v: f32) => v * 2.0))
+    let pairs = [(1, "one") (2, "two")]
+    print(pairs ¨ ((p: (i64, str)) => p.1))
+    let total = (xs: [i64]) => xs ▷ +/
+    print(total([4 5 6]))
+}

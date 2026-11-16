@@ -37,6 +37,12 @@ fn main() {
         Err(e) => print("no shell: {e}"),
     }
     print(is_err(os::run("no-such-program-xyz", [])))
+    // in another working directory
+    match os::run_in(fs::temp_dir(), "echo", ["in" "temp"]) {
+        Ok(o) => print(trim(o.stdout)),
+        Err(e) => print("cannot run programs: {e}"),
+    }
+    print(is_err(os::run_in("/no/such/folder", "echo", [])))
 }
 
 fn days_between(a: i64, b: i64) -> i64 { (b - a) div (24 * 3600 * 1s) }

@@ -14,11 +14,11 @@ Several things that look missing exist under another name, or are left out on pu
 | `and` / `or` did not short-circuit: `n > 0 and xs[0] == "x"` read `xs[0]` of an empty list and crashed | ✅ fixed |
 | `{` in a string starts an interpolation; the error spoke of digraphs | ✅ the message says so, and to write `\{` |
 | `module` as a record field name | ✅ fixed |
-| Types on a lambda's parameters: `(a: i64, b: i64) => a + b` | open (a named function instead) |
+| Types on a lambda's parameters: `(a: i64, b: i64) => a + b` | ✅ fixed |
 | `match` on a list of pairs needed `_ => …` after `[]` and `[(k, v), ..rest]` | ✅ fixed |
 | An empty map literal | ✅ `[:]` |
 | `split("", "\n")` gave `[]` | ✅ `[""]` |
-| Running a program in another folder (`os::run` has no working directory) | open (`os::shell("cd dir && …")`) |
+| Running a program in another folder (`os::run` has no working directory) | ✅ `os::run_in(dir, program, arguments)` |
 | Is input waiting? (debouncing while reading) | a task reading into a channel, and `chan::try_receive` |
 | Reading an exact number of bytes from standard input | ✅ `io::read_bytes(n)` |
 | `mimic check src/a_module.mim` said `mimic run <file>` expects `module main` | ✅ a file inside a project is checked with its project |

@@ -248,6 +248,7 @@ Colours and other effects are ANSI codes in strings: `"\x1b[1;32mgreen\x1b[0m"`.
 | `os::set_env(name, value)` | `Result[bool, str]` | sync |
 | `os::run(program, arguments)` | `Result[os::Output, str]`: `program` is looked up through `PATH`; `Output { status, stdout, stderr }` holds the exit status (128 + n when killed by signal n) and both outputs, captured completely | sync |
 | `os::on_interrupt(f)` | Ctrl-C calls `f` (on a thread of its own) instead of stopping the program; `f` decides, for example with `os::exit(0)` | sync |
+| `os::run_in(dir, program, arguments)` | `os::run` with `dir` as the program's working directory (a relative program path, such as `./tool`, is found from there); `Err` when `dir` is not a folder | sync |
 | `os::shell(command)` | the command line through the system shell: `/bin/sh -c` (on Windows `cmd.exe /c`) | sync |
 | `os::exit(code)` | Leave the program now with that exit status | ordered |
 

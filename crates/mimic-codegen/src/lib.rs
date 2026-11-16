@@ -2677,7 +2677,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Stmt::Let { name, mutable, value, span, .. } => {
                 let v = self.expr(value)?;
                 let t = self.cur_spec.as_ref().and_then(|sp| sp.lets.get(&id(s)).copied()).unwrap_or(Ty::Dyn);
-                let v = self.as_ty(v, t, &format!("`let {name}`"))?;
+                let what = if matches!(&value.kind, ExprKind::Path(p) if p.len() == 1 && p[0].contains('·')) { format!("parameter `{name}`") } else { format!("`let {name}`") };
+                let v = self.as_ty(v, t, &what)?;
                 let v = self.own(v)?;
                 let slot = self.entry_alloca(t, name)?;
                 self.b.build_store(slot, self.basic(v)).s()?;

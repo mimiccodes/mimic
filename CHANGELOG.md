@@ -4,6 +4,10 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Added
+- **Types on a lambda's parameters**: `(w: f64, h: f64) => w * h`, checked like a function's (error E0401 names the parameter).
+- **`os::run_in(dir, program, arguments)`**: `os::run` in another working directory; a missing folder is an `Err` that names it.
+
 ## 0.3.15 — 2026-11-16
 
 Updating while an editor is open works again, `and`/`or` short-circuit, servers can be profiled and stopped, lists of number-only records are 9× faster, and fixes from first users' notes.

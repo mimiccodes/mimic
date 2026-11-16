@@ -31,6 +31,23 @@ fn main() {
 hello
 ```
 
+Parameters may carry types, as a function's do. Mimic usually infers them, so types here document intent and are checked: a call with a value of another type is error E0401.
+
+```mimic run
+module main
+
+fn main() {
+    let area = (w: f64, h: f64) => w * h
+    print(area(2.0, 3.5))
+    print([1 2 3] ¨ ((n: i64) => n * 10))
+}
+```
+
+```output
+7.0
+[10 20 30]
+```
+
 ## Passing functions
 
 A named function can be passed by its name. Write a function parameter's type as `fn(argument types) -> result`:

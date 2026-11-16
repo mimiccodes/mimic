@@ -462,6 +462,9 @@ pub module os {
     pub extern \"mimic\" sync {
         fn set_env(name: str, value: str) -> Result[bool, str]
         fn run(program: str, arguments: [str]) -> Result[Output, str]
+        // the same, in the working directory `dir` (a relative program
+        // path, like ./tool, is found from there)
+        fn run_in(dir: str, program: str, arguments: [str]) -> Result[Output, str]
         // Run a command line through the system shell: /bin/sh -c, or
         // cmd.exe /c on Windows.
         fn shell(command: str) -> Result[Output, str]
