@@ -477,11 +477,13 @@ static mim_val *impl_sleep(mim_val *d) {
     /* never less than asked for: some clocks (WASI hosts, coarse system
      * timers) wake a little early, so sleep again for what is left */
     int64_t until = monotonic_ns() + ns;
+    PROF_IDLE(1);
     for (int64_t left = ns; left > 0; left = until - monotonic_ns()) {
         struct timespec ts = {(time_t)(left / 1000000000), (long)(left % 1000000000)};
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
         }
     }
+    PROF_IDLE(0);
     return NULL;
 }
 
@@ -842,7 +844,10 @@ static mim_val *impl_io_run(mim_val *program, mim_val *argv_list) {
     int open = 2;
     char buf[65536];
     while (open > 0) {
-        if (poll(fds, 2, -1) < 0) {
+        PROF_IDLE(1);
+        int polled = poll(fds, 2, -1);
+        PROF_IDLE(0);
+        if (polled < 0) {
             if (errno == EINTR) continue;
             break;
         }
@@ -1830,7 +1835,10 @@ static int key_byte(int ms) {
 #elif !defined(__wasi__)
     if (ms >= 0) {
         struct pollfd p = {0, POLLIN, 0};
-        if (poll(&p, 1, ms) <= 0) return -1;
+        PROF_IDLE(1);
+        int polled = poll(&p, 1, ms);
+        PROF_IDLE(0);
+        if (polled <= 0) return -1;
     }
     unsigned char c;
     ssize_t r;

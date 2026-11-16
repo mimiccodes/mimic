@@ -115,7 +115,9 @@ static int mw_socket(int af, int type, int proto) {
     return (int)s;
 }
 static int mw_accept(int fd, struct sockaddr *a, socklen_t *l) {
+    PROF_IDLE(1);
     SOCKET s = accept((SOCKET)fd, a, l);
+    PROF_IDLE(0);
     if (s == INVALID_SOCKET) {
         errno = ws_errno();
         return -1;
@@ -444,8 +446,10 @@ mim_val *mim_std_tcp_accept(mim_val *l) {
     int lfd = fd_of(l, "tcp_accept");
     int fd;
     mim_wait_readable(lfd);
+    PROF_IDLE(1);
     while ((fd = accept(lfd, NULL, NULL)) < 0 && errno == EINTR) {
     }
+    PROF_IDLE(0);
     if (fd < 0) return err_errno("cannot accept", NULL);
     sock_setup(fd);
     return ok_of(socket_of(fd));
@@ -2844,9 +2848,11 @@ static void conn_run(int fd, mim_val *handler, conn_fn one, void *identity, pthr
 
 static void *conn_main(void *p) {
     conn_job *j = (conn_job *)p;
+    prof_register("connection");
     conn_run(j->fd, j->handler, j->one, j->identity, j->turn);
     mim_release(j->handler);
     free(j);
+    prof_unregister();
     free_list_drain(); /* this thread ends now */
     return NULL;
 }
@@ -2901,7 +2907,9 @@ static mim_val *serve_loop_ex(mim_val *port, mim_val *handler, int64_t limit, co
     pthread_t *threads = limit > 0 && parallel && !green ? (pthread_t *)calloc((size_t)limit, sizeof(pthread_t)) : NULL;
     while (limit == 0 || served < limit) {
         mim_wait_readable(lfd);
+        PROF_IDLE(1);
         int fd = accept(lfd, NULL, NULL);
+        PROF_IDLE(0);
         if (fd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             break;
@@ -3596,8 +3604,10 @@ mim_val *mim_std_tls_accept(mim_val *l, mim_val *identity) {
     int lfd = fd_of(l, "tls::accept");
     int fd;
     mim_wait_readable(lfd);
+    PROF_IDLE(1);
     while ((fd = accept(lfd, NULL, NULL)) < 0 && errno == EINTR) {
     }
+    PROF_IDLE(0);
     if (fd < 0) return err_errno("cannot accept", NULL);
     sock_setup(fd);
     sock_timeout(fd, 30);

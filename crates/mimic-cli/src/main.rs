@@ -319,6 +319,9 @@ enum Cmd {
         /// How many functions to list
         #[arg(long, default_value_t = 15)]
         top: usize,
+        /// For a program that does not end by itself (a server): stop it after this many seconds
+        #[arg(long = "for", value_name = "SECONDS")]
+        seconds: Option<f64>,
         /// Arguments for the program (after `--`)
         #[arg(last = true)]
         args: Vec<String>,
@@ -665,7 +668,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Explain { code, emit_json } => explain(code.as_deref(), emit_json),
-        Cmd::Profile { file, json, hz, top, args } => profile::run(profile::Options { file, json, hz, top, args }),
+        Cmd::Profile { file, json, hz, top, seconds, args } => profile::run(profile::Options { file, json, hz, top, seconds, args }),
         Cmd::Repl { json } => {
             if json {
                 repl::run_json()?;

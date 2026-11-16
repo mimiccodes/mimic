@@ -83,15 +83,15 @@ A name LLVM does not accept is an error, with a suggestion for the closest name.
 
 | Tier | Meaning | Targets today |
 |---|---|---|
-| **stable** | Programs run and pass every golden test (on the development machine or in CI) | Native, `aarch64-macos`, `x86_64-macos` (under Rosetta), `aarch64-ios-macabi` (Mac Catalyst), `wasm32-wasi` (Node), `x86_64-linux-musl` and `aarch64-linux-musl` (static Linux), `x86_64-windows` |
+| **stable** | Programs run and pass every golden test (on the development machine or in CI) | Native, `aarch64-macos`, `x86_64-macos` (under Rosetta), `aarch64-ios-macabi` (Mac Catalyst), `wasm32-wasi` (Node), `x86_64-linux-musl` and `aarch64-linux-musl` (static Linux), `x86_64-windows` and `aarch64-windows` |
 | **runs** | A program ran on the target, but not the full test suite yet | `aarch64-ios-simulator` (iPhone simulator) |
-| **links** | Complete executables are built and checked (format, architecture, platform), but not run | The other 28 Linux musl targets; `aarch64-windows`; iOS, tvOS, watchOS and visionOS devices and the other simulators |
+| **links** | Complete executables are built and checked (format, architecture, platform), but not run | The other 28 Linux musl targets; iOS, tvOS, watchOS and visionOS devices and the other simulators |
 | **compiles** | Object files or assembly only: no C library is bundled yet | The other CPU architectures |
 | **not yet** | GPU architecture: needs the GPU backend (roadmap F8) | amdgpu, r600, spirv, spirv32, spirv64 |
 
 Static Linux programs (`*-linux-musl`, what `--target x86_64-linux` makes) cannot load the system's OpenSSL, so their TLS (`https://`, `tls::`) is Mbed TLS 3.6, bundled in `mimic`, built for the target on first use (cached like musl) and linked into the program. They trust the system's CA bundle, or the file `SSL_CERT_FILE` names.
 
-A target moves up a tier when tests run on it. CI runs every golden program on Linux x86_64 (native and static), on Arm Linux (static, cross-built), and on Windows x86_64 (built there by `mimic` itself, and cross-built on Linux).
+A target moves up a tier when tests run on it. CI runs every golden program on Linux x86_64 (native and static), on Arm Linux (static, cross-built), on Windows x86_64 (built there by `mimic` itself, and cross-built on Linux), and on Windows arm64 (cross-built on Linux).
 
 ## What each target produces
 

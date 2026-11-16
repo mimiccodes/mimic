@@ -22,6 +22,8 @@ pub struct Options {
     pub json: bool,
     pub hz: Option<u32>,
     pub top: usize,
+    /// Stop the program after this many seconds (a server), writing the profile
+    pub seconds: Option<f64>,
     pub args: Vec<String>,
 }
 
@@ -180,7 +182,28 @@ pub fn run(o: Options) -> Result<ExitCode, String> {
     if let Some(hz) = o.hz {
         child.env("MIMIC_PROFILE_HZ", hz.to_string());
     }
-    let status = child.status().map_err(|e| format!("cannot run {}: {e}", art.path.display()))?;
+    if let Some(secs) = o.seconds {
+        // timed by the program itself, from when it starts running
+        child.env("MIMIC_PROFILE_FOR", secs.to_string());
+    }
+    let mut proc = child.spawn().map_err(|e| format!("cannot run {}: {e}", art.path.display()))?;
+    let status = match o.seconds {
+        None => proc.wait().map_err(|e| e.to_string())?,
+        // (a program that never starts its runtime is stopped well after)
+        Some(secs) => {
+            let t0 = std::time::Instant::now();
+            loop {
+                if let Some(st) = proc.try_wait().map_err(|e| e.to_string())? {
+                    break st;
+                }
+                if t0.elapsed().as_secs_f64() >= secs + 60.0 {
+                    let _ = proc.kill();
+                    break proc.wait().map_err(|e| e.to_string())?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
     let bytes = std::fs::read(&data_path).map_err(|_| "the program wrote no profile (did it end in a crash, or call os::exit before the runtime could write it?)".to_string())?;
     let data = parse(&bytes)?;
     let report = analyse(&input, &program, &art.path, &data, o.top)?;

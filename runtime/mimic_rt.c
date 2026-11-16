@@ -194,6 +194,7 @@ typedef struct {
     pthread_t th;
 #endif
     uintptr_t hi;           /* the top of the stack: frame pointers stay below */
+    volatile uintptr_t co_hi; /* while a coroutine runs here: the top of its stack */
     volatile int *idle;     /* the thread's t_prof_idle */
     int ready;              /* atomic: 1 while the thread can be sampled */
     int64_t waiting;        /* atomic: samples while it waited for work */
@@ -211,6 +212,7 @@ static _Thread_local int t_prof_id = -1;
 static int g_prof_stop;
 static int64_t g_prof_t0, g_prof_hz = 1000, g_prof_rounds;
 static const char *g_prof_path;
+static int64_t g_prof_for_ns;
 /* counters, while profiling */
 int64_t mim_prof_gpu_ns, mim_prof_gpu_kernels, mim_prof_gpu_bytes, mim_prof_copy_bytes, mim_prof_copies;
 
@@ -239,9 +241,11 @@ static int64_t prof_now(void) {
 static uint64_t g_prof_job[PROF_JOB_DEPTH];
 static int g_prof_job_depth;
 static void prof_job(void);
+static void prof_stack_top(uintptr_t top);
 static void prof_register(const char *name);
 static void prof_unregister(void);
 static void prof_start(const char *path);
+static void prof_dump(void);
 void mim_rt_init(int32_t argc, char **argv);
 
 /* ==== thread pool ======================================================== */
@@ -861,7 +865,8 @@ static void prof_record(int id, uint64_t pc, uint64_t lr, uintptr_t fp, uintptr_
     /* arm64: a function that calls nothing keeps no frame; its caller is in
      * the link register (elsewhere it names this function again: harmless) */
     if (lr) s->pc[d++] = lr - 1;
-    while (d < PROF_DEPTH && fp >= sp && fp + 16 <= t->hi && (fp & 7) == 0) {
+    uintptr_t hi = t->co_hi ? t->co_hi : t->hi;
+    while (d < PROF_DEPTH && fp >= sp && fp + 16 <= hi && (fp & 7) == 0) {
         uintptr_t next = ((uintptr_t *)fp)[0];
         uintptr_t ret = ((uintptr_t *)fp)[1];
         if (!ret) break;
@@ -957,6 +962,13 @@ static void prof_job(void) {
     g_prof_job_depth = d;
 }
 
+/* This thread now runs on a coroutine's stack, whose top is `top` (0: on
+ * its own stack again), so samples follow the coroutine's frames. */
+static void prof_stack_top(uintptr_t top) {
+    int id = t_prof_id;
+    if (id >= 0 && id < PROF_THREADS) g_prof_threads[id].co_hi = top;
+}
+
 /* Before a registered thread ends. */
 static void prof_unregister(void) {
     int id = t_prof_id;
@@ -994,6 +1006,15 @@ static void *prof_sampler(void *arg)
         int n = __atomic_load_n(&g_prof_nthreads, __ATOMIC_ACQUIRE);
         if (n > PROF_THREADS) n = PROF_THREADS;
         g_prof_rounds++;
+        /* a program that does not end by itself (a server): `mimic profile
+         * --for N` sets MIMIC_PROFILE_FOR; after N seconds of the program's
+         * own time the profile is written and the program ends here */
+        if (g_prof_for_ns > 0 && prof_now() - g_prof_t0 >= g_prof_for_ns) {
+            __atomic_store_n(&g_prof_stop, 1, __ATOMIC_RELEASE);
+            prof_dump();
+            fflush(NULL);
+            _exit(0);
+        }
         for (int i = 0; i < n; i++) {
             prof_thread *t = &g_prof_threads[i];
             int one = 1;
@@ -1028,13 +1049,18 @@ static HANDLE g_prof_thread;
 #endif
 
 static void prof_write(void) {
-    if (!mim_prof_on) return;
+    if (!mim_prof_on || __atomic_load_n(&g_prof_stop, __ATOMIC_ACQUIRE)) return;
     __atomic_store_n(&g_prof_stop, 1, __ATOMIC_RELEASE);
 #ifdef _WIN32
     WaitForSingleObject(g_prof_thread, INFINITE);
 #else
     pthread_join(g_prof_thread, NULL);
 #endif
+    prof_dump();
+}
+
+/* The samples and counters, to the profile file. */
+static void prof_dump(void) {
     int64_t wall = prof_now() - g_prof_t0;
     FILE *f = fopen(g_prof_path, "wb");
     if (!f) {
@@ -1092,6 +1118,8 @@ static void prof_write(void) {
 
 static void prof_start(const char *path) {
     g_prof_path = path;
+    const char *pfor = getenv("MIMIC_PROFILE_FOR");
+    if (pfor && atof(pfor) > 0) g_prof_for_ns = (int64_t)(atof(pfor) * 1e9);
     const char *hz = getenv("MIMIC_PROFILE_HZ");
     if (hz && atoll(hz) > 0) g_prof_hz = atoll(hz) > 20000 ? 20000 : atoll(hz);
     g_prof_cap = (int64_t)1 << 20; /* about 200 MB of address space, touched as used */
@@ -1123,6 +1151,7 @@ static void prof_start(const char *path) {
 #else
 static void prof_register(const char *name) { (void)name; }
 static void prof_job(void) {}
+static void prof_stack_top(uintptr_t top) { (void)top; }
 static void prof_unregister(void) {}
 static void prof_start(const char *path) { (void)path; }
 #endif

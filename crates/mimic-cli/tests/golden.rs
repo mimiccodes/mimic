@@ -2147,6 +2147,16 @@ fn profile_names_functions() {
     assert!(v["memory"]["allocations"].is_number() && v["gpu"]["kernels"].is_number());
     // the program's own output goes to stderr with --json
     assert!(String::from_utf8_lossy(&out.stderr).contains("true"));
+    // a program that never ends (a server): `--for` stops it and still profiles it
+    let g = dir.join("forever.mim");
+    std::fs::write(&g, "module main\n\nfn tick(n: i64) -> i64 {\n    time::sleep(20ms)\n    tick(n + 1)\n}\n\nfn main() {\n    print(\"started\")\n    print(tick(0))\n}\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let out = mimic().args(["profile", "--json", "--for", "1"]).arg(&g).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(t0.elapsed().as_secs() < 60, "stopped after about a second");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["wall_seconds"].as_f64().unwrap() >= 0.9, "{v}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("started"), "the program's output is kept");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

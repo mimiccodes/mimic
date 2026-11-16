@@ -65,7 +65,7 @@ The report is also saved as JSON next to the program (`target/profiling/NAME.pro
 
 ## How it works
 
-The program is built for release, as `mimic build` would build it, with two differences (in `target/profiling/`): frame pointers are kept, so the stack can be read, and every allocation goes through the runtime's allocator, which counts them. The runtime then wakes about a thousand times a second and records where each of its threads is: the instruction and the calls that led there. A thread waiting for work only counts as waiting. At exit, the samples are named with the program's symbol table and joined with the compiler's decisions. Nothing is added to the program's own code, so it runs at nearly full speed.
+The program is built for release, as `mimic build` would build it, with two differences (in `target/profiling/`): frame pointers are kept, so the stack can be read, and every allocation goes through the runtime's allocator, which counts them. The runtime then wakes about a thousand times a second and records where each of its threads is: the instruction and the calls that led there. A thread waiting for work, for the network or in `time::sleep` only counts as waiting. A server's event loop is sampled too: its threads, and the tasks running on them, each on its own stack. At exit, the samples are named with the program's symbol table and joined with the compiler's decisions. Nothing is added to the program's own code, so it runs at nearly full speed.
 
 Flags:
 
@@ -73,6 +73,7 @@ Flags:
 |---|---|
 | `--hz N` | Samples per second on each thread (default 1000). When every core is busy the sampler may fall behind; the report uses the rate it reached. |
 | `--top N` | How many functions to list (default 15) |
+| `--for SECONDS` | For a program that does not end by itself, such as a server: after that many seconds of its running time, the profile is written and the program stops. Drive it meanwhile (a load generator, a browser). |
 | `--json` | The report as JSON; the program's own output goes to stderr |
 | `-- ARGS` | Arguments for the program |
 

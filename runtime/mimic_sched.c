@@ -349,9 +349,12 @@ static void *sched_main(void *p) {
     s->sp = ConvertThreadToFiberEx(NULL, FIBER_FLAG_FLOAT_SWITCH); /* the scheduler's own fiber */
     if (!s->sp) mim_panic("cannot start the event loop");
 #endif
+    prof_register("event loop");
     for (;;) {
         pthread_mutex_lock(&s->m);
+        PROF_IDLE(1);
         while (!s->head) pthread_cond_wait(&s->c, &s->m);
+        PROF_IDLE(0);
         mim_co *co = s->head;
         s->head = co->next;
         if (!s->head) s->tail = NULL;
@@ -363,7 +366,9 @@ static void *sched_main(void *p) {
         t_in_parallel = co->in_parallel;
         t_co = co;
         co->state = CO_RUNNING;
+        if (co->stack) prof_stack_top((uintptr_t)(co->stack + CO_STACK));
         mim_co_switch(&s->sp, co->sp);
+        prof_stack_top(0);
         t_co = NULL;
         co->native_depth = t_native_depth;
         co->in_parallel = t_in_parallel;
@@ -632,6 +637,7 @@ static void reg_fired(ws_reg *r, uint32_t ev) {
 
 static void *poller_main(void *p) {
     (void)p;
+    prof_register("poller");
     for (;;) {
         int64_t wait = timers_due();
 #ifdef _WIN32
@@ -647,7 +653,10 @@ static void *poller_main(void *p) {
         }
         struct epoll_event ev[64];
         int ms = wait < 0 ? -1 : (int)((wait + 999999) / 1000000);
+        /* (waiting for the network or a timer: idle, for the profiler) */
+        PROF_IDLE(1);
         int n = epoll_wait(g_ep, ev, 64, ms);
+        PROF_IDLE(0);
         for (int i = 0; i < n; i++) {
             if (ev[i].data.ptr == NULL) {
                 char buf[64];
@@ -665,7 +674,10 @@ static void *poller_main(void *p) {
             ts.tv_nsec = (long)(wait % 1000000000);
             tp = &ts;
         }
+        /* (waiting for the network or a timer: idle, for the profiler) */
+        PROF_IDLE(1);
         int n = kevent(g_poll, NULL, 0, ev, 64, tp);
+        PROF_IDLE(0);
         for (int i = 0; i < n; i++) {
             if (ev[i].udata == NULL) {
                 char buf[64];
@@ -678,7 +690,10 @@ static void *poller_main(void *p) {
 #else
         struct epoll_event ev[64];
         int ms = wait < 0 ? -1 : (int)((wait + 999999) / 1000000);
+        /* (waiting for the network or a timer: idle, for the profiler) */
+        PROF_IDLE(1);
         int n = epoll_wait(g_poll, ev, 64, ms);
+        PROF_IDLE(0);
         for (int i = 0; i < n; i++) {
             if (ev[i].data.ptr == NULL) {
                 char buf[64];
