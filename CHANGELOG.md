@@ -4,6 +4,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.14 — 2026-11-16
+
+Faster servers, parallel recursion and prefix sums, and a `mimic edit` where everything is clickable. On GitHub's machines Mimic on all cores is now even with or ahead of Rust + Rayon on most benchmarks ([BENCHMARK.md](BENCHMARK.md)).
+
+**Upgrading from 0.3.13:** run the new release's install script. Nothing in programs needs to change.
+
 ### Changed
 - **`mimic edit` is easier to use: everything is clickable.** A toolbar (Run, Test, Check, Audit, Find, Glyphs, REPL, Manual, ≡ Commands; icons only on a narrow terminal), a command list with every command and its key (F2, filtered as you type), folders in the file tree that open and close (`src/` and the open file's folders start open), tabs that switch and close with their ×, pane tabs, `file.mim:12` in any pane that jumps to the line, the error count and the hints in the status bar, the start screen's lines, and the items of every pop-up list. The wheel scrolls whatever is under it.
 - **Prefix sums are faster: 0.28 s → 0.17 s** (100 million numbers, 12 cores). A scan's chunks keep their fixed boundaries (results never depend on the number of threads), but each thread now takes one contiguous run of them, so the fresh output's pages are faulted in one region per thread instead of interleaved.
