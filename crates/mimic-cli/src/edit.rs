@@ -238,7 +238,7 @@ impl Doc {
 
 // ---- the editor -----------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Pane {
     Problems,
     Audit,
@@ -263,6 +263,112 @@ impl Pane {
     }
 }
 
+/// Everything the editor can do, for the toolbar, the command list (F2)
+/// and the start screen: what it is called, its key, and the key it acts as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cmd {
+    Run,
+    Test,
+    Check,
+    Audit,
+    Where,
+    Manual,
+    Repl,
+    Find,
+    Replace,
+    Glyphs,
+    Open,
+    New,
+    Save,
+    Close,
+    Files,
+    Panel,
+    GotoLine,
+    Undo,
+    Redo,
+    Commands,
+    Quit,
+}
+
+const COMMANDS: &[(Cmd, &str, &str)] = &[
+    (Cmd::Run, "Run the program", "F5"),
+    (Cmd::Test, "Run the tests", "F6"),
+    (Cmd::Check, "Problems", "F7"),
+    (Cmd::Audit, "Audit: quality and security", "F8"),
+    (Cmd::Where, "Where code runs", "F9"),
+    (Cmd::Manual, "The manual for the word under the cursor", "F1"),
+    (Cmd::Repl, "Evaluate a line (the REPL)", "F4"),
+    (Cmd::Find, "Find", "Ctrl-F"),
+    (Cmd::Replace, "Replace", "Ctrl-H"),
+    (Cmd::Glyphs, "Glyph palette", "Ctrl-G"),
+    (Cmd::Open, "Open a file", "Ctrl-O"),
+    (Cmd::New, "New program", "Ctrl-N"),
+    (Cmd::Save, "Save", "Ctrl-S"),
+    (Cmd::Close, "Close the file", "Ctrl-W"),
+    (Cmd::Files, "Show or hide the files", "Ctrl-B"),
+    (Cmd::Panel, "Show or hide the bottom pane", "Ctrl-J"),
+    (Cmd::GotoLine, "Go to a line", "Ctrl-L"),
+    (Cmd::Undo, "Undo", "Ctrl-Z"),
+    (Cmd::Redo, "Redo", "Ctrl-Y"),
+    (Cmd::Commands, "All commands", "F2"),
+    (Cmd::Quit, "Quit", "Ctrl-Q"),
+];
+
+impl Cmd {
+    /// The key it is: a click and the command list press it.
+    fn key(self) -> KeyEvent {
+        let f = |n| KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE);
+        let c = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        match self {
+            Cmd::Run => f(5),
+            Cmd::Test => f(6),
+            Cmd::Check => f(7),
+            Cmd::Audit => f(8),
+            Cmd::Where => f(9),
+            Cmd::Manual => f(1),
+            Cmd::Repl => f(4),
+            Cmd::Commands => f(2),
+            Cmd::Find => c('f'),
+            Cmd::Replace => c('h'),
+            Cmd::Glyphs => c('g'),
+            Cmd::Open => c('o'),
+            Cmd::New => c('n'),
+            Cmd::Save => c('s'),
+            Cmd::Close => c('w'),
+            Cmd::Files => c('b'),
+            Cmd::Panel => c('j'),
+            Cmd::GotoLine => c('l'),
+            Cmd::Undo => c('z'),
+            Cmd::Redo => c('y'),
+            Cmd::Quit => c('q'),
+        }
+    }
+}
+
+/// What is under the mouse: recorded while drawing.
+#[derive(Clone, Debug, PartialEq)]
+enum Hit {
+    /// a row of the file tree
+    Tree(usize),
+    Tab(usize),
+    TabClose(usize),
+    Button(Cmd),
+    Pane(Pane),
+    /// a line of the bottom pane (it may name a file and line)
+    PaneLine(usize),
+    Errors,
+    PromptItem(usize),
+}
+
+/// A row of the file tree: a folder or a file, at a depth.
+#[derive(Clone, Debug)]
+struct Row {
+    depth: usize,
+    path: PathBuf,
+    dir: bool,
+    name: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PromptKind {
     Find,
@@ -273,6 +379,8 @@ pub enum PromptKind {
     GotoLine,
     /// A line for the REPL (F4)
     Eval,
+    /// The command list (F2)
+    Command,
 }
 
 pub struct Prompt {
@@ -323,6 +431,15 @@ pub struct Editor {
     /// the editor's area on screen (for the mouse)
     area: Rect,
     gutter: u16,
+    /// folders of the file tree that are closed, and its first row shown
+    collapsed: std::collections::HashSet<PathBuf>,
+    tree_top: usize,
+    tree_area: Rect,
+    panel_area: Rect,
+    /// what each pane showed last, to show again when its tab is clicked
+    panes: std::collections::HashMap<Pane, Vec<(String, Style)>>,
+    /// where things are on screen, for clicks (filled while drawing)
+    hits: std::cell::RefCell<Vec<(Rect, Hit)>>,
 }
 
 fn glyph_table() -> Vec<(&'static str, &'static str, Option<&'static str>, &'static str)> {
@@ -428,7 +545,27 @@ impl Editor {
             last_find: String::new(),
             area: Rect::default(),
             gutter: 6,
+            collapsed: std::collections::HashSet::new(),
+            tree_top: 0,
+            tree_area: Rect::default(),
+            panel_area: Rect::default(),
+            panes: std::collections::HashMap::new(),
+            hits: std::cell::RefCell::new(Vec::new()),
         };
+        // folders start closed, except src/ and those holding the file opened
+        for f in &ed.files {
+            let mut d = f.parent();
+            while let Some(dir) = d {
+                if dir == ed.root || !dir.starts_with(&ed.root) {
+                    break;
+                }
+                let keep_open = dir == ed.root.join("src") || first.as_deref().is_some_and(|x| x.starts_with(dir));
+                if !keep_open {
+                    ed.collapsed.insert(dir.to_path_buf());
+                }
+                d = dir.parent();
+            }
+        }
         if let Some(f) = first {
             ed.open_file(&f);
         }
@@ -526,6 +663,7 @@ impl Editor {
     }
 
     fn set_pane(&mut self, pane: Pane, lines: Vec<(String, Style)>) {
+        self.panes.insert(pane, lines.clone());
         self.pane = pane;
         self.pane_lines = lines;
         self.pane_scroll = 0;
@@ -660,6 +798,7 @@ impl Editor {
             (KeyCode::Char('f'), true, _) => self.prompt = Some(Prompt { kind: PromptKind::Find, input: self.last_find.clone(), selected: 0 }),
             (KeyCode::Char('h'), true, _) | (KeyCode::Char('r'), true, _) => self.prompt = Some(Prompt { kind: PromptKind::Replace, input: self.last_find.clone(), selected: 0 }),
             (KeyCode::Char('g'), true, _) => self.prompt = Some(Prompt { kind: PromptKind::Glyph, input: String::new(), selected: 0 }),
+            (KeyCode::F(2), _, _) => self.prompt = Some(Prompt { kind: PromptKind::Command, input: String::new(), selected: 0 }),
             (KeyCode::Char('l'), true, _) => self.prompt = Some(Prompt { kind: PromptKind::GotoLine, input: String::new(), selected: 0 }),
             (KeyCode::Char('b'), true, _) => self.show_files = !self.show_files,
             (KeyCode::Char('j'), true, _) => self.show_panel = !self.show_panel,
@@ -946,6 +1085,15 @@ impl Editor {
                 v.sort_by_key(|(s, _)| *s);
                 v.into_iter().map(|(_, x)| x).collect()
             }
+            PromptKind::Command => {
+                let mut v: Vec<(usize, (String, String, String))> = COMMANDS
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (_, label, key))| fuzzy(&p.input, &format!("{label} {key}")).map(|s| (s, (label.to_string(), key.to_string(), i.to_string()))))
+                    .collect();
+                v.sort_by_key(|(s, _)| *s);
+                v.into_iter().map(|(_, x)| x).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -1003,6 +1151,13 @@ impl Editor {
                             self.open_file(Path::new(f));
                         }
                     }
+                    PromptKind::Command => {
+                        if let Some((_, _, i)) = items.get(p.selected)
+                            && let Some((cmd, ..)) = i.parse::<usize>().ok().and_then(|i| COMMANDS.get(i))
+                        {
+                            self.key(cmd.key());
+                        }
+                    }
                     PromptKind::Glyph => {
                         if let Some((_, _, g)) = items.get(p.selected) {
                             let g = g.clone();
@@ -1020,7 +1175,15 @@ impl Editor {
 
     fn mouse(&mut self, m: MouseEvent) {
         let a = self.area;
+        let inside = |r: Rect| m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
         match m.kind {
+            // the wheel scrolls what is under it
+            MouseEventKind::ScrollDown if self.show_files && inside(self.tree_area) => self.tree_top += 3,
+            MouseEventKind::ScrollUp if self.show_files && inside(self.tree_area) => self.tree_top = self.tree_top.saturating_sub(3),
+            MouseEventKind::ScrollDown if self.show_panel && inside(self.panel_area) => {
+                self.pane_scroll = (self.pane_scroll + 3).min(self.pane_lines.len().saturating_sub(1));
+            }
+            MouseEventKind::ScrollUp if self.show_panel && inside(self.panel_area) => self.pane_scroll = self.pane_scroll.saturating_sub(3),
             MouseEventKind::ScrollDown => {
                 if let Some(d) = self.doc() {
                     d.top = (d.top + 3).min(d.lines().saturating_sub(1));
@@ -1031,7 +1194,8 @@ impl Editor {
                     d.top = d.top.saturating_sub(3);
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Left) if self.click(m.column, m.row) => {}
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) if self.prompt.is_none() => {
                 let drag = matches!(m.kind, MouseEventKind::Drag(_));
                 if m.column >= a.x + self.gutter && m.column < a.x + a.width && m.row >= a.y && m.row < a.y + a.height {
                     let gutter = self.gutter;
@@ -1055,6 +1219,99 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// A click on something drawn: true if it was a button, a tab, a row…
+    fn click(&mut self, x: u16, y: u16) -> bool {
+        let hit = {
+            let hits = self.hits.borrow();
+            // the last drawn is on top (a pop-up list over the rest)
+            hits.iter().rev().find(|(r, _)| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height).map(|(_, h)| h.clone())
+        };
+        let Some(hit) = hit else {
+            // a click outside an open list closes it
+            if self.prompt.is_some() {
+                self.prompt = None;
+                return true;
+            }
+            return false;
+        };
+        if self.prompt.is_some() && !matches!(hit, Hit::PromptItem(_)) {
+            self.prompt = None;
+        }
+        match hit {
+            Hit::PromptItem(i) => {
+                if let Some(p) = self.prompt.as_mut() {
+                    p.selected = i;
+                }
+                self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            Hit::Button(cmd) => self.key(cmd.key()),
+            Hit::Tab(i) => {
+                self.cur = i.min(self.docs.len().saturating_sub(1));
+                self.refresh_labels();
+            }
+            Hit::TabClose(i) => {
+                if self.docs.get(i).is_some_and(|d| d.dirty) {
+                    self.cur = i;
+                    self.message = format!("{} has unsaved changes: Ctrl-S to save, or Ctrl-W to close without saving", self.docs[i].name());
+                } else if i < self.docs.len() {
+                    self.docs.remove(i);
+                    self.cur = self.cur.min(self.docs.len().saturating_sub(1));
+                    self.refresh_labels();
+                }
+            }
+            Hit::Tree(i) => {
+                if let Some(row) = self.tree_rows().get(i).cloned() {
+                    if row.dir {
+                        if !self.collapsed.remove(&row.path) {
+                            self.collapsed.insert(row.path);
+                        }
+                    } else {
+                        self.open_file(&row.path);
+                    }
+                }
+            }
+            Hit::Pane(p) => {
+                self.show_panel = true;
+                match p {
+                    Pane::Problems => self.key(Cmd::Check.key()),
+                    Pane::Where => self.show_where(),
+                    Pane::Repl => {
+                        let lines = if self.repl_log.is_empty() { vec![("F4 or Ctrl-E evaluates a line here.".to_string(), Style::default().fg(MUTED))] } else { self.repl_log.clone() };
+                        self.set_pane(Pane::Repl, lines);
+                    }
+                    other => {
+                        let lines = self.panes.get(&other).cloned().unwrap_or_else(|| {
+                            let how = match other {
+                                Pane::Audit => "F8 (or ⚑ Audit) audits the project.",
+                                Pane::Manual => "F1 on a word (or ? Manual) shows its page here.",
+                                _ => "F5 (or ▶ Run) runs the program, F6 the tests; the output comes here.",
+                            };
+                            vec![(how.to_string(), Style::default().fg(MUTED))]
+                        });
+                        self.set_pane(other, lines);
+                    }
+                }
+            }
+            Hit::PaneLine(i) => {
+                if let Some((file, line, col)) = self.pane_lines.get(i).and_then(|(t, _)| file_line(t)) {
+                    let path = [self.root.join(&file), PathBuf::from(&file)].into_iter().find(|p| p.is_file());
+                    match path {
+                        Some(p) => {
+                            self.open_file(&p);
+                            if let Some(d) = self.doc() {
+                                d.move_to((line.saturating_sub(1), col.saturating_sub(1)), false);
+                                d.top = line.saturating_sub(6);
+                            }
+                        }
+                        None => self.message = format!("{file} is not a file here"),
+                    }
+                }
+            }
+            Hit::Errors => self.key(Cmd::Check.key()),
+        }
+        true
     }
 
     /// Check again a moment after the last edit.
@@ -1118,6 +1375,7 @@ impl Editor {
     // ---- drawing --------------------------------------------------------------
 
     pub fn draw(&mut self, f: &mut Frame) {
+        self.hits.borrow_mut().clear();
         let full = f.area();
         f.render_widget(Block::default().style(Style::default().bg(BG)), full);
         let rows = Layout::default()
@@ -1147,41 +1405,125 @@ impl Editor {
     }
 
     fn draw_tabs(&self, f: &mut Frame, area: Rect) {
+        let mut hits = self.hits.borrow_mut();
+        // the toolbar on the right: a click runs the command
+        let buttons: [(Cmd, &str); 9] = [
+            (Cmd::Run, "▶ Run"),
+            (Cmd::Test, "✓ Test"),
+            (Cmd::Check, "● Check"),
+            (Cmd::Audit, "⚑ Audit"),
+            (Cmd::Find, "⌕ Find"),
+            (Cmd::Glyphs, "⍳ Glyphs"),
+            (Cmd::Repl, "› REPL"),
+            (Cmd::Manual, "? Manual"),
+            (Cmd::Commands, "≡ Commands"),
+        ];
+        // full labels when there is room, else the icons alone
+        let full_w: u16 = buttons.iter().map(|(_, t)| t.chars().count() as u16 + 3).sum();
+        let compact = area.width <= full_w + 40;
+        let label = |t: &str| -> String { if compact { t.chars().next().unwrap_or(' ').to_string() } else { t.to_string() } };
+        let bar_w: u16 = buttons.iter().map(|(_, t)| label(t).chars().count() as u16 + 3).sum();
+        let show_bar = area.width > bar_w + 30;
         let mut spans = vec![Span::styled(" MIMIC ", Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD)), Span::raw(" ")];
+        hits.push((Rect { width: 7, height: 1, ..area }, Hit::Button(Cmd::Commands)));
+        let mut x = area.x + 8;
+        let limit = if show_bar { area.x + area.width - bar_w - 1 } else { area.x + area.width };
         for (i, d) in self.docs.iter().enumerate() {
+            let label = format!(" {}{} ", d.name(), if d.dirty { " •" } else { "" });
+            let w = label.chars().count() as u16 + 2;
+            if x + w > limit {
+                spans.push(Span::styled(" … ", Style::default().fg(MUTED)));
+                break;
+            }
             let st = if i == self.cur { Style::default().fg(INK).bg(LINE).add_modifier(Modifier::BOLD) } else { Style::default().fg(MUTED) };
-            spans.push(Span::styled(format!(" {}{} ", d.name(), if d.dirty { " •" } else { "" }), st));
+            spans.push(Span::styled(label.clone(), st));
+            spans.push(Span::styled("× ", Style::default().fg(MUTED).bg(if i == self.cur { LINE } else { PANEL })));
+            let lw = label.chars().count() as u16;
+            hits.push((Rect { x, y: area.y, width: lw, height: 1 }, Hit::Tab(i)));
+            hits.push((Rect { x: x + lw, y: area.y, width: 2, height: 1 }, Hit::TabClose(i)));
+            x += w;
         }
         f.render_widget(Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL)), area);
+        if show_bar {
+            let mut bx = area.x + area.width - bar_w;
+            let mut bar = Vec::new();
+            for (cmd, text) in buttons {
+                let text = label(text);
+                let w = text.chars().count() as u16 + 2;
+                let st = if cmd == Cmd::Run { Style::default().fg(BG).bg(ORANGE) } else { Style::default().fg(INK).bg(LINE) };
+                bar.push(Span::styled(format!(" {text} "), st));
+                bar.push(Span::raw(" "));
+                hits.push((Rect { x: bx, y: area.y, width: w, height: 1 }, Hit::Button(cmd)));
+                bx += w + 1;
+            }
+            f.render_widget(Paragraph::new(Line::from(bar)), Rect { x: area.x + area.width - bar_w, width: bar_w, ..area });
+        }
     }
 
-    fn draw_files(&self, f: &mut Frame, area: Rect) {
+    /// The file tree's rows: folders (open or closed) and the files of open
+    /// folders, folders first.
+    fn tree_rows(&self) -> Vec<Row> {
+        let mut files: Vec<(Vec<String>, &PathBuf)> = self.files.iter().map(|p| (p.strip_prefix(&self.root).unwrap_or(p).iter().map(|c| c.to_string_lossy().to_string()).collect(), p)).collect();
+        // folders before files at each level
+        files.sort_by(|a, b| {
+            let key = |parts: &Vec<String>| parts.iter().enumerate().map(|(i, c)| (i + 1 == parts.len(), c.to_lowercase())).collect::<Vec<_>>();
+            key(&a.0).cmp(&key(&b.0))
+        });
+        let mut rows = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        'file: for (parts, path) in files {
+            let mut dir = self.root.clone();
+            for (depth, part) in parts.iter().enumerate().take(parts.len().saturating_sub(1)) {
+                dir = dir.join(part);
+                if seen.insert(dir.clone()) {
+                    rows.push(Row { depth, path: dir.clone(), dir: true, name: part.clone() });
+                }
+                if self.collapsed.contains(&dir) {
+                    continue 'file;
+                }
+            }
+            rows.push(Row { depth: parts.len().saturating_sub(1), path: path.clone(), dir: false, name: parts.last().cloned().unwrap_or_default() });
+        }
+        rows
+    }
+
+    fn draw_files(&mut self, f: &mut Frame, area: Rect) {
+        self.tree_area = area;
         let cur = self.docs.get(self.cur).and_then(|d| d.path.clone());
-        let items: Vec<ListItem> = self
-            .files
-            .iter()
-            .map(|p| {
-                let shown = p.strip_prefix(&self.root).unwrap_or(p).display().to_string();
-                let has_problem = self.problems.iter().any(|x| &x.path == p);
-                let st = if cur.as_deref() == Some(p) {
+        let rows = self.tree_rows();
+        let title = self.root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let block = Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(LINE))
+            .title(Span::styled(format!(" {title} "), Style::default().fg(MUTED)))
+            .style(Style::default().bg(PANEL));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let height = inner.height.saturating_sub(1) as usize;
+        self.tree_top = self.tree_top.min(rows.len().saturating_sub(height.max(1)));
+        let mut lines = Vec::new();
+        let mut hits = self.hits.borrow_mut();
+        for (k, (i, row)) in rows.iter().enumerate().skip(self.tree_top).take(height).enumerate() {
+            let indent = "  ".repeat(row.depth);
+            let line = if row.dir {
+                let open = !self.collapsed.contains(&row.path);
+                Line::from(vec![Span::raw(format!(" {indent}")), Span::styled(if open { "▾ " } else { "▸ " }, Style::default().fg(ORANGE)), Span::styled(format!("{}/", row.name), Style::default().fg(TYPE))])
+            } else {
+                let has_problem = self.problems.iter().any(|x| x.path == row.path);
+                let st = if cur.as_deref() == Some(row.path.as_path()) {
                     Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD)
                 } else if has_problem {
                     Style::default().fg(ERROR)
                 } else {
                     Style::default().fg(INK)
                 };
-                ListItem::new(Line::from(Span::styled(shown, st)))
-            })
-            .collect();
-        let title = self.root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(LINE))
-                .title(Span::styled(format!(" {title} "), Style::default().fg(MUTED)))
-                .style(Style::default().bg(PANEL)),
-        );
-        f.render_widget(list, area);
+                let icon = if row.name.ends_with(".mim") { "◆ " } else if row.name.ends_with(".mnet") { "◇ " } else { "· " };
+                Line::from(vec![Span::raw(format!(" {indent}  ")), Span::styled(icon, Style::default().fg(if row.name.ends_with(".mim") { ORANGE } else { MUTED })), Span::styled(row.name.clone(), st)])
+            };
+            lines.push(line);
+            hits.push((Rect { x: inner.x, y: inner.y + 1 + k as u16, width: inner.width, height: 1 }, Hit::Tree(i)));
+        }
+        f.render_widget(Paragraph::new(lines), Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner });
     }
 
     fn draw_start(&self, f: &mut Frame, area: Rect) {
@@ -1189,6 +1531,14 @@ impl Editor {
         let ink = Style::default().fg(INK);
         let muted = Style::default().fg(MUTED);
         let key = |k: &str, what: &str| Line::from(vec![Span::styled(format!("  {k:<12}"), Style::default().fg(BRIGHT)), Span::styled(what.to_string(), ink)]);
+        // the keys' lines are buttons (rows 10 to 18 below)
+        {
+            let mut hits = self.hits.borrow_mut();
+            for (row, cmd) in [Cmd::Open, Cmd::New, Cmd::Glyphs, Cmd::Run, Cmd::Repl, Cmd::Check, Cmd::Where, Cmd::Manual, Cmd::Save].into_iter().enumerate() {
+                hits.push((Rect { x: area.x, y: area.y + 10 + row as u16, width: area.width.min(70), height: 1 }, Hit::Button(cmd)));
+            }
+            hits.push((Rect { x: area.x, y: area.y + 19, width: area.width.min(70), height: 1 }, Hit::Button(Cmd::Commands)));
+        }
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled("  ███╗   ███╗██╗███╗   ███╗██╗ ██████╗", o)),
@@ -1209,6 +1559,7 @@ impl Editor {
             key("F9", "where code runs"),
             key("F1", "the manual for the word under the cursor"),
             key("Ctrl-S", "save          Ctrl-Q  quit"),
+            key("F2", "every command (or click ≡ Commands, or anything here)"),
             Line::from(""),
             Line::from(Span::styled(format!("  mimic {}", env!("CARGO_PKG_VERSION")), muted)),
         ];
@@ -1297,39 +1648,70 @@ impl Editor {
         }
     }
 
-    fn draw_panel(&self, f: &mut Frame, area: Rect) {
+    fn draw_panel(&mut self, f: &mut Frame, area: Rect) {
+        self.panel_area = area;
+        let mut hits = self.hits.borrow_mut();
+        let mut x = area.x;
         let titles: Vec<Span> = PANES
             .iter()
             .flat_map(|p| {
                 let st = if *p == self.pane { Style::default().fg(BG).bg(ORANGE).add_modifier(Modifier::BOLD) } else { Style::default().fg(MUTED) };
+                let w = p.title().chars().count() as u16 + 2;
+                hits.push((Rect { x, y: area.y, width: w, height: 1 }, Hit::Pane(*p)));
+                x += w + 1;
                 [Span::styled(format!(" {} ", p.title()), st), Span::raw(" ")]
             })
             .collect();
         let block = Block::default().borders(Borders::TOP).border_style(Style::default().fg(LINE)).title(Line::from(titles)).style(Style::default().bg(PANEL));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let lines: Vec<Line> = self.pane_lines.iter().skip(self.pane_scroll).take(inner.height as usize).map(|(t, s)| Line::from(Span::styled(t.clone(), *s))).collect();
+        let lines: Vec<Line> = self
+            .pane_lines
+            .iter()
+            .enumerate()
+            .skip(self.pane_scroll)
+            .take(inner.height as usize)
+            .map(|(i, (t, s))| {
+                hits.push((Rect { x: inner.x, y: inner.y + (i - self.pane_scroll) as u16, width: inner.width, height: 1 }, Hit::PaneLine(i)));
+                // a file and line to jump to: underlined
+                let st = if file_line(t).is_some() { s.add_modifier(Modifier::UNDERLINED) } else { *s };
+                Line::from(Span::styled(t.clone(), st))
+            })
+            .collect();
         f.render_widget(Paragraph::new(lines), inner);
     }
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
+        let mut hits = self.hits.borrow_mut();
         let (errors, place) = match self.docs.get(self.cur) {
             Some(d) => (self.problems.len(), format!("Ln {}, Col {}", d.cursor.0 + 1, d.cursor.1 + 1)),
             None => (self.problems.len(), String::new()),
         };
-        let left = if self.message.is_empty() {
-            "Ctrl-G glyphs · F1 manual · F4 REPL · F5 run · F6 test · F8 audit · F9 where code runs · Ctrl-Q quit".to_string()
-        } else {
-            self.message.clone()
-        };
         let (err_text, err_style) = if errors == 0 { (" ✓ no errors ".to_string(), Style::default().fg(STRING)) } else { (format!(" ✗ {errors} error(s) "), Style::default().fg(ERROR)) };
-        let right = format!("{err_text} {place} ");
-        // the counts on the right always show; the hints take what is left
-        let room = (area.width as usize).saturating_sub(right.chars().count() + 2);
-        let mut hint: String = format!(" {left}").chars().take(room).collect();
-        let pad = room.saturating_sub(hint.chars().count());
-        hint.push_str(&" ".repeat(pad));
-        let spans = vec![Span::styled(hint, Style::default().fg(MUTED)), Span::raw("  "), Span::styled(err_text, err_style), Span::styled(format!(" {place} "), Style::default().fg(INK))];
+        let right_w = (err_text.chars().count() + place.chars().count() + 2) as u16;
+        let room = area.width.saturating_sub(right_w + 2);
+        let mut spans = Vec::new();
+        let mut x = area.x;
+        if self.message.is_empty() {
+            // the hints are buttons too
+            for (cmd, text) in [(Cmd::Commands, "F2 commands"), (Cmd::Glyphs, "Ctrl-G glyphs"), (Cmd::Manual, "F1 manual"), (Cmd::Repl, "F4 REPL"), (Cmd::Run, "F5 run"), (Cmd::Test, "F6 test"), (Cmd::Save, "Ctrl-S save"), (Cmd::Quit, "Ctrl-Q quit")] {
+                let w = text.chars().count() as u16 + 2;
+                if x + w > area.x + room {
+                    break;
+                }
+                spans.push(Span::styled(format!(" {text} "), Style::default().fg(MUTED)));
+                hits.push((Rect { x, y: area.y, width: w, height: 1 }, Hit::Button(cmd)));
+                x += w;
+            }
+        } else {
+            let msg: String = format!(" {}", self.message).chars().take(room as usize).collect();
+            x += msg.chars().count() as u16;
+            spans.push(Span::styled(msg, Style::default().fg(INK)));
+        }
+        spans.push(Span::raw(" ".repeat((area.x + room).saturating_sub(x) as usize + 2)));
+        hits.push((Rect { x: area.x + room + 2, y: area.y, width: err_text.chars().count() as u16, height: 1 }, Hit::Errors));
+        spans.push(Span::styled(err_text, err_style));
+        spans.push(Span::styled(format!(" {place} "), Style::default().fg(INK)));
         f.render_widget(Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL)), area);
     }
 
@@ -1343,6 +1725,7 @@ impl Editor {
             PromptKind::Glyph => " Glyphs: type a word or what it does ".to_string(),
             PromptKind::GotoLine => " Go to line ".to_string(),
             PromptKind::Eval => " Evaluate: an expression, a let or a fn (the REPL keeps them) ".to_string(),
+            PromptKind::Command => " Commands: type part of a name, or click one ".to_string(),
         };
         let items = self.prompt_items();
         let h = if items.is_empty() { 3 } else { (items.len() as u16 + 3).min(18) };
@@ -1362,9 +1745,39 @@ impl Editor {
             let mut state = ListState::default();
             state.select(Some(p.selected));
             let list = List::new(list).highlight_style(Style::default().bg(DEEP).fg(INK));
-            f.render_stateful_widget(list, Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner }, &mut state);
+            let at = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+            f.render_stateful_widget(list, at, &mut state);
+            // each item is a click target (the list scrolls to keep the selection in view)
+            let offset = state.offset();
+            let mut hits = self.hits.borrow_mut();
+            for (row, i) in (offset..items.len()).enumerate().take(at.height as usize) {
+                hits.push((Rect { y: at.y + row as u16, height: 1, ..at }, Hit::PromptItem(i)));
+            }
         }
     }
+}
+
+/// A file and line named in a line of output: `src/main.mim:12`,
+/// `src/main.mim:12:5`, `--> file.mim:3:9`, `(file.mim, line 4)`.
+fn file_line(text: &str) -> Option<(String, usize, usize)> {
+    let bytes: Vec<char> = text.chars().collect();
+    let s: String = bytes.iter().collect();
+    for (i, _) in s.match_indices(".mim") {
+        let end = i + 4;
+        let rest = &s[end..];
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let line: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if line.is_empty() {
+            continue;
+        }
+        let after = &rest[line.len()..];
+        let col: String = after.strip_prefix(':').map(|c| c.chars().take_while(char::is_ascii_digit).collect()).unwrap_or_default();
+        // the path: back to a space, a bracket or a quote
+        let start = s[..i].rfind(|c: char| c.is_whitespace() || "([\"'`".contains(c)).map_or(0, |k| k + 1);
+        let file = s[start..end].to_string();
+        return Some((file, line.parse().ok()?, col.parse().unwrap_or(1)));
+    }
+    None
 }
 
 /// Is the end of `before` (one line) inside a string?
@@ -1605,6 +2018,111 @@ mod tests {
         settle(&mut ed);
         assert!(log(&ed).iter().any(|l| l == "› print(⍳ 4 ▷ +/)"), "{:?}", log(&ed));
         assert!(screen(&mut ed).contains("REPL"));
+    }
+
+    fn click_at(ed: &mut Editor, x: u16, y: u16) {
+        ed.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE });
+    }
+
+    /// Where a text is on the screen (column, row).
+    fn find_on(screen: &str, text: &str) -> (u16, u16) {
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(i) = line.find(text) {
+                return (line[..i].chars().count() as u16, y as u16);
+            }
+        }
+        panic!("`{text}` is not on the screen:\n{screen}");
+    }
+
+    #[test]
+    fn everything_is_clickable() {
+        // a project: src/main.mim, src/util/text.mim, docs/guide.md
+        let dir = std::env::temp_dir().join(format!("mimic-edit-test-{}-clicks", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/util")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("mim.mim"), "module mim\n\nproject {\n    name = \"clicks\"\n    version = \"0.1.0\"\n    kind = [\"bin\"]\n}\n").unwrap();
+        std::fs::write(dir.join("src/main.mim"), "module main\n\nfn main() {\n    print(1)\n}\n").unwrap();
+        std::fs::write(dir.join("src/util/text.mim"), "module text\n").unwrap();
+        std::fs::write(dir.join("docs/guide.md"), "# Guide\n").unwrap();
+        let mut ed = Editor::open(Some(&dir)).unwrap();
+        // folders: src open, docs closed; a click opens and closes them
+        let s = screen(&mut ed);
+        assert!(s.contains("▾ src/") && s.contains("▸ docs/") && !s.contains("guide.md"), "{s}");
+        let (x, y) = find_on(&s, "▸ docs/");
+        click_at(&mut ed, x, y);
+        let s = screen(&mut ed);
+        assert!(s.contains("▾ docs/") && s.contains("guide.md"), "{s}");
+        let (x, y) = find_on(&s, "▾ docs/");
+        click_at(&mut ed, x, y);
+        assert!(!screen(&mut ed).contains("guide.md"));
+        // a nested folder, then a file in it
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, "▸ util/");
+        click_at(&mut ed, x, y);
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, "text.mim");
+        click_at(&mut ed, x, y);
+        assert_eq!(ed.docs[ed.cur].name(), "text.mim");
+        // open main.mim from the tree: two tabs; a tab switches, its × closes it
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, "◆ main.mim");
+        click_at(&mut ed, x + 2, y);
+        assert_eq!(ed.docs.len(), 2);
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, " text.mim ");
+        click_at(&mut ed, x + 1, y);
+        assert_eq!(ed.docs[ed.cur].name(), "text.mim");
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, " text.mim ");
+        click_at(&mut ed, x + " text.mim ".len() as u16, y);
+        assert_eq!(ed.docs.len(), 1, "× closed it");
+        // the toolbar's ≡ Commands opens the command list; a click runs one
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, " ≡ ");
+        click_at(&mut ed, x, y);
+        assert_eq!(ed.prompt.as_ref().map(|p| p.kind.clone()), Some(PromptKind::Command));
+        typing(&mut ed, "go to");
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, "Go to a line");
+        click_at(&mut ed, x, y);
+        assert_eq!(ed.prompt.as_ref().map(|p| p.kind.clone()), Some(PromptKind::GotoLine), "the command ran");
+        ed.key(key(KeyCode::Esc));
+        // a pane's file:line jumps there
+        ed.set_pane(Pane::Output, vec![("error at src/main.mim:4:5 here".into(), Style::default())]);
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, "error at src/main.mim:4:5");
+        click_at(&mut ed, x, y);
+        assert_eq!((ed.docs[ed.cur].name(), ed.docs[ed.cur].cursor), ("main.mim".to_string(), (3, 4)));
+        // the pane tabs switch panes
+        let s = screen(&mut ed);
+        let (x, y) = find_on(&s, " REPL ");
+        click_at(&mut ed, x + 1, y);
+        assert_eq!(ed.pane, Pane::Repl);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toolbar_labels_on_a_wide_screen() {
+        let f = temp("wide", "module main\n\nfn main() {\n}\n");
+        let mut ed = Editor::open(Some(&f)).unwrap();
+        let mut t = ratatui::Terminal::new(TestBackend::new(160, 30)).unwrap();
+        t.draw(|fr| ed.draw(fr)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let top: String = (0..160).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        for label in ["▶ Run", "✓ Test", "⚑ Audit", "⍳ Glyphs", "≡ Commands"] {
+            assert!(top.contains(label), "{top}");
+        }
+        let bottom: String = (0..160).map(|x| buf[(x, 29)].symbol().to_string()).collect();
+        assert!(bottom.contains("F2 commands") && bottom.contains("no errors"), "{bottom}");
+    }
+
+    #[test]
+    fn file_and_line_in_output() {
+        assert_eq!(file_line("  --> src/main.mim:12:5"), Some(("src/main.mim".into(), 12, 5)));
+        assert_eq!(file_line("✗ main.mim:3:1  E0303 nope"), Some(("main.mim".into(), 3, 1)));
+        assert_eq!(file_line("(/tmp/x.mim:7)"), Some(("/tmp/x.mim".into(), 7, 1)));
+        assert_eq!(file_line("no file here"), None);
     }
 
     #[test]

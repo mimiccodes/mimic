@@ -5,6 +5,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Changed
+- **`mimic edit` is easier to use: everything is clickable.** A toolbar (Run, Test, Check, Audit, Find, Glyphs, REPL, Manual, ≡ Commands; icons only on a narrow terminal), a command list with every command and its key (F2, filtered as you type), folders in the file tree that open and close (`src/` and the open file's folders start open), tabs that switch and close with their ×, pane tabs, `file.mim:12` in any pane that jumps to the line, the error count and the hints in the status bar, the start screen's lines, and the items of every pop-up list. The wheel scrolls whatever is under it.
 - **Servers are faster: 1.7–1.9× C → 1.10× C** (the HTTP benchmark, all cores, M3 Pro). Every task waiting on a socket took one lock shared by all the event loop's threads, and held it through system calls (duplicating the descriptor, registering it with kqueue or epoll, closing it); under load a third of a server's busy time went to waiting for it. Socket waits now register, fire and close outside the lock, which only guards the timer heap; a wait with no deadline needs no lock at all. Found with `mimic profile --for`.
 
 ## 0.3.13 — 2026-11-16

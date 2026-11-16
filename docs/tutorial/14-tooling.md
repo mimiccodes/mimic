@@ -156,7 +156,7 @@ fn larger(a: i64, b: i64) -> i64 { a ⌈ b }
 type, glyphs by typing `\i` (or Ctrl-G for the palette), F5 to run, F6 to
 test, F4 to evaluate a line in the REPL pane, F1 for the manual on the word under the cursor, and labels showing
 where code runs in parallel. Ctrl-S saves, Ctrl-Q quits. `mimic man editors`
-lists every key.
+lists every key. Everything is clickable as well: the toolbar, the folders of the file tree, the tabs, and any `file.mim:12` in a pane; **≡ Commands** (F2) lists every command.
 
 ## Where the time goes
 

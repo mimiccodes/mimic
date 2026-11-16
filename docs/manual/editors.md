@@ -31,8 +31,11 @@ Syntax highlighting comes from the grammars in [mimic-syntax](https://github.com
 
 `mimic edit` needs nothing installed: it is part of `mimic`, and knows everything the language server knows.
 
+**Everything is clickable.** The toolbar at the top runs, tests, checks and audits, finds, opens the glyphs, the REPL and the manual; **≡ Commands** (or F2) lists every command with its key, and typing filters the list. Folders in the file tree open and close with a click, and a file opens with one; tabs switch with a click and close with their ×; the bottom pane's tabs switch panes; a `file.mim:12` in any pane (an error, a test failure, a finding) jumps there; the error count in the status bar opens the problems, and its hints are buttons too. The wheel scrolls the code, the tree or the pane, whichever is under it.
+
 | Key | Does |
 |---|---|
+| F2 | Every command, with its key: type part of its name, or click it |
 | Ctrl-O | Open a file of the project (type part of its name) |
 | Ctrl-N, Ctrl-W | A new program; close the file |
 | Ctrl-S, Ctrl-Q | Save; quit (it asks when something is unsaved) |
