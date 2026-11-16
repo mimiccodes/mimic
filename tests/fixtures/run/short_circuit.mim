@@ -1,0 +1,44 @@
+module main
+
+// `and` / `or` on truth values evaluate the right side only when it
+// decides; on lists they work element by element
+
+fn first_is(xs: [str], s: str) -> bool {
+    len(xs) > 0 and xs[0] == s
+}
+
+fn even(n: i64) -> bool {
+    n == 0 or odd(n - 1)
+}
+
+fn odd(n: i64) -> bool {
+    n != 0 and even(n - 1)
+}
+
+fn safe_ratio(a: i64, b: i64) -> bool {
+    b != 0 and a div b > 2
+}
+
+fn noisy(s: str) -> bool {
+    print(s)
+    true
+}
+
+fn main() {
+    let empty: [str] = []
+    print(first_is(empty, "x"))
+    print(first_is(["x"], "x"))
+    print(even(10))
+    print(odd(7))
+    print(safe_ratio(9, 0))
+    print(safe_ratio(9, 2))
+    let n = 0
+    if n > 0 and empty[0] == "x" { print("wrong") } else { print("skipped") }
+    if n == 0 or empty[0] == "x" { print("taken") }
+    print(false and noisy("not printed"))
+    print(true or noisy("not printed"))
+    print(true and noisy("printed"))
+    let xs = [1 5 9]
+    print(xs > 2 and xs < 8)
+    print(xs < 2 or xs > 8)
+}

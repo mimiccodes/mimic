@@ -295,6 +295,10 @@ impl Eligible<'_> {
             ExprKind::Path(p) => {
                 p.len() == 1 && !mimic_syntax::parser::is_upper(&p[0]) && !matches!(self.p.lookup(self.module, p), Some(Resolved::Fn(_)))
             }
+            // a net evaluates both sides: `and` / `or` only when the right
+            // side cannot fail or recurse (native code skips it when the left
+            // decides)
+            ExprKind::Binary { op: BinOp::And | BinOp::Or, lhs, rhs } => self.expr(lhs) && self.expr(rhs) && cannot_fail(rhs),
             ExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Index { base, index } => self.expr(base) && self.expr(index),
@@ -315,6 +319,17 @@ impl Eligible<'_> {
             ExprKind::Block(b) => self.block(b),
             _ => false, // strings, array literals, lambdas, unsafe, if-without-else
         }
+    }
+}
+
+/// Numbers, variables and arithmetic that cannot fail (no division, index
+/// or call).
+fn cannot_fail(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Path(_) => true,
+        ExprKind::Unary { expr, .. } => cannot_fail(expr),
+        ExprKind::Binary { op, lhs, rhs } => !matches!(op, BinOp::Div | BinOp::Mod | BinOp::IntDiv) && cannot_fail(lhs) && cannot_fail(rhs),
+        _ => false,
     }
 }
 

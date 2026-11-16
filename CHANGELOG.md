@@ -5,7 +5,13 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Fixed
+- **`and` and `or` short-circuit.** `n > 0 and xs[0] == "x"` read `xs[0]` even when `n` was 0, and crashed on an empty list; the right side now runs only when it decides the answer, as in C and Rust. (On lists they still work element by element.) A pure function whose `and`/`or` has a right side that could fail or recurse (an index, a call, a division) is no longer put on the interaction nets, which evaluate both sides.
+- **Profiling a server or a long program can be stopped.** Ctrl-C during `mimic profile` stops the program and still shows the report of the time it ran (before, the profile was lost). `--stop-file FILE` does the same when a file appears: the VS Code extension's profiling notification has a Cancel that stops the program and shows its profile, and `mimic mcp`'s `profile` tool stops a program still running after its `timeout_s` and reports up to there.
 - **Updating Mimic while an editor is open.** On macOS the installer copied the new `mimic` over the old file, which the editor's language server was running; macOS keeps the signature it checked for that file, so the new `mimic` was killed when it started ("Killed: 9", also when updating from the VS Code extension). The installer now writes a new file and moves it into place. On Windows, where a running `mimic.exe` cannot be overwritten, the old one is moved aside first.
+
+### Added
+- **`math::to_int(x)`**: a float's integer part as an `i64`, towards zero (`math::to_int(math::round(x))` rounds). There was no way to turn a float into an integer. NaN, or a number no `i64` holds, stops the program.
+- **New tests**: image filters (box and Gaussian blur, sharpen, Sobel, Prewitt and Scharr edges, the Laplacian, median and bilateral filters, and pipelines of them), a QOI image encoder and decoder, and Dijkstra and A* shortest paths; each checked against an independent implementation (byte for byte for QOI).
 
 ### Changed
 - **Lists of records with only number fields are 9× faster.** A record whose fields are all numbers (`{ id: i64, x: f64, v: f64 }`) lives in registers; in a list it was boxed field by field on every step (each number allocated on its own, then copied into the record), and `¨` over such a list was not fused. Now a chain such as `ps ¨ step ¨ step ¨ step` is one pass with each record in registers, the sums after it are fused too, and putting a record back into a list stores its numbers directly. A million records moved five times and summed: 2.09 s → 0.23 s on one core, 26 million allocations → 2 million. Found with `mimic profile`.

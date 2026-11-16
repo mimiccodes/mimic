@@ -839,6 +839,12 @@ MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
 
+mim_val *mim_std_math_to_int(mim_val *a) {
+    double x = math_arg(a, "to_int");
+    if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) mim_panic("math::to_int: the number is NaN or too large for an i64");
+    return mim_int((int64_t)x);
+}
+
 
 /* ==== tests (`mimic test`) ================================================= */
 

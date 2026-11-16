@@ -1,0 +1,6 @@
+64×48 RGBA: 12288 bytes raw, 6978 bytes as QOI
+header: 716f696600000040000000300400
+runs 139, table 127, diff 2, luma 756, rgb 654, rgba 512
+checksum: 126400085
+end marker: [0 0 0 0 0 0 0 1]
+decoded 64×48: 3072 pixels, same as the original: true

@@ -213,6 +213,10 @@ static int g_prof_stop;
 static int64_t g_prof_t0, g_prof_hz = 1000, g_prof_rounds;
 static const char *g_prof_path;
 static int64_t g_prof_for_ns;
+/* asked to stop: Ctrl-C while profiling, or the file MIMIC_PROFILE_STOP
+ * names appeared (an editor's Stop button) */
+static volatile int g_prof_quit;
+static const char *g_prof_stop_path;
 /* counters, while profiling */
 int64_t mim_prof_gpu_ns, mim_prof_gpu_kernels, mim_prof_gpu_bytes, mim_prof_copy_bytes, mim_prof_copies;
 
@@ -1007,6 +1011,32 @@ static void prof_unregister(void) {
     t_prof_id = -1;
 }
 
+/* Ctrl-C while profiling: the sampler writes the profile and ends the
+ * program, as after `--for` (a program's own os::on_interrupt replaces it) */
+#ifdef _WIN32
+static BOOL WINAPI prof_console(DWORD ev) {
+    if (ev != CTRL_C_EVENT && ev != CTRL_BREAK_EVENT) return FALSE;
+    g_prof_quit = 1;
+    return TRUE;
+}
+#else
+static void prof_interrupt(int sig) {
+    (void)sig;
+    g_prof_quit = 1;
+}
+#endif
+
+static int prof_stop_asked(void) {
+    if (g_prof_quit) return 1;
+    /* the stop file: looked for about 30 times a second */
+    if (!g_prof_stop_path || g_prof_rounds % (g_prof_hz / 30 + 1)) return 0;
+#ifdef _WIN32
+    return GetFileAttributesA(g_prof_stop_path) != INVALID_FILE_ATTRIBUTES;
+#else
+    return access(g_prof_stop_path, F_OK) == 0;
+#endif
+}
+
 #ifdef _WIN32
 static DWORD WINAPI prof_sampler(LPVOID arg)
 #else
@@ -1034,7 +1064,7 @@ static void *prof_sampler(void *arg)
         /* a program that does not end by itself (a server): `mimic profile
          * --for N` sets MIMIC_PROFILE_FOR; after N seconds of the program's
          * own time the profile is written and the program ends here */
-        if (g_prof_for_ns > 0 && prof_now() - g_prof_t0 >= g_prof_for_ns) {
+        if ((g_prof_for_ns > 0 && prof_now() - g_prof_t0 >= g_prof_for_ns) || prof_stop_asked()) {
             __atomic_store_n(&g_prof_stop, 1, __ATOMIC_RELEASE);
             prof_dump();
             fflush(NULL);
@@ -1145,6 +1175,8 @@ static void prof_start(const char *path) {
     g_prof_path = path;
     const char *pfor = getenv("MIMIC_PROFILE_FOR");
     if (pfor && atof(pfor) > 0) g_prof_for_ns = (int64_t)(atof(pfor) * 1e9);
+    const char *pstop = getenv("MIMIC_PROFILE_STOP");
+    if (pstop && *pstop) g_prof_stop_path = pstop;
     const char *hz = getenv("MIMIC_PROFILE_HZ");
     if (hz && atoll(hz) > 0) g_prof_hz = atoll(hz) > 20000 ? 20000 : atoll(hz);
     g_prof_cap = (int64_t)1 << 20; /* about 200 MB of address space, touched as used */
@@ -1162,6 +1194,14 @@ static void prof_start(const char *path) {
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPROF, &sa, NULL);
+    struct sigaction si;
+    memset(&si, 0, sizeof si);
+    si.sa_handler = prof_interrupt;
+    sigemptyset(&si.sa_mask);
+    si.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &si, NULL);
+#else
+    SetConsoleCtrlHandler(prof_console, TRUE);
 #endif
     mim_prof_on = 1;
     g_prof_t0 = prof_now();

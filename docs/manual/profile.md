@@ -74,8 +74,11 @@ Flags:
 | `--hz N` | Samples per second on each thread (default 1000). When every core is busy the sampler may fall behind; the report uses the rate it reached. |
 | `--top N` | How many functions to list (default 15) |
 | `--for SECONDS` | For a program that does not end by itself, such as a server: after that many seconds of its running time, the profile is written and the program stops. Drive it meanwhile (a load generator, a browser). |
+| `--stop-file FILE` | Stop the program when this file appears, writing the profile so far (what editors' Stop buttons use) |
 | `--json` | The report as JSON; the program's own output goes to stderr |
 | `-- ARGS` | Arguments for the program |
+
+**Ctrl-C** while profiling stops the program and still shows the report of the time it ran: the program writes its profile and ends, and `mimic profile` reads it. In VS Code, the profiling notification's Cancel does the same.
 
 ## For agents
 

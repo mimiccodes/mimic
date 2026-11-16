@@ -21,6 +21,9 @@ pub module math {
         fn floor(x: f64) -> f64
         fn ceil(x: f64) -> f64
         fn round(x: f64) -> f64
+        // the integer part, towards zero: math::to_int(¯2.7) is -2 (a NaN,
+        // or a number no i64 holds, stops the program)
+        fn to_int(x: f64) -> i64
     }
 
     // π

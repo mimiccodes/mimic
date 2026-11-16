@@ -182,7 +182,7 @@ impl Server {
         }
         if !self.access.read_only && !self.access.no_run {
             t.push(tool("run", "Build and run the project (or a standalone file with module main); returns its output and exit status. Stops it after timeout_s seconds (default 30).", json!({ "file": file, "args": { "type": "array", "items": { "type": "string" } }, "stdin": { "type": "string" }, "release": { "type": "boolean" }, "timeout_s": { "type": "integer" } }), &[], false));
-            t.push(tool("profile", "Run the program sampled and report where its time goes, as JSON: the share of time per function (self and with what it calls) with where the compiler runs it (parallel, fused, SIMD, GPU), each thread's share of time working, GPU time, and memory allocated and copied. A release build with frame pointers.", json!({ "file": file, "args": { "type": "array", "items": { "type": "string" } }, "timeout_s": { "type": "integer" } }), &[], false));
+            t.push(tool("profile", "Run the program sampled and report where its time goes, as JSON: the share of time per function (self and with what it calls) with where the compiler runs it (parallel, fused, SIMD, GPU), each thread's share of time working, GPU time, and memory allocated and copied. A release build with frame pointers. A program still running after timeout_s seconds (default 120; a server) is stopped then and profiled up to there.", json!({ "file": file, "args": { "type": "array", "items": { "type": "string" } }, "timeout_s": { "type": "integer" } }), &[], false));
             t.push(tool("test", "Run the tests (test blocks and examples in comments) of the project or a file; words filter by name.", json!({ "file": file, "filter": { "type": "array", "items": { "type": "string" } } }), &[], false));
         }
         if self.access.allow_install && !self.access.read_only {
@@ -521,10 +521,14 @@ impl Server {
                     args.push("--".into());
                     args.extend(xs.iter().filter_map(|x| x.as_str().map(String::from)));
                 }
+                // a program still running after timeout_s (a server) is
+                // stopped then and profiled up to there; the build has its
+                // own time on top
                 let secs = a.get("timeout_s").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
-                let (_, out, err, timed_out) = self.mimic(&args, None, Duration::from_secs(secs))?;
+                args.splice(2..2, ["--for".to_string(), secs.to_string()]);
+                let (_, out, err, timed_out) = self.mimic(&args, None, Duration::from_secs(secs + 600))?;
                 if timed_out {
-                    return Ok(failure(format!("stopped after {secs} s: the profile is written when the program ends")));
+                    return Ok(failure(format!("stopped after {} s without a profile (the build or the program did not finish)", secs + 600)));
                 }
                 // (the program's own output went to stderr)
                 Ok(if out.trim_start().starts_with('{') { text(out) } else { failure(format!("{out}{err}").trim().to_string()) })

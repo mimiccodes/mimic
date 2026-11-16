@@ -38,6 +38,8 @@ tea time
 
 Integers are 64-bit `i64`, floats are `f64` and truth values are `bool`. Text is `str`.
 
+`and` and `or` look at their right side only when it decides the answer, as in C and Rust: `len(xs) > 0 and xs[0] == "x"` never reads `xs[0]` of an empty list. On lists of truth values they work element by element.
+
 ## Let bindings
 
 `let` gives a value a name. Bindings are **immutable**:

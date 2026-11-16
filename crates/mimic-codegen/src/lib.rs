@@ -4833,6 +4833,19 @@ impl<'ctx> Cg<'ctx, '_> {
                     && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
                 {
                     let name = decl.name.clone();
+                    if name == "to_int" {
+                        // towards zero, as C's cast; NaN and numbers out of
+                        // range stop the program instead of wrapping
+                        let x = self.to_f64(vals[0])?;
+                        let f64t = self.ctx.f64_type();
+                        let lo = self.b.build_float_compare(inkwell::FloatPredicate::OGE, x, f64t.const_float(-9223372036854775808.0), "").s()?;
+                        let hi = self.b.build_float_compare(inkwell::FloatPredicate::OLT, x, f64t.const_float(9223372036854775808.0), "").s()?;
+                        let fits = self.b.build_and(lo, hi, "").s()?;
+                        let bad = self.b.build_not(fits, "").s()?;
+                        self.panic_if(bad, "math::to_int: the number is NaN or too large for an i64")?;
+                        let n = self.b.build_float_to_signed_int(x, self.ctx.i64_type(), "").s()?;
+                        return self.as_ty(V::I(n), ty, "result of `math::to_int`");
+                    }
                     let mut fargs: Vec<BasicMetadataValueEnum> = Vec::new();
                     for v in &vals {
                         fargs.push(self.to_f64(*v)?.into());
@@ -5138,6 +5151,32 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.drop_tmp(b)?;
                 let pred = if *op == BinOp::Eq { IntPredicate::NE } else { IntPredicate::EQ };
                 Ok(V::B(self.b.build_int_compare(pred, r, i64t.const_zero(), "").s()?))
+            }
+            // `a and b`, `a or b` on truth values: b only when it decides
+            // (`n > 0 and xs[0] == "x"` never reads xs[0] when n is 0)
+            ExprKind::Binary { op: op @ (BinOp::And | BinOp::Or), lhs, rhs } if self.ty_of(lhs) == Ty::Bool && self.ty_of(rhs) == Ty::Bool => {
+                let a = self.expr(lhs)?;
+                let a = self.truth(a)?;
+                let f = self.cur_fn.ok_or("internal compiler error: `and` outside a function")?;
+                let pre = self.b.get_insert_block().unwrap();
+                let more = self.ctx.append_basic_block(f, if *op == BinOp::And { "and_rhs" } else { "or_rhs" });
+                let done = self.ctx.append_basic_block(f, "logic_done");
+                if *op == BinOp::And {
+                    self.b.build_conditional_branch(a, more, done).s()?;
+                } else {
+                    self.b.build_conditional_branch(a, done, more).s()?;
+                }
+                self.b.position_at_end(more);
+                let b = self.expr(rhs)?;
+                let b = self.truth(b)?;
+                let more_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(done);
+                // (from the left side alone its value decides: false for
+                // `and`, true for `or`)
+                let phi = self.b.build_phi(self.ctx.bool_type(), "logic").s()?;
+                phi.add_incoming(&[(&a, pre), (&b, more_end)]);
+                self.as_ty(V::B(phi.as_basic_value().into_int_value()), ty, "operator result")
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;

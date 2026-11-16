@@ -106,7 +106,7 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 **Bitwise operators** work on integers, elementwise on arrays, and in fused kernels, nets and `¨` like every other operator:
 * **Where they bind.** They bind tighter than comparisons, unlike C, so `x & mask == 0` means `(x & mask) == 0`. They bind looser than `+` and `*`, so `1 + 2 << 3` is `24`.
 * **Shifts.** `>>` is arithmetic and keeps the sign: `¯16 >> 2` is `-4`. `>>>` is logical and fills with zeros. A shift amount uses its low 6 bits, exactly as the hardware does, so every shift is a single instruction and `x << 64` is `x`.
-* **Bools.** `& | ^ ~` also work on bools, without short-circuiting, which is handy for masks: `(xs > 2) & (xs < 6)`.
+* **Bools.** `& | ^ ~` also work on bools, without short-circuiting, which is handy for masks: `(xs > 2) & (xs < 6)`. `and` and `or` short-circuit on single truth values (the right side runs only when it decides) and work element by element on lists.
 * **Floats and text** are a compile error (E0407).
 
 **Loops are words.** Mimic has no loop statements. These words, and recursion, replace them:

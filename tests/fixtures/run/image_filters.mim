@@ -1,0 +1,150 @@
+module main
+
+// Image filters on a 32×24 grayscale image (pixels 0 … 255), every one
+// written as a map over the pixels (parallel, no loops): box and Gaussian
+// blur, sharpen, Sobel, Prewitt and Scharr edges, the Laplacian, a median
+// filter, a bilateral filter (denoising that keeps edges), and pipelines of
+// them. Edges are clamped: a pixel outside the image reads its nearest one.
+// Each result is printed as sum, smallest, largest and a checksum that
+// weighs every pixel by its position.
+
+type Image = { w: i64, h: i64, px: [i64] }
+
+// a gradient, a bright square in the middle, and fixed noise
+fn test_image() -> Image {
+    let w = 32
+    let h = 24
+    let px = ⍳ (w * h) ¨ (i => {
+        let x = i % w
+        let y = i div w
+        let base = (x * 7 + y * 13) % 64
+        let square = if x >= 10 and x < 22 and y >= 6 and y < 18 { 120 } else { 0 }
+        let noise = (i * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        base + square + noise
+    })
+    Image { w: w, h: h, px: px }
+}
+
+fn at(img: Image, x: i64, y: i64) -> i64 {
+    img.px[clamp(y, 0, img.h - 1) * img.w + clamp(x, 0, img.w - 1)]
+}
+
+// the kernel's weighted sum around every pixel (a k×k kernel, k odd)
+fn convolve(img: Image, kernel: [i64], k: i64) -> [i64] {
+    let r = k div 2
+    ⍳ (img.w * img.h) ¨ (i => {
+        let x = i % img.w
+        let y = i div img.w
+        ⍳ (k * k) ¨ (j => kernel[j] * at(img, x + j % k - r, y + j div k - r)) ▷ +/
+    })
+}
+
+fn image_of(img: Image, px: [i64]) -> Image {
+    Image { w: img.w, h: img.h, px: px }
+}
+
+fn box_blur(img: Image) -> Image {
+    image_of(img, convolve(img, [1 1 1 1 1 1 1 1 1], 3) ¨ (s => s div 9))
+}
+
+// 5×5 Gaussian: the outer product of [1 4 6 4 1], divided by 256
+fn gaussian(img: Image) -> Image {
+    let row = [1 4 6 4 1]
+    let kernel = ⍳ 25 ¨ (j => row[j div 5] * row[j % 5])
+    image_of(img, convolve(img, kernel, 5) ¨ (s => s div 256))
+}
+
+fn sharpen(img: Image) -> Image {
+    image_of(img, clamp(convolve(img, [0 ¯1 0 ¯1 5 ¯1 0 ¯1 0], 3), 0, 255))
+}
+
+// |gx| + |gy| for a horizontal kernel and its transpose, at most 255
+fn gradient(img: Image, gx: [i64]) -> Image {
+    let gy = ⍳ 9 ¨ (j => gx[j % 3 * 3 + j div 3])
+    let a = convolve(img, gx, 3)
+    let b = convolve(img, gy, 3)
+    image_of(img, clamp(∣ a + ∣ b, 0, 255))
+}
+
+fn sobel(img: Image) -> Image { gradient(img, [¯1 0 1 ¯2 0 2 ¯1 0 1]) }
+fn prewitt(img: Image) -> Image { gradient(img, [¯1 0 1 ¯1 0 1 ¯1 0 1]) }
+fn scharr(img: Image) -> Image { gradient(img, [¯3 0 3 ¯10 0 10 ¯3 0 3]) }
+
+// Sobel's magnitude √(gx² + gy²), rounded
+fn sobel_magnitude(img: Image) -> Image {
+    let gx = convolve(img, [¯1 0 1 ¯2 0 2 ¯1 0 1], 3)
+    let gy = convolve(img, [¯1 ¯2 ¯1 0 0 0 1 2 1], 3)
+    let m = ⍳ (img.w * img.h) ¨ (i => math::to_int(math::floor(math::hypot(gx[i] * 1.0, gy[i] * 1.0) + 0.5)))
+    image_of(img, clamp(m, 0, 255))
+}
+
+fn laplacian(img: Image) -> Image {
+    image_of(img, clamp(∣ convolve(img, [0 1 0 1 ¯4 1 0 1 0], 3), 0, 255))
+}
+
+// the middle of the 9 values around every pixel
+fn median(img: Image) -> Image {
+    let px = ⍳ (img.w * img.h) ¨ (i => {
+        let x = i % img.w
+        let y = i div img.w
+        let around = ⍳ 9 ¨ (j => at(img, x + j % 3 - 1, y + j div 3 - 1))
+        sort(around)[4]
+    })
+    image_of(img, px)
+}
+
+// 5×5 bilateral filter: neighbours weigh by distance (σ 2) and by how
+// close their value is (σ 30), so noise smooths out and edges stay
+fn bilateral(img: Image) -> Image {
+    let px = ⍳ (img.w * img.h) ¨ (i => {
+        let x = i % img.w
+        let y = i div img.w
+        let p = img.px[i] * 1.0
+        let ws = ⍳ 25 ¨ (j => {
+            let dx = j % 5 - 2
+            let dy = j div 5 - 2
+            let q = at(img, x + dx, y + dy) * 1.0
+            math::exp((0 - (dx * dx + dy * dy)) * 1.0 / 8.0) * math::exp(0.0 - (q - p) * (q - p) / 1800.0)
+        })
+        let vs = ⍳ 25 ¨ (j => at(img, x + j % 5 - 2, y + j div 5 - 2) * 1.0)
+        math::to_int(math::floor((ws * vs ▷ +/) / (ws ▷ +/) + 0.5))
+    })
+    image_of(img, px)
+}
+
+fn threshold(img: Image, t: i64) -> [bool] {
+    img.px > t
+}
+
+fn report(name: str, img: Image) {
+    let weights = ⍳ (img.w * img.h) ¨ (i => i % 251 + 1)
+    let check = img.px * weights ▷ +/
+    print("{name:<16} sum {img.px ▷ +/:>7}  min {img.px ▷ ⌊/:>3}  max {img.px ▷ ⌈/:>3}  check {check}")
+}
+
+fn picture(img: Image, edges: [bool]) {
+    let rows = ⍳ img.h ¨ (y => ⍳ img.w ¨ (x => if edges[y * img.w + x] { "#" } else { "." }) ▷ join(""))
+    print(join(rows, "\n"))
+}
+
+fn main() {
+    let img = test_image()
+    report("original", img)
+    report("box blur", box_blur(img))
+    report("gaussian", gaussian(img))
+    report("sharpen", sharpen(img))
+    report("sobel", sobel(img))
+    report("prewitt", prewitt(img))
+    report("scharr", scharr(img))
+    report("sobel magnitude", sobel_magnitude(img))
+    report("laplacian", laplacian(img))
+    report("median", median(img))
+    report("bilateral", bilateral(img))
+    // pipelines: denoise, then find edges
+    report("median→sobel", sobel(median(img)))
+    report("gauss→laplace", laplacian(gaussian(img)))
+    report("bilat→sharpen", sharpen(bilateral(img)))
+    let edges = threshold(sobel(gaussian(img)), 100)
+    print("edges after a Gaussian blur: {edges ⌿ edges ▷ len}")
+    picture(img, edges)
+}

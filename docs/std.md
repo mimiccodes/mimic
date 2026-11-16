@@ -120,6 +120,7 @@ math::atan2(1.0, 1.0) * 4.0        // π
 | `math::asin(x)`, `math::acos(x)`, `math::atan(x)`, `math::atan2(y, x)` | inverse trigonometry |
 | `math::exp(x)`, `math::ln(x)`, `math::log2(x)`, `math::log10(x)` | exponential and logarithms |
 | `math::floor(x)`, `math::ceil(x)`, `math::round(x)` | rounding (to an `f64`) |
+| `math::to_int(x)` | the integer part as an `i64`, towards zero: `math::to_int(¯2.7)` is `-2`; `math::to_int(math::round(x))` rounds. NaN, or a number no `i64` holds, stops the program. (An integer becomes a float with `n * 1.0`.) |
 | `math::pi()`, `math::e()` | the constants |
 
 All take and return `f64` (integers are converted). On numbers the compiler knows, each is one machine instruction or one call to the system's math library, so it costs what it does in C and runs inside parallel array kernels. Any function of a standard module can be passed as a value: `xs ¨ math::sqrt`.

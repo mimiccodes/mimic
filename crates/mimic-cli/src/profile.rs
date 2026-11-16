@@ -24,7 +24,29 @@ pub struct Options {
     pub top: usize,
     /// Stop the program after this many seconds (a server), writing the profile
     pub seconds: Option<f64>,
+    /// Stop the program when this file appears (an editor's Stop button)
+    pub stop_file: Option<PathBuf>,
     pub args: Vec<String>,
+}
+
+/// Ctrl-C while profiling goes to the program, which writes its profile and
+/// ends; `mimic profile` lets it pass, to read the profile and report.
+fn ignore_interrupts() {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn signal(sig: i32, handler: usize) -> usize;
+        }
+        // SIGINT, SIG_IGN
+        unsafe { signal(2, 1) };
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn SetConsoleCtrlHandler(handler: usize, add: i32) -> i32;
+        }
+        unsafe { SetConsoleCtrlHandler(0, 1) };
+    }
 }
 
 /// What the runtime wrote.
@@ -186,24 +208,33 @@ pub fn run(o: Options) -> Result<ExitCode, String> {
         // timed by the program itself, from when it starts running
         child.env("MIMIC_PROFILE_FOR", secs.to_string());
     }
+    if let Some(f) = &o.stop_file {
+        let _ = std::fs::remove_file(f);
+        child.env("MIMIC_PROFILE_STOP", f);
+    }
     let mut proc = child.spawn().map_err(|e| format!("cannot run {}: {e}", art.path.display()))?;
-    let status = match o.seconds {
-        None => proc.wait().map_err(|e| e.to_string())?,
-        // (a program that never starts its runtime is stopped well after)
-        Some(secs) => {
-            let t0 = std::time::Instant::now();
-            loop {
-                if let Some(st) = proc.try_wait().map_err(|e| e.to_string())? {
-                    break st;
-                }
-                if t0.elapsed().as_secs_f64() >= secs + 60.0 {
-                    let _ = proc.kill();
-                    break proc.wait().map_err(|e| e.to_string())?;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+    ignore_interrupts();
+    // (a program that never starts its runtime is stopped well after it
+    // was asked to stop)
+    let t0 = std::time::Instant::now();
+    let mut asked: Option<std::time::Instant> = None;
+    let status = loop {
+        if let Some(st) = proc.try_wait().map_err(|e| e.to_string())? {
+            break st;
         }
+        if asked.is_none() && o.stop_file.as_ref().is_some_and(|f| f.exists()) {
+            asked = Some(std::time::Instant::now());
+        }
+        let late = o.seconds.is_some_and(|secs| t0.elapsed().as_secs_f64() >= secs + 60.0) || asked.is_some_and(|a| a.elapsed().as_secs() >= 10);
+        if late {
+            let _ = proc.kill();
+            break proc.wait().map_err(|e| e.to_string())?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     };
+    if let Some(f) = &o.stop_file {
+        let _ = std::fs::remove_file(f);
+    }
     let bytes = std::fs::read(&data_path).map_err(|_| "the program wrote no profile (did it end in a crash, or call os::exit before the runtime could write it?)".to_string())?;
     let data = parse(&bytes)?;
     let report = analyse(&input, &program, &art.path, &data, o.top)?;

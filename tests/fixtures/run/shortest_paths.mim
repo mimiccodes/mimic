@@ -1,0 +1,129 @@
+module main
+
+// Shortest paths: Dijkstra's algorithm and A* on a 24×14 grid where every
+// cell costs 1 … 9 to enter and walls (#) cannot be entered, and Dijkstra
+// on a small road map. Written array-style: each step takes the closest
+// open node (`min_by`), then relaxes every node at once (a parallel map);
+// `settle` repeats the step until the goal is closed. A* adds the
+// Manhattan distance to the goal (each step costs at least 1, so it never
+// overestimates): the same cost, fewer nodes expanded.
+
+type Grid = { w: i64, h: i64, cost: [i64] }
+type Search = { dist: [i64], prev: [i64], closed: [bool], expanded: i64 }
+
+fn far() -> i64 { 1 << 40 }
+
+// walls: two long ones with gaps, and a box around part of the grid
+fn make_grid() -> Grid {
+    let w = 24
+    let h = 14
+    let cost = ⍳ (w * h) ¨ (i => {
+        let x = i % w
+        let y = i div w
+        let wall = (x == 6 and y != 2 and y != 11) or (x == 15 and y > 0 and y != 7) or (y == 4 and x > 16 and x < 22)
+        if wall { 0 } else { (i * 1103515245 + 12345) % 2147483648 div 65536 % 9 + 1 }
+    })
+    Grid { w: w, h: h, cost: cost }
+}
+
+fn neighbours(g: Grid, u: i64, v: i64) -> bool {
+    let (ux, uy, vx, vy) = (u % g.w, u div g.w, v % g.w, v div g.w)
+    ∣ (ux - vx) + ∣ (uy - vy) == 1
+}
+
+// guess: the Manhattan distance to the goal (0 for Dijkstra)
+fn search(g: Grid, start: i64, goal: i64, guess: bool) -> Search {
+    let n = g.w * g.h
+    let first = Search { dist: put(far() ⥊ [n], start, 0), prev: ¯1 ⥊ [n], closed: false ⥊ [n], expanded: 0 }
+    first ▷ settle(s => step(g, s, goal, guess), s => s.closed[goal] or open_count(s) == 0)
+}
+
+fn estimate(g: Grid, v: i64, goal: i64, guess: bool) -> i64 {
+    if guess { ∣ (v % g.w - goal % g.w) + ∣ (v div g.w - goal div g.w) } else { 0 }
+}
+
+fn open_count(s: Search) -> i64 {
+    ⍳ ≢ s.dist ⌿ (s.dist < far() and not s.closed) ▷ len
+}
+
+fn step(g: Grid, s: Search, goal: i64, guess: bool) -> Search {
+    let open = ⍳ ≢ s.dist ⌿ (s.dist < far() and not s.closed)
+    // the open node with the smallest distance (+ estimate); the lowest
+    // index among equals, so the result does not depend on the order
+    let u = match min_by(open, v => (s.dist[v] + estimate(g, v, goal, guess)) * 100000 + v) {
+        Some(v) => v,
+        None => ¯1,
+    }
+    let closed = put(s.closed, u, true)
+    let better = ⍳ ≢ s.dist ¨ (v => g.cost[v] > 0 and not closed[v] and neighbours(g, u, v) and s.dist[u] + g.cost[v] < s.dist[v])
+    let dist = ⍳ ≢ s.dist ¨ (v => if better[v] { s.dist[u] + g.cost[v] } else { s.dist[v] })
+    let prev = ⍳ ≢ s.dist ¨ (v => if better[v] { u } else { s.prev[v] })
+    Search { dist: dist, prev: prev, closed: closed, expanded: s.expanded + 1 }
+}
+
+// the path from start to goal, following `prev` back
+fn path(s: Search, goal: i64) -> [i64] {
+    let back = [goal] ▷ settle(p => push(p, s.prev[p[≢ p - 1]]), p => s.prev[p[≢ p - 1]] < 0)
+    ⌽ back
+}
+
+fn draw(g: Grid, on_path: [bool]) {
+    let rows = ⍳ g.h ¨ (y => ⍳ g.w ¨ (x => {
+        let i = y * g.w + x
+        if g.cost[i] == 0 { "#" } else if on_path[i] { "*" } else { string(g.cost[i]) }
+    }) ▷ join(""))
+    print(join(rows, "\n"))
+}
+
+// ---- a road map: Dijkstra over an edge list --------------------------------
+
+type Road = { a: i64, b: i64, km: i64 }
+
+fn roads_from(names: [str], roads: [Road], from: i64) -> [i64] {
+    let n = ≢ names
+    let first = Search { dist: put(far() ⥊ [n], from, 0), prev: ¯1 ⥊ [n], closed: false ⥊ [n], expanded: 0 }
+    let end = first ▷ settle(s => road_step(roads, s), s => open_count(s) == 0)
+    end.dist
+}
+
+fn road_step(roads: [Road], s: Search) -> Search {
+    let open = ⍳ ≢ s.dist ⌿ (s.dist < far() and not s.closed)
+    let u = match min_by(open, v => s.dist[v] * 1000 + v) {
+        Some(v) => v,
+        None => ¯1,
+    }
+    let closed = put(s.closed, u, true)
+    // the shortest way into each node through u (roads go both ways)
+    let via = ⍳ ≢ s.dist ¨ (v => {
+        let ks = roads ⌿ (roads ¨ (r => (r.a == u and r.b == v) or (r.b == u and r.a == v))) ¨ (r => r.km)
+        if ≢ ks == 0 { far() } else { s.dist[u] + (ks ▷ ⌊/) }
+    })
+    Search { dist: s.dist ⌊ via, prev: s.prev, closed: closed, expanded: s.expanded + 1 }
+}
+
+fn main() {
+    let g = make_grid()
+    let start = 1 * g.w + 1
+    let goal = 12 * g.w + 22
+    let d = search(g, start, goal, false)
+    let a = search(g, start, goal, true)
+    let p = path(a, goal)
+    print("dijkstra: cost {d.dist[goal]}, {d.expanded} nodes expanded")
+    print("a*:       cost {a.dist[goal]}, {a.expanded} nodes expanded")
+    print("same path cost: {d.dist[goal] == a.dist[goal]}, a* expanded fewer: {a.expanded < d.expanded}")
+    print("path: {≢ p} cells, cost again {p ↓ 1 ¨ (i => g.cost[i]) ▷ +/}")
+    draw(g, ⍳ (g.w * g.h) ¨ (i => contains(p, i)))
+    // a goal no path reaches: walled in
+    let shut = Grid { w: g.w, h: g.h, cost: ⍳ (g.w * g.h) ¨ (i => {
+        let x = i % g.w
+        let y = i div g.w
+        if x >= 19 and x <= 21 and y >= 2 and y <= 4 and not (x == 20 and y == 3) { 0 } else { g.cost[i] }
+    }) }
+    let none = search(shut, start, 3 * g.w + 20, true)
+    print("walled-in goal reached: {none.dist[3 * g.w + 20] < far()}")
+
+    let names = ["Amber", "Birch", "Cedar", "Dune", "Elm", "Fjord"]
+    let roads = [Road { a: 0, b: 1, km: 7 } Road { a: 0, b: 2, km: 9 } Road { a: 0, b: 5, km: 14 } Road { a: 1, b: 2, km: 10 } Road { a: 1, b: 3, km: 15 } Road { a: 2, b: 3, km: 11 } Road { a: 2, b: 5, km: 2 } Road { a: 3, b: 4, km: 6 } Road { a: 4, b: 5, km: 9 }]
+    let km = roads_from(names, roads, 0)
+    print(⍳ ≢ names ¨ (i => "{names[i]} {km[i]}") ▷ join(", "))
+}
