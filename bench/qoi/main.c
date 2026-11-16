@@ -13,10 +13,10 @@
 static uint32_t rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r << 24 | g << 16 | b << 8 | a; }
 static uint32_t slot(uint32_t p) { return ((p >> 24) * 3 + (p >> 16 & 255) * 5 + (p >> 8 & 255) * 7 + (p & 255) * 11) % 64; }
 
-static uint32_t pixel(long i) {
-    long x = i % W, y = i / W;
-    long noise = (i * 1103515245 + 12345) % 2147483648 / 65536;
-    long band = y * 10 / H;
+static uint32_t pixel(int64_t i) {
+    int64_t x = i % W, y = i / W;
+    int64_t noise = (i * 1103515245 + 12345) % 2147483648 / 65536;
+    int64_t band = y * 10 / H;
     if (band < 2) return rgba(40, 90, 200, 255);
     if (band < 5) return rgba(x * 3 % 256, y * 5 % 256, (x + y) % 256, 255);
     if (band < 7) { static const uint32_t c[3] = {0xff0000ff, 0x00ff00ff, 0x0000ffff}; return c[(x / 5 + y) % 3]; }
@@ -24,14 +24,14 @@ static uint32_t pixel(long i) {
     return rgba((120 + x) % 256, 60, (30 + y) % 256, x * 4 % 256);
 }
 
-static long encode(const uint32_t *px, long n, uint8_t *out) {
-    long o = 0;
+static int64_t encode(const uint32_t *px, int64_t n, uint8_t *out) {
+    int64_t o = 0;
     uint8_t hdr[14] = {'q', 'o', 'i', 'f', 0, 0, W >> 8, W & 255, 0, 0, H >> 8, H & 255, 4, 0};
     memcpy(out, hdr, 14);
     o = 14;
     uint32_t seen[64] = {0}, prev = rgba(0, 0, 0, 255);
-    long run = 0;
-    for (long i = 0; i < n; i++) {
+    int64_t run = 0;
+    for (int64_t i = 0; i < n; i++) {
         uint32_t p = px[i];
         if (p == prev) {
             run++;
@@ -61,9 +61,9 @@ static long encode(const uint32_t *px, long n, uint8_t *out) {
     return o;
 }
 
-static void decode(const uint8_t *d, long n, uint32_t *px) {
+static void decode(const uint8_t *d, int64_t n, uint32_t *px) {
     uint32_t seen[64] = {0}, prev = rgba(0, 0, 0, 255);
-    long pos = 14, i = 0;
+    int64_t pos = 14, i = 0;
     while (i < n) {
         uint8_t b = d[pos];
         uint32_t p;
@@ -72,7 +72,7 @@ static void decode(const uint8_t *d, long n, uint32_t *px) {
         else if (b >> 6 == 0) { p = seen[b]; pos += 1; }
         else if (b >> 6 == 1) { p = rgba(((prev >> 24) + (b >> 4 & 3) - 2) & 255, ((prev >> 16 & 255) + (b >> 2 & 3) - 2) & 255, ((prev >> 8 & 255) + (b & 3) - 2) & 255, prev & 255); pos += 1; }
         else if (b >> 6 == 2) { int dg = (b & 63) - 32; uint8_t m = d[pos + 1]; p = rgba(((prev >> 24) + dg + (m >> 4) - 8) & 255, ((prev >> 16 & 255) + dg) & 255, ((prev >> 8 & 255) + dg + (m & 15) - 8) & 255, prev & 255); pos += 2; }
-        else { long r = (b & 63) + 1; for (long k = 0; k < r; k++) px[i++] = prev; pos += 1; continue; }
+        else { int64_t r = (b & 63) + 1; for (int64_t k = 0; k < r; k++) px[i++] = prev; pos += 1; continue; }
         seen[slot(p)] = p;
         px[i++] = p;
         prev = p;
@@ -80,18 +80,18 @@ static void decode(const uint8_t *d, long n, uint32_t *px) {
 }
 
 int main(void) {
-    long n = (long)W * H;
+    int64_t n = (int64_t)W * H;
     uint32_t *px = malloc(n * 4), *back = malloc(n * 4);
     uint8_t *data = malloc(n * 5 + 22);
-    for (long i = 0; i < n; i++) px[i] = pixel(i);
-    long size = 0, ok = 1;
+    for (int64_t i = 0; i < n; i++) px[i] = pixel(i);
+    int64_t size = 0, ok = 1;
     for (int rep = 0; rep < 5; rep++) {
         size = encode(px, n, data);
         decode(data, n, back);
         ok = ok && memcmp(px, back, n * 4) == 0;
     }
-    long long check = 0;
-    for (long i = 0; i < size; i++) check += (long long)data[i] * (i % 251 + 1);
-    printf("%ld bytes\n%lld\n%s\n", size, check, ok ? "true" : "false");
+    int64_t check = 0;
+    for (int64_t i = 0; i < size; i++) check += (int64_t)data[i] * (i % 251 + 1);
+    printf("%lld bytes\n%lld\n%s\n", (long long)size, (long long)check, ok ? "true" : "false");
     return 0;
 }
