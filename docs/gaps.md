@@ -11,6 +11,22 @@ Several things that look missing exist under another name, or are left out on pu
 | String escape for ESC and other control characters (`\x1b`, `\u{…}`); `\033` was silently misread | ✅ fixed |
 | `include "stdlib.h"` failed: C's `div` clashes with the `div` operator | ✅ fixed (names from C live under `c::`) |
 | `print` cannot write without a newline, and output cannot be flushed (terminal games, progress bars) | ✅ `io::write`, `io::flush`, the `term` module |
+| `and` / `or` did not short-circuit: `n > 0 and xs[0] == "x"` read `xs[0]` of an empty list and crashed | ✅ fixed |
+| `{` in a string starts an interpolation; the error spoke of digraphs | ✅ the message says so, and to write `\{` |
+| `module` as a record field name | ✅ fixed |
+| Types on a lambda's parameters: `(a: i64, b: i64) => a + b` | open (a named function instead) |
+| `match` on a list of pairs needed `_ => …` after `[]` and `[(k, v), ..rest]` | ✅ fixed |
+| An empty map literal | ✅ `[:]` |
+| `split("", "\n")` gave `[]` | ✅ `[""]` |
+| Running a program in another folder (`os::run` has no working directory) | open (`os::shell("cd dir && …")`) |
+| Is input waiting? (debouncing while reading) | a task reading into a channel, and `chan::try_receive` |
+| Reading an exact number of bytes from standard input | ✅ `io::read_bytes(n)` |
+| `mimic check src/a_module.mim` said `mimic run <file>` expects `module main` | ✅ a file inside a project is checked with its project |
+| Checking stops at the first syntax error without saying so | ✅ it says that names and types are checked once the file parses |
+| `mimic doc --json` printed errors on standard output | ✅ standard error, exit status 1 |
+| `mimic create mimic-ls` refused the name | ✅ the project is `mimic_ls` in the folder `mimic-ls` |
+| A float could not be turned into an integer | ✅ `math::to_int(x)` |
+| Standard functions did not check their arguments' types (`to_float(5)` crashed when run) | ✅ error E0401 |
 
 ## Terminal and console ✅ (0.2.6)
 

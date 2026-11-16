@@ -1727,7 +1727,16 @@ fn variant_covered(p: &Program, module: ModId, t: TypeId, v: usize, pats: &[&Pat
 /// Do the unguarded array patterns of these arms cover every length?
 /// (`[]`, `[x]`, `[x, ..rest]` do: lengths 0 and 1 exactly, then 1 or more.)
 fn arrays_exhaustive(arms: &[Arm]) -> bool {
-    let irrefutable = |p: &Pattern| matches!(p, Pattern::Wild(_) | Pattern::Bind(..));
+    // a pattern every element matches: `_`, a name, and tuples of them
+    // (`[(f, v), ..rest]`: the type says every element is such a pair)
+    fn irrefutable(p: &Pattern) -> bool {
+        match p {
+            Pattern::Wild(_) | Pattern::Bind(..) => true,
+            Pattern::Tuple(ps, _) => ps.iter().all(irrefutable),
+            Pattern::As(p, _, _) => irrefutable(p),
+            _ => false,
+        }
+    }
     let mut exact = Vec::new();
     let mut from: Option<usize> = None;
     for arm in arms.iter().filter(|a| a.guard.is_none()) {
@@ -1736,7 +1745,7 @@ fn arrays_exhaustive(arms: &[Arm]) -> bool {
             p => p,
         };
         if let Pattern::Array { elems, rest, .. } = pat
-            && elems.iter().all(irrefutable)
+            && elems.iter().all(|p| irrefutable(p))
         {
             match rest {
                 Some(_) => from = Some(from.map_or(elems.len(), |k| k.min(elems.len()))),

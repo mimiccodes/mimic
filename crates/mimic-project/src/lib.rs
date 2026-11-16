@@ -392,7 +392,13 @@ pub fn hello() {{
 /// Create the standard project layout in `dir` (which may already exist but must not contain mim.mim).
 pub fn scaffold(dir: &Path, name: &str, bin: bool, lib: bool) -> Result<Vec<PathBuf>, String> {
     if !valid_ident(name) {
-        return Err(format!("`{name}` is not a valid project name: use letters, digits and `_`, starting with a letter"));
+        // `mimic-ls` → `mimic_ls`: the name as it would be written in code
+        let mut fixed: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+        if !fixed.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            fixed.insert(0, 'p');
+        }
+        let hint = if valid_ident(&fixed) { format!(" (try `{fixed}`)") } else { String::new() };
+        return Err(format!("`{name}` is not a valid project name: use letters, digits and `_`, starting with a letter{hint}"));
     }
     if dir.join(MANIFEST).exists() {
         return Err(format!("{} already contains a mimic project", dir.display()));

@@ -4,7 +4,7 @@
 
 | Command | What it does |
 |---|---|
-| `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. |
+| `mimic create <name> [--bin] [--lib]` | Create a project in `./<name>`. The default kind is `--bin`; pass both flags for a combined binary and library. A project's name is a name in code, so `-` becomes `_`: `mimic create mimic-ls` makes the folder `mimic-ls` with the project `mimic_ls`. |
 | `mimic init [--name N] [--bin] [--lib]` | Turn the current directory into a project. |
 | `mimic run [file.mim] [--debug\|--release] [--emit-json] [-- args…]` | Build and run the project, or a single standalone file that declares `module main`. With `--emit-json`, compile errors go to stderr as JSON. |
 | `mimic run --terminal [file.mim]`, `mimic run --window [file.mim]` | Show a `ui` program in the terminal, or in a native window, instead of the browser (sets `MIMIC_UI`). |

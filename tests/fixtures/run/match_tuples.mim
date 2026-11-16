@@ -1,0 +1,27 @@
+module main
+
+// `[]` and `[(k, v), ..rest]` cover every list of pairs: no `_` arm needed
+
+fn total(xs: [(str, i64)]) -> i64 {
+    match xs {
+        [] => 0,
+        [(_, v), ..rest] => v + total(rest),
+    }
+}
+
+fn keys(xs: [(str, i64)]) -> str {
+    match xs {
+        [] => "",
+        [(k, _)] => k,
+        [(k, _), ..rest] => k + "," + keys(rest),
+    }
+}
+
+fn main() {
+    let pairs = [("a", 1), ("b", 2), ("c", 39)]
+    print(total(pairs))
+    print(keys(pairs))
+    print(math::to_int(2.9))
+    print(math::to_int(0.0 - 2.9))
+    print(math::to_int(math::round(2.5)))
+}

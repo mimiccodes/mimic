@@ -191,6 +191,11 @@ impl Report {
         }
         let n = self.errors().max(1);
         out.push_str(&format!("error: could not compile due to {n} previous error{}", if n == 1 { "" } else { "s" }));
+        // a file that does not parse is not checked further: say so, or
+        // fixing the syntax looks like it uncovers new errors
+        if !self.entries.is_empty() && self.entries.iter().all(|e| e.diag.code.id.starts_with("E01") || e.diag.code.id.starts_with("E02")) {
+            out.push_str("\nnote: a syntax error stops the check here; names and types are checked once the file parses");
+        }
         out
     }
 

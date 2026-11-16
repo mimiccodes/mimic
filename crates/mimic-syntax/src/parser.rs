@@ -1399,7 +1399,11 @@ impl Parser {
                                 }
                                 None => parse_expr(&c),
                             }
-                            .map_err(|d| Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {}", d.msg), span))?;
+                            .map_err(|d| {
+                                Diag::new(&C::BAD_INTERPOLATION, format!("in `{{{c}}}`: {}", d.msg), span)
+                                    .note("`{` in a string starts an interpolation: what follows, up to `}`, is read as code")
+                                    .help("for a brace in the text, write `\\{` and `\\}` (`\"\\{\\\"a\\\": 1\\}\"` is the text `{\"a\": 1}`)")
+                            })?;
                             respan(&mut e, span);
                             out.push(InterpPart::Expr(e));
                         }

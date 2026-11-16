@@ -889,9 +889,10 @@ pub fn load_with(input: &Input, target: &Target, tests: bool) -> Result<Program,
                 if sf.ast.module.name != "main" {
                     let d = mimic_syntax::Diag::new(
                         &C::ENTRY_MODULE,
-                        format!("`mimic run <file>` expects the file to declare `module main` (found `module {}`)", sf.ast.module.name),
+                        format!("a file used on its own must declare `module main` (found `module {}`)", sf.ast.module.name),
                         sf.ast.module.span,
-                    );
+                    )
+                    .help("a module of a project is checked and built with its project: run `mimic check` or `mimic build` in the project's folder (the one with mim.mim)");
                     report.push_in(Some(&sf.path), &sf.display, &sf.src, d);
                 }
                 files.push(sf);
@@ -1896,6 +1897,21 @@ pub fn input_from(file: Option<&Path>) -> Result<Input, String> {
         format!("error: could not find `{MANIFEST}` in {} or any parent directory\n  = help: create a project with `mimic create <name>` or `mimic init`, or pass a file: `mimic run file.mim`", cwd.display())
     })?;
     Ok(Input::Project(Box::new(Project::load(&root)?)))
+}
+
+/// For `mimic check <file>`: a file inside a project is checked with its
+/// project (a library module means nothing alone, and editors check the
+/// file they show); anything else as `input_from`.
+pub fn input_for_check(file: Option<&Path>) -> Result<Input, String> {
+    if let Some(f) = file
+        && f.is_file()
+        && let Ok(abs) = fs::canonicalize(f)
+        && let Some(root) = abs.parent().and_then(mimic_project::find_root)
+        && abs.starts_with(root.join("src"))
+    {
+        return Ok(Input::Project(Box::new(Project::load(&root)?)));
+    }
+    input_from(file)
 }
 
 /// Compile a raw `.mnet` interaction-net file into an executable that reduces `@main`.

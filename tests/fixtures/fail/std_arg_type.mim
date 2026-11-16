@@ -1,0 +1,8 @@
+// expect-error: E0401 argument `s` of `to_float`: expected str, found i64
+module main
+
+// a standard function checks its arguments like any other
+fn main() {
+    let xs = [1 2 3]
+    print(to_float(xs[0]))
+}

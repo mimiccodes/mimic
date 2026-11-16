@@ -1,0 +1,8 @@
+// expect-panic: math::to_int: the number is NaN or too large for an i64
+module main
+
+fn main() {
+    print(math::to_int(2.9))
+    print(math::to_int(0.0 - 2.9))
+    print(math::to_int(1.0e30))
+}

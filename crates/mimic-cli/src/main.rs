@@ -543,10 +543,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             if dir.exists() {
                 return Err(format!("destination `{}` already exists", dir.display()));
             }
-            let pname = Path::new(&name).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(name.clone());
+            // the folder keeps its name; the project's is a name for code
+            // (`mimic-ls` → `mimic_ls`), as `mimic init` does
+            let folder = Path::new(&name).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(name.clone());
+            let pname = folder.replace('-', "_");
             mimic_project::scaffold(&dir, &pname, bin, lib)?;
             write_initial_modfile(&dir);
-            status("Created", format!("{} `{pname}` project", kind_label(bin, lib)));
+            let where_ = if pname != folder { format!(" in `{folder}`") } else { String::new() };
+            status("Created", format!("{} `{pname}` project{where_}", kind_label(bin, lib)));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Init { name, kind } => {
@@ -560,7 +564,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Check { file, emit_json, fix } => {
             let check_once = || -> Result<(String, Program), Report> {
-                let input = driver::input_from(file.as_deref())?;
+                let input = driver::input_for_check(file.as_deref())?;
                 let p = driver::load(&input)?;
                 if let Input::Project(proj) = &input {
                     modfile::sync(proj, &p)?;

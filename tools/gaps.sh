@@ -46,6 +46,10 @@ trusted extern "C" include "stdio.h"'
 echo "== found by first users"
 check escape_hex      '    print("\x1b[0m")'
 check stdlib_h        '    print(c::div(7, 2).quot)' 'trusted extern "C" include "stdlib.h"'
+check lambda_types    '    let f = (a: i64, b: i64) => a + b
+    print(f(1, 2))'
+check run_in_dir      '    print(os::run_in("/", "ls", []))'
+check float_to_int    '    print(math::to_int(2.5))'
 echo "== terminal and console"
 check io_write        '    io::write("no newline")'
 check io_flush        '    io::flush()'

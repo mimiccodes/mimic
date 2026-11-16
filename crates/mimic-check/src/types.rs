@@ -947,6 +947,25 @@ impl Walk<'_, '_> {
                 }
             }
         }
+        // the standard library's own functions: their parameters' types too
+        // (`to_float(5)` is an error, not a crash when it runs)
+        if let FnKind::Extern { decl, .. } = &p.fns[f].kind
+            && decl.intrinsic
+        {
+            let module = p.fns[f].module;
+            for (i, (pname, pt)) in decl.params.iter().enumerate() {
+                let (Some(a), Some(t)) = (args.get(i), argt.get(i).copied()) else { break };
+                let here = a.span.start >= call.span.start && a.span.end <= call.span.end;
+                if !here || matches!(t, Ty::Never | Ty::Dyn) {
+                    continue;
+                }
+                if let Err(m) = coerce_in(p, module, Some(pt), t) {
+                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("argument `{pname}` of `{}`: {m}", path.join("::")), a.span));
+                    argt[i] = Ty::Dyn;
+                }
+            }
+            return;
+        }
         let FnKind::User(d) = &p.fns[f].kind else { return };
         let (module, file) = (p.fns[f].module, p.fns[f].file);
         for (i, prm) in d.params.iter().enumerate() {
