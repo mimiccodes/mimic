@@ -1,0 +1,28 @@
+module main
+
+// Divisions inside a fused `¨` by a divisor that is the same for every
+// element go through a reciprocal computed once (no divide per element).
+// They must give exactly the divide's results: each is checked against the
+// same division by `d + x * 0` (which depends on the element, so it divides)
+// for every sign, extremes, and pseudo-random numbers over the whole range.
+
+fn same(xs: [i64], d: i64) -> bool {
+    let q = xs ¨ (x => x div d)
+    let r = xs ¨ (x => x % d)
+    let q2 = xs ¨ (x => x div (d + x * 0))
+    let r2 = xs ¨ (x => x % (d + x * 0))
+    all(q == q2) and all(r == r2)
+}
+
+fn main() {
+    let edge = [0 1 ¯1 2 ¯2 3 ¯3 7 ¯7 255 256 ¯256 1000003 ¯1000003 0x7FFFFFFFFFFFFFFF (0 - 0x7FFFFFFFFFFFFFFF) 0x8000000000000000 (0x8000000000000000 + 1)]
+    let rnd = ⍳ 20000 ¨ (i => (i * 6364136223846793005 + 1442695040888963407) ^ (i << 17))
+    let xs = concat(edge, rnd)
+    let ds = concat(edge ↓ 1, rnd ↑ 200) ⌿ (concat(edge ↓ 1, rnd ↑ 200) != 0)
+    // (i64::MIN div -1 overflows: left out of the check)
+    let ok = ds ¨ (d => same(xs ⌿ (xs != 0x8000000000000000 or d != ¯1), d))
+    print("{≢ ds} divisors × {≢ xs} numbers: {all(ok)}")
+    // the zero check still stops the program in such a loop: in fail/
+    let w = 7
+    print(⍳ 15 ¨ (i => i % w * 10 + i div w))
+}

@@ -1349,6 +1349,14 @@ mim_val *mim_std_bytes_from(mim_val *xs) {
     return r;
 }
 
+/* bytes::from over a fused loop (written straight into bytes by compiled
+ * code): an element that is not a byte stops the program, as above */
+void mim_byte_fail(int64_t v, int64_t i) {
+    char buf[128];
+    snprintf(buf, sizeof buf, "bytes::from: %lld at index %lld is not a byte (0 … 255)", (long long)v, (long long)i);
+    mim_panic(buf);
+}
+
 /* the UTF-8 bytes of a string */
 mim_val *mim_std_bytes_of_text(mim_val *s) {
     if (!s || s->dtype != MIM_CHAR || s->rank != 1) mim_panic("bytes::of_text: expected text (str)");

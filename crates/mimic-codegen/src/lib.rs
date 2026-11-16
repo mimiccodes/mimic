@@ -363,6 +363,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
+        inv_divs: Default::default(),
     };
     // every standard-library type descriptor, for the runtime (see desc())
     cg.desc(usize::MAX, None);
@@ -635,6 +636,10 @@ struct Cg<'ctx, 'p> {
     fj: forkjoin::State<'ctx>,
     /// the fused expression being compiled (for the GPU decision's note)
     fused_at: std::cell::Cell<Option<mimic_syntax::Span>>,
+    /// Integer divisions (expression ids) inside a fused `¨`'s function
+    /// whose divisor is the same for every element: by a reciprocal
+    /// computed once (see magic_div), not a divide per element.
+    inv_divs: std::cell::RefCell<std::collections::HashSet<usize>>,
 }
 
 /// Does `fid` call itself only in tail position, or as one operand of `+` / `×`
@@ -1582,6 +1587,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_index_fail" => void.fn_type(&[p, i64t], false),
+            "mim_byte_fail" => void.fn_type(&[i64t, i64t], false),
             "mim_vec_as" => ptr.fn_type(&[p, i32t], false),
             "mim_call" => ptr.fn_type(&[p, i32t, p], false),
             "mim_spawn" => ptr.fn_type(&[p, i32t, p], false),
@@ -2758,6 +2764,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.ret(v)?;
                 }
             }
+            Stmt::LetTuple { names, value, .. } if self.let_tuple_in_regs(s, names, value)? => {}
             Stmt::LetTuple { names, value, .. } => {
                 let v = self.expr(value)?;
                 let b = self.boxed(v)?;
@@ -4165,31 +4172,45 @@ impl<'ctx> Cg<'ctx, '_> {
             Add => Ok(V::I(bld.build_int_add(x, y, "").s()?)),
             Sub => Ok(V::I(bld.build_int_sub(x, y, "").s()?)),
             Mul => Ok(V::I(bld.build_int_mul(x, y, "").s()?)),
-            IntDiv => {
+            IntDiv | Mod => {
                 let z = bld.build_int_compare(IntPredicate::EQ, y, zero, "").s()?;
-                self.panic_if(z, "integer division by zero")?;
-                let q = bld.build_int_signed_div(x, y, "").s()?;
+                self.panic_if(z, if op == IntDiv { "integer division by zero" } else { "integer modulo by zero" })?;
+                // x >= 0 and y > 0 (indices, sizes: nearly always): floored
+                // and truncated division agree, and an unsigned divide needs
+                // no correction. LLVM drops the test where it can prove it
+                // (an index of a fused loop) or hoists it (a divisor the same
+                // for every element); else it is one well-predicted branch.
+                let bld = &self.b;
+                let f = self.cur_fn.unwrap();
+                let xp = bld.build_int_compare(IntPredicate::SGE, x, zero, "").s()?;
+                let yp = bld.build_int_compare(IntPredicate::SGT, y, zero, "").s()?;
+                let pos = bld.build_and(xp, yp, "").s()?;
+                let (fast, slow, done) = (self.ctx.append_basic_block(f, "div_pos"), self.ctx.append_basic_block(f, "div_floor"), self.ctx.append_basic_block(f, "div_done"));
+                bld.build_conditional_branch(pos, fast, slow).s()?;
+                bld.position_at_end(fast);
+                let a = if op == IntDiv { bld.build_int_unsigned_div(x, y, "").s()? } else { bld.build_int_unsigned_rem(x, y, "").s()? };
+                bld.build_unconditional_branch(done).s()?;
+                bld.position_at_end(slow);
                 let r = bld.build_int_signed_rem(x, y, "").s()?;
-                // floor: step down when the remainder is non-zero and the signs differ
+                // floor: when the remainder is non-zero and its sign differs
+                // from y's, the quotient steps down and the remainder adds y
                 let nz = bld.build_int_compare(IntPredicate::NE, r, zero, "").s()?;
                 let sx = bld.build_xor(r, y, "").s()?;
                 let neg = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
                 let adj = bld.build_and(nz, neg, "").s()?;
-                let adj = bld.build_int_z_extend(adj, self.ctx.i64_type(), "").s()?;
-                Ok(V::I(bld.build_int_sub(q, adj, "").s()?))
-            }
-            Mod => {
-                let z = bld.build_int_compare(IntPredicate::EQ, y, zero, "").s()?;
-                self.panic_if(z, "integer modulo by zero")?;
-                // floored modulo with ONE division: r = x rem y, then add y
-                // when r is non-zero and its sign differs from y's
-                let r = bld.build_int_signed_rem(x, y, "").s()?;
-                let nz = bld.build_int_compare(IntPredicate::NE, r, zero, "").s()?;
-                let sx = bld.build_xor(r, y, "").s()?;
-                let neg = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
-                let adj = bld.build_and(nz, neg, "").s()?;
-                let ry = bld.build_int_add(r, y, "").s()?;
-                Ok(V::I(bld.build_select(adj, ry, r, "").s()?.into_int_value()))
+                let b = if op == IntDiv {
+                    let q = bld.build_int_signed_div(x, y, "").s()?;
+                    let adj = bld.build_int_z_extend(adj, self.ctx.i64_type(), "").s()?;
+                    bld.build_int_sub(q, adj, "").s()?
+                } else {
+                    let ry = bld.build_int_add(r, y, "").s()?;
+                    bld.build_select(adj, ry, r, "").s()?.into_int_value()
+                };
+                bld.build_unconditional_branch(done).s()?;
+                bld.position_at_end(done);
+                let phi = bld.build_phi(self.ctx.i64_type(), "").s()?;
+                phi.add_incoming(&[(&a, fast), (&b, slow)]);
+                Ok(V::I(phi.as_basic_value().into_int_value()))
             }
             Max | Min => {
                 let c = bld.build_int_compare(if op == Max { IntPredicate::SGT } else { IntPredicate::SLT }, x, y, "").s()?;
@@ -4203,6 +4224,152 @@ impl<'ctx> Cg<'ctx, '_> {
             Ge => cmp(IntPredicate::SGE),
             Div | And | Or | BitAnd | BitOr | BitXor | Shl | Shr | UShr => unreachable!(),
         }
+    }
+
+    /// `let (a, b) = (x, y)`, or `= if c { (x, y) } else { (z, w) }`, whose
+    /// parts are numbers or truth values: each name gets its value in a
+    /// register, and no tuple is made (in a loop over pixels that was an
+    /// allocation, a check and a release per pixel). False: not this shape;
+    /// nothing was compiled.
+    fn let_tuple_in_regs(&mut self, s: &Stmt, names: &[String], value: &Expr) -> R<bool> {
+        let tys: Vec<Ty> = (0..names.len()).map(|i| self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn)).collect();
+        if !tys.iter().all(|t| matches!(t, Ty::I64 | Ty::F64 | Ty::Bool)) {
+            return Ok(false);
+        }
+        let parts = |e: &Expr| -> Option<Vec<Expr>> {
+            let tail = match &e.kind {
+                ExprKind::Tuple(xs) => return Some(xs.clone()),
+                ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref()?,
+                _ => return None,
+            };
+            match &tail.kind {
+                ExprKind::Tuple(xs) => Some(xs.clone()),
+                _ => None,
+            }
+        };
+        let eval = |cg: &mut Self, xs: &[Expr]| -> R<Vec<BasicValueEnum<'ctx>>> {
+            let mut out = Vec::new();
+            for (x, t) in xs.iter().zip(&tys) {
+                let v = cg.expr(x)?;
+                let v = cg.as_ty(v, *t, "tuple element")?;
+                out.push(cg.basic(v));
+            }
+            Ok(out)
+        };
+        let vals: Vec<BasicValueEnum<'ctx>> = match &value.kind {
+            ExprKind::Tuple(xs) if xs.len() == names.len() => eval(self, xs)?,
+            ExprKind::If { cond, then, els: Some(els) } => {
+                let then_e = Expr { kind: ExprKind::Block(then.clone()), span: value.span };
+                let (Some(xs), Some(ys)) = (parts(&then_e), parts(els)) else { return Ok(false) };
+                if xs.len() != names.len() || ys.len() != names.len() {
+                    return Ok(false);
+                }
+                let c = self.expr(cond)?;
+                let c = self.truth(c)?;
+                let f = self.cur_fn.unwrap();
+                let (tb, eb, done) = (self.ctx.append_basic_block(f, "tup_then"), self.ctx.append_basic_block(f, "tup_else"), self.ctx.append_basic_block(f, "tup_done"));
+                self.b.build_conditional_branch(c, tb, eb).s()?;
+                self.b.position_at_end(tb);
+                let a = eval(self, &xs)?;
+                let a_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(eb);
+                let b = eval(self, &ys)?;
+                let b_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(done);
+                let mut out = Vec::new();
+                for (x, y) in a.iter().zip(&b) {
+                    let phi = self.b.build_phi(x.get_type(), "").s()?;
+                    phi.add_incoming(&[(x, a_end), (y, b_end)]);
+                    out.push(phi.as_basic_value());
+                }
+                out
+            }
+            _ => return Ok(false),
+        };
+        for ((n, t), v) in names.iter().zip(&tys).zip(vals) {
+            if n == "_" {
+                continue;
+            }
+            let slot = self.entry_alloca(*t, n)?;
+            self.b.build_store(slot, v).s()?;
+            self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: *t, owned: false, mutable: false, moves: false });
+        }
+        Ok(true)
+    }
+
+    /// Floored `div` / `%` by a divisor that is the same for every element
+    /// of a fused loop: the runtime's mim_div_magic gives a reciprocal (a
+    /// multiplier and a shift for |d|) without side effects, so LLVM
+    /// computes it once, before the loop; each element then takes a
+    /// multiply-high and shifts instead of a divide, as C does for a
+    /// constant divisor. Exactly the results of the divide (floored; the
+    /// same message for zero; i64::MIN div -1 wraps, as the hardware's).
+    fn magic_div(&self, op: BinOp, a: V<'ctx>, b: V<'ctx>) -> R<V<'ctx>> {
+        let x = self.to_i64(a)?;
+        let d = self.to_i64(b)?;
+        // a constant: LLVM's own division by a constant. And only on x86-64,
+        // where a 64-bit divide costs tens of cycles: Apple's and other
+        // arm64 cores divide in a few, faster than this sequence (measured:
+        // the scale benchmark took 60% longer with it on an M3)
+        let x86 = self.module.get_triple().as_str().to_string_lossy().starts_with("x86_64");
+        if d.get_sign_extended_constant().is_some() || !x86 {
+            return self.scalar_binary(op, a, b);
+        }
+        let i64t = self.ctx.i64_type();
+        let i128t = self.ctx.i128_type();
+        let zero = i64t.const_zero();
+        let bld = &self.b;
+        let z = bld.build_int_compare(IntPredicate::EQ, d, zero, "").s()?;
+        self.panic_if(z, if op == BinOp::IntDiv { "integer division by zero" } else { "integer modulo by zero" })?;
+        let bld = &self.b;
+        let f = self.module.get_function("mim_div_magic").unwrap_or_else(|| {
+            let f = self.module.add_function("mim_div_magic", i64t.fn_type(&[i64t.into()], false), Some(Linkage::External));
+            let attr = |n: &str| self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id(n), 0);
+            // no side effects, may run anywhere: hoisted out of the loop
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("memory"), 0));
+            for n in ["nounwind", "willreturn", "speculatable", "nofree", "nosync"] {
+                f.add_attribute(inkwell::attributes::AttributeLoc::Function, attr(n));
+            }
+            f
+        });
+        let m = bld.build_call(f, &[d.into()], "magic").s()?.try_as_basic_value().basic().unwrap().into_int_value();
+        // |x| and |d| as unsigned (|i64::MIN| is 2^63)
+        let absf = Intrinsic::find("llvm.abs").and_then(|i| i.get_declaration(&self.module, &[i64t.into()])).ok_or("internal compiler error: llvm.abs")?;
+        let no = self.ctx.bool_type().const_zero();
+        let ax = bld.build_call(absf, &[x.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
+        let ad = bld.build_call(absf, &[d.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
+        // sh = ceil(log2 |d|) - 1 = 63 - clz(|d| - 1) (|d| >= 2; |d| = 1 below)
+        let ctlz = Intrinsic::find("llvm.ctlz").and_then(|i| i.get_declaration(&self.module, &[i64t.into()])).ok_or("internal compiler error: llvm.ctlz")?;
+        let dm1 = bld.build_int_sub(ad, i64t.const_int(1, false), "").s()?;
+        let lz = bld.build_call(ctlz, &[dm1.into(), no.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value();
+        let sh = bld.build_int_sub(i64t.const_int(63, false), lz, "").s()?;
+        // (|d| = 1: clz(0) = 64 gives a shift of -1; that result is replaced below)
+        let sh = bld.build_and(sh, i64t.const_int(63, false), "").s()?;
+        // q = (t + ((ax - t) >> 1)) >> sh, t = mulhi(m, ax); |d| = 1: q = ax
+        let wide = bld.build_int_mul(bld.build_int_z_extend(m, i128t, "").s()?, bld.build_int_z_extend(ax, i128t, "").s()?, "").s()?;
+        let t = bld.build_int_truncate(bld.build_right_shift(wide, i128t.const_int(64, false), false, "").s()?, i64t, "").s()?;
+        let half = bld.build_right_shift(bld.build_int_sub(ax, t, "").s()?, i64t.const_int(1, false), false, "").s()?;
+        let uq = bld.build_right_shift(bld.build_int_add(t, half, "").s()?, sh, false, "").s()?;
+        let one = bld.build_int_compare(IntPredicate::EQ, ad, i64t.const_int(1, false), "").s()?;
+        let uq = bld.build_select(one, ax, uq, "").s()?.into_int_value();
+        // truncated quotient and remainder, then floored
+        let neg = bld.build_int_compare(IntPredicate::SLT, bld.build_xor(x, d, "").s()?, zero, "").s()?;
+        let nq = bld.build_int_neg(uq, "").s()?;
+        let tq = bld.build_select(neg, nq, uq, "").s()?.into_int_value();
+        let tr = bld.build_int_sub(x, bld.build_int_mul(tq, d, "").s()?, "").s()?;
+        let nz = bld.build_int_compare(IntPredicate::NE, tr, zero, "").s()?;
+        let sx = bld.build_xor(tr, d, "").s()?;
+        let opp = bld.build_int_compare(IntPredicate::SLT, sx, zero, "").s()?;
+        let adj = bld.build_and(nz, opp, "").s()?;
+        Ok(V::I(if op == BinOp::IntDiv {
+            let a1 = bld.build_int_z_extend(adj, i64t, "").s()?;
+            bld.build_int_sub(tq, a1, "").s()?
+        } else {
+            let ry = bld.build_int_add(tr, d, "").s()?;
+            bld.build_select(adj, ry, tr, "").s()?.into_int_value()
+        }))
     }
 
     /// `& | ^ << >> >>>`. Shift amounts use their low 6 bits (`x << 64` is
@@ -4531,6 +4698,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let want: u64 = match el {
             El::F64 => 1,
             El::Bool => 2,
+            El::U8 => 8,
+            El::F32 => 9,
+            El::I32 => 10,
             _ => 0,
         };
         let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
@@ -4566,6 +4736,22 @@ impl<'ctx> Cg<'ctx, '_> {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
                 let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
                 V::B(self.b.build_int_compare(IntPredicate::NE, x, self.ctx.i8_type().const_zero(), "").s()?)
+            }
+            // a byte: 0 … 255 as an i64
+            El::U8 => {
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                V::I(self.b.build_int_z_extend(x, i64t, "").s()?)
+            }
+            El::F32 => {
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), data, &[i], "").s()? };
+                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?.into_float_value();
+                V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
+            }
+            El::I32 => {
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), data, &[i], "").s()? };
+                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?.into_int_value();
+                V::I(self.b.build_int_s_extend(x, i64t, "").s()?)
             }
             _ => {
                 let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
@@ -4822,6 +5008,18 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // bytes::from over a fused integer expression: written
+                // straight into bytes, in one pass
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "from"
+                    && self.p.mods[self.p.fns[fid].module].name == "bytes"
+                    && args.len() == 1
+                    && fuse::num_el(self.ty_of(&args[0])) == Some(El::I64)
+                    && self.is_fae(&args[0])
+                {
+                    return self.fused_bytes(&args[0]);
+                }
                 let mut vals = Vec::new();
                 for a in args {
                     vals.push(self.expr(a)?);
@@ -5068,14 +5266,15 @@ impl<'ctx> Cg<'ctx, '_> {
                 let r = self.index_fixed(b, i)?;
                 self.as_ty(r, ty, "element")
             }
+            // (bytes too: an element of a [u8] reads as an i64)
             ExprKind::Index { base, index }
-                if fuse::num_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
+                if fuse::index_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
             {
                 let b = self.expr(base)?;
                 let b = self.boxed(b)?;
                 let i = self.expr(index)?;
                 let i = self.to_i64(i)?;
-                let r = self.index_fast(b, i, fuse::num_el(self.ty_of(base)).unwrap(), ty)?;
+                let r = self.index_fast(b, i, fuse::index_el(self.ty_of(base)).unwrap(), ty)?;
                 self.drop_tmp(b)?;
                 Ok(r)
             }
@@ -5188,6 +5387,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.narrow_binary(*op, a, ta, b, tb, ty);
                 }
                 if Self::is_unboxed(&a) && Self::is_unboxed(&b) && ty.is_unboxed() {
+                    if matches!(op, BinOp::IntDiv | BinOp::Mod)
+                        && matches!((a, b), (V::I(_), V::I(_)))
+                        && self.inv_divs.borrow().contains(&id(e))
+                    {
+                        return self.magic_div(*op, a, b);
+                    }
                     return self.scalar_binary(*op, a, b);
                 }
                 let a = self.boxed(a)?;

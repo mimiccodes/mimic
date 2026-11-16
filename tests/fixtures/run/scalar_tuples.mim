@@ -1,0 +1,34 @@
+module main
+
+// `let (a, b) = …` of numbers and truth values stays in registers, from a
+// tuple or from an `if` whose branches are tuples (also inside a fused
+// loop); a `match` whose other arm stops (panic) keeps the type of the
+// arm that gives a value; bytes are summed, read and written directly
+
+fn plane(o: i64, w: i64, h: i64) -> i64 {
+    let luma = o < w * h
+    let (pw, ph, half) = if luma { (w, h, false) } else { (w div 2, h div 2, true) }
+    let (a, b) = (pw * 10, ph + 1)
+    if half { a + b } else { a - b }
+}
+
+fn first_byte(path: str) -> i64 {
+    let data = match fs::read_bytes(path) {
+        Ok(b) => b,
+        Err(e) => panic("cannot read {path}: {e}"),
+    }
+    (data ↑ 4) ▷ +/
+}
+
+fn main() {
+    print(⍳ 8 ¨ (o => plane(o, 2, 2)))
+    let (x, y, z) = if 3 > 2 { (1.5, 2, true) } else { (0.0, 0, false) }
+    print("{x} {y} {z}")
+    let path = path::join(fs::temp_dir(), "scalar_tuples.bin")
+    fs::write_bytes(path, bytes::from([1 2 3 250 5]))
+    print(first_byte(path))
+    let px = bytes::from(⍳ 1000 ¨ (i => i % 256))
+    print(px ▷ +/)
+    print(bytes::from(⍳ 6 ¨ (i => px[i * 100] div 2)))
+    fs::remove(path)
+}

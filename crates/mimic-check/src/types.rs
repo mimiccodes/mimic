@@ -1007,6 +1007,13 @@ impl Walk<'_, '_> {
                         _ => {}
                     }
                 }
+                // panic and os::exit never return: they take no part in the
+                // type of a match or an if (`Ok(b) => b, Err(e) => panic(…)`
+                // is the type of b, not dynamic)
+                let module = &self.inf.p.mods[m].name;
+                if (module == "prelude" && decl.name == "panic") || (module == "os" && decl.name == "exit") {
+                    return Ty::Never;
+                }
                 return match &decl.ret {
                     None => Ty::Unit,
                     Some(t) => ann_in(self.inf.p, m, t).unwrap_or(Ty::Dyn),
@@ -1825,7 +1832,7 @@ pub fn prim_ty(p: Prim, a: Ty, b: Ty) -> Ty {
         Ty::Arr(El::F64, _) => Ty::F64,
         Ty::Arr(El::F32, _) => Ty::F32,
         Ty::Arr(El::I32, _) => Ty::I32,
-        Ty::Arr(El::I64 | El::Bool | El::Char, _) => Ty::I64,
+        Ty::Arr(El::I64 | El::Bool | El::Char | El::U8, _) => Ty::I64,
         Ty::Arr(El::Dyn, _) | Ty::Dyn => Ty::Dyn,
         s => s, // reducing a scalar returns it
     };

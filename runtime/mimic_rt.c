@@ -2659,6 +2659,35 @@ typedef struct {
     int64_t *pi;
 } reduce_ctx;
 
+/* The reciprocal of |d| for division without a divide (compiled code,
+ * magic_div in lib.rs): with l = ceil(log2 |d|), m = 2^64 (2^l - |d|) / |d| + 1;
+ * then any unsigned n gives n / |d| = (t + ((n - t) >> 1)) >> (l - 1) where
+ * t = mulhi(m, n) (Granlund and Montgomery). The shift is computed by the
+ * caller; |d| <= 1 is handled there, and d = 0 is never divided by. No side
+ * effects: the compiler computes it once, before a loop. */
+uint64_t mim_div_magic(int64_t d) {
+    uint64_t ad = d < 0 ? (uint64_t)0 - (uint64_t)d : (uint64_t)d;
+    if (ad <= 1) return 0;
+    int l = 64 - __builtin_clzll(ad - 1);
+    uint64_t top = l == 64 ? (uint64_t)0 - ad : ((uint64_t)1 << l) - ad; /* 2^l - ad (top < ad) */
+#ifdef __SIZEOF_INT128__
+    return (uint64_t)(((unsigned __int128)top << 64) / ad) + 1;
+#else
+    /* (top · 2^64) / ad by long division, a bit at a time (top < ad) */
+    uint64_t q = 0, rem = top;
+    for (int i = 0; i < 64; i++) {
+        uint64_t carry = rem >> 63;
+        rem <<= 1;
+        q <<= 1;
+        if (carry || rem >= ad) {
+            rem -= ad;
+            q |= 1;
+        }
+    }
+    return q + 1;
+#endif
+}
+
 static void reduce_range(void *vc, int64_t lo, int64_t hi) {
     reduce_ctx *c = (reduce_ctx *)vc;
     int64_t slot = lo / g_grain;
@@ -2687,6 +2716,36 @@ static void reduce_range(void *vc, int64_t lo, int64_t hi) {
         case P_MIN: for (int64_t i = lo + 1; i < hi; i++) acc = x[i] < acc ? x[i] : acc; break;
         }
         c->pf[slot] = acc;
+    } else if (c->a->dtype == MIM_I64 || c->a->dtype == MIM_U8 || c->a->dtype == MIM_I32 || c->a->dtype == MIM_BOOL) {
+        /* integers of one width: a tight loop per operation (vectorised),
+         * not a switch on the type and the operation per element */
+        int64_t acc = geti(c->a, lo);
+#define REDUCE_INT(T)                                                                                       \
+    do {                                                                                                    \
+        const T *x = (const T *)c->a->data;                                                                 \
+        switch (c->prim) {                                                                                  \
+        case P_SUM: {                                                                                       \
+            uint64_t s = (uint64_t)acc;                                                                     \
+            for (int64_t i = lo + 1; i < hi; i++) s += (uint64_t)(int64_t)x[i];                             \
+            acc = (int64_t)s;                                                                               \
+        } break;                                                                                            \
+        case P_PRODUCT: {                                                                                   \
+            uint64_t s = (uint64_t)acc;                                                                     \
+            for (int64_t i = lo + 1; i < hi; i++) s *= (uint64_t)(int64_t)x[i];                             \
+            acc = (int64_t)s;                                                                               \
+        } break;                                                                                            \
+        case P_MAX: for (int64_t i = lo + 1; i < hi; i++) acc = (int64_t)x[i] > acc ? (int64_t)x[i] : acc; break; \
+        case P_MIN: for (int64_t i = lo + 1; i < hi; i++) acc = (int64_t)x[i] < acc ? (int64_t)x[i] : acc; break; \
+        }                                                                                                   \
+    } while (0)
+        switch (c->a->dtype) {
+        case MIM_I64: REDUCE_INT(int64_t); break;
+        case MIM_I32: REDUCE_INT(int32_t); break;
+        case MIM_U8: REDUCE_INT(uint8_t); break;
+        default: REDUCE_INT(uint8_t); break; /* bool: 0 or 1, one byte each */
+        }
+#undef REDUCE_INT
+        c->pi[slot] = acc;
     } else {
         int64_t acc = geti(c->a, lo);
         for (int64_t i = lo + 1; i < hi; i++) {

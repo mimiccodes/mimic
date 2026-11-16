@@ -1,0 +1,166 @@
+module main
+
+// Video transcoding into several resolutions, timed, two ways:
+//
+//   1. ffmpeg alone: one ffmpeg run per resolution (decode, scale, encode),
+//      then one run that writes every resolution at once.
+//   2. Mimic's own scaler: ffmpeg decodes the video once into raw frames
+//      (YUV 4:2:0), Mimic scales every plane of every frame to each
+//      resolution (bilinear, 8-bit fixed point: one parallel map over all
+//      the output pixels), and ffmpeg encodes each result.
+//
+// Results go to out/results-mimic.json (results-mimic-1thread.json with
+// MIMIC_THREADS=1); transcode.mjs does the same in
+// JavaScript, and compare.mjs puts the two side by side (the scaled frames
+// must be the same bytes: their checksums are compared).
+//
+//   mimic run --release transcode.mim                 # a generated 1080p clip
+//   mimic run --release transcode.mim -- video.mp4 3  # your video, 3 seconds
+//
+// Needs ffmpeg and ffprobe on the PATH.
+
+type Size = { w: i64, h: i64 }
+type Timed = { name: str, seconds: f64 }
+type Scaled = { name: str, scale_seconds: f64, encode_seconds: f64, checksum: i64, bytes: i64 }
+type Results = {
+    language: str,
+    threads: str,
+    source: str,
+    width: i64,
+    height: i64,
+    frames: i64,
+    ffmpeg_each: [Timed],
+    ffmpeg_all_seconds: f64,
+    decode_seconds: f64,
+    own: [Scaled],
+}
+
+fn sizes() -> [Size] {
+    [Size { w: 1280, h: 720 } Size { w: 854, h: 480 } Size { w: 640, h: 360 } Size { w: 426, h: 240 }]
+}
+
+fn label(s: Size) -> str { "{s.h}p" }
+
+fn seconds_since(t0: i64) -> f64 { (time::clock() - t0) / 1000000000.0 }
+
+// run a program; stop with its error output when it fails
+fn must(program: str, args: [str]) -> str {
+    match os::run(program, args) {
+        Ok(o) => {
+            if o.status != 0 {
+                panic("{program} failed ({o.status}): {o.stderr}")
+            }
+            o.stdout
+        },
+        Err(e) => panic("cannot run {program}: {e} (is it installed and on the PATH?)"),
+    }
+}
+
+fn encode_args() -> [str] { ["-c:v" "libx264" "-preset" "veryfast" "-crf" "23" "-an"] }
+
+// a 1080p test clip, made by ffmpeg, unless the program was given a video
+fn source(args: [str], seconds: str) -> str {
+    if ≢ args > 0 { args[0] } else {
+        let path = "out/source-1080p.mp4"
+        if not fs::exists(path) {
+            print("making a {seconds} s 1920×1080 test clip: {path}")
+            must("ffmpeg", ["-y" "-v" "error" "-f" "lavfi" "-i" "testsrc2=size=1920x1080:rate=30" "-t" seconds "-pix_fmt" "yuv420p" "-c:v" "libx264" "-preset" "veryfast" path])
+        }
+        path
+    }
+}
+
+// ---- bilinear scaling of one plane, for every frame at once ---------------
+
+// Every output pixel of every frame, as one parallel map. A frame is its
+// Y plane (w×h) then U and V (w/2 × h/2 each), as ffmpeg writes yuv420p.
+fn scale_all(src: [u8], frames: i64, w: i64, h: i64, w2: i64, h2: i64) -> [u8] {
+    let (cw, ch, cw2, ch2) = (w div 2, h div 2, w2 div 2, h2 div 2)
+    let in_frame = w * h + 2 * cw * ch
+    let out_frame = w2 * h2 + 2 * cw2 * ch2
+    bytes::from(⍳ (frames * out_frame) ¨ (o => {
+        let f = o div out_frame
+        let r = o % out_frame
+        // which plane: its size here and there, and where it starts
+        let luma = r < w2 * h2
+        let k = if luma { r } else { (r - w2 * h2) % (cw2 * ch2) }
+        let plane = if luma { 0 } else { 1 + (r - w2 * h2) div (cw2 * ch2) }
+        let (pw, ph, qw, qh) = if luma { (w, h, w2, h2) } else { (cw, ch, cw2, ch2) }
+        let base = f * in_frame + if plane == 0 { 0 } else { w * h + (plane - 1) * cw * ch }
+        let sx = k % qw * (pw - 1) * 256 div (qw - 1)
+        let sy = k div qw * (ph - 1) * 256 div (qh - 1)
+        let x0 = sx >> 8
+        let y0 = sy >> 8
+        let fx = sx & 255
+        let fy = sy & 255
+        let x1 = (x0 + 1) ⌊ (pw - 1)
+        let y1 = (y0 + 1) ⌊ (ph - 1)
+        let top = src[base + y0 * pw + x0] * (256 - fx) + src[base + y0 * pw + x1] * fx
+        let bot = src[base + y1 * pw + x0] * (256 - fx) + src[base + y1 * pw + x1] * fx
+        (top * (256 - fy) + bot * fy + 32768) >> 16
+    }))
+}
+
+fn main() {
+    let args = os::args()
+    let seconds = if ≢ args > 1 { args[1] } else { "2" }
+    fs::make_dir("out")
+    let src = source(args, seconds)
+    let dims = split(trim(must("ffprobe", ["-v" "error" "-select_streams" "v:0" "-show_entries" "stream=width,height" "-of" "csv=p=0" src])), ",")
+    let w = to_int(dims[0])
+    let h = to_int(dims[1])
+    print("source: {src}, {w}×{h}")
+
+    // 1. ffmpeg alone, one resolution at a time, then all at once
+    let one_by_one = sizes() ¨ (s => {
+        let t0 = time::clock()
+        must("ffmpeg", concat(concat(["-y" "-v" "error" "-i" src "-t" seconds "-vf" "scale={s.w}:{s.h}"], encode_args()), ["out/ffmpeg-{label(s)}.mp4"]))
+        let t = Timed { name: label(s), seconds: seconds_since(t0) }
+        print("ffmpeg {t.name:>5}: {t.seconds:.2} s")
+        t
+    })
+    let n = ≢ sizes()
+    let splits = ⍳ n ¨ (i => "[v{i}]") ▷ join("")
+    let scales = ⍳ n ¨ (i => "[v{i}]scale={sizes()[i].w}:{sizes()[i].h}[o{i}]") ▷ join(";")
+    let outs = flatten(⍳ n ¨ (i => concat(concat(["-map" "[o{i}]"], encode_args()), ["out/ffmpeg-all-{label(sizes()[i])}.mp4"])))
+    let t_all = time::clock()
+    must("ffmpeg", concat(["-y" "-v" "error" "-i" src "-t" seconds "-filter_complex" "[0:v]split={n}{splits};{scales}"], outs))
+    let all_seconds = seconds_since(t_all)
+    print("ffmpeg all at once: {all_seconds:.2} s")
+
+    // 2. decode once, scale with Mimic, encode each
+    let t_dec = time::clock()
+    must("ffmpeg", ["-y" "-v" "error" "-i" src "-t" seconds "-f" "rawvideo" "-pix_fmt" "yuv420p" "out/frames.yuv"])
+    let raw = match fs::read_bytes("out/frames.yuv") {
+        Ok(b) => b,
+        Err(e) => panic("cannot read the decoded frames: {e}"),
+    }
+    let frame_bytes = w * h + 2 * (w div 2) * (h div 2)
+    let frames = ≢ raw div frame_bytes
+    let decode_seconds = seconds_since(t_dec)
+    print("decoded {frames} frames ({≢ raw div 1000000} MB) in {decode_seconds:.2} s")
+    let own = sizes() ¨ (s => {
+        let t0 = time::clock()
+        let out = scale_all(raw, frames, w, h, s.w, s.h)
+        let checksum = out ▷ +/
+        let scale_seconds = seconds_since(t0)
+        let raw_path = "out/mimic-{label(s)}.yuv"
+        fs::write_bytes(raw_path, out)
+        let t1 = time::clock()
+        must("ffmpeg", concat(concat(["-y" "-v" "error" "-f" "rawvideo" "-pix_fmt" "yuv420p" "-s" "{s.w}x{s.h}" "-r" "30" "-i" raw_path], encode_args()), ["out/mimic-{label(s)}.mp4"]))
+        let encode_seconds = seconds_since(t1)
+        fs::remove(raw_path)
+        print("mimic  {label(s):>5}: scale {scale_seconds:.3} s, encode {encode_seconds:.2} s, checksum {checksum}")
+        Scaled { name: label(s), scale_seconds: scale_seconds, encode_seconds: encode_seconds, checksum: checksum, bytes: ≢ out }
+    })
+    fs::remove("out/frames.yuv")
+    // MIMIC_THREADS=1 keeps Mimic on one core (for the comparison)
+    let threads = match os::env("MIMIC_THREADS") {
+        Some(t) => t,
+        None => "all",
+    }
+    let suffix = if threads == "1" { "-1thread" } else { "" }
+    let r = Results { language: "mimic", threads: threads, source: src, width: w, height: h, frames: frames, ffmpeg_each: one_by_one, ffmpeg_all_seconds: all_seconds, decode_seconds: decode_seconds, own: own }
+    fs::write("out/results-mimic{suffix}.json", json::encode_pretty(r))
+    print("scaling all {n} resolutions: {own ¨ (x => x.scale_seconds) ▷ +/:.3} s; results in out/results-mimic{suffix}.json")
+}

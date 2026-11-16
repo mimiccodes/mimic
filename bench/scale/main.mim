@@ -1,0 +1,36 @@
+module main
+
+// scale: video frames resized the way a transcoder does before encoding.
+// 30 frames of 1920×1080 8-bit pixels, each scaled (bilinear, 8-bit fixed
+// point weights, so every language gives the same bytes) to 1280×720,
+// 854×480, 640×360 and 426×240; prints the sum of every output pixel
+
+fn frame(w: i64, h: i64, f: i64) -> [u8] {
+    ⍳ (w * h) ¨ (i => (i % w * 7 + i div w * 3 + i % w * (i div w) % 13 + f * 5) % 256) ▷ bytes::from
+}
+
+fn scale(src: [u8], w: i64, h: i64, w2: i64, h2: i64) -> [u8] {
+    ⍳ (w2 * h2) ¨ (i => {
+        let sx = i % w2 * (w - 1) * 256 div (w2 - 1)
+        let sy = i div w2 * (h - 1) * 256 div (h2 - 1)
+        let x0 = sx >> 8
+        let y0 = sy >> 8
+        let fx = sx & 255
+        let fy = sy & 255
+        let x1 = (x0 + 1) ⌊ (w - 1)
+        let y1 = (y0 + 1) ⌊ (h - 1)
+        let top = src[y0 * w + x0] * (256 - fx) + src[y0 * w + x1] * fx
+        let bot = src[y1 * w + x0] * (256 - fx) + src[y1 * w + x1] * fx
+        (top * (256 - fy) + bot * fy + 32768) >> 16
+    }) ▷ bytes::from
+}
+
+fn frame_sum(f: i64) -> i64 {
+    let src = frame(1920, 1080, f)
+    let sizes = [[1280 720] [854 480] [640 360] [426 240]]
+    sizes ¨ (s => scale(src, 1920, 1080, s[0], s[1]) ▷ +/) ▷ +/
+}
+
+fn main() {
+    print(⍳ 30 ¨ frame_sum ▷ +/)
+}

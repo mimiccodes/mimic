@@ -22,11 +22,21 @@ pub(crate) fn num_el(t: Ty) -> Option<El> {
     }
 }
 
+/// A list whose elements an index reads directly: the numeric ones, and
+/// bytes (each reads as an i64).
+pub(crate) fn index_el(t: Ty) -> Option<El> {
+    match t {
+        Ty::Arr(El::U8, _) => Some(El::U8),
+        _ => num_el(t),
+    }
+}
+
 /// Runtime dtype code (`MIM_I64`/`MIM_F64`/`MIM_BOOL`).
 fn dtype_of(e: El) -> i32 {
     match e {
         El::F64 => 1,
         El::F32 => 9,
+        El::U8 => 8,
         El::I32 => 10,
         El::Bool => 2,
         _ => 0,
@@ -75,6 +85,85 @@ pub(crate) enum Node {
 }
 
 /// Does the computation call a function that can reach recursion?
+/// The integer divisions (`div`, `%`; expression ids) in a fused `¨`'s
+/// lambda body whose divisor is the same for every element: it names only
+/// captured variables and `let`s computed from them (names are never
+/// shadowed, so a name means one binding), and is not a constant.
+fn invariant_divisions(captures: &[String], body: &Expr) -> Vec<usize> {
+    use std::collections::HashSet;
+    fn lets_of<'a>(b: &'a Block, out: &mut Vec<(String, &'a Expr)>) {
+        for st in &b.stmts {
+            if let Stmt::Let { name, value, .. } = st {
+                out.push((name.clone(), value));
+            }
+        }
+    }
+    // every `let` in the body (blocks, and the branches of `if`)
+    let mut ptrs: Vec<*const Block> = Vec::new();
+    body.walk(&mut |x| match &x.kind {
+        ExprKind::Block(b) => ptrs.push(b),
+        ExprKind::If { then, .. } => ptrs.push(then),
+        _ => {}
+    });
+    let mut lets: Vec<(String, &Expr)> = Vec::new();
+    for p in ptrs {
+        // SAFETY: the blocks are inside `body`, alive for this function
+        lets_of(unsafe { &*p }, &mut lets);
+    }
+    // names in an expression; None when it holds something not plainly
+    // computed (a call, a lambda, a pattern match)
+    fn names(e: &Expr) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        let mut ok = true;
+        e.walk(&mut |x| match &x.kind {
+            ExprKind::Path(p) if p.len() == 1 => out.push(p[0].clone()),
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Index { .. } | ExprKind::Field { .. } => {}
+            _ => ok = false,
+        });
+        ok.then_some(out)
+    }
+    let mut inv: HashSet<String> = captures.iter().cloned().collect();
+    loop {
+        let before = inv.len();
+        for (n, v) in &lets {
+            if !inv.contains(n) && names(v).is_some_and(|ns| ns.iter().all(|m| inv.contains(m))) {
+                inv.insert(n.clone());
+            }
+        }
+        if inv.len() == before {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    body.walk(&mut |x| {
+        if let ExprKind::Binary { op: BinOp::IntDiv | BinOp::Mod, rhs, .. } = &x.kind
+            && !matches!(rhs.kind, ExprKind::Int(_))
+            && names(rhs).is_some_and(|ns| !ns.is_empty() && ns.iter().all(|m| inv.contains(m)))
+        {
+            out.push(id(x));
+        }
+    });
+    out
+}
+
+/// Does `e` loop over arrays (a map, a range, a scan, a loop word, a
+/// matrix product)?
+fn array_work(e: &Expr) -> bool {
+    array_work_in(|f| e.walk(f))
+}
+
+fn array_work_in(walk: impl FnOnce(&mut dyn FnMut(&Expr))) -> bool {
+    let mut found = false;
+    walk(&mut |x| {
+        if let ExprKind::Prim { prim, .. } = &x.kind
+            && matches!(prim, Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul)
+        {
+            found = true;
+        }
+    });
+    found
+}
+
 fn heavy(n: &Node) -> bool {
     match n {
         Node::Apply { heavy, arg, .. } => *heavy || self::heavy(arg),
@@ -132,7 +221,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// A numeric vector, fusible or materialised.
     fn is_vec_operand(&self, x: &Expr) -> bool {
-        self.is_fae(x) || num_el(self.ty_of(x)).is_some()
+        self.is_fae(x) || index_el(self.ty_of(x)).is_some()
     }
 
     /// `xs ¨ f` computed element by element: `xs` a numeric array, `f` a pure
@@ -174,7 +263,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// (`records`: `f` may return a record)
     fn each_fusible_to(&self, e: &Expr, args: &[Expr], records: bool) -> bool {
-        if args.len() != 2 || !(self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
+        if args.len() != 2 || !(self.is_fae(&args[0]) || index_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
@@ -212,7 +301,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// An operand of a fused operation: a fusible array, any numeric vector
     /// (read directly), or an unboxed scalar.
     fn is_operand(&self, x: &Expr) -> bool {
-        self.is_fae(x) || num_el(self.ty_of(x)).is_some() || self.ty_of(x).is_unboxed()
+        self.is_fae(x) || index_el(self.ty_of(x)).is_some() || self.ty_of(x).is_unboxed()
     }
 
     /// Worth fusing: an operation over arrays (a lone `⍳ n` or variable is not).
@@ -302,7 +391,10 @@ impl<'ctx> Cg<'ctx, '_> {
                                 called.push(k);
                             }
                         });
-                        let heavy = self.reaches_recursion(called);
+                        let heavy = array_work(body) || self.reaches_heavy(called);
+                        // divisions by a value the same for every element
+                        let inv = invariant_divisions(&caps.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), body);
+                        self.inv_divs.borrow_mut().extend(inv);
                         let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
                         let msl = self.gpu_wanted().then(|| self.msl_lambda(&args[1], &caps)).flatten().map(std::rc::Rc::new);
                         // (the captures it divides by: as slots)
@@ -318,7 +410,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         let kind = if self.plan.entered.contains(&fid) { Kind::Native } else { Kind::Plain };
                         let f = self.request(&k, kind)?;
                         let spec = self.spec(&k)?;
-                        let heavy = self.reaches_recursion(vec![k.clone()]);
+                        let heavy = self.reaches_heavy(vec![k.clone()]);
                         let msl = self.gpu_wanted().then(|| self.msl_named(&k)).flatten().map(std::rc::Rc::new);
                         let simd = if self.opt_level >= 2 { self.simd_named(&k, 0).map(|f| (f.get_name().to_str().unwrap().to_string(), Vec::new())) } else { None };
                         if simd.is_some() {
@@ -393,7 +485,7 @@ impl<'ctx> Cg<'ctx, '_> {
             plan.temps.push(v);
             return Ok(Node::LeafObj(plan.slots.len() - 1));
         }
-        if let Some(el) = num_el(t) {
+        if let Some(el) = index_el(t) {
             // a variable read again: the same leaf
             let name = match &x.kind {
                 ExprKind::Path(p) if p.len() == 1 && self.lookup(&p[0]).is_some() => Some(p[0].clone()),
@@ -510,6 +602,11 @@ impl<'ctx> Cg<'ctx, '_> {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
                         V::F(self.b.build_load(self.ctx.f64_type(), p, "").s()?.into_float_value())
                     }
+                    El::U8 => {
+                        let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
+                        let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?.into_int_value();
+                        V::I(self.b.build_int_z_extend(b, self.ctx.i64_type(), "").s()?)
+                    }
                     El::Bool => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
                         let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?.into_int_value();
@@ -574,7 +671,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 let j = self.b.build_int_add(i, slots[*s].into_int_value(), "").s()?;
                 self.eval_node(a, j, slots)?
             }
-            Node::Apply { f, arg, caps, pt, rt, depth, .. } => {
+            Node::Apply { f, arg, caps, pt, rt, depth, heavy, .. } => {
                 let x = self.eval_node(arg, i, slots)?;
                 let x: BasicMetadataValueEnum = match pt {
                     Ty::F64 => self.to_f64(x)?.into(),
@@ -600,7 +697,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     args.push(self.ctx.i32_type().const_zero().into()); // a fresh native stack
                 }
                 let fv = self.module.get_function(f).ok_or("internal compiler error: missing ¨ function")?;
-                let r = self.b.build_call(fv, &args, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: ¨ function returns nothing")?;
+                let call = self.b.build_call(fv, &args, "").s()?;
+                // the element's function goes inside the loop (as C's loop
+                // body is): its checks that do not depend on the element
+                // (divisors, the lists' headers) leave the loop, and the
+                // index is known to be ≥ 0. Not for work that may recurse.
+                if !*heavy && !*depth {
+                    let always = self.ctx.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"), 0);
+                    call.add_attribute(inkwell::attributes::AttributeLoc::Function, always);
+                }
+                let r = call.try_as_basic_value().basic().ok_or("internal compiler error: ¨ function returns nothing")?;
                 // (a record made by the function is ours)
                 self.val_of(r, *rt, matches!(rt, Ty::Obj(_)))
             }
@@ -746,6 +852,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// Generate `void kernel(ptr ctx, i64 lo, i64 hi)`.
     fn emit_kernel(&mut self, root: &Node, plan: &Plan<'ctx>, mode: Mode) -> R<FunctionValue<'ctx>> {
         if let Mode::Map(el) = mode
+            && el != El::U8
             && let Some(k) = self.emit_simd_kernel(root, plan, el)?
         {
             return Ok(k);
@@ -948,6 +1055,30 @@ impl<'ctx> Cg<'ctx, '_> {
         keys.iter().any(|k| visit(self, k, &mut path, &mut done))
     }
 
+    /// May one call of these be a lot of work: they reach recursion, or
+    /// loop over arrays themselves (`¨`, `⍳`, scans …)? Then a fused loop
+    /// over them is shared out by time (mim_par_for_timed), not by count:
+    /// `⍳ 30 ¨ frame` with a million-pixel `frame` uses every core.
+    pub(crate) fn reaches_heavy(&mut self, keys: Vec<types::Key>) -> bool {
+        let mut seen: Vec<types::Key> = Vec::new();
+        let mut todo = keys.clone();
+        while let Some(k) = todo.pop() {
+            if seen.contains(&k) {
+                continue;
+            }
+            if let FnKind::User(d) = &self.p.fns[k.0].kind
+                && array_work_in(|f| d.body.walk(f))
+            {
+                return true;
+            }
+            if let Ok(spec) = self.spec(&k) {
+                todo.extend(spec.calls.values().cloned());
+            }
+            seen.push(k);
+        }
+        self.reaches_recursion(keys)
+    }
+
     /// Run a map kernel `k` over `0..n` timed: the first element alone, then
     /// the rest on the thread pool (one element per task) when they would
     /// take longer than waking it costs, else here.
@@ -1016,6 +1147,34 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(out)
     }
 
+    /// `bytes::from(e)` over a fusible integer expression: one pass that
+    /// writes the bytes, checking each (no list of i64 in between).
+    pub(crate) fn fused_bytes(&mut self, e: &Expr) -> R<V<'ctx>> {
+        self.fused_at.set(Some(e.span));
+        self.note(e.span, "fused", "the whole chain of array operations is one loop writing the bytes, with no arrays in between; it is split over the cores when large".into());
+        let mut plan = Plan::default();
+        let root = self.build(e, &mut plan)?;
+        let n = self.plan_len(&plan)?;
+        let el = El::U8;
+        let out = self.alloc_vec(dtype_of(el), n)?;
+        let data = self.data_of(out)?;
+        let mode = Mode::Map(el);
+        if heavy(&root) {
+            let k = self.emit_kernel(&root, &plan, mode)?;
+            let ctx = self.pack_ctx(&plan, &[data, self.ctx.i64_type().const_zero().into()])?;
+            self.timed_apply(n, k, ctx)?;
+        } else {
+            self.small_or_kernel(&root, &plan, n, mode, data, |cg| {
+                let k = cg.emit_kernel(&root, &plan, mode)?;
+                let ctx = cg.pack_ctx(&plan, &[data, cg.ctx.i64_type().const_zero().into()])?;
+                cg.par_for(n, k, ctx)?;
+                Ok(None)
+            })?;
+        }
+        self.release_plan(&plan)?;
+        Ok(out)
+    }
+
     /// `xs ¨ f` making records (see each_obj_fusible).
     pub(crate) fn fused_each_obj(&mut self, e: &Expr) -> R<V<'ctx>> {
         self.fused_at.set(Some(e.span));
@@ -1042,7 +1201,7 @@ impl<'ctx> Cg<'ctx, '_> {
     fn el_bytes(el: El) -> u64 {
         match el {
             El::F32 | El::I32 => 4,
-            El::Bool => 1,
+            El::Bool | El::U8 => 1,
             _ => 8,
         }
     }
@@ -1234,6 +1393,21 @@ impl<'ctx> Cg<'ctx, '_> {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
                 let t = self.truth(v)?;
                 self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+            }
+            // a byte (bytes::from): 0 … 255, else the program stops
+            El::U8 => {
+                let n = self.to_i64(v)?;
+                let bad = self.b.build_int_compare(IntPredicate::UGT, n, i64t.const_int(255, false), "").s()?;
+                let f = self.cur_fn.unwrap();
+                let fail = self.ctx.append_basic_block(f, "not_byte");
+                let ok = self.ctx.append_basic_block(f, "byte");
+                self.b.build_conditional_branch(bad, fail, ok).s()?;
+                self.b.position_at_end(fail);
+                self.call_rt("mim_byte_fail", &[n.into(), i.into()])?;
+                self.b.build_unreachable().s()?;
+                self.b.position_at_end(ok);
+                let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
+                self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i8_type(), "").s()?).s()?;
             }
             // a record: the list takes a reference of its own
             El::Obj(_) => {

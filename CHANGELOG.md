@@ -5,8 +5,20 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **Example: transcoding a video into several resolutions** (`examples/transcode`): ffmpeg alone, and ffmpeg decoding and encoding around Mimic's own scaler (every plane of every frame, one parallel map), timed per resolution; the same in JavaScript (`transcode.mjs`, worker threads) and a comparison (`compare.mjs`) that checks both produced the same bytes. Scaling 60 frames of 1080p to 720p, 480p, 360p and 240p: Mimic 1.23 s on all cores, 6.43 s on one; JavaScript 4.06 s and 12.09 s; C on one thread 5.00 s.
+- **Benchmark `scale`**: video frames resized bilinearly (C, Rust, Rust + Rayon, Go, Mimic).
 - **Types on a lambda's parameters**: `(w: f64, h: f64) => w * h`, checked like a function's (error E0401 names the parameter).
 - **`os::run_in(dir, program, arguments)`**: `os::run` in another working directory; a missing folder is an `Err` that names it.
+
+### Changed
+- **Byte data is fast.** Reading an element of a `[u8]` was a call into the runtime that allocated a number (now one load: the scale benchmark went from 10 s to 1.4 s); `bytes::from(…)` over a computed list writes the bytes in one pass, without a list of i64 in between; sums, products, maxima and minima of integer lists run as tight loops. The sum of a `[u8]` is an `i64` (it was typed as a list, which sent the code around it to slow paths).
+- **Loops whose elements are big pieces of work use every core**: `⍳ 30 ¨ frame` where each `frame` works over a million pixels ran on one core, as 30 elements looked small. An element whose function itself loops over arrays is now timed and shared out (2 → 6 of 12 cores in the scale benchmark).
+- **The function a fused `¨` applies goes inside the loop** (inlined), so its checks that do not depend on the element (divisors, the lists' headers) leave the loop.
+- **Integer `div` and `%` of numbers that are not negative take a plain divide**, without the correction that rounding towards minus infinity needs (the results are the same); LLVM drops or hoists the test where it can. On x86-64, a division in a fused loop by a value the same for every element uses a reciprocal computed once (no divide per element). The transcode example's scaler: 8.8 s → 6.4 s on one core.
+- **`let (a, b) = …` of numbers stays in registers**, from a tuple or an `if` whose branches are tuples: in a loop over pixels it made, checked and released a tuple per pixel (the transcode example's scaler: 116 s → 0.9 s).
+
+### Fixed
+- **`panic` and `os::exit` take no part in a value's type**: `match fs::read_bytes(p) { Ok(b) => b, Err(e) => panic(…) }` was dynamic (the arms joined bytes with nothing), so everything computed from it ran on slow paths; it is `[u8]`.
 
 ## 0.3.15 — 2026-11-16
 
