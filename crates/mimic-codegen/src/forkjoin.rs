@@ -293,7 +293,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut slots = Vec::new();
         for c in &calls {
             let fid = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(*c))).map(|k| k.0).ok_or("internal compiler error: fork call without a callee")?;
-            let kind = seq_of(self.kind_for(fid));
+            // below the cut, a recursion that splits itself runs its plain
+            // sequential version, as on one thread (the native one counts
+            // its depth on every call: ~13% slower on x86)
+            let kind = if matches!(self.fj.mode, Mode::Fork(_)) && self.plan.wide.contains(&fid) { Kind::Seq } else { seq_of(self.kind_for(fid)) };
             self.fj.kinds.insert(id(*c), (kind, None));
             let v = self.expr(c)?;
             let bv = self.fj_settle(v, self.ty_of(c))?;
