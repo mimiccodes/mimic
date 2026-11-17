@@ -7,7 +7,7 @@ name: install scripts
 # the extension's scripts against a real VS Code.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
   pull_request:
     paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
@@ -50,6 +50,13 @@ jobs:
           cat tools/get/install.sh | sh
           ~/.mimic/bin/mimic --version | grep -q "mimic $latest"
           pkill -f "mimic lsp" || true
+          # the channels: previews (the newest preview, or stable), remembered; then back
+          cat tools/get/install.sh | sh -s -- --preview
+          test "$(cat ~/.mimic/channel)" = preview
+          cat tools/get/install.sh | sh -s -- --check | grep -q "preview"
+          cat tools/get/install.sh | sh -s -- --stable
+          test "$(cat ~/.mimic/channel)" = stable
+          ~/.mimic/bin/mimic --version | grep -q "mimic $latest"
           cat tools/get/install.sh | sh -s -- --uninstall
           test ! -e ~/.mimic/bin/mimic
       - name: The extension, in a real VS Code
@@ -98,6 +105,15 @@ jobs:
           Invoke-Expression $script
           if (-not ((& $exe --version) -match "mimic $latest")) { throw "not updated to $latest while running" }
           $lsp.Kill()
+          # the channels: previews (the newest preview, or stable), remembered; then back
+          $env:MIMIC_CHANNEL = 'preview'
+          Invoke-Expression $script
+          Remove-Item Env:MIMIC_CHANNEL
+          if ((Get-Content "$env:USERPROFILE\.mimic\channel" -TotalCount 1) -ne 'preview') { throw "the preview channel was not remembered" }
+          $env:MIMIC_CHANNEL = 'stable'
+          Invoke-Expression $script
+          Remove-Item Env:MIMIC_CHANNEL
+          if (-not ((& $exe --version) -match "mimic $latest")) { throw "not back on $latest" }
           $env:MIMIC_UNINSTALL = '1'
           Invoke-Expression $script
           if (Test-Path $exe) { throw "still installed after uninstalling" }

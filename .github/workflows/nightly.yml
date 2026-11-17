@@ -1,0 +1,70 @@
+# The nightly build: each night, when dev has changed since the last one and
+# CI passed on it, build dev with the release workflow and publish it as the
+# pre-release tagged `nightly` (replacing the last one). Its version is
+# dev's, marked with the date: 0.4.1-dev on 2026-11-18 is
+# 0.4.1-nightly.20261118. `mimic upgrade --nightly` installs it.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even when dev has not changed"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      build: ${{ steps.d.outputs.build }}
+      sha: ${{ steps.d.outputs.sha }}
+      version: ${{ steps.d.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - id: d
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          last=$(git ls-remote origin refs/tags/nightly | cut -f1)
+          ci=$(gh run list --workflow ci.yml --commit "$sha" --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')
+          base=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          version="${base%%-*}-nightly.$(date -u +%Y%m%d)"
+          echo "dev $sha, last nightly ${last:-none}, successful CI runs on it: $ci, version $version"
+          build=true
+          if [ "$sha" = "$last" ] && [ "$FORCE" != true ]; then
+            echo "::notice::dev has not changed since the last nightly"; build=false
+          elif [ "$ci" = 0 ] && [ "$FORCE" != true ]; then
+            echo "::notice::CI has not passed on dev's $sha; no nightly"; build=false
+          fi
+          echo "build=$build" >> $GITHUB_OUTPUT
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+  release:
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: nightly
+      ref: ${{ needs.decide.outputs.sha }}
+      version: ${{ needs.decide.outputs.version }}

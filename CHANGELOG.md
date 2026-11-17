@@ -4,6 +4,14 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+Release channels: previews of the next version and nightly builds, alongside stable releases.
+
+### Added
+- **Release channels:** `mimic upgrade --preview` installs the newest preview of the next version (or stable, when it is newer) and `mimic upgrade --nightly` the nightly build of the development branch; the channel is remembered, so later `mimic upgrade`s stay on it, and `--stable` goes back. The install commands take the same options (`sh -s -- --preview`, `$env:MIMIC_CHANNEL = "nightly"` on Windows). Stable stays the default, and previews and nightlies never reach the install command or the website unless asked for.
+
+### Changed
+- **How Mimic is developed:** work comes together on a `dev` branch through reviewed pull requests, `main` holds releases only, and a nightly build and weekly previews keep each long step visible ([docs/versions.md](docs/versions.md#how-a-version-is-made)).
+
 ## 0.3.17 — 2026-11-17
 
 Install and update Mimic from the terminal, from Mimic itself, and the editor extension with one command.

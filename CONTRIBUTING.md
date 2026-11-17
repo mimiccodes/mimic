@@ -19,13 +19,22 @@ tools/gaps.sh                  # the known gaps (docs/gaps.md), each checked aga
 
 ## Making a change
 
+Work happens on `dev`; `main` holds releases only (see [docs/versions.md](docs/versions.md#how-a-version-is-made)).
+
+1. Branch from `dev`: `feat/0.4.5-grade` for a step of the plan, `fix/…` for a bug, `docs/…` for writing.
+2. Open a pull request into `dev`. CI builds and tests it on Linux, macOS and Windows; it is merged, squashed into one commit, once CI passes.
+3. Commit messages name the part and the change (`upgrade: remember the channel`), with the reason in the body.
+
+Every change:
+
 * **Tests.** A new feature or fix comes with a golden program in `tests/fixtures/run` (`name.mim` and the expected output in `name.out`), or an expected failure in `tests/fixtures/fail`.
 * **Docs in the same change.** Anything a user can see goes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md), and into the tutorial (`docs/tutorial`) and the reference (`docs/*.md`) where it belongs. The examples in the tutorial are run by the tests, so they stay true.
 * **Speed.** Changes to code generation or the runtime run the benchmarks (`python3 bench/run.py`, see [BENCHMARK.md](BENCHMARK.md)). Numbers in the docs are measured, never estimated.
 * **New library features** go in a module (`fs::`, `http::`, …), not in the global namespace.
 * **Parallel by default.** Mimic has no annotations for parallelism; the compiler decides. A change that needs one is a design question: open an issue first.
+* **Reported problems stay fixed.** A bug a user reports becomes a check in `tools/gaps.sh` ([docs/gaps.md](docs/gaps.md)) the day it is reported, and a golden program once fixed.
 
-Versions and what each must pass are in [docs/versions.md](docs/versions.md).
+Versions, branches, channels and what each release must pass are in [docs/versions.md](docs/versions.md).
 
 ## Repository layout
 

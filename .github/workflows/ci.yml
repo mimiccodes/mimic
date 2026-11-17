@@ -1,14 +1,14 @@
 # Build mimic and run every test on Linux, macOS and Windows; run the golden
 # programs as static Linux executables (x86_64 here, arm64 on an Arm runner)
 # and as Windows programs cross-built on Linux (x86_64, and arm64 on Windows
-# on Arm); on every push to main
+# on Arm); on every push to main and dev
 # and every pull request. The LLVM it links comes from the llvm workflow's
 # release download.
 name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
