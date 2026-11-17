@@ -21,8 +21,9 @@ and writes results.md with each time as a ratio to C.
     bench/run.py fib sort        # some benchmarks
     bench/run.py --runs 3        # fewer timed runs
     bench/run.py --json out.json # also write the times as JSON
-    bench/run.py --noise 10      # everything 10 times: how much each
-                                 # ratio to C varies on this machine
+    bench/run.py --noise 8       # the gate's comparison with the same
+                                 # compiler on both sides, 8 times: the
+                                 # noise each benchmark's tolerance allows
                                  # (bench/noise/<platform>.json)
     bench/run.py --machine       # measure this machine's limits again
     bench/run.py --gate OLD      # the speed gate: Mimic as built here
@@ -175,7 +176,7 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--history", default=str(HERE / "history.jsonl"), help="where to append this run's times ('' for nowhere)")
     ap.add_argument("--json", default="", help="also write this run's times to this JSON file")
-    ap.add_argument("--noise", type=int, default=0, metavar="N", help="run everything N times and write how much each ratio to C varies (bench/noise/<platform>.json)")
+    ap.add_argument("--noise", type=int, default=0, metavar="N", help="the gate's comparison with the same compiler on both sides, N times: the noise behind each tolerance (bench/noise/<platform>.json)")
     ap.add_argument("--machine", action="store_true", help="measure this machine's limits again (and only that, without benchmark names)")
     ap.add_argument("--gate", default="", metavar="OLD", help="the speed gate: compare Mimic as built here with the mimic at OLD, on this machine, in turns")
     ap.add_argument("--inject", action="store_true", help="with --gate: build the new side without LLVM's optimizer (the gate must fail)")
@@ -375,14 +376,17 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
 LOWEST, HIGHEST, DEFAULT = 0.03, 0.25, 0.10
 
 
-def tolerance(name: str, key: str) -> float:
-    """Twice the noise measured on this platform, within 3% … 25%."""
+def tolerance(name: str, key: str) -> tuple[float, bool]:
+    """Twice the noise measured on this platform, within 3% … 25%, and
+    whether the benchmark is gated here: one whose noise needs more than
+    25% is measured and reported but cannot fail the gate (no tolerance
+    would tell its slowdowns from its noise)."""
     f = HERE / "noise" / f"{platform_id()}.json"
     try:
         spread = json.loads(f.read_text(encoding="utf-8"))["benchmarks"][name][key]["spread"]
     except (OSError, ValueError, KeyError):
-        return DEFAULT
-    return min(HIGHEST, max(LOWEST, 2 * spread))
+        return DEFAULT, True
+    return min(HIGHEST, max(LOWEST, 2 * spread)), 2 * spread <= HIGHEST
 
 
 def build_with(compiler: Path, src: Path, env: dict, side: str) -> Path:
@@ -435,12 +439,14 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
         got = pair(b, old, new, runs, inject)
         for key, (t_old, t_new) in got.items():
             where = "1 core" if key == "mimic" else "all cores"
-            tol = tolerance(b.name, key)
+            tol, gated = tolerance(b.name, key)
             change = t_new / t_old
             verdict = "ok"
-            if change > 1 + tol:
-                # measured twice more: worse in 2 of 3 fails
-                again = [pair(b, old, new, runs, inject)[key] for _ in range(2)]
+            if change > 1 + tol and not gated:
+                verdict = "too noisy to gate here"
+            elif change > 1 + tol:
+                # measured twice more, with more runs: worse in 2 of 3 fails
+                again = [pair(b, old, new, runs + 2, inject)[key] for _ in range(2)]
                 worse = 1 + sum(n / o > 1 + tol for o, n in again)
                 change = sorted([change, *(n / o for o, n in again)])[1]
                 verdict = "**slower**" if worse >= 2 else "ok (noise)"
@@ -449,7 +455,8 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
             elif change < 1 - tol:
                 verdict = "faster"
                 faster.append(f"{b.name} ({where})")
-            lines.append(f"| {b.name} | {where} | {t_old:.3f} s | {t_new:.3f} s | {(change - 1) * 100:+.0f}% | {tol * 100:.0f}% | {verdict} |")
+            limit = f"{tol * 100:.0f}%" if gated else "not gated"
+            lines.append(f"| {b.name} | {where} | {t_old:.3f} s | {t_new:.3f} s | {(change - 1) * 100:+.0f}% | {limit} | {verdict} |")
     lines.append("")
     if failed:
         lines.append(f"**Slower:** {', '.join(failed)}.")
@@ -463,28 +470,27 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
 
 
 def noise(benches, runs: int, times: int) -> int:
-    """Run everything `times` times, unchanged, and record how much each
-    ratio to C moves between rounds: the noise a speed gate has to allow
-    for on this machine (bench/noise/<platform>.json)."""
-    rounds = []
-    for i in range(times):
-        print(f"round {i + 1} of {times}")
-        rounds.append(dict(measure(benches, runs)))
+    """The gate's own comparison with the same compiler on both sides,
+    `times` times per benchmark: every difference is noise. Its widest
+    move is what the gate must allow for on this machine
+    (bench/noise/<platform>.json)."""
+    me = Path(mimic_exe())
     out = {}
-    for name in rounds[0]:
-        for k in ("mimic", "mimic-all"):
-            ratios = [r[name][k] / r[name]["c"] for r in rounds if name in r and k in r[name] and r[name].get("c")]
-            if len(ratios) < 2:
-                continue
-            mid = sorted(ratios)[len(ratios) // 2]
-            # the widest move from the median, as a share of it
-            spread = max(abs(x - mid) for x in ratios) / mid
-            out.setdefault(name, {})[k] = {"median": round(mid, 4), "spread": round(spread, 4), "ratios": [round(x, 4) for x in ratios]}
+    for b in benches:
+        if not (b / "main.mim").exists():
+            continue
+        print(f"  {b.name}", flush=True)
+        changes = {}
+        for _ in range(times):
+            for key, (t_old, t_new) in pair(b, me, me, runs, False).items():
+                changes.setdefault(key, []).append(t_new / t_old)
+        for key, rs in changes.items():
+            out.setdefault(b.name, {})[key] = {"spread": round(max(abs(r - 1) for r in rs), 4), "ratios": [round(r, 4) for r in rs]}
     cpu, _ = machine()
     path = HERE / "noise" / f"{platform_id()}.json"
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "rounds": times, "runs": runs, "date": time.strftime("%Y-%m-%d"), "benchmarks": out}, indent=1) + "\n", encoding="utf-8")
-    print(f"\n{'benchmark':<16} {'1 core':>8} {'all cores':>10}   (widest move of the ratio to C)")
+    path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "rounds": times, "runs": runs, "date": time.strftime("%Y-%m-%d"), "how": "the same compiler on both sides of the gate's comparison", "benchmarks": out}, indent=1) + "\n", encoding="utf-8")
+    print(f"\n{'benchmark':<16} {'1 core':>8} {'all cores':>10}   (widest move, same compiler both sides)")
     for name, v in out.items():
         cell = lambda k: f"{v[k]['spread'] * 100:.1f}%" if k in v else "—"
         print(f"{name:<16} {cell('mimic'):>8} {cell('mimic-all'):>10}")
