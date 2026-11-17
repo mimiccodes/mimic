@@ -20,6 +20,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 4. **Statistics:** each measurement is the best of 5 wall-clock runs, after one warm-up run. On macOS the first launch of a new binary is slowed by a security scan, and the warm-up absorbs it. The machine, OS, CPU model and load average are recorded with every table.
 5. **Score:** each result is reported as a ratio to C (`time / C time`). Below 1.0 means faster than C.
 6. **Noise:** `bench/run.py --noise N` runs everything N times unchanged and records how far each ratio to C moves on the machine (`bench/noise/<platform>.json`). From 0.4.0, the speed gate allows each benchmark about twice its measured noise, and no more.
+7. **Share of the machine:** `bench/machine/` measures the machine's limits once: the peak floating-point rate (fused multiply-adds on the widest registers) and the memory bandwidth (the STREAM triad), on one core and on all. A benchmark whose work counts against one of them declares it in `meta.json` (`{"bound": "compute", "flops": N}` or `{"bound": "memory", "bytes": N}`), and its results also show as a share of that limit, so a result that matches C but leaves most of the machine idle is visible. Benchmarks limited by latency, branches or allocation (fib, tree, http, json, …) have no such share. Above 100% means hardware beyond the CPU's vector units did the work (Apple's matrix unit, later the GPU).
 
 ## Benchmark suite
 
