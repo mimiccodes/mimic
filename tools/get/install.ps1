@@ -9,6 +9,12 @@
 #   $env:MIMIC_VERSION = "0.3.16"; irm https://mimic.codes/install.ps1 | iex
 #   $env:MIMIC_FORCE = "1";        irm https://mimic.codes/install.ps1 | iex
 #   $env:MIMIC_UNINSTALL = "1";    irm https://mimic.codes/install.ps1 | iex
+#   $env:MIMIC_CHANNEL = "preview"; irm https://mimic.codes/install.ps1 | iex
+#
+# Channels: stable releases (the default), previews of the next version
+# ("preview": the newest preview or stable release), and nightly builds of
+# the development branch ("nightly"). The channel chosen is remembered, so
+# later updates stay on it; MIMIC_CHANNEL = "stable" goes back.
 #
 # It downloads the Windows release from GitHub, checks it against the
 # release's SHA256SUMS, unpacks it with Windows' own tar (Expand-Archive
@@ -18,7 +24,7 @@
 # aside first). `mimic upgrade` runs this same script.
 
 function Install-Mimic {
-    param([string]$Version, [switch]$Force, [switch]$Check, [switch]$Uninstall)
+    param([string]$Version, [string]$Channel, [switch]$Force, [switch]$Check, [switch]$Uninstall)
     $ErrorActionPreference = "Stop"
     $ProgressPreference = "SilentlyContinue" # (the progress bar makes downloads many times slower)
     # Windows PowerShell 5.1 may still default to old TLS versions
@@ -29,7 +35,7 @@ function Install-Mimic {
     $exe = Join-Path $bin "mimic.exe"
 
     if ($Uninstall) {
-        Remove-Item -Force -ErrorAction SilentlyContinue $exe, (Join-Path $mimicHome "installed-version")
+        Remove-Item -Force -ErrorAction SilentlyContinue $exe, (Join-Path $mimicHome "installed-version"), (Join-Path $mimicHome "channel")
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $kept = @($userPath -split ";" | Where-Object { $_ -ne "" -and $_.TrimEnd("\") -ne $bin.TrimEnd("\") })
         [Environment]::SetEnvironmentVariable("Path", ($kept -join ";"), "User")
@@ -44,6 +50,28 @@ function Install-Mimic {
         throw "there is no Windows release for $arch; Mimic needs 64-bit Windows"
     }
 
+    # the channel: as asked, else the one last installed from, else stable
+    $channelFile = Join-Path $mimicHome "channel"
+    if (-not $Channel -and (Test-Path $channelFile)) { $Channel = (Get-Content $channelFile -TotalCount 1).Trim() }
+    if (-not $Channel) { $Channel = "stable" }
+    if ($Channel -notin @("stable", "preview", "nightly")) { throw "unknown channel '$Channel' (stable, preview or nightly)" }
+    $latestIs = "the latest"
+    $tag = $null
+
+    if (-not $Version -and $Channel -eq "preview") {
+        # the newest preview or stable release, from GitHub's list (newest first)
+        $list = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers @{ "User-Agent" = "mimic-install" }
+        $Version = ($list | ForEach-Object { $_.tag_name } | Where-Object { $_ -match "^v\d+\.\d+\.\d+(-(preview|fix)\.\d+)?$" } | Select-Object -First 1)
+        if (-not $Version) { throw "found no preview or stable release on GitHub" }
+        $latestIs = "the latest preview"
+    } elseif (-not $Version -and $Channel -eq "nightly") {
+        $text = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases/download/nightly/version.txt").Content
+        if ($text -is [byte[]]) { $text = [System.Text.Encoding]::UTF8.GetString($text) }
+        $Version = ($text -split "`n")[0].Trim()
+        $tag = "nightly"
+        $latestIs = "the latest nightly"
+    }
+
     # the latest release's version: GitHub's redirect to its tag (not the
     # API, which limits how often it may be asked)
     if (-not $Version) {
@@ -53,12 +81,13 @@ function Install-Mimic {
         $res = $req.GetResponse()
         $location = $res.Headers["Location"]
         $res.Close()
-        if (-not $location -or $location -notmatch "/v(\d+\.\d+\.\d+)$") {
+        if (-not $location -or $location -notmatch "/v(\d+\.\d+\.\d+(-fix\.\d+)?)$") {
             throw "could not find the latest release on GitHub (got '$location'); check your connection, or set MIMIC_VERSION"
         }
         $Version = $Matches[1]
     }
     $Version = $Version.TrimStart("v")
+    if (-not $tag) { $tag = "v$Version" }
 
     $current = $null
     if (Test-Path $exe) {
@@ -67,17 +96,18 @@ function Install-Mimic {
     }
     if ($Check) {
         if (-not $current) { Write-Host "Mimic is not installed in $bin; the latest is $Version" }
-        elseif ($current -eq $Version) { Write-Host "mimic $current is the latest" }
+        elseif ($current -eq $Version) { Write-Host "mimic $current is $latestIs" }
         else { Write-Host "mimic $current is installed; $Version is available (run this again, or mimic upgrade)" }
         return
     }
     if ($current -eq $Version -and -not $Force) {
-        Write-Host "mimic $Version is already installed in $bin, and is the latest (MIMIC_FORCE=1 reinstalls it)"
+        Write-Host "mimic $Version is already installed in $bin, and is $latestIs (MIMIC_FORCE=1 reinstalls it)"
+        Set-Content -Path $channelFile -Value $Channel
         return
     }
 
     $name = "mimic-$Version-windows-x86_64.zip"
-    $base = "https://github.com/$repo/releases/download/v$Version"
+    $base = "https://github.com/$repo/releases/download/$tag"
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("mimic-install-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force $tmp | Out-Null
     try {
@@ -113,9 +143,11 @@ function Install-Mimic {
         if ($LASTEXITCODE -ne 0) { throw "the installer failed (exit status $LASTEXITCODE)" }
         # this terminal sees mimic too, not only new ones
         if (($env:Path -split ";") -notcontains $bin) { $env:Path = "$bin;$env:Path" }
+        Set-Content -Path $channelFile -Value $Channel
+        if ($Channel -ne "stable") { Write-Host "on the $Channel channel: later updates stay on it (MIMIC_CHANNEL=stable goes back)" }
     } finally {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
     }
 }
 
-Install-Mimic -Version $env:MIMIC_VERSION -Force:($env:MIMIC_FORCE -eq "1") -Check:($env:MIMIC_CHECK -eq "1") -Uninstall:($env:MIMIC_UNINSTALL -eq "1")
+Install-Mimic -Version $env:MIMIC_VERSION -Channel $env:MIMIC_CHANNEL -Force:($env:MIMIC_FORCE -eq "1") -Check:($env:MIMIC_CHECK -eq "1") -Uninstall:($env:MIMIC_UNINSTALL -eq "1")

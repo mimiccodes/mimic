@@ -9,6 +9,13 @@
 #   curl -fsSL https://mimic.codes/install.sh | sh -s -- --version 0.3.16
 #   curl -fsSL https://mimic.codes/install.sh | sh -s -- --force
 #   curl -fsSL https://mimic.codes/install.sh | sh -s -- --uninstall
+#   curl -fsSL https://mimic.codes/install.sh | sh -s -- --preview
+#   curl -fsSL https://mimic.codes/install.sh | sh -s -- --nightly
+#
+# Channels: stable releases (the default), previews of the next version
+# (--preview: the newest preview or stable release), and nightly builds of
+# the development branch (--nightly). The channel chosen is remembered, so
+# later updates stay on it; --stable goes back.
 #
 # It downloads the release for this system from GitHub, checks it against
 # the release's SHA256SUMS, and runs the installer inside it, which puts
@@ -36,6 +43,10 @@ usage() {
     say "  --version X.Y.Z   that release instead of the latest (also MIMIC_VERSION)"
     say "  --force           install even when that version is already installed"
     say "  --check           only say whether an update is available"
+    say "  --preview         the newest preview of the next version (or stable, when newer)"
+    say "  --nightly         the nightly build of the development branch"
+    say "  --stable          stable releases again (the default)"
+    say "                    (the channel is remembered for later updates)"
     say "  --uninstall       remove mimic (your projects stay)"
 }
 
@@ -64,6 +75,17 @@ latest() {
     [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v" ;;
     *) fail "could not find the latest release on GitHub (got '$tag'); check your connection, or pass --version" ;;
     esac
+}
+
+# the newest preview or stable release: the first in GitHub's list (newest
+# first) that is either; the API is asked once
+newest_preview() {
+    fetch "https://api.github.com/repos/$REPO/releases?per_page=30" "$1" ||
+        fail "could not list the releases on GitHub (try again in a while, or pass --version)"
+    v=$(grep -o '"tag_name": *"[^"]*"' "$1" | sed 's/.*"v\([^"]*\)"$/\1/' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-(preview|fix)\.[0-9]+)?$' | head -1)
+    [ -n "$v" ] || fail "found no preview or stable release on GitHub"
+    printf '%s' "$v"
 }
 
 sha256() {
@@ -110,7 +132,7 @@ target() {
 uninstall() {
     home=${MIMIC_HOME:-$HOME/.mimic}
     bin=${MIMIC_BIN:-$home/bin}
-    rm -f "$bin/mimic" "$home/installed-version"
+    rm -f "$bin/mimic" "$home/installed-version" "$home/channel"
     for p in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.config/fish/config.fish"; do
         if [ -f "$p" ] && grep -q "# added by mimic's install.sh" "$p"; then
             grep -v "# added by mimic's install.sh" "$p" >"$p.mimic-tmp" || true
@@ -124,6 +146,7 @@ main() {
     version=${MIMIC_VERSION:-}
     force=0
     check=0
+    channel=${MIMIC_CHANNEL:-}
     while [ $# -gt 0 ]; do
         case "$1" in
         --version)
@@ -133,6 +156,7 @@ main() {
             ;;
         --force) force=1 && shift ;;
         --check) check=1 && shift ;;
+        --stable | --preview | --nightly) channel=${1#--} && shift ;;
         --uninstall) uninstall && return 0 ;;
         -h | --help) usage && return 0 ;;
         *) fail "unknown option '$1' (see --help)" ;;
@@ -142,7 +166,34 @@ main() {
     home=${MIMIC_HOME:-$HOME/.mimic}
     bin=${MIMIC_BIN:-$home/bin}
     t=$(target)
-    [ -n "$version" ] || version=$(latest)
+    # the channel: as asked, else the one last installed from, else stable
+    if [ -z "$channel" ] && [ -f "$home/channel" ]; then channel=$(head -1 "$home/channel"); fi
+    case "${channel:-stable}" in
+    stable | preview | nightly) channel=${channel:-stable} ;;
+    *) fail "unknown channel '$channel' (stable, preview or nightly)" ;;
+    esac
+
+    tmp=$(mktemp -d 2>/dev/null || mktemp -d -t mimic)
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+    latest_is="the latest"
+    tag=""
+    if [ -z "$version" ]; then
+        case "$channel" in
+        stable) version=$(latest) ;;
+        preview)
+            version=$(newest_preview "$tmp/releases.json")
+            latest_is="the latest preview"
+            ;;
+        nightly)
+            fetch "https://github.com/$REPO/releases/download/nightly/version.txt" "$tmp/version.txt" ||
+                fail "could not find the nightly build on GitHub"
+            version=$(head -1 "$tmp/version.txt" | tr -d '\r')
+            tag=nightly
+            latest_is="the latest nightly"
+            ;;
+        esac
+    fi
+    [ -n "$tag" ] || tag="v$version"
 
     current=""
     if [ -x "$bin/mimic" ]; then
@@ -152,21 +203,20 @@ main() {
         if [ -z "$current" ]; then
             say "Mimic is not installed in $bin; the latest is $version"
         elif [ "$current" = "$version" ]; then
-            say "mimic $current is the latest"
+            say "mimic $current is $latest_is"
         else
             say "mimic $current is installed; $version is available (run this script again, or mimic upgrade)"
         fi
         return 0
     fi
     if [ "$current" = "$version" ] && [ "$force" = 0 ]; then
-        say "mimic $version is already installed in $bin, and is the latest (--force reinstalls it)"
+        say "mimic $version is already installed in $bin, and is $latest_is (--force reinstalls it)"
+        printf '%s\n' "$channel" >"$home/channel"
         return 0
     fi
 
-    tmp=$(mktemp -d 2>/dev/null || mktemp -d -t mimic)
-    trap 'rm -rf "$tmp"' EXIT INT TERM
     name="mimic-$version-$t.tar.gz"
-    base="https://github.com/$REPO/releases/download/v$version"
+    base="https://github.com/$REPO/releases/download/$tag"
     if [ -n "$current" ]; then
         say "updating mimic $current to $version ($t)"
     else
@@ -184,6 +234,8 @@ main() {
     # the release's own installer: it replaces mimic safely while an editor
     # runs it, clears an old version's build cache and sets PATH
     MIMIC_HOME=$home MIMIC_BIN=$bin sh "$pkg/install.sh" </dev/null
+    printf '%s\n' "$channel" >"$home/channel"
+    [ "$channel" = stable ] || say "on the $channel channel: later updates stay on it (--stable goes back)"
 }
 
 main "$@"

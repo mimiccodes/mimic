@@ -24,7 +24,25 @@ Mimic follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
    * runs the tests there;
    * attaches the binaries, checksums and changelog section to a GitHub release.
 5. **Before every tag:** the owner approves it.
-6. **No gap forgotten:** [gaps.md](gaps.md) lists every everyday feature still missing, each with the version that closes it, and `tools/gaps.sh` checks them all against the compiler. Every problem a user reports becomes a check there the same day, and a closed gap becomes a golden test.
+6. **Branches:**
+   * `main` holds released code only: each commit on it is a release, merged from `dev` by a pull request the owner merges, then tagged. `git log --first-parent main` lists the releases.
+   * `dev` is where work comes together. Every change reaches it as a pull request from a short-lived branch (`feat/0.4.1-ir-calls`, `fix/…`, `docs/…`), squashed into one commit once CI passes on Linux, macOS and Windows. Its version is the next one marked `-dev` (`0.4.1-dev`).
+   * An urgent fix to a stable release is a `hotfix/…` branch from `main`, released as `vX.Y.Z-fix.N` and merged back into `dev`.
+   * When an era of the roadmap is complete, a read-only branch keeps it as it was: `ideation` (0.1 to 0.3, at 0.3.17), then `core` (0.4), `acceleration` (0.6), `domains` (0.7), `everywhere` (0.11) and `maturity` (0.13).
+7. **Channels:**
+
+   | Channel | Tag | Made | Installed with |
+   |---|---|---|---|
+   | Stable | `vX.Y.Z` | when a step's **Done when** checks pass | the install command, `mimic upgrade` |
+   | Preview | `vX.Y.Z-preview.N` | from `dev`, when it has something new and CI is green | `mimic upgrade --preview` |
+   | Nightly | `nightly` (one, replaced) | each night from `dev`, when it changed and CI passed | `mimic upgrade --nightly` |
+
+   Previews and nightlies are GitHub pre-releases, which are never the "latest" release, so the install command and the website only see stable releases. The channel chosen is remembered by `mimic upgrade`; `--stable` goes back.
+8. **How often:**
+   * A preview at least every 7 days while `dev` has new work, so a long step is never a long silence.
+   * A stable release as soon as a step is done. A step that would take more than 3 weeks is split in this plan first.
+   * A crash or a wrong result in a stable release is fixed in a release within 48 hours.
+9. **No gap forgotten:** [gaps.md](gaps.md) lists every everyday feature still missing, each with the version that closes it, and `tools/gaps.sh` checks them all against the compiler. Every problem a user reports becomes a check there the same day, and a closed gap becomes a golden test.
 
 **Released so far:** 0.1.0, 0.2.0 (2026-11-14), and **0.2.9** (2026-11-15), which completes stage 0.2: every step from 0.2.0 to 0.2.9 below is in it. The Linux build needs glibc 2.28 or newer; Windows has the IOCP event loop (wepoll), and Windows arm64 is tested in CI. **0.3.13** (2026-11-16) completes stage 0.3, the Workbench: every step from 0.3.0 to 0.3.13 is in it (CI green on Linux, macOS and Windows). The VS Code extension is released on GitHub (`.vsix`); publishing it to the Marketplace and Open VSX is left for later, by choice. **0.3.14** (2026-11-16) makes servers, parallel recursion and prefix sums faster and everything in `mimic edit` clickable. **0.3.15** (2026-11-16) fixes updating while an editor runs Mimic, makes `and`/`or` short-circuit, lets a profile of a server be stopped, and adds `math::to_int`. **0.3.16** (2026-11-17) makes byte, pixel and state-machine code fast (the `scale`, `filters`, `qoi` and `paths` benchmarks, a video transcoding example), and adds types on lambda parameters and `os::run_in`. **0.3.17** (2026-11-17) installs and updates Mimic from the terminal (`curl -fsSL https://mimic.codes/install.sh | sh`, `irm https://mimic.codes/install.ps1 | iex`) and from Mimic itself (`mimic upgrade`), and the editor extension with one command. Next: stage 0.4, fast by default and a richer vocabulary.
 

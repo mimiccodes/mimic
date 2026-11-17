@@ -1,7 +1,14 @@
 # Build `mimic` for Linux x86_64, macOS arm64 and Windows x86_64 and publish
 # them as one GitHub release, with checksums. Runs when a version tag is
 # pushed (`git tag v0.2.0 && git push origin v0.2.0`), or by hand for a tag
-# that exists. The release notes are the tag's section of CHANGELOG.md.
+# that exists, or from the nightly workflow. The release notes are the
+# tag's section of CHANGELOG.md (its Unreleased section for previews and
+# nightlies).
+#
+# Stable tags are vX.Y.Z (and vX.Y.Z-fix.N for an urgent fix); previews
+# vX.Y.Z-preview.N, published as pre-releases, which GitHub never calls
+# "latest"; the nightly build is the one pre-release tagged `nightly`,
+# replaced each night (see docs/versions.md).
 name: release
 
 on:
@@ -11,6 +18,20 @@ on:
     inputs:
       tag:
         description: "Existing tag to build and publish (e.g. v0.2.0)"
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release's tag (nightly)"
+        type: string
+        required: true
+      ref:
+        description: "The commit to build"
+        type: string
+        required: true
+      version:
+        description: "The version it reports (e.g. 0.4.1-nightly.20261118)"
+        type: string
         required: true
 
 permissions:
@@ -22,6 +43,9 @@ env:
   LLVM_TAG: deps-llvm-23.1.4
   CARGO_TERM_COLOR: always
   TAG: ${{ inputs.tag || github.ref_name }}
+  REF: ${{ inputs.ref || inputs.tag || github.ref_name }}
+  # the version it reports: given (nightly), else the tag's
+  INPUT_VERSION: ${{ inputs.version }}
 
 jobs:
   build:
@@ -44,7 +68,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
+
+      - name: Version
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            perl -0pi -e 's/(\[workspace\.package\]\nversion = )"[^"]*"/$1"$ENV{INPUT_VERSION}"/' Cargo.toml
+          fi
+          echo "VERSION=${INPUT_VERSION:-${TAG#v}}" >> $GITHUB_ENV
+          grep -m1 '^version' Cargo.toml
 
       - name: Rust
         run: rustup update stable && rustup default stable && rustc --version
@@ -108,6 +140,7 @@ jobs:
         run: |
           m="$PWD/target/release/mimic"
           "$m" --version
+          "$m" --version | grep -qF "mimic $VERSION " || { echo "error: the build does not report $VERSION" >&2; exit 1; }
           "$m" cc --version
           cd "$RUNNER_TEMP"
           "$m" create hello
@@ -116,8 +149,7 @@ jobs:
 
       - name: Package
         run: |
-          v=${TAG#v}
-          name=mimic-$v-${{ matrix.platform }}
+          name=mimic-$VERSION-${{ matrix.platform }}
           mkdir -p "dist/$name"
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/release/mimic.exe tools/release/install.ps1 tools/release/install.cmd "dist/$name/"
@@ -138,7 +170,7 @@ jobs:
       # the install script, as a team mate would run it, from the package
       - name: Install script
         run: |
-          name=mimic-${TAG#v}-${{ matrix.platform }}
+          name=mimic-$VERSION-${{ matrix.platform }}
           if [ "$RUNNER_OS" = Windows ]; then
             run() { powershell -NoProfile -ExecutionPolicy Bypass -File "dist/$name/install.ps1" "$@" < /dev/null; }
             home="$USERPROFILE/.mimic"
@@ -171,7 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -180,17 +212,29 @@ jobs:
 
       - name: Checksums and notes
         run: |
+          VERSION=${INPUT_VERSION:-${TAG#v}}
           cd dist
+          # which version this release is, for the install scripts (the
+          # nightly's tag does not say)
+          echo "$VERSION" > version.txt
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
           cd ..
           # this version's section of CHANGELOG.md, then how to install
-          python3 - <<'PY' > notes.md
+          VERSION=$VERSION python3 - <<'PY' > notes.md
           import os, re
-          v = os.environ["TAG"].lstrip("v")
+          v = os.environ["VERSION"]
           text = open("CHANGELOG.md", encoding="utf-8").read()
-          m = re.search(r"^## " + re.escape(v) + r"\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
-          print(m.group(1).strip() if m else f"Mimic {v}.")
+          def section(name):
+              m = re.search(r"^## " + re.escape(name) + r"\b.*?$(.*?)(?=^## |\Z)", text, re.M | re.S)
+              return m.group(1).strip() if m else ""
+          if "-preview." in v or "-nightly." in v:
+              kind = "nightly build of the development branch" if "-nightly." in v else "preview of the next version"
+              print(f"A {kind}: not a stable release. Install it with `mimic upgrade --{'nightly' if '-nightly.' in v else 'preview'}`.")
+              print()
+              print(section("Unreleased") or "No changes listed yet.")
+          else:
+              print(section(v) or f"Mimic {v}.")
           print(open(".github/release-install.md", encoding="utf-8").read().replace("{v}", v))
           PY
 
@@ -198,5 +242,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Mimic ${TAG#v}" --notes-file notes.md --verify-tag
+          VERSION=${INPUT_VERSION:-${TAG#v}}
+          if [ "$TAG" = nightly ]; then
+            # one nightly at a time: the last one goes, tag included
+            gh release delete nightly --cleanup-tag -y 2>/dev/null || true
+            gh release create nightly --target "$REF" --prerelease --title "Mimic nightly $VERSION" --notes-file notes.md
+          elif ! gh release view "$TAG" >/dev/null 2>&1; then
+            case "$TAG" in
+            *-preview.*) gh release create "$TAG" --title "Mimic $VERSION" --notes-file notes.md --verify-tag --prerelease ;;
+            *) gh release create "$TAG" --title "Mimic $VERSION" --notes-file notes.md --verify-tag ;;
+            esac
+          fi
           gh release upload "$TAG" dist/* --clobber

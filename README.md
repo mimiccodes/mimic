@@ -81,7 +81,7 @@ fn main() {
 | **Windows** (PowerShell) | `irm https://mimic.codes/install.ps1 \| iex` |
 | **Editor extension** (VS Code, Cursor, Windsurf, VSCodium) | `curl -fsSL https://mimic.codes/vscode.sh \| sh`, or on Windows `irm https://mimic.codes/vscode.ps1 \| iex` |
 
-`mimic` goes into `~/.mimic/bin`, with no administrator rights, and is checked against the release's checksums. It is one binary with the compiler, Clang, a linker and the C libraries inside; nothing else is needed (on macOS, the Xcode Command Line Tools). **To update,** run `mimic upgrade`, or the install command again. Options, uninstalling and troubleshooting: [mimic.codes/install](https://mimic.codes/install).
+`mimic` goes into `~/.mimic/bin`, with no administrator rights, and is checked against the release's checksums. It is one binary with the compiler, Clang, a linker and the C libraries inside; nothing else is needed (on macOS, the Xcode Command Line Tools). **To update,** run `mimic upgrade`, or the install command again (`--preview` and `--nightly` follow the next version as it is built). Options, uninstalling and troubleshooting: [mimic.codes/install](https://mimic.codes/install).
 
 ## Your first program
 
