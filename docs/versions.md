@@ -26,7 +26,7 @@ Mimic follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 5. **Before every tag:** the owner approves it.
 6. **No gap forgotten:** [gaps.md](gaps.md) lists every everyday feature still missing, each with the version that closes it, and `tools/gaps.sh` checks them all against the compiler. Every problem a user reports becomes a check there the same day, and a closed gap becomes a golden test.
 
-**Released so far:** 0.1.0, 0.2.0 (2026-11-14), and **0.2.9** (2026-11-15), which completes stage 0.2: every step from 0.2.0 to 0.2.9 below is in it. The Linux build needs glibc 2.28 or newer; Windows has the IOCP event loop (wepoll), and Windows arm64 is tested in CI. **0.3.13** (2026-11-16) completes stage 0.3, the Workbench: every step from 0.3.0 to 0.3.13 is in it (CI green on Linux, macOS and Windows). The VS Code extension is released on GitHub (`.vsix`); publishing it to the Marketplace and Open VSX is left for later, by choice. **0.3.14** (2026-11-16) makes servers, parallel recursion and prefix sums faster and everything in `mimic edit` clickable. **0.3.15** (2026-11-16) fixes updating while an editor runs Mimic, makes `and`/`or` short-circuit, lets a profile of a server be stopped, and adds `math::to_int`. **0.3.16** (2026-11-17) makes byte, pixel and state-machine code fast (the `scale`, `filters`, `qoi` and `paths` benchmarks, a video transcoding example), and adds types on lambda parameters and `os::run_in`. Next: stage 0.4.
+**Released so far:** 0.1.0, 0.2.0 (2026-11-14), and **0.2.9** (2026-11-15), which completes stage 0.2: every step from 0.2.0 to 0.2.9 below is in it. The Linux build needs glibc 2.28 or newer; Windows has the IOCP event loop (wepoll), and Windows arm64 is tested in CI. **0.3.13** (2026-11-16) completes stage 0.3, the Workbench: every step from 0.3.0 to 0.3.13 is in it (CI green on Linux, macOS and Windows). The VS Code extension is released on GitHub (`.vsix`); publishing it to the Marketplace and Open VSX is left for later, by choice. **0.3.14** (2026-11-16) makes servers, parallel recursion and prefix sums faster and everything in `mimic edit` clickable. **0.3.15** (2026-11-16) fixes updating while an editor runs Mimic, makes `and`/`or` short-circuit, lets a profile of a server be stopped, and adds `math::to_int`. **0.3.16** (2026-11-17) makes byte, pixel and state-machine code fast (the `scale`, `filters`, `qoi` and `paths` benchmarks, a video transcoding example), and adds types on lambda parameters and `os::run_in`. Next: stage 0.4, fast by default and a richer vocabulary.
 
 ---
 
@@ -103,101 +103,131 @@ Built with: `lsp-server` and `lsp-types` (the language server; MCP is JSON-RPC o
 | **0.3.12** | **`mimic edit`, Mimic's own terminal editor:**<ul><li>Made for Mimic: a theme in Mimic's colours, the MIMIC start screen, highlighting from Mimic's own lexer (exact, `c::` in its own colour), glyph input and a glyph palette.</li><li>Panes: files, problems, audit, manual, run and test output, where code runs.</li><li>Several files, search and replace, undo history, mouse; easy keys by default (Ctrl-S, Ctrl-Q), a vim mode later.</li><li>Uses the engine directly: everything the language server knows, with no setup.</li></ul> | A whole session (edit, check, run, test, audit, read the manual) without leaving the editor |
 | **0.3.13** | **`mimic repl`, `mimic profile`, and benchmarks against Rust and Go (Phase G5):**<ul><li>The REPL: one-liners such as `⍳ 10 ▷ +/`, also a pane in the editor.</li><li>The profiler: time per function, per core, CPU against GPU, memory traffic, tied to the parallel decisions of 0.3.9.</li><li>The benchmark suite gains Rust (one thread and Rayon) and Go columns, in CI on every platform.</li></ul> | The profiler shows per-core and CPU/GPU time for every benchmark; `BENCHMARK.md` has Rust and Go columns |
 
-## 0.4 — One GPU layer, and Vulkan
+## 0.4 — Fast by default, and a richer vocabulary
+
+The compiler gets a real optimizing core, so speed comes from general analyses instead of recognised shapes (every slowdown found while building the 0.3.16 benchmarks was a program shape the compiler did not know), and the language gets the array vocabulary that graphics, networking, systems and quantum code build on. Nothing in existing programs changes: diagnostics stay warnings, and `i64` results stay exactly what they are. The goal for the stage, on every benchmark and on macOS, Linux and Windows: within 1.2× of C on one core, and at or ahead of Rust + Rayon on all cores, each benchmark reported as a share of what the machine can do. Design notes: [docs/design/ir.md](design/ir.md) and [docs/design/vocabulary.md](design/vocabulary.md).
+
+| Version | Contents | Done when |
+|---|---|---|
+| **0.4.0** | **The measuring stick:**<ul><li>A corpus of about 50 everyday algorithms (parsers, compression, hashing, graph search, simulations, text), each with C and Rust versions.</li><li>The machine's limits measured (peak compute and memory bandwidth), and each benchmark shown as a share of them.</li><li>Ratio gates in CI: a slowdown fails the build.</li></ul> | An injected slowdown fails CI on all three systems |
+| **0.4.1** | **Mimic IR:**<ul><li>A typed intermediate representation (SSA, with structured control flow) between the syntax tree and LLVM.</li><li>Fusion, inlining and the choice of where code runs become passes over it; interaction nets are translated from it.</li><li>Introduced one function at a time; the old code generator is removed at the end.</li></ul> | Every golden test passes through the IR; benchmarks within ±3% |
+| **0.4.2** | **Ownership by analysis** (as in Perceus): reference counting placed by the compiler, borrowing inferred, a value changed in place wherever nothing else holds it, debug builds included. | The `qoi` and `paths` steps copy nothing; reference-count operations in the corpus at least halved |
+| **0.4.3** | **Loops and values in registers:**<ul><li>`settle`, `evolve` and tail recursion become loops with the state's fields in registers.</li><li>Escape analysis: values that stay in a function live on its stack, at any size.</li><li>`Option`, tuples and small variants unboxed.</li></ul> | Steady-state loops allocate nothing; `qoi` within 1.5× of C, `paths` within 1.3× |
+| **0.4.4** | **Types everywhere, checks proven away:**<ul><li>A warning, with the reason, where code falls back to dynamic types (`mimic why`, editors, the audit).</li><li>Narrow integers in machine code (8, 16 and 32 bits) with the same `i64` results.</li><li>Range analysis removes the bounds checks and floored-division corrections it can prove unneeded.</li></ul> | The hot loops of `scale` and `filters` carry no checks; twice the SIMD lanes where narrow |
+| **0.4.5** | **Vocabulary I, the array core:** `⍋ ⍒` (grade), `⍸` (where), `∊` (in), `⍷` (find), `⊐` (index of), `⊇` (select), `⌸` (group), `⍤` (rank: rank polymorphism), `∘.` (outer product), an inner product, `↕` (windows), `⌺` (stencil), shifts, `⊖` (rotate), `⊤ ⊥` (encode, decode), `⌹` (solve), `√`. Each with a word and a digraph; all fused and parallel. | Every glyph has a manual page and tests; the image filters written without indexing match C |
+| **0.4.6** | **Vocabulary II, numbers:**<ul><li>Complex numbers (`c64`, `c128`, literals like `3j4`).</li><li>`⊗` (tensor product) and `†` (adjoint).</li><li>`math::fft`, linear algebra and statistics on the new glyphs.</li></ul> | An FFT and a matrix decomposition within 1.2× of C |
+| **0.4.7** | **Bits, bytes and small vectors:**<ul><li>Unsigned and sized integers (`u16`, `u32`, `u64`, `i16`).</li><li>Bit syntax: binary data built and matched in one expression (`<<version: 4, length: 16, rest: bytes>>`).</li><li>Packed records, zero-copy byte views.</li><li>Swizzles (`v.xyz`), color (`#ff8800`) and unit (`12px`) literals.</li></ul> | A TCP/IP header parser and a PNG chunk reader in bit syntax; swizzles compile to register moves |
+| **0.4.8** | **Data layout:** lists of records stored flat (packed, or one array per field), records with text fields included; arenas for short-lived values. | `records` within 1.2× of C |
+| **0.4.9** | **The runtime inside the optimizer:** the runtime as LLVM bitcode, optimized with the program; plain (non-atomic) reference counts for values that never leave their thread. | Element access, append and retain/release are inline in hot loops |
+| **0.4.10** | **One cost model, profiles, every CPU at its best:**<ul><li>One model decides where code runs (fused kernel, SIMD, fork-join, interaction nets, tasks).</li><li>`mimic build --pgo` from `mimic profile` data; chunk sizes and thread counts tuned per machine.</li><li>`--cpu portable`: several CPU levels in one binary (x86-64 v2/v3/v4, Armv8/Armv9 with SVE), the best picked at start.</li></ul> | Each benchmark's choice at least as good as the best fixed choice; one binary uses AVX-512 where present |
+| **0.4.11** | **Task and pipeline parallelism:** independent pure `let`s and calls run at once; pipelines overlap their stages. | The two searches of `paths` run at once; the transcoding example overlaps its stages |
+| **0.4.12** | **Fast libraries:** vector kernels per CPU family behind the glyphs (sort, scan, search, hashing, UTF-8); a priority queue, hash maps and sorted sets; JSON and HTTP tuned; `mimic ffi bind <header.h>`. | `http` within 1.1× of C, `json` at C or faster |
+| **0.4.13** | **Performance audit rules:** quadratic `concat`, a copy every step, a hot loop on dynamic types, a scan of a whole array inside a loop; each with a suggested rewrite. | Each rule fires on its test and stays quiet on the corpus |
+
+## 0.5 — One GPU layer, and Vulkan
 
 GPU code written once for every backend, then the first backend for every vendor.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.4.0** | **Device layer:**<ul><li>An interface in the runtime: devices, buffers, copies, kernel launch, wait. Metal moves onto it.</li><li>Kernels generated once as LLVM IR from the fused expressions. Metal keeps its source path.</li></ul> | Metal results and speed unchanged; GPU fixtures green |
-| **0.4.1** | **Vulkan:**<ul><li>SPIR-V kernels from LLVM's SPIR-V backend.</li><li>The Vulkan loader found at run time.</li><li>Maps and `¨` with pure numeric functions on NVIDIA, AMD and Intel GPUs.</li></ul> | GPU fixtures pass on Linux CI through Mesa's software Vulkan |
-| **0.4.2** | **More kernels on Vulkan:**<ul><li>Reductions and scans.</li><li>f64 kernels where the device supports them (otherwise on the CPU).</li><li>Exactly the `--strict-math` results, like Metal.</li></ul> | Reduction and scan fixtures pass on Vulkan |
-| **0.4.3** | **The `--gpu` choice:**<ul><li>`--gpu auto` (default) puts in every backend the target OS can use; the runtime picks the device present.</li><li>`--gpu vulkan,metal` includes only the backends named; `--gpu none` builds for the CPU only.</li><li>`mimic targets --gpu` lists the backends.</li></ul> | One binary runs its kernels on Metal on a Mac and on Vulkan on Linux |
-| **0.4.4** | **Vulkan on Windows**<ul><li>A software Vulkan driver in Windows CI.</li><li>Vulkan on macOS through a Vulkan-on-Metal layer, optional.</li></ul> | GPU fixtures pass on Windows CI |
+| **0.5.0** | **Device layer:**<ul><li>An interface in the runtime: devices, buffers, copies, kernel launch, wait. Metal moves onto it.</li><li>Kernels generated once as LLVM IR from the fused expressions. Metal keeps its source path.</li></ul> | Metal results and speed unchanged; GPU fixtures green |
+| **0.5.1** | **Vulkan:**<ul><li>SPIR-V kernels from LLVM's SPIR-V backend.</li><li>The Vulkan loader found at run time.</li><li>Maps and `¨` with pure numeric functions on NVIDIA, AMD and Intel GPUs.</li></ul> | GPU fixtures pass on Linux CI through Mesa's software Vulkan |
+| **0.5.2** | **More kernels on Vulkan:**<ul><li>Reductions and scans.</li><li>f64 kernels where the device supports them (otherwise on the CPU).</li><li>Exactly the `--strict-math` results, like Metal.</li></ul> | Reduction and scan fixtures pass on Vulkan |
+| **0.5.3** | **The `--gpu` choice:**<ul><li>`--gpu auto` (default) puts in every backend the target OS can use; the runtime picks the device present.</li><li>`--gpu vulkan,metal` includes only the backends named; `--gpu none` builds for the CPU only.</li><li>`mimic targets --gpu` lists the backends.</li></ul> | One binary runs its kernels on Metal on a Mac and on Vulkan on Linux |
+| **0.5.4** | **Vulkan on Windows**<ul><li>A software Vulkan driver in Windows CI.</li><li>Vulkan on macOS through a Vulkan-on-Metal layer, optional.</li></ul> | GPU fixtures pass on Windows CI |
 
-## 0.5 — CUDA and ROCm
+## 0.6 — CUDA and ROCm
 
 Each vendor's native path, for top speed.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.5.0** | **CUDA:**<ul><li>PTX kernels from LLVM's NVPTX backend, loaded through the CUDA driver at run time.</li><li>Device memory, pinned host memory, asynchronous copies.</li></ul> | GPU fixtures pass on an NVIDIA machine (GPU runner or rented) |
-| **0.5.1** | **ROCm:**<ul><li>AMDGPU code objects (LLVM backend, linked by LLD), loaded through HIP at run time.</li></ul> | GPU fixtures pass on an AMD machine |
-| **0.5.2** | **Several GPUs:**<ul><li>Every device found is used. Large kernels are split across devices.</li><li>`MIMIC_GPU` chooses the devices.</li></ul> | A kernel split over two GPUs matches one GPU's result |
+| **0.6.0** | **CUDA:**<ul><li>PTX kernels from LLVM's NVPTX backend, loaded through the CUDA driver at run time.</li><li>Device memory, pinned host memory, asynchronous copies.</li></ul> | GPU fixtures pass on an NVIDIA machine (GPU runner or rented) |
+| **0.6.1** | **ROCm:**<ul><li>AMDGPU code objects (LLVM backend, linked by LLD), loaded through HIP at run time.</li></ul> | GPU fixtures pass on an AMD machine |
+| **0.6.2** | **Several GPUs:**<ul><li>Every device found is used. Large kernels are split across devices.</li><li>`MIMIC_GPU` chooses the devices.</li></ul> | A kernel split over two GPUs matches one GPU's result |
 
-## 0.6 — Placement and streaming (the memory wall)
+## 0.7 — Domains: graphics, quantum, protocols
+
+Libraries for whole fields, built on the 0.4 vocabulary and the GPU stages.
+
+| Version | Contents | Done when |
+|---|---|---|
+| **0.7.0** | **`gfx::`:** vectors, matrices, transforms, colors and images; shaders written in Mimic, compiled for Metal and Vulkan. | A rendering example runs its shaders on Metal and Vulkan from one source |
+| **0.7.1** | **`quantum::`:** qubit registers as state vectors, gates (H, X, CNOT, rotations), circuits as values, measurement; simulated on every core and on GPUs. | A 28-qubit circuit simulates at the speed of the best CPU and GPU simulators |
+| **0.7.2** | **Protocols:** DNS, TLS records, HTTP/2 frames, PNG and WAV written with bit syntax. | Each parses and builds its reference test vectors |
+
+## 0.8 — Placement and streaming (the memory wall)
 
 Each part of a program runs on the hardware that suits it, and data streams instead of waiting on memory.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.6.0** | **Residency:**<ul><li>Every array knows where its current copy lives (host or device).</li><li>Copies happen only when needed. A chain of GPU operations keeps its data on the device.</li></ul> | A chain of GPU maps copies its input once and its result once |
-| **0.6.1** | **Cost model:** each kernel picks CPU, SIMD or GPU.<ul><li>**Inputs:** its size, the work per element, where the data is, and the speed of the link to the device (none on unified memory).</li><li>Calibrated once per machine and cached.</li></ul> | Each benchmark chooses at least as well as the best fixed choice |
-| **0.6.2** | **Streaming:**<ul><li>Large arrays go through fused pipelines in cache-sized chunks, also across steps that cannot be fused, without whole-array intermediates.</li><li>Device copies are double-buffered, so they overlap with work.</li></ul> | Memory traffic of the streamed benchmarks measured below one pass per intermediate |
-| **0.6.3** | **CPU and GPU together:**<ul><li>One kernel split between the CPU cores and the GPU by their measured speeds.</li><li>NUMA-aware placement on multi-socket machines.</li></ul> | Combined CPU + GPU runs faster than either alone on the mandelbrot and matmul benchmarks |
-| **0.6.4** | **Beyond memory:**<ul><li>Arrays larger than RAM stream from files (memory mapping, io_uring on Linux), through the same pipelines.</li></ul> | A sum over a file larger than RAM runs at disk speed |
-| **0.6.5** | **Portable fast binaries:**<ul><li>`--cpu portable` carries code for several CPU levels (x86-64 v2/v3/v4, Armv8/Armv9 with SVE) and picks the best at start.</li></ul> | One binary uses AVX-512 where present and still runs on an older CPU |
+| **0.8.0** | **Residency:**<ul><li>Every array knows where its current copy lives (host or device).</li><li>Copies happen only when needed. A chain of GPU operations keeps its data on the device.</li></ul> | A chain of GPU maps copies its input once and its result once |
+| **0.8.1** | **Cost model:** each kernel picks CPU, SIMD or GPU.<ul><li>**Inputs:** its size, the work per element, where the data is, and the speed of the link to the device (none on unified memory).</li><li>Calibrated once per machine and cached.</li></ul> | Each benchmark chooses at least as well as the best fixed choice |
+| **0.8.2** | **Streaming:**<ul><li>Large arrays go through fused pipelines in cache-sized chunks, also across steps that cannot be fused, without whole-array intermediates.</li><li>Device copies are double-buffered, so they overlap with work.</li></ul> | Memory traffic of the streamed benchmarks measured below one pass per intermediate |
+| **0.8.3** | **CPU and GPU together:**<ul><li>One kernel split between the CPU cores and the GPU by their measured speeds.</li><li>NUMA-aware placement on multi-socket machines.</li></ul> | Combined CPU + GPU runs faster than either alone on the mandelbrot and matmul benchmarks |
+| **0.8.4** | **Beyond memory:**<ul><li>Arrays larger than RAM stream from files (memory mapping, io_uring on Linux), through the same pipelines.</li></ul> | A sum over a file larger than RAM runs at disk speed |
 
-## 0.7 — Every operating system
+## 0.9 — Every operating system
 
 A C library and the runtime for every OS LLVM targets, from any host.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.7.0** | **glibc Linux from any host:**<ul><li>Stubs per glibc version, e.g. `x86_64-linux-gnu.2.17` runs on old distributions.</li><li>Dynamic or static linking.</li></ul> | Programs for glibc 2.17 run on the newest and oldest supported distributions |
-| **0.7.1** | **Android:**<ul><li>The NDK C library; executables and shared libraries for apps.</li><li>Tests in the Android emulator.</li></ul> | Golden fixtures pass in the emulator (arm64, x86_64) |
-| **0.7.2** | **The BSDs:** FreeBSD, NetBSD, OpenBSD, DragonFly.<ul><li>C library stubs; the runtime (kqueue already exists).</li><li>Tests in virtual machines in CI.</li></ul> | Golden fixtures pass on FreeBSD; the rest link |
-| **0.7.3** | **Apple from any host:** macOS and iOS programs built on Linux and Windows, through SDK stubs and code signing. | A Linux runner builds a macOS program that the Mac runner runs |
-| **0.7.4** | **The other systems LLVM targets:** illumos/Solaris, Haiku, Fuchsia, AIX, z/OS, and the rest of LLVM's operating systems. | Each links a program; those with VMs or emulators run the fixtures |
-| **0.7.5** | **No OS, and the web:**<ul><li>**UEFI and freestanding:** a runtime without threads or I/O, with static memory as an option.</li><li>**WebAssembly:** WASI preview 2 and WASI threads; the browser with JavaScript glue.</li></ul> | A UEFI program boots in an emulator; WASI and browser fixtures pass |
+| **0.9.0** | **glibc Linux from any host:**<ul><li>Stubs per glibc version, e.g. `x86_64-linux-gnu.2.17` runs on old distributions.</li><li>Dynamic or static linking.</li></ul> | Programs for glibc 2.17 run on the newest and oldest supported distributions |
+| **0.9.1** | **Android:**<ul><li>The NDK C library; executables and shared libraries for apps.</li><li>Tests in the Android emulator.</li></ul> | Golden fixtures pass in the emulator (arm64, x86_64) |
+| **0.9.2** | **The BSDs:** FreeBSD, NetBSD, OpenBSD, DragonFly.<ul><li>C library stubs; the runtime (kqueue already exists).</li><li>Tests in virtual machines in CI.</li></ul> | Golden fixtures pass on FreeBSD; the rest link |
+| **0.9.3** | **Apple from any host:** macOS and iOS programs built on Linux and Windows, through SDK stubs and code signing. | A Linux runner builds a macOS program that the Mac runner runs |
+| **0.9.4** | **The other systems LLVM targets:** illumos/Solaris, Haiku, Fuchsia, AIX, z/OS, and the rest of LLVM's operating systems. | Each links a program; those with VMs or emulators run the fixtures |
+| **0.9.5** | **No OS, and the web:**<ul><li>**UEFI and freestanding:** a runtime without threads or I/O, with static memory as an option.</li><li>**WebAssembly:** WASI preview 2 and WASI threads; the browser with JavaScript glue.</li></ul> | A UEFI program boots in an emulator; WASI and browser fixtures pass |
 
-## 0.8 — Every CPU and SIMD extension
+## 0.10 — Every CPU and SIMD extension
 
 Programs run (not only compile) on every architecture LLVM supports, with SIMD for each vector extension.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.8.0** | **An emulated CI matrix (QEMU):** RISC-V 64, PowerPC 64 (LE and BE), s390x, LoongArch 64, MIPS and MIPS64, Arm 32-bit, x86 32-bit, SPARC 64. The full suite on each. | Golden fixtures pass on every architecture in the matrix |
-| **0.8.1** | **Every vector extension:**<ul><li>**Scalable vectors:** SVE/SVE2, RISC-V V.</li><li>**Fixed-width:** AVX-512 masks, AltiVec/VSX, z/Architecture vector, LoongArch LSX/LASX, WebAssembly SIMD.</li></ul> | The SIMD fixture's machine code holds vector instructions on each, and the results match |
-| **0.8.2** | **Run-time choice everywhere:** the best SIMD level chosen at start on every architecture family. | Portable binaries pick their level on x86, Arm, RISC-V and PowerPC |
-| **0.8.3** | **Microcontrollers:**<ul><li>AVR, MSP430, Xtensa (ESP32), Arm Cortex-M, RISC-V 32.</li><li>A minimal runtime: no threads, static memory.</li></ul> | Programs link for each; Cortex-M and RISC-V 32 run in QEMU |
-| **0.8.4** | **The remaining architectures:** Hexagon, VE, M68k, C-SKY, Lanai, XCore, ARC, SPARC 32, and BPF (eBPF programs). | Each compiles the fixtures; those QEMU emulates run them |
+| **0.10.0** | **An emulated CI matrix (QEMU):** RISC-V 64, PowerPC 64 (LE and BE), s390x, LoongArch 64, MIPS and MIPS64, Arm 32-bit, x86 32-bit, SPARC 64. The full suite on each. | Golden fixtures pass on every architecture in the matrix |
+| **0.10.1** | **Every vector extension:**<ul><li>**Scalable vectors:** SVE/SVE2, RISC-V V.</li><li>**Fixed-width:** AVX-512 masks, AltiVec/VSX, z/Architecture vector, LoongArch LSX/LASX, WebAssembly SIMD.</li></ul> | The SIMD fixture's machine code holds vector instructions on each, and the results match |
+| **0.10.2** | **Run-time choice everywhere:** the best SIMD level chosen at start on every architecture family. | Portable binaries pick their level on x86, Arm, RISC-V and PowerPC |
+| **0.10.3** | **Microcontrollers:**<ul><li>AVR, MSP430, Xtensa (ESP32), Arm Cortex-M, RISC-V 32.</li><li>A minimal runtime: no threads, static memory.</li></ul> | Programs link for each; Cortex-M and RISC-V 32 run in QEMU |
+| **0.10.4** | **The remaining architectures:** Hexagon, VE, M68k, C-SKY, Lanai, XCore, ARC, SPARC 32, and BPF (eBPF programs). | Each compiles the fixtures; those QEMU emulates run them |
 
-## 0.9 — Every GPU
+## 0.11 — Every GPU
 
 Every GPU LLVM can generate code for, on every device class.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.9.0** | **OpenCL:** SPIR-V kernels through the OpenCL runtime, for Intel GPUs, older drivers and other accelerators. | GPU fixtures pass on a CPU OpenCL runtime (PoCL) in CI |
-| **0.9.1** | **DirectX 12:** DXIL from LLVM's DirectX backend, on Windows. | GPU fixtures pass on Windows through a software DirectX device (WARP) |
-| **0.9.2** | **Phones:** Metal on iOS, Vulkan on Android. | GPU fixtures pass in the iOS simulator and the Android emulator |
-| **0.9.3** | **WebGPU in the browser:** kernels translated to WGSL by Mimic (LLVM has no WGSL backend). | GPU fixtures pass in a headless browser |
-| **0.9.4** | **More work on GPUs:** matrix multiply on GPU matrix units, sorts, scans of records. | `matmul` and `sort` benchmarks run on each tier-1 GPU |
+| **0.11.0** | **OpenCL:** SPIR-V kernels through the OpenCL runtime, for Intel GPUs, older drivers and other accelerators. | GPU fixtures pass on a CPU OpenCL runtime (PoCL) in CI |
+| **0.11.1** | **DirectX 12:** DXIL from LLVM's DirectX backend, on Windows. | GPU fixtures pass on Windows through a software DirectX device (WARP) |
+| **0.11.2** | **Phones:** Metal on iOS, Vulkan on Android. | GPU fixtures pass in the iOS simulator and the Android emulator |
+| **0.11.3** | **WebGPU in the browser:** kernels translated to WGSL by Mimic (LLVM has no WGSL backend). | GPU fixtures pass in a headless browser |
+| **0.11.4** | **More work on GPUs:** matrix multiply on GPU matrix units, sorts, scans of records. | `matmul` and `sort` benchmarks run on each tier-1 GPU |
 
-## 0.10 — Language and tools complete
+## 0.12 — Language and tools complete
 
 Everything 1.0 promises, frozen.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.10.0** | **The rest of the language:** sized integers (`i8`, `i16`, `u16`, `u32`, `u64`), decoding unions, and the gaps listed in the roadmap. | Every feature in the language reference has fixtures |
-| **0.10.1** | **Tools complete:**<ul><li>The Workbench (0.3) reviewed against the finished language: every rule, fix, manual page and MCP tool up to date.</li><li>`--json` for every command; inferred types per span (`--types`).</li></ul> | Every command, rule and MCP tool has fixtures; the manual covers the frozen language |
-| **0.10.2** | **Packages:**<ul><li>The registry.</li><li>Versioned dependency resolution, lockfiles, workspaces.</li></ul> | A project depends on registry packages by version range |
-| **0.10.3** | **Incremental compilation:** per module, with stable symbols. | Changing one module rebuilds only it and its dependents |
-| **0.10.4** | **Standard library review:**<ul><li>Names and signatures settled; deprecated items removed.</li><li>The language and library references complete.</li></ul> | Every public std item documented with an example |
-| **0.10.5** | **Freeze:** a language specification and a conformance suite. Only fixes after this. | The spec covers the whole language; the suite passes |
+| **0.12.0** | **The rest of the language:** sized integers (`i8`, `i16`, `u16`, `u32`, `u64`), decoding unions, and the gaps listed in the roadmap. | Every feature in the language reference has fixtures |
+| **0.12.1** | **Tools complete:**<ul><li>The Workbench (0.3) reviewed against the finished language: every rule, fix, manual page and MCP tool up to date.</li><li>`--json` for every command; inferred types per span (`--types`).</li></ul> | Every command, rule and MCP tool has fixtures; the manual covers the frozen language |
+| **0.12.2** | **Packages:**<ul><li>The registry.</li><li>Versioned dependency resolution, lockfiles, workspaces.</li></ul> | A project depends on registry packages by version range |
+| **0.12.3** | **Incremental compilation:** per module, with stable symbols. | Changing one module rebuilds only it and its dependents |
+| **0.12.4** | **Standard library review:**<ul><li>Names and signatures settled; deprecated items removed.</li><li>The language and library references complete.</li></ul> | Every public std item documented with an example |
+| **0.12.5** | **Freeze:** a language specification and a conformance suite. Only fixes after this. | The spec covers the whole language; the suite passes |
 
-## 0.11 — Bootstrap
+## 0.13 — Bootstrap
 
 The compiler rewritten in Mimic.
 
 | Version | Contents | Done when |
 |---|---|---|
-| **0.11.0** | **The front end in Mimic:** lexer, parser, checker, types. It runs beside the Rust one on every test. | Both front ends agree on every fixture |
-| **0.11.1** | **Code generation in Mimic:** LLVM through Mimic's C interop, nets, fusion, SIMD and GPU kernels. | The Mimic code generator builds every fixture, with the same output |
-| **0.11.2** | **The driver in Mimic:** projects, packages, the toolchain (Clang and LLD through the C interop).<ul><li>Stage 1 (built by the Rust compiler) builds stage 2. Stage 2 builds stage 3.</li></ul> | Stages 2 and 3 are identical bit for bit |
-| **0.11.3** | **Parity:** the Mimic-built `mimic` passes the full suite on every tier-1 platform and compiles at least as fast as the Rust-built one. | CI green with the self-hosted compiler |
+| **0.13.0** | **The front end in Mimic:** lexer, parser, checker, types. It runs beside the Rust one on every test. | Both front ends agree on every fixture |
+| **0.13.1** | **Code generation in Mimic:** LLVM through Mimic's C interop, nets, fusion, SIMD and GPU kernels. | The Mimic code generator builds every fixture, with the same output |
+| **0.13.2** | **The driver in Mimic:** projects, packages, the toolchain (Clang and LLD through the C interop).<ul><li>Stage 1 (built by the Rust compiler) builds stage 2. Stage 2 builds stage 3.</li></ul> | Stages 2 and 3 are identical bit for bit |
+| **0.13.3** | **Parity:** the Mimic-built `mimic` passes the full suite on every tier-1 platform and compiles at least as fast as the Rust-built one. | CI green with the self-hosted compiler |
 | **1.0.0-rc.N** | **Release candidates:** the self-hosted compiler is the release. The Rust compiler is kept only as a frozen seed for bootstrapping from source. | No open release blockers |
 
 ## 1.0.0
