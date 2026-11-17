@@ -425,7 +425,7 @@ fn render(r: &Value, top: usize) -> String {
         let w = f(&t["working"]);
         avg += w;
         let bar = (w * 30.0).round() as usize;
-        out += &format!("  {:>2} {:<7} {} {}\n", i, t["name"].as_str().unwrap_or(""), format!("{}{}", "█".repeat(bar), "·".repeat(30 - bar.min(30))), pct(w));
+        out += &format!("  {:>2} {:<7} {}{} {}\n", i, t["name"].as_str().unwrap_or(""), "█".repeat(bar), "·".repeat(30 - bar.min(30)), pct(w));
     }
     if !threads.is_empty() {
         out += &format!("  average {}: {:.1} of {} cores kept busy\n", pct(avg / threads.len() as f64), cpu / wall.max(1e-9), threads.len());

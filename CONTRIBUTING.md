@@ -14,6 +14,7 @@ You need:
 tools/deps.sh                  # once: the sources of the embedded Clang, LLD and musl
 cargo build --release          # → target/release/mimic
 cargo test --release           # unit tests, golden programs, the tutorial's examples
+cargo clippy --workspace --all-targets -- -D warnings   # lints; CI fails on any warning
 tools/gaps.sh                  # the known gaps (docs/gaps.md), each checked against the compiler
 ```
 

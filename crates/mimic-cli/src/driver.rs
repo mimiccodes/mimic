@@ -860,7 +860,7 @@ fn expect_with_text(items: &mut [mimic_syntax::ast::Item], src: &str) {
                         }
                         kind => ("expect_true", vec![Expr { kind, span: arg.span }, lit(ExprKind::Str(text)), line]),
                     };
-                    *callee = Box::new(lit(ExprKind::Path(vec![name.into()])));
+                    **callee = lit(ExprKind::Path(vec![name.into()]));
                     *args = new_args;
                 });
             }

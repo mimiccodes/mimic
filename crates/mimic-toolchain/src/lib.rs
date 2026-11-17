@@ -185,7 +185,11 @@ pub fn cpu_valid(triple: &str, cpu: &str) -> Option<bool> {
 /// Machine code for an optimised LLVM module in parts at once, one object
 /// file per path (see mimic_split_codegen in shim.cpp). Returns how many of
 /// the paths were written (a module may split into fewer parts).
-pub fn split_codegen(module: *mut std::ffi::c_void, tm: *mut std::ffi::c_void, paths: &[std::path::PathBuf]) -> Result<usize, String> {
+///
+/// # Safety
+/// `module` must be a live LLVMModuleRef and `tm` a live
+/// LLVMTargetMachineRef, neither used elsewhere during the call.
+pub unsafe fn split_codegen(module: *mut std::ffi::c_void, tm: *mut std::ffi::c_void, paths: &[std::path::PathBuf]) -> Result<usize, String> {
     let cs: Vec<std::ffi::CString> = paths.iter().map(|p| std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap()).collect();
     let ptrs: Vec<*const c_char> = cs.iter().map(|c| c.as_ptr()).collect();
     let mut err = vec![0 as c_char; 1024];

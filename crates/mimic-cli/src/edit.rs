@@ -1850,7 +1850,7 @@ fn highlight(text: &str) -> std::collections::HashMap<usize, Style> {
                         let s = &text[a.min(text.len())..b.min(text.len())];
                         if s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                             Style::default().fg(ORANGE).add_modifier(Modifier::BOLD) // keywords
-                        } else if s.chars().any(|c| !c.is_ascii()) {
+                        } else if !s.is_ascii() {
                             Style::default().fg(BRIGHT) // glyphs
                         } else {
                             Style::default().fg(MUTED)

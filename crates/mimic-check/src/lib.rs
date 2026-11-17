@@ -1745,7 +1745,7 @@ fn arrays_exhaustive(arms: &[Arm]) -> bool {
             p => p,
         };
         if let Pattern::Array { elems, rest, .. } = pat
-            && elems.iter().all(|p| irrefutable(p))
+            && elems.iter().all(irrefutable)
         {
             match rest {
                 Some(_) => from = Some(from.map_or(elems.len(), |k| k.min(elems.len()))),
