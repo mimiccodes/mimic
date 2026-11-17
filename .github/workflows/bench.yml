@@ -166,7 +166,7 @@ jobs:
       - name: Noise
         if: ${{ inputs.noise }}
         run: |
-          "$(command -v python3 || command -v python)" bench/run.py --noise ${{ inputs.noise }} | tee noise.txt
+          "$(command -v python3 || command -v python)" bench/run.py --runs 2 --noise ${{ inputs.noise }} | tee noise.txt
           { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Results
