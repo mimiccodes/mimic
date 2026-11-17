@@ -4,6 +4,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.16 — 2026-11-17
+
+A speed round on byte, pixel and state-machine code (found with four new benchmarks and a video transcoding example), types on lambda parameters, and `os::run_in`.
+
+**Upgrading from 0.3.15:** run the new release's install script (or update from the VS Code extension 0.10.5). Programs do not need to change. Release builds now change lists inside records in place where nothing else holds them; debug builds still copy, so a long state-machine loop is much faster with `mimic run --release`.
+
 ### Added
 - **Example: transcoding a video into several resolutions** (`examples/transcode`): ffmpeg alone, and ffmpeg decoding and encoding around Mimic's own scaler (every plane of every frame, one parallel map), timed per resolution; the same in JavaScript (`transcode.mjs`, worker threads) and a comparison (`compare.mjs`) that checks both produced the same bytes. Scaling 60 frames of 1080p to 720p, 480p, 360p and 240p: Mimic 1.23 s on all cores, 6.43 s on one; JavaScript 4.06 s and 12.09 s; C on one thread 5.00 s.
 - **Benchmark `scale`**: video frames resized bilinearly (C, Rust, Rust + Rayon, Go, Mimic).
