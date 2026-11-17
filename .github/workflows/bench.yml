@@ -1,16 +1,17 @@
 # The benchmark suite (bench/run.py: Mimic against C and Rust) on GitHub's
-# runners, and the speed gate: each Mimic/C ratio against the baseline in
-# bench/baseline/, within the tolerance its measured noise allows (BENCHMARK.md).
+# runners, and the speed gate: Mimic as changed against the compiler it
+# changes, both built and timed in turns on the same machine, each benchmark
+# within the tolerance its measured noise allows (BENCHMARK.md). (Numbers
+# from another run cannot be compared: each job gets a different machine.)
 #
 # * pull requests into dev that touch the compiler, the runtime or the
-#   benchmarks: the gate reports (it does not block);
-# * release pull requests into main: the gate is a required check;
-# * every night, on dev: the whole suite and the gate;
-# * by hand: a normal run, `noise` (measure the noise) or `baseline` (record
-#   new baselines, kept as a download to commit).
+#   benchmarks: against dev, reported (it does not block);
+# * release pull requests into main: against main, a required check;
+# * every night, on dev: the whole suite, and the gate against main;
+# * by hand: the suite and the gate against main, or `noise`.
 #
-# Every gate run also checks the gate itself: a build without LLVM's
-# optimizer (MIMIC_DEBUG_DISABLE=optimizer) must fail it.
+# Every gate run also checks the gate itself: the new compiler building
+# without LLVM's optimizer (MIMIC_DEBUG_DISABLE=optimizer) must fail it.
 name: bench
 
 on:
@@ -22,10 +23,6 @@ on:
         description: "Instead: run everything this many times unchanged and record how much each ratio to C varies (0: a normal run)"
         type: number
         default: 0
-      baseline:
-        description: "Instead: record this run's ratios as the baselines (a download to commit)"
-        type: boolean
-        default: false
   schedule:
     - cron: "0 4 * * *"
 
@@ -137,30 +134,48 @@ jobs:
       - name: Crates for the Rust versions
         run: for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch); done
 
-      - name: Benchmarks and the speed gate
-        if: ${{ !inputs.noise && !inputs.baseline }}
-        run: '"$(command -v python3 || command -v python)" bench/run.py --runs 3 --history bench/history.jsonl --gate'
+      # the whole suite, against C and Rust: nightly and by hand
+      - name: Benchmarks
+        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl'
 
-      # the gate must catch a real slowdown: a baseline of three benchmarks,
-      # then the same built without LLVM's optimizer must fail it
+      # the compiler the change goes into, built beside it
+      - name: The compiler before the change
+        if: ${{ !inputs.noise }}
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          git worktree add --detach ../before FETCH_HEAD
+          if [ "$RUNNER_OS" != Windows ]; then ln -sfn "$HOME/.mimic/deps/llvm-$LLVM_VERSION" ../before/.llvm; fi
+          (cd ../before && cargo build --release)
+          exe=mimic; [ "$RUNNER_OS" = Windows ] && exe=mimic.exe
+          echo "BEFORE=$(cd ../before && pwd)/target/release/$exe" >> "$GITHUB_ENV"
+          echo "before: $BASE at $(git -C ../before rev-parse --short HEAD)"
+
+      - name: The speed gate
+        if: ${{ !inputs.noise }}
+        run: |
+          before="$BEFORE"
+          [ "$RUNNER_OS" = Windows ] && before=$(cygpath -w "$BEFORE")
+          "$(command -v python3 || command -v python)" bench/run.py --runs 3 --gate "$before"
+
+      # the gate must catch a real slowdown: the new compiler without
+      # LLVM's optimizer, against itself
       - name: The gate catches a slowdown
-        if: ${{ !inputs.noise && !inputs.baseline }}
+        if: ${{ !inputs.noise }}
         run: |
           py="$(command -v python3 || command -v python)"
-          "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --history '' --baseline > /dev/null
-          if MIMIC_DEBUG_DISABLE=optimizer "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --history '' --gate > injected.txt; then
+          me=target/release/mimic; [ "$RUNNER_OS" = Windows ] && me=$(cygpath -w "$PWD/target/release/mimic.exe")
+          cp bench/gate.md gate-real.md
+          if "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --gate "$me" --inject > injected.txt; then
             cat injected.txt
             echo "::error::a build without the optimizer passed the speed gate"
             exit 1
           fi
           sed -n '/^## Speed gate/,$p' injected.txt
+          mv gate-real.md bench/gate.md
           echo "- the gate failed a build without the optimizer, as it should" >> "$GITHUB_STEP_SUMMARY"
-          git checkout -- bench/baseline 2>/dev/null || true
-
-      - name: Baselines
-        if: ${{ inputs.baseline }}
-        run: |
-          "$(command -v python3 || command -v python)" bench/run.py --history '' --baseline
 
       # the noise of this runner, for the speed gate's tolerances
       - name: Noise
@@ -183,7 +198,6 @@ jobs:
             bench/results.md
             bench/history.jsonl
             bench/noise/
-            bench/baseline/
             bench/gate.md
             bench/target/machine-*.json
           if-no-files-found: ignore
