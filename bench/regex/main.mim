@@ -1,0 +1,127 @@
+module main
+
+// regex: a Thompson NFA engine. Four patterns (alternation, `*`, `+`, `?`,
+// character classes) are parsed, compiled into an automaton of at most 63
+// states, and run over 50,000 generated strings each, keeping the set of
+// live states as the bits of one integer; a string matches when the whole
+// of it leads to the final state. Strings are independent, so `¨` matches
+// them in parallel. Prints how many strings each pattern matches. The
+// reference (bench/regex/ref.py) is Python's own `re`.
+
+type Re = Ch(i64, i64) | Cat(Re, Re) | Alt(Re, Re) | Star(Re) | Plus(Re) | Opt(Re)
+
+// the automaton: node kinds (0 a character range, 1 a split, 2 the end),
+// each range, and where each node goes
+type N = { kind: [i64], lo: [i64], hi: [i64], o1: [i64], o2: [i64] }
+
+// ---- parsing: alternation, then concatenation, then repetition -----------
+
+fn alt(p: [i64], i: i64) -> (Re, i64) {
+    let (a, j) = cat(p, i)
+    if j < ≢ p and p[j] == 124 {
+        let (b, k) = alt(p, j + 1)
+        (Alt(a, b), k)
+    } else { (a, j) }
+}
+
+fn cat(p: [i64], i: i64) -> (Re, i64) {
+    let (a, j) = rep(p, i)
+    if j < ≢ p and p[j] != 124 and p[j] != 41 {
+        let (b, k) = cat(p, j)
+        (Cat(a, b), k)
+    } else { (a, j) }
+}
+
+fn rep(p: [i64], i: i64) -> (Re, i64) {
+    atom(p, i) ▷ settle(s => {
+        let r = match p[s.1] {
+            42 => Star(s.0),
+            43 => Plus(s.0),
+            _ => Opt(s.0),
+        }
+        (r, s.1 + 1)
+    }, s => s.1 == ≢ p or (p[s.1] != 42 and p[s.1] != 43 and p[s.1] != 63))
+}
+
+fn atom(p: [i64], i: i64) -> (Re, i64) {
+    if p[i] == 40 {
+        let (a, j) = alt(p, i + 1)
+        (a, j + 1)
+    } else if p[i] == 91 {
+        (Ch(p[i + 1], p[i + 3]), i + 5)
+    } else {
+        (Ch(p[i], p[i]), i + 1)
+    }
+}
+
+// ---- compiling: each piece knows where it goes next ----------------------
+
+fn add(n: N, k: i64, lo: i64, hi: i64, a: i64, b: i64) -> (N, i64) {
+    (N { kind: push(n.kind, k), lo: push(n.lo, lo), hi: push(n.hi, hi), o1: push(n.o1, a), o2: push(n.o2, b) }, ≢ n.kind)
+}
+
+fn comp(n: N, r: Re, next: i64) -> (N, i64) {
+    match r {
+        Ch(lo, hi) => add(n, 0, lo, hi, next, -1),
+        Cat(a, b) => {
+            let (n1, sb) = comp(n, b, next)
+            comp(n1, a, sb)
+        },
+        Alt(a, b) => {
+            let (n1, sa) = comp(n, a, next)
+            let (n2, sb) = comp(n1, b, next)
+            add(n2, 1, 0, 0, sa, sb)
+        },
+        Star(a) => {
+            let (n1, s) = add(n, 1, 0, 0, -1, next)
+            let (n2, body) = comp(n1, a, s)
+            ({ n2 with o1: put(n2.o1, s, body) }, s)
+        },
+        Plus(a) => {
+            let (n1, s) = add(n, 1, 0, 0, -1, next)
+            let (n2, body) = comp(n1, a, s)
+            ({ n2 with o1: put(n2.o1, s, body) }, body)
+        },
+        Opt(a) => {
+            let (n1, sa) = comp(n, a, next)
+            add(n1, 1, 0, 0, sa, next)
+        },
+    }
+}
+
+// the states reached from `s` without reading (splits followed), as bits
+fn closure(n: N, s: i64, seen: i64) -> i64 {
+    if (seen >>> s) & 1 == 1 { 0 }
+    else if n.kind[s] == 1 { closure(n, n.o1[s], seen | 1 << s) | closure(n, n.o2[s], seen | 1 << s) }
+    else { 1 << s }
+}
+
+// the live states after reading `c`
+fn step(n: N, cl: [i64], cur: i64, c: i64) -> i64 {
+    ⍳ ≢ n.kind ¨ (s => if (cur >>> s) & 1 == 1 and n.kind[s] == 0 and n.lo[s] <= c and c <= n.hi[s] { cl[n.o1[s]] } else { 0 }) ▷ gather((a, b) => a | b)
+}
+
+fn mix(v: i64, m: i64) -> i64 { (v * 2654435761 >> 11) % m }
+
+fn count(p: i64, pattern: str, alphabet: str) -> i64 {
+    let pat = bytes::of_text(pattern) ¨ (b => b + 0)
+    let alpha = bytes::of_text(alphabet) ¨ (b => b + 0)
+    let (ast, _) = alt(pat, 0)
+    let (n0, final) = add(N { kind: [], lo: [], hi: [], o1: [], o2: [] }, 2, 0, 0, -1, -1)
+    let (n, start) = comp(n0, ast, final)
+    let cl = ⍳ ≢ n.kind ¨ (s => closure(n, s, 0))
+    +/ (⍳ 50000 ¨ (j => {
+        let size = 8 + mix(p * 7919 + j, 33)
+        let text = ⍳ size ¨ (k => alpha[mix(p * 1000003 + j * 131 + k, ≢ alpha)])
+        let (at, live) = (0, cl[start]) ▷ settle(s => (s.0 + 1, step(n, cl, s.1, text[s.0])), s => s.0 == size or s.1 == 0)
+        if at == size and (live >>> final) & 1 == 1 { 1 } else { 0 }
+    }))
+}
+
+fn main() {
+    let a = count(0, "(a|b)*abb", "ab")
+    let b = count(1, "(0|1(01*0)*1)*", "01")
+    let c = count(2, "[a-c]*b[a-c]?c+", "abc")
+    let d = count(3, "(x|y|z)*(xy|yz)+z?", "xyz")
+    print("{a} {b} {c} {d}")
+}
