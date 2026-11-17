@@ -9,6 +9,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Added
 - **The 0.4.0 corpus, hashing:** `crc32`, `adler32`, `fnv1a`, `murmur3`, `xxhash32` and `sha256` benchmarks in Mimic, C and Rust, checked against independent references. They show sequential passes over arrays 13–57× slower than C and SHA-256 170× (docs/gaps.md, with the 0.4 steps that fix them), and that Mimic has no `fold`.
+- **The 0.4.0 corpus, parsing:** `csv`, `expr`, `tokenize`, `url` and `http_parse`, checked against Python's `csv`, `eval`, `re` and `urllib`. Parsing that splits into independent pieces runs in parallel and is at or near C's time on all cores (`csv` 0.90×, `expr` 0.95×); scanning characters one at a time is 25× C on one core (docs/gaps.md).
 - **The share of the machine:** `bench/machine/` measures the peak floating-point rate and the memory bandwidth, on one core and on all, and benchmarks that declare their work (`meta.json`: matmul, mandelbrot, prefix_sum so far) also show what share of that limit each version reached (`bench/run.py --machine` measures again).
 - **`bench/run.py --json`** writes a run's times as JSON, and **`--noise N`** runs everything N times unchanged and records how much each ratio to C varies on the machine (`bench/noise/<platform>.json`; the bench workflow's `noise` input runs it on GitHub's machines). It is the first part of 0.4.0: the speed gate's tolerances come from this measured noise.
 

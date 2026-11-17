@@ -48,6 +48,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Group | Benchmarks |
 |---|---|
 | Hashing and checksums | `crc32`, `adler32`, `fnv1a`, `murmur3`, `xxhash32` (8 MiB each), `sha256` (2 MiB) |
+| Parsing | `csv` (400,000 rows, quoted fields), `expr` (300,000 expressions, precedence climbing), `tokenize` (200,000 lines of C-like code), `url` (300,000 URLs), `http_parse` (200,000 requests in one stream) |
 
 ## Building the suite, step by step
 
