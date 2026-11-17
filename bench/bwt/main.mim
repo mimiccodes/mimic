@@ -1,0 +1,68 @@
+module main
+
+// bwt: 256 KiB of generated text in 32 blocks of 8 KiB, as bzip2 cuts it.
+// For each block: the Burrows-Wheeler transform (its rotations sorted by
+// prefix doubling: sort by pairs of ranks, number the groups with a running
+// sum, repeat with twice the length), move-to-front over the last column,
+// and the block back from its transform. Blocks are independent, so `¨`
+// runs them in parallel. Prints the sum of the primary indices, a checksum
+// of the transforms, the zeros move-to-front made, and 1 when every block
+// came back. The reference is bench/bwt/ref.py.
+
+type R = { k: i64, rank: [i64] }
+type M = { j: i64, table: [i64], zeros: i64 }
+type I = { j: i64, row: i64, out: [i64] }
+
+fn vocabulary() -> [str] {
+    ["the" "of" "and" "to" "in" "is" "parallel" "array" "kernel" "fusion" "memory" "vector" "mimic" "cache" "thread" "core" "loop" "value" "zebra" "quartz"]
+}
+
+fn piece(words: [str], i: i64) -> str {
+    let w = words[if i % 7 != 0 { (i * 2654435761 >> 13) % 20 } else { (i * 40503 >> 7) % 20 }]
+    w + (if i % 11 == 10 { ". " } else { " " })
+}
+
+// one doubling: rotations ordered by (rank, rank k further on), renumbered
+fn double(r: R) -> R {
+    let b = ≢ r.rank
+    let key = ⍳ b ¨ (i => r.rank[i] * 1048576 + r.rank[(i + r.k) % b])
+    let order = sort_index(key)
+    let sorted = order ¨ (j => key[j])
+    let group = (⍳ b ¨ (j => if j == 0 or sorted[j] != sorted[j - 1] { 1 } else { 0 })) ▷ trail(+)
+    let inverse = sort_index(order)
+    { r with k: r.k * 2, rank: ⍳ b ¨ (i => group[inverse[i]] - 1) }
+}
+
+fn mtf(s: M, last: [i64]) -> M {
+    let x = last[s.j]
+    let r = +/ (⍳ 256 * (s.table == x))
+    { s with j: s.j + 1, table: concat([x], concat(s.table ↑ r, s.table ↓ (r + 1))), zeros: s.zeros + (if r == 0 { 1 } else { 0 }) }
+}
+
+fn back(s: I, last: [i64], order: [i64]) -> I {
+    { s with j: s.j + 1, row: order[s.row], out: push(s.out, last[s.row]) }
+}
+
+// [primary, checksum, move-to-front zeros, 1 if the block came back]
+fn block(blk: [i64]) -> [i64] {
+    let b = ≢ blk
+    let ranked = R { k: 1, rank: blk } ▷ settle(double, r => r.k >= b or ⌈/ r.rank == b - 1)
+    let sa = sort_index(ranked.rank)
+    let last = sa ¨ (i => blk[(i + b - 1) % b])
+    let primary = +/ (⍳ b * (sa == 0))
+    let check = ((0, 0) ▷ settle(s => (s.0 + 1, (s.1 * 31 + last[s.0] + s.0) % 1000000007), s => s.0 == b)).1
+    let m = M { j: 0, table: ⍳ 256, zeros: 0 } ▷ settle(s => mtf(s, last), s => s.j == b)
+    let order = sort_index(last)
+    let got = I { j: 0, row: order[primary], out: [] } ▷ settle(s => back(s, last, order), s => s.j == b)
+    [primary check m.zeros (if +/ (got.out != blk) == 0 { 1 } else { 0 })]
+}
+
+fn main() {
+    let (size, blocks) = (8192, 32)
+    let n = size * blocks
+    let words = vocabulary()
+    let d = bytes::of_text(join(⍳ (n div 2) ¨ (i => piece(words, i)), "")) ↑ n ¨ (x => x + 0)
+    let res = ⍳ blocks ¨ (k => block(d ↓ (k * size) ↑ size))
+    let total = ⍳ 4 ¨ (c => +/ (res ¨ (r => r[c])))
+    print("{total[0]} {total[1] % 1000000007} {total[2]} {⌊/ (res ¨ (r => r[3]))}")
+}
