@@ -4,6 +4,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+Stage 0.4.0, the measuring stick, so far (0.4.0-preview.1): a benchmark corpus of everyday algorithms, each in Mimic, C and Rust; the machine's limits; and a speed gate that fails CI on a slowdown. The corpus already found two bugs and the gaps the rest of stage 0.4 closes.
+
 ### Changed
 - **Benchmarks against C and Rust only:** the Go versions are gone, from the suite and from the tables in BENCHMARK.md and on the website. The http benchmark's load generator is now a Rust program (`bench/http/load/main.rs`).
 
