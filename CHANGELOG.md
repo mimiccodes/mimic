@@ -4,9 +4,16 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.17 — 2026-11-17
+
+Install and update Mimic from the terminal, from Mimic itself, and the editor extension with one command.
+
 ### Added
 - **Install and update from the terminal:** `curl -fsSL https://mimic.codes/install.sh | sh` (macOS, Linux, WSL) and `irm https://mimic.codes/install.ps1 | iex` (Windows) install the latest Mimic or update to it (or say it is the latest), checked against the release's `SHA256SUMS`, with `--version`, `--check`, `--force` and `--uninstall`. `curl -fsSL https://mimic.codes/vscode.sh | sh` (`vscode.ps1` on Windows) installs or updates the extension in VS Code, Cursor, Windsurf and VSCodium. They avoid the update problems met before: a running `mimic` replaced safely, Windows' `tar` instead of `Expand-Archive`, Rosetta terminals on Apple silicon, musl Linux reported clearly, no GitHub API limits. Tested in CI on Linux, macOS and Windows.
 - **`mimic upgrade`**: the same from Mimic itself (`--check`, `--version`, `--force`; `--editors` updates the extension too).
+
+### Changed
+- The terminal library behind `mimic edit` is updated (ratatui 0.30), which also removes a low-severity advisory in one of its dependencies (`lru`).
 
 ## 0.3.16 — 2026-11-17
 
