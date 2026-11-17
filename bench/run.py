@@ -24,6 +24,14 @@ and writes results.md with each time as a ratio to C.
     bench/run.py --noise 10      # everything 10 times: how much each
                                  # ratio to C varies on this machine
                                  # (bench/noise/<platform>.json)
+    bench/run.py --machine       # measure this machine's limits again
+
+The machine's limits (peak floating-point rate and memory bandwidth, on
+one core and on all, from bench/machine/) are measured once per machine
+and kept in bench/target/. A benchmark whose work counts against one of
+them says so in meta.json: {"bound": "compute", "flops": N} or
+{"bound": "memory", "bytes": N}; its results then also show as a share
+of what the machine can do.
 
 Every run also appends its times to bench/history.jsonl (with the date, the
 commit and the machine) and reports any Mimic time more than 10% slower
@@ -152,8 +160,13 @@ def main() -> int:
     ap.add_argument("--history", default=str(HERE / "history.jsonl"), help="where to append this run's times ('' for nowhere)")
     ap.add_argument("--json", default="", help="also write this run's times to this JSON file")
     ap.add_argument("--noise", type=int, default=0, metavar="N", help="run everything N times and write how much each ratio to C varies (bench/noise/<platform>.json)")
+    ap.add_argument("--machine", action="store_true", help="measure this machine's limits again (and only that, without benchmark names)")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
+    if a.machine:
+        limits(fresh=True)
+        if not a.names:
+            return 0
     benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
     if a.names:
         benches = [b for b in benches if b.name in a.names]
@@ -217,6 +230,87 @@ def machine() -> tuple[str, float]:
     return cpu or platform.processor() or platform.machine(), load
 
 
+def wall(cmds) -> float:
+    """Seconds for these commands, all started at once, to finish."""
+    t0 = time.perf_counter()
+    procs = [subprocess.Popen(c, stdout=subprocess.DEVNULL) for c in cmds]
+    if any(p.wait() != 0 for p in procs):
+        raise RuntimeError(f"{cmds[0][0]} failed")
+    return time.perf_counter() - t0
+
+
+def limits(fresh: bool = False) -> dict:
+    """The machine's limits: peak floating-point operations a second and
+    memory bandwidth, on one core and on all (all: one copy per core at
+    once). Each is timed at two sizes, the difference taking start-up
+    away; best of 5. Kept per machine in bench/target/. A share above
+    100% means hardware beyond the CPU's vector units did the work (such
+    as Apple's matrix unit), or a busy machine measured its limits low."""
+    cpu, _ = machine()
+    cores = os.cpu_count() or 1
+    path = OUT / f"machine-{platform_id()}.json"
+    if not fresh and path.exists():
+        try:
+            m = json.loads(path.read_text())
+            if m.get("cpu") == cpu and m.get("cores") == cores:
+                return m
+        except ValueError:
+            pass
+    print("measuring this machine's limits (bench/machine)")
+    peak = build("c", HERE / "machine" / "peak.c", "machine-peak")
+    stream = build("c", HERE / "machine" / "stream.c", "machine-stream")
+
+    def rate(cmd, small, large, work_per_step, copies):
+        best = float("inf")
+        for _ in range(5):
+            dt = wall([cmd(large)] * copies) - wall([cmd(small)] * copies)
+            best = min(best, dt) if dt > 0 else best
+        return work_per_step * (large - small) * copies / best
+
+    # peak: accumulators × lanes × 2 operations per round (the probe says)
+    flops = int(run([str(peak), "w"]).stdout)
+    rounds = 2_000_000
+    while wall([[str(peak), str(rounds)]]) < 0.25 and rounds < 1 << 34:
+        rounds *= 2
+    p_cmd = lambda r: [str(peak), str(r)]
+    m = {"cpu": cpu, "cores": cores, "platform": platform_id(), "date": time.strftime("%Y-%m-%d")}
+    m["flops_1"] = rate(p_cmd, rounds // 4, rounds, flops, 1)
+    m["flops_all"] = rate(p_cmd, rounds // 4, rounds, flops, cores)
+    # bandwidth: 24 bytes per element per round; arrays far beyond the caches
+    n1, nall = 1 << 24, 1 << 22
+    m["bytes_1"] = rate(lambda r: [str(stream), str(n1), str(r)], 2, 12, 24 * n1, 1)
+    m["bytes_all"] = rate(lambda r: [str(stream), str(nall), str(r)], 2, 12, 24 * nall, cores)
+    path.write_text(json.dumps(m, indent=1) + "\n", encoding="utf-8")
+    print(f"  peak {m['flops_1'] / 1e9:.1f} GFLOP/s on one core, {m['flops_all'] / 1e9:.1f} on all {cores}")
+    print(f"  memory {m['bytes_1'] / 1e9:.1f} GB/s on one core, {m['bytes_all'] / 1e9:.1f} on all {cores}")
+    return m
+
+
+def shares(rows) -> list:
+    """For benchmarks with a meta.json: the share of the machine's limit
+    each version reached, [(name, bound, {lang: share})]."""
+    out = []
+    m = None
+    for name, t in rows:
+        f = HERE / name / "meta.json"
+        if not f.exists():
+            continue
+        meta = json.loads(f.read_text())
+        bound = meta.get("bound")
+        if bound not in ("compute", "memory"):
+            continue
+        m = m or limits()
+        work = meta["flops"] if bound == "compute" else meta["bytes"]
+        key = "flops" if bound == "compute" else "bytes"
+        got = {}
+        for lang in ("c", "rust", "mimic", "rayon", "mimic-all"):
+            if lang in t and t[lang] > 0:
+                limit = m[f"{key}_all"] if lang in ("rayon", "mimic-all") else m[f"{key}_1"]
+                got[lang] = work / t[lang] / limit
+        out.append((name, bound, got))
+    return out
+
+
 def report(rows, runs: int, history: str, json_out: str) -> None:
     """results.md, the table on the terminal, the history, and JSON if asked."""
     c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
@@ -234,10 +328,26 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
     for name, t in rows:
         cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
         lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'mimic')} | {c(t, 'rayon')} | {c(t, 'mimic-all')} |")
+    table = len(lines)
+    sh = shares(rows)
+    if sh:
+        m = limits()
+        pct = lambda d, k: f"{d[k] * 100:.0f}%" if k in d else "—"
+        lines += [
+            "",
+            "## Share of the machine",
+            "",
+            f"What each version reached of this machine's limit: peak {m['flops_1'] / 1e9:.1f} GFLOP/s on one core and {m['flops_all'] / 1e9:.1f} on all; memory {m['bytes_1'] / 1e9:.1f} GB/s on one core and {m['bytes_all'] / 1e9:.1f} on all (bench/machine).",
+            "",
+            "| Benchmark | Limited by | C | Rust | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for name, bound, d in sh:
+            lines.append(f"| {name} | {bound} | {pct(d, 'c')} | {pct(d, 'rust')} | {pct(d, 'mimic')} | {pct(d, 'rayon')} | {pct(d, 'mimic-all')} |")
     (HERE / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[6:]))
     if json_out:
-        Path(json_out).write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "runs": runs, "results": {n: t for n, t in rows}}, indent=1) + "\n", encoding="utf-8")
+        Path(json_out).write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "runs": runs, "results": {n: t for n, t in rows}, "machine": limits() if sh else None, "shares": {n: {"bound": b, **d} for n, b, d in sh}}, indent=1) + "\n", encoding="utf-8")
     if history:
         record(Path(history), cpu, runs, load, rows)
 

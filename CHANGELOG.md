@@ -8,6 +8,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **Benchmarks against C and Rust only:** the Go versions are gone, from the suite and from the tables in BENCHMARK.md and on the website. The http benchmark's load generator is now a Rust program (`bench/http/load/main.rs`).
 
 ### Added
+- **The share of the machine:** `bench/machine/` measures the peak floating-point rate and the memory bandwidth, on one core and on all, and benchmarks that declare their work (`meta.json`: matmul, mandelbrot, prefix_sum so far) also show what share of that limit each version reached (`bench/run.py --machine` measures again).
 - **`bench/run.py --json`** writes a run's times as JSON, and **`--noise N`** runs everything N times unchanged and records how much each ratio to C varies on the machine (`bench/noise/<platform>.json`; the bench workflow's `noise` input runs it on GitHub's machines). It is the first part of 0.4.0: the speed gate's tolerances come from this measured noise.
 
 ## 0.3.18 — 2026-11-17
