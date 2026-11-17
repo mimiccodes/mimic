@@ -1,0 +1,319 @@
+{
+ "benchmarks": {
+  "adler32": {
+   "mimic": {
+    "ratio": 36.2337,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 34.2967,
+    "tolerance": 0.1
+   }
+  },
+  "base64": {
+   "mimic": {
+    "ratio": 3.0795,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.5676,
+    "tolerance": 0.1
+   }
+  },
+  "bwt": {
+   "mimic": {
+    "ratio": 4.549,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.0185,
+    "tolerance": 0.1
+   }
+  },
+  "crc32": {
+   "mimic": {
+    "ratio": 26.3834,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 28.3053,
+    "tolerance": 0.1
+   }
+  },
+  "csv": {
+   "mimic": {
+    "ratio": 5.2218,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 1.8624,
+    "tolerance": 0.1
+   }
+  },
+  "expr": {
+   "mimic": {
+    "ratio": 6.7572,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.4783,
+    "tolerance": 0.1
+   }
+  },
+  "fib": {
+   "mimic": {
+    "ratio": 1.2424,
+    "tolerance": 0.111
+   },
+   "mimic-all": {
+    "ratio": 0.4573,
+    "tolerance": 0.191
+   }
+  },
+  "filters": {
+   "mimic": {
+    "ratio": 1.1861,
+    "tolerance": 0.064
+   },
+   "mimic-all": {
+    "ratio": 0.6142,
+    "tolerance": 0.128
+   }
+  },
+  "fnv1a": {
+   "mimic": {
+    "ratio": 42.2849,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 40.2466,
+    "tolerance": 0.1
+   }
+  },
+  "http": {
+   "mimic": {
+    "ratio": 1.5342,
+    "tolerance": 0.25
+   },
+   "mimic-all": {
+    "ratio": 1.4501,
+    "tolerance": 0.25
+   }
+  },
+  "http_parse": {
+   "mimic": {
+    "ratio": 4.2997,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 3.8595,
+    "tolerance": 0.1
+   }
+  },
+  "huffman": {
+   "mimic": {
+    "ratio": 51.79,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 52.0067,
+    "tolerance": 0.1
+   }
+  },
+  "json": {
+   "mimic": {
+    "ratio": 0.9518,
+    "tolerance": 0.163
+   },
+   "mimic-all": {
+    "ratio": 0.7577,
+    "tolerance": 0.194
+   }
+  },
+  "lz77": {
+   "mimic": {
+    "ratio": 877.7392,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 882.0857,
+    "tolerance": 0.1
+   }
+  },
+  "mandelbrot": {
+   "mimic": {
+    "ratio": 0.6937,
+    "tolerance": 0.112
+   },
+   "mimic-all": {
+    "ratio": 0.2284,
+    "tolerance": 0.25
+   }
+  },
+  "matmul": {
+   "mimic": {
+    "ratio": 0.1659,
+    "tolerance": 0.25
+   },
+   "mimic-all": {
+    "ratio": 0.1634,
+    "tolerance": 0.25
+   }
+  },
+  "murmur3": {
+   "mimic": {
+    "ratio": 21.0632,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 21.3819,
+    "tolerance": 0.1
+   }
+  },
+  "nbody": {
+   "mimic": {
+    "ratio": 1.193,
+    "tolerance": 0.164
+   },
+   "mimic-all": {
+    "ratio": 1.1887,
+    "tolerance": 0.178
+   }
+  },
+  "paths": {
+   "mimic": {
+    "ratio": 2.3328,
+    "tolerance": 0.237
+   },
+   "mimic-all": {
+    "ratio": 2.659,
+    "tolerance": 0.232
+   }
+  },
+  "prefix_sum": {
+   "mimic": {
+    "ratio": 0.8895,
+    "tolerance": 0.228
+   },
+   "mimic-all": {
+    "ratio": 0.617,
+    "tolerance": 0.25
+   }
+  },
+  "qoi": {
+   "mimic": {
+    "ratio": 16.3517,
+    "tolerance": 0.157
+   },
+   "mimic-all": {
+    "ratio": 10.6545,
+    "tolerance": 0.246
+   }
+  },
+  "records": {
+   "mimic": {
+    "ratio": 1.9493,
+    "tolerance": 0.25
+   },
+   "mimic-all": {
+    "ratio": 1.4653,
+    "tolerance": 0.25
+   }
+  },
+  "rle": {
+   "mimic": {
+    "ratio": 76.9957,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 33.4907,
+    "tolerance": 0.1
+   }
+  },
+  "scale": {
+   "mimic": {
+    "ratio": 2.1584,
+    "tolerance": 0.217
+   },
+   "mimic-all": {
+    "ratio": 0.7235,
+    "tolerance": 0.239
+   }
+  },
+  "sha256": {
+   "mimic": {
+    "ratio": 141.9755,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 134.7671,
+    "tolerance": 0.1
+   }
+  },
+  "sort": {
+   "mimic": {
+    "ratio": 0.1582,
+    "tolerance": 0.242
+   },
+   "mimic-all": {
+    "ratio": 0.1095,
+    "tolerance": 0.173
+   }
+  },
+  "sum_of_squares": {
+   "mimic": {
+    "ratio": 1.1148,
+    "tolerance": 0.241
+   },
+   "mimic-all": {
+    "ratio": 0.4507,
+    "tolerance": 0.25
+   }
+  },
+  "tokenize": {
+   "mimic": {
+    "ratio": 24.1632,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 8.6295,
+    "tolerance": 0.1
+   }
+  },
+  "tree": {
+   "mimic": {
+    "ratio": 0.5439,
+    "tolerance": 0.163
+   },
+   "mimic-all": {
+    "ratio": 0.2421,
+    "tolerance": 0.25
+   }
+  },
+  "url": {
+   "mimic": {
+    "ratio": 8.6918,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 3.4691,
+    "tolerance": 0.1
+   }
+  },
+  "xxhash32": {
+   "mimic": {
+    "ratio": 16.7003,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 15.5027,
+    "tolerance": 0.1
+   }
+  }
+ },
+ "commit": "0e00862",
+ "cores": 3,
+ "cpu": "Apple M1 (Virtual)",
+ "date": "2026-11-17",
+ "platform": "macos-arm64"
+}

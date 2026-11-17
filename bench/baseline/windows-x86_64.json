@@ -1,0 +1,309 @@
+{
+ "benchmarks": {
+  "adler32": {
+   "mimic": {
+    "ratio": 41.3215,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 41.2789,
+    "tolerance": 0.1
+   }
+  },
+  "base64": {
+   "mimic": {
+    "ratio": 4.2387,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 4.1584,
+    "tolerance": 0.1
+   }
+  },
+  "bwt": {
+   "mimic": {
+    "ratio": 3.4744,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 1.3538,
+    "tolerance": 0.1
+   }
+  },
+  "crc32": {
+   "mimic": {
+    "ratio": 42.6918,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 42.698,
+    "tolerance": 0.1
+   }
+  },
+  "csv": {
+   "mimic": {
+    "ratio": 4.4365,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.3953,
+    "tolerance": 0.1
+   }
+  },
+  "expr": {
+   "mimic": {
+    "ratio": 5.2533,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.131,
+    "tolerance": 0.1
+   }
+  },
+  "fib": {
+   "mimic": {
+    "ratio": 0.8801,
+    "tolerance": 0.25
+   },
+   "mimic-all": {
+    "ratio": 0.4394,
+    "tolerance": 0.236
+   }
+  },
+  "filters": {
+   "mimic": {
+    "ratio": 1.6285,
+    "tolerance": 0.104
+   },
+   "mimic-all": {
+    "ratio": 0.8017,
+    "tolerance": 0.03
+   }
+  },
+  "fnv1a": {
+   "mimic": {
+    "ratio": 57.9575,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 57.4098,
+    "tolerance": 0.1
+   }
+  },
+  "http_parse": {
+   "mimic": {
+    "ratio": 3.1843,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.8416,
+    "tolerance": 0.1
+   }
+  },
+  "huffman": {
+   "mimic": {
+    "ratio": 36.6618,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 36.0362,
+    "tolerance": 0.1
+   }
+  },
+  "json": {
+   "mimic": {
+    "ratio": 0.6782,
+    "tolerance": 0.125
+   },
+   "mimic-all": {
+    "ratio": 0.6073,
+    "tolerance": 0.054
+   }
+  },
+  "lz77": {
+   "mimic": {
+    "ratio": 1145.9418,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 1143.6492,
+    "tolerance": 0.1
+   }
+  },
+  "mandelbrot": {
+   "mimic": {
+    "ratio": 0.3399,
+    "tolerance": 0.03
+   },
+   "mimic-all": {
+    "ratio": 0.1258,
+    "tolerance": 0.25
+   }
+  },
+  "matmul": {
+   "mimic": {
+    "ratio": 0.3781,
+    "tolerance": 0.03
+   },
+   "mimic-all": {
+    "ratio": 0.2276,
+    "tolerance": 0.036
+   }
+  },
+  "murmur3": {
+   "mimic": {
+    "ratio": 26.9606,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 26.8423,
+    "tolerance": 0.1
+   }
+  },
+  "nbody": {
+   "mimic": {
+    "ratio": 0.8262,
+    "tolerance": 0.03
+   },
+   "mimic-all": {
+    "ratio": 0.825,
+    "tolerance": 0.035
+   }
+  },
+  "paths": {
+   "mimic": {
+    "ratio": 2.5645,
+    "tolerance": 0.044
+   },
+   "mimic-all": {
+    "ratio": 2.5439,
+    "tolerance": 0.044
+   }
+  },
+  "prefix_sum": {
+   "mimic": {
+    "ratio": 1.0349,
+    "tolerance": 0.03
+   },
+   "mimic-all": {
+    "ratio": 0.6295,
+    "tolerance": 0.03
+   }
+  },
+  "qoi": {
+   "mimic": {
+    "ratio": 14.7601,
+    "tolerance": 0.047
+   },
+   "mimic-all": {
+    "ratio": 8.1822,
+    "tolerance": 0.089
+   }
+  },
+  "records": {
+   "mimic": {
+    "ratio": 3.4598,
+    "tolerance": 0.114
+   },
+   "mimic-all": {
+    "ratio": 2.3701,
+    "tolerance": 0.153
+   }
+  },
+  "rle": {
+   "mimic": {
+    "ratio": 66.5623,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 38.2021,
+    "tolerance": 0.1
+   }
+  },
+  "scale": {
+   "mimic": {
+    "ratio": 1.5243,
+    "tolerance": 0.03
+   },
+   "mimic-all": {
+    "ratio": 0.7851,
+    "tolerance": 0.049
+   }
+  },
+  "sha256": {
+   "mimic": {
+    "ratio": 161.1495,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 162.73,
+    "tolerance": 0.1
+   }
+  },
+  "sort": {
+   "mimic": {
+    "ratio": 0.2628,
+    "tolerance": 0.065
+   },
+   "mimic-all": {
+    "ratio": 0.142,
+    "tolerance": 0.145
+   }
+  },
+  "sum_of_squares": {
+   "mimic": {
+    "ratio": 1.154,
+    "tolerance": 0.063
+   },
+   "mimic-all": {
+    "ratio": 0.7477,
+    "tolerance": 0.25
+   }
+  },
+  "tokenize": {
+   "mimic": {
+    "ratio": 20.9672,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 8.9324,
+    "tolerance": 0.1
+   }
+  },
+  "tree": {
+   "mimic": {
+    "ratio": 0.3505,
+    "tolerance": 0.053
+   },
+   "mimic-all": {
+    "ratio": 0.1743,
+    "tolerance": 0.25
+   }
+  },
+  "url": {
+   "mimic": {
+    "ratio": 6.2388,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 2.7121,
+    "tolerance": 0.1
+   }
+  },
+  "xxhash32": {
+   "mimic": {
+    "ratio": 15.5417,
+    "tolerance": 0.1
+   },
+   "mimic-all": {
+    "ratio": 16.1742,
+    "tolerance": 0.1
+   }
+  }
+ },
+ "commit": "0e00862",
+ "cores": 4,
+ "cpu": "Intel64 Family 6 Model 207 Stepping 2, GenuineIntel",
+ "date": "2026-11-17",
+ "platform": "windows-x86_64"
+}

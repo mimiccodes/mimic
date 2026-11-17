@@ -429,7 +429,11 @@ def gate(rows, benches, runs: int) -> int:
             if not b:
                 lines.append(f"| {name} | {where} | — | {r:.2f}× | | | new |")
                 continue
-            limit = b["ratio"] * (1 + b["tolerance"])
+            # the tolerance from the noise measured now (the baseline's own
+            # is what it was when it was recorded)
+            tol = tolerance(name, k)
+            b = {**b, "tolerance": tol}
+            limit = b["ratio"] * (1 + tol)
             verdict = "ok"
             if r > limit:
                 # measure twice more: worse in 2 of 3 fails
