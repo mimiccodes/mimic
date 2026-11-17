@@ -43,6 +43,12 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | 15 | `qoi` (encode and decode a 1024×768 QOI image, 5 times) | sequential state machine, byte output | `settle`, records, `push`/`concat`/`put` in place |
 | 16 | `paths` (Dijkstra and A* on a 600×600 grid) | a binary heap, branches | `settle`, records, `put` in place |
 
+**The 0.4.0 corpus:** everyday algorithms, each in Mimic, C and Rust, each checked against an independent reference (Python's `zlib`, `hashlib`, the `xxhash` and `mmh3` libraries, or a reference implementation). What is awkward or slow in Mimic goes into [docs/gaps.md](docs/gaps.md) with the 0.4 step that fixes it; once an algorithm is fast and tested, the same code goes into the standard library (ciphers excepted).
+
+| Group | Benchmarks |
+|---|---|
+| Hashing and checksums | `crc32`, `adler32`, `fnv1a`, `murmur3`, `xxhash32` (8 MiB each), `sha256` (2 MiB) |
+
 ## Building the suite, step by step
 
 ### Step 1: Harness ✅
