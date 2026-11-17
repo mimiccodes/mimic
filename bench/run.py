@@ -25,6 +25,16 @@ and writes results.md with each time as a ratio to C.
                                  # ratio to C varies on this machine
                                  # (bench/noise/<platform>.json)
     bench/run.py --machine       # measure this machine's limits again
+    bench/run.py --baseline      # record each ratio to C as this machine's
+                                 # baseline (bench/baseline/<platform>.json)
+    bench/run.py --gate          # fail when a ratio got worse than its
+                                 # baseline by more than its tolerance
+
+The gate: each benchmark's Mimic/C ratio (on one core and on all) is
+compared with the baseline. Its tolerance is twice the noise measured for
+it on this platform (bench/noise/), at least 3% and at most 25%. A ratio
+worse than that is measured twice more and fails if it is worse in 2 of
+the 3; a ratio better than that asks for the baseline to be updated.
 
 The machine's limits (peak floating-point rate and memory bandwidth, on
 one core and on all, from bench/machine/) are measured once per machine
@@ -161,6 +171,8 @@ def main() -> int:
     ap.add_argument("--json", default="", help="also write this run's times to this JSON file")
     ap.add_argument("--noise", type=int, default=0, metavar="N", help="run everything N times and write how much each ratio to C varies (bench/noise/<platform>.json)")
     ap.add_argument("--machine", action="store_true", help="measure this machine's limits again (and only that, without benchmark names)")
+    ap.add_argument("--baseline", action="store_true", help="record this run's ratios to C as the baseline (bench/baseline/<platform>.json)")
+    ap.add_argument("--gate", action="store_true", help="fail when a ratio to C is worse than its baseline by more than its tolerance")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     if a.machine:
@@ -174,6 +186,10 @@ def main() -> int:
         return noise(benches, a.runs, a.noise)
     rows = measure(benches, a.runs)
     report(rows, a.runs, a.history, a.json)
+    if a.baseline:
+        write_baseline(rows)
+    if a.gate:
+        return gate(rows, benches, a.runs)
     return 0
 
 
@@ -182,7 +198,7 @@ def measure(benches, runs: int):
     one = {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}
     rows = []
     for b in benches:
-        expected = (b / "expected.txt").read_text().strip()
+        expected = (b / "expected.txt").read_text(encoding="utf-8").strip()
         times = {}
         load = None
         if (b / "load").is_dir():
@@ -226,7 +242,7 @@ def machine() -> tuple[str, float]:
     except OSError:
         cpu = ""
     if not cpu and Path("/proc/cpuinfo").exists():
-        cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines() if l.startswith("model name")), "")
+        cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines() if l.startswith("model name")), "")
     return cpu or platform.processor() or platform.machine(), load
 
 
@@ -251,7 +267,7 @@ def limits(fresh: bool = False) -> dict:
     path = OUT / f"machine-{platform_id()}.json"
     if not fresh and path.exists():
         try:
-            m = json.loads(path.read_text())
+            m = json.loads(path.read_text(encoding="utf-8"))
             if m.get("cpu") == cpu and m.get("cores") == cores:
                 return m
         except ValueError:
@@ -295,7 +311,7 @@ def shares(rows) -> list:
         f = HERE / name / "meta.json"
         if not f.exists():
             continue
-        meta = json.loads(f.read_text())
+        meta = json.loads(f.read_text(encoding="utf-8"))
         bound = meta.get("bound")
         if bound not in ("compute", "memory"):
             continue
@@ -352,6 +368,93 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
         record(Path(history), cpu, runs, load, rows)
 
 
+KEYS = ("mimic", "mimic-all")
+LOWEST, HIGHEST, DEFAULT = 0.03, 0.25, 0.10
+
+
+def ratios(t: dict) -> dict:
+    """Mimic's ratios to C (one core, all cores) of one benchmark."""
+    return {k: t[k] / t["c"] for k in KEYS if k in t and t.get("c")}
+
+
+def tolerance(name: str, key: str) -> float:
+    """Twice the noise measured on this platform, within 3% … 25%."""
+    f = HERE / "noise" / f"{platform_id()}.json"
+    try:
+        spread = json.loads(f.read_text(encoding="utf-8"))["benchmarks"][name][key]["spread"]
+    except (OSError, ValueError, KeyError):
+        return DEFAULT
+    return min(HIGHEST, max(LOWEST, 2 * spread))
+
+
+def write_baseline(rows) -> None:
+    out = {}
+    for name, t in rows:
+        for k, r in ratios(t).items():
+            out.setdefault(name, {})[k] = {"ratio": round(r, 4), "tolerance": round(tolerance(name, k), 3)}
+    cpu, _ = machine()
+    try:
+        commit = run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT).stdout.strip()
+    except (OSError, RuntimeError):
+        commit = ""
+    path = HERE / "baseline" / f"{platform_id()}.json"
+    path.parent.mkdir(exist_ok=True)
+    old = {}
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8")).get("benchmarks", {})
+        except ValueError:
+            pass
+    # benchmarks not run this time keep their baseline
+    path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "commit": commit, "date": time.strftime("%Y-%m-%d"), "benchmarks": {**old, **out}}, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"\nbaseline written to {path.relative_to(ROOT)}")
+
+
+def gate(rows, benches, runs: int) -> int:
+    """Compare with the baseline; worse beyond the tolerance in 2 of 3
+    measurements fails. Writes bench/gate.md and returns the exit code."""
+    path = HERE / "baseline" / f"{platform_id()}.json"
+    if not path.exists():
+        print(f"\nno baseline for {platform_id()} ({path.relative_to(ROOT)}): nothing to compare")
+        return 0
+    base = json.loads(path.read_text(encoding="utf-8"))["benchmarks"]
+    by_name = {b.name: b for b in benches}
+    lines = [f"## Speed gate ({platform_id()}, baseline {json.loads(path.read_text(encoding="utf-8")).get('commit', '?')})", "", "| Benchmark | | Baseline | Now | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
+    failed, faster = [], []
+    for name, t in rows:
+        now = ratios(t)
+        for k, r in now.items():
+            b = base.get(name, {}).get(k)
+            where = "1 core" if k == "mimic" else "all cores"
+            if not b:
+                lines.append(f"| {name} | {where} | — | {r:.2f}× | | | new |")
+                continue
+            limit = b["ratio"] * (1 + b["tolerance"])
+            verdict = "ok"
+            if r > limit:
+                # measure twice more: worse in 2 of 3 fails
+                again = [ratios(dict(measure([by_name[name]], runs))[name]).get(k, r) for _ in range(2)]
+                worse = 1 + sum(x > limit for x in again)
+                r = sorted([r, *again])[1]
+                verdict = "**slower**" if worse >= 2 else "ok (noise)"
+                if worse >= 2:
+                    failed.append(f"{name} ({where})")
+            elif r < b["ratio"] * (1 - b["tolerance"]):
+                verdict = "faster"
+                faster.append(f"{name} ({where})")
+            lines.append(f"| {name} | {where} | {b['ratio']:.2f}× | {r:.2f}× | {(r / b['ratio'] - 1) * 100:+.0f}% | {b['tolerance'] * 100:.0f}% | {verdict} |")
+    lines.append("")
+    if failed:
+        lines.append(f"**Slower than the baseline:** {', '.join(failed)}.")
+    if faster:
+        lines.append(f"Faster than the baseline: {', '.join(faster)}; update it with `bench/run.py --baseline`.")
+    if not failed and not faster:
+        lines.append("Every ratio is within its tolerance.")
+    (HERE / "gate.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("\n" + "\n".join(lines))
+    return 1 if failed else 0
+
+
 def noise(benches, runs: int, times: int) -> int:
     """Run everything `times` times, unchanged, and record how much each
     ratio to C moves between rounds: the noise a speed gate has to allow
@@ -401,7 +504,7 @@ def record(path: Path, cpu: str, runs: int, load: float, rows) -> None:
     }
     last = None
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 e = json.loads(line)
             except ValueError:

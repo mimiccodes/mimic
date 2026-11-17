@@ -1,18 +1,33 @@
-# The benchmark suite (bench/run.py: Mimic against C and Rust) on
-# GitHub's runners: by hand, and every Monday. The results table is shown on
-# the run's page and kept as a download with the run's history line.
-# (Shared runners are noisy: compare ratios to C, not absolute times.)
+# The benchmark suite (bench/run.py: Mimic against C and Rust) on GitHub's
+# runners, and the speed gate: each Mimic/C ratio against the baseline in
+# bench/baseline/, within the tolerance its measured noise allows (BENCHMARK.md).
+#
+# * pull requests into dev that touch the compiler, the runtime or the
+#   benchmarks: the gate reports (it does not block);
+# * release pull requests into main: the gate is a required check;
+# * every night, on dev: the whole suite and the gate;
+# * by hand: a normal run, `noise` (measure the noise) or `baseline` (record
+#   new baselines, kept as a download to commit).
+#
+# Every gate run also checks the gate itself: a build without LLVM's
+# optimizer (MIMIC_DEBUG_DISABLE=optimizer) must fail it.
 name: bench
 
 on:
+  pull_request:
+    branches: [dev, main]
   workflow_dispatch:
     inputs:
       noise:
         description: "Instead: run everything this many times unchanged and record how much each ratio to C varies (0: a normal run)"
         type: number
         default: 0
+      baseline:
+        description: "Instead: record this run's ratios as the baselines (a download to commit)"
+        type: boolean
+        default: false
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read
@@ -23,7 +38,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # into dev, only changes to what is measured run the suite
+  scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.s.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: s
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          run=true
+          if [ "${{ github.event_name }}" = pull_request ] && [ "$BASE" = dev ]; then
+            git diff --name-only "origin/$BASE...HEAD" | grep -qE '^(crates|runtime|bench)/|^Cargo\.(toml|lock)$' || run=false
+          fi
+          echo "run=$run" | tee -a "$GITHUB_OUTPUT"
+
   bench:
+    needs: scope
+    if: needs.scope.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +78,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the nightly run measures dev, where the work is
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
 
       - name: Rust
         run: rustup update stable && rustup default stable
@@ -98,20 +137,42 @@ jobs:
       - name: Crates for the Rust versions
         run: for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch); done
 
-      - name: Benchmarks
-        if: ${{ !inputs.noise }}
-        run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl'
+      - name: Benchmarks and the speed gate
+        if: ${{ !inputs.noise && !inputs.baseline }}
+        run: '"$(command -v python3 || command -v python)" bench/run.py --runs 3 --history bench/history.jsonl --gate'
+
+      # the gate must catch a real slowdown: a baseline of three benchmarks,
+      # then the same built without LLVM's optimizer must fail it
+      - name: The gate catches a slowdown
+        if: ${{ !inputs.noise && !inputs.baseline }}
+        run: |
+          py="$(command -v python3 || command -v python)"
+          "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --history '' --baseline > /dev/null
+          if MIMIC_DEBUG_DISABLE=optimizer "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --history '' --gate > injected.txt; then
+            cat injected.txt
+            echo "::error::a build without the optimizer passed the speed gate"
+            exit 1
+          fi
+          sed -n '/^## Speed gate/,$p' injected.txt
+          echo "- the gate failed a build without the optimizer, as it should" >> "$GITHUB_STEP_SUMMARY"
+          git checkout -- bench/baseline 2>/dev/null || true
+
+      - name: Baselines
+        if: ${{ inputs.baseline }}
+        run: |
+          "$(command -v python3 || command -v python)" bench/run.py --history '' --baseline
 
       # the noise of this runner, for the speed gate's tolerances
       - name: Noise
         if: ${{ inputs.noise }}
         run: |
-          "$(command -v python3 || command -v python)" bench/run.py --noise ${{ inputs.noise }} | tee noise.txt
+          "$(command -v python3 || command -v python)" bench/run.py --runs 2 --noise ${{ inputs.noise }} | tee noise.txt
           { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Results
         if: always()
         run: |
+          [ -f bench/gate.md ] && cat bench/gate.md >> "$GITHUB_STEP_SUMMARY" || true
           [ -f bench/results.md ] && cat bench/results.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - uses: actions/upload-artifact@v4
@@ -122,5 +183,7 @@ jobs:
             bench/results.md
             bench/history.jsonl
             bench/noise/
+            bench/baseline/
+            bench/gate.md
             bench/target/machine-*.json
           if-no-files-found: ignore

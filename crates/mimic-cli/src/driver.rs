@@ -76,6 +76,12 @@ pub struct Profile {
     pub coverage: bool,
 }
 
+/// `MIMIC_DEBUG_DISABLE=optimizer` (a comma-separated list): turn a part of
+/// the compiler off, for testing (the speed gate's own check).
+pub fn debug_disabled(what: &str) -> bool {
+    std::env::var("MIMIC_DEBUG_DISABLE").is_ok_and(|v| v.split(',').any(|x| x.trim() == what))
+}
+
 impl Profile {
     pub fn for_input(input: &Input, release: bool) -> Profile {
         let cfg = match input {
@@ -83,7 +89,10 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false, coverage: false }
+        // a real slowdown on purpose, to show the speed gate catches one
+        // (bench/run.py --gate); part of the build's cache key like any opt
+        let opt = if debug_disabled("optimizer") { 0 } else { p.opt };
+        Profile { release, net: true, opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false, coverage: false }
     }
     pub fn name(&self) -> &'static str {
         if self.coverage {
