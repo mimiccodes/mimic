@@ -77,12 +77,13 @@ latest() {
     esac
 }
 
-# the newest preview or stable release: the first in GitHub's list (newest
-# first) that is either; the API is asked once
+# the newest preview or stable release: the first in the releases' feed
+# (newest first) that is either (the feed, not the API, which limits how
+# often it may be asked)
 newest_preview() {
-    fetch "https://api.github.com/repos/$REPO/releases?per_page=30" "$1" ||
-        fail "could not list the releases on GitHub (try again in a while, or pass --version)"
-    v=$(grep -o '"tag_name": *"[^"]*"' "$1" | sed 's/.*"v\([^"]*\)"$/\1/' |
+    fetch "https://github.com/$REPO/releases.atom" "$1" ||
+        fail "could not list the releases on GitHub (check your connection, or pass --version)"
+    v=$(grep -o 'releases/tag/v[^"]*"' "$1" | sed 's|.*/v\([^"]*\)"$|\1|' |
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-(preview|fix)\.[0-9]+)?$' | head -1)
     [ -n "$v" ] || fail "found no preview or stable release on GitHub"
     printf '%s' "$v"

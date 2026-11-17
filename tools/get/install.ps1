@@ -59,9 +59,12 @@ function Install-Mimic {
     $tag = $null
 
     if (-not $Version -and $Channel -eq "preview") {
-        # the newest preview or stable release, from GitHub's list (newest first)
-        $list = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers @{ "User-Agent" = "mimic-install" }
-        $Version = ($list | ForEach-Object { $_.tag_name } | Where-Object { $_ -match "^v\d+\.\d+\.\d+(-(preview|fix)\.\d+)?$" } | Select-Object -First 1)
+        # the newest preview or stable release: the first in the releases'
+        # feed (newest first) that is either (the feed, not the API, which
+        # limits how often it may be asked)
+        $feed = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases.atom").Content
+        if ($feed -is [byte[]]) { $feed = [System.Text.Encoding]::UTF8.GetString($feed) }
+        $Version = ([regex]::Matches($feed, 'releases/tag/(v[^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match "^v\d+\.\d+\.\d+(-(preview|fix)\.\d+)?$" } | Select-Object -First 1)
         if (-not $Version) { throw "found no preview or stable release on GitHub" }
         $latestIs = "the latest preview"
     } elseif (-not $Version -and $Channel -eq "nightly") {
