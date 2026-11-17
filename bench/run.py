@@ -25,16 +25,20 @@ and writes results.md with each time as a ratio to C.
                                  # ratio to C varies on this machine
                                  # (bench/noise/<platform>.json)
     bench/run.py --machine       # measure this machine's limits again
-    bench/run.py --baseline      # record each ratio to C as this machine's
-                                 # baseline (bench/baseline/<platform>.json)
-    bench/run.py --gate          # fail when a ratio got worse than its
-                                 # baseline by more than its tolerance
+    bench/run.py --gate OLD      # the speed gate: Mimic as built here
+                                 # against the mimic at OLD (the code it
+                                 # changes), on this machine, in turns
 
-The gate: each benchmark's Mimic/C ratio (on one core and on all) is
-compared with the baseline. Its tolerance is twice the noise measured for
-it on this platform (bench/noise/), at least 3% and at most 25%. A ratio
-worse than that is measured twice more and fails if it is worse in 2 of
-the 3; a ratio better than that asks for the baseline to be updated.
+The gate: each benchmark is built with both compilers and timed with
+each in turn (old, new, old, new, …), on one core and on all, so both
+meet the same machine and the same moment. A new time worse than the old
+by more than the benchmark's tolerance is measured twice more and fails
+if it is worse in 2 of the 3. The tolerance is twice the noise measured
+for the benchmark on this platform (bench/noise/), at least 3% and at
+most 25%. Comparing with numbers recorded on another run does not work on
+shared machines: a CI job gets a different machine each time. --inject
+builds the new side without LLVM's optimizer (MIMIC_DEBUG_DISABLE), a
+real slowdown the gate must catch.
 
 The machine's limits (peak floating-point rate and memory bandwidth, on
 one core and on all, from bench/machine/) are measured once per machine
@@ -69,6 +73,8 @@ EXE = ".exe" if WINDOWS else ""
 
 
 def mimic_exe() -> str:
+    if os.environ.get("MIMIC_EXE"):
+        return os.environ["MIMIC_EXE"]
     built = ROOT / "target" / "release" / f"mimic{EXE}"
     return str(built) if built.exists() else "mimic"
 
@@ -171,8 +177,8 @@ def main() -> int:
     ap.add_argument("--json", default="", help="also write this run's times to this JSON file")
     ap.add_argument("--noise", type=int, default=0, metavar="N", help="run everything N times and write how much each ratio to C varies (bench/noise/<platform>.json)")
     ap.add_argument("--machine", action="store_true", help="measure this machine's limits again (and only that, without benchmark names)")
-    ap.add_argument("--baseline", action="store_true", help="record this run's ratios to C as the baseline (bench/baseline/<platform>.json)")
-    ap.add_argument("--gate", action="store_true", help="fail when a ratio to C is worse than its baseline by more than its tolerance")
+    ap.add_argument("--gate", default="", metavar="OLD", help="the speed gate: compare Mimic as built here with the mimic at OLD, on this machine, in turns")
+    ap.add_argument("--inject", action="store_true", help="with --gate: build the new side without LLVM's optimizer (the gate must fail)")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     if a.machine:
@@ -184,12 +190,10 @@ def main() -> int:
         benches = [b for b in benches if b.name in a.names]
     if a.noise:
         return noise(benches, a.runs, a.noise)
+    if a.gate:
+        return gate(benches, Path(a.gate), a.runs, a.inject)
     rows = measure(benches, a.runs)
     report(rows, a.runs, a.history, a.json)
-    if a.baseline:
-        write_baseline(rows)
-    if a.gate:
-        return gate(rows, benches, a.runs)
     return 0
 
 
@@ -368,13 +372,7 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
         record(Path(history), cpu, runs, load, rows)
 
 
-KEYS = ("mimic", "mimic-all")
 LOWEST, HIGHEST, DEFAULT = 0.03, 0.25, 0.10
-
-
-def ratios(t: dict) -> dict:
-    """Mimic's ratios to C (one core, all cores) of one benchmark."""
-    return {k: t[k] / t["c"] for k in KEYS if k in t and t.get("c")}
 
 
 def tolerance(name: str, key: str) -> float:
@@ -387,69 +385,78 @@ def tolerance(name: str, key: str) -> float:
     return min(HIGHEST, max(LOWEST, 2 * spread))
 
 
-def write_baseline(rows) -> None:
+def build_with(compiler: Path, src: Path, env: dict, side: str) -> Path:
+    """The program built by `compiler`, copied to its own name (both
+    compilers build to the same place)."""
+    r = run([str(compiler), "build", str(src), "--emit-json"], env={**os.environ, **env})
+    built = Path(json.loads(r.stdout)["artifacts"][0]["path"])
+    own = OUT / f"{src.parent.name}-{side}{EXE}"
+    shutil.copy2(built, own)
+    return own
+
+
+def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
+    """One benchmark built with both compilers and timed in turns:
+    {"mimic": (old, new), "mimic-all": (old, new)} in seconds (best of)."""
+    expected = (b / "expected.txt").read_text(encoding="utf-8").strip()
+    load = None
+    if (b / "load").is_dir():
+        load = OUT / f"{b.name}-load{EXE}"
+        if not load.exists():
+            run(["rustc", "-C", "opt-level=3", "--edition", "2024", str(b / "load" / "main.rs"), "-o", str(load)])
+    src = b / "main.mim"
+    exes = (build_with(old, src, {}, "old"), build_with(new, src, {"MIMIC_DEBUG_DISABLE": "optimizer"} if inject else {}, "new"))
+    once = (lambda exe, env: time_server(exe, load, env, 1, expected)) if load else (lambda exe, env: time_runs(exe, env, 1, expected))
     out = {}
-    for name, t in rows:
-        for k, r in ratios(t).items():
-            out.setdefault(name, {})[k] = {"ratio": round(r, 4), "tolerance": round(tolerance(name, k), 3)}
-    cpu, _ = machine()
-    try:
-        commit = run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT).stdout.strip()
-    except (OSError, RuntimeError):
-        commit = ""
-    path = HERE / "baseline" / f"{platform_id()}.json"
-    path.parent.mkdir(exist_ok=True)
-    old = {}
-    if path.exists():
-        try:
-            old = json.loads(path.read_text(encoding="utf-8")).get("benchmarks", {})
-        except ValueError:
-            pass
-    # benchmarks not run this time keep their baseline
-    path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "commit": commit, "date": time.strftime("%Y-%m-%d"), "benchmarks": {**old, **out}}, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"\nbaseline written to {path.relative_to(ROOT)}")
+    for key, env in (("mimic", {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}), ("mimic-all", {})):
+        best = [float("inf"), float("inf")]
+        for _ in range(runs):
+            for side in (0, 1):
+                best[side] = min(best[side], once(exes[side], env))
+        out[key] = tuple(best)
+    return out
 
 
-def gate(rows, benches, runs: int) -> int:
-    """Compare with the baseline; worse beyond the tolerance in 2 of 3
-    measurements fails. Writes bench/gate.md and returns the exit code."""
-    path = HERE / "baseline" / f"{platform_id()}.json"
-    if not path.exists():
-        print(f"\nno baseline for {platform_id()} ({path.relative_to(ROOT)}): nothing to compare")
-        return 0
-    base = json.loads(path.read_text(encoding="utf-8"))["benchmarks"]
-    by_name = {b.name: b for b in benches}
-    lines = [f"## Speed gate ({platform_id()}, baseline {json.loads(path.read_text(encoding="utf-8")).get('commit', '?')})", "", "| Benchmark | | Baseline | Now | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
+def gate(benches, old: Path, runs: int, inject: bool) -> int:
+    """Mimic as built here against the mimic at `old`, benchmark by
+    benchmark on this machine; slower beyond the tolerance in 2 of 3
+    measurements fails. Writes bench/gate.md; returns the exit code."""
+    new = Path(mimic_exe())
+    if not old.exists():
+        print(f"error: no mimic at {old}", file=sys.stderr)
+        return 2
+    title = "the new side built without the optimizer" if inject else f"against {old}"
+    lines = [f"## Speed gate ({platform_id()}, {title})", "", "| Benchmark | | Before | After | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
     failed, faster = [], []
-    for name, t in rows:
-        now = ratios(t)
-        for k, r in now.items():
-            b = base.get(name, {}).get(k)
-            where = "1 core" if k == "mimic" else "all cores"
-            if not b:
-                lines.append(f"| {name} | {where} | — | {r:.2f}× | | | new |")
-                continue
-            limit = b["ratio"] * (1 + b["tolerance"])
+    for b in benches:
+        if not (b / "main.mim").exists():
+            continue
+        print(f"  {b.name}", flush=True)
+        got = pair(b, old, new, runs, inject)
+        for key, (t_old, t_new) in got.items():
+            where = "1 core" if key == "mimic" else "all cores"
+            tol = tolerance(b.name, key)
+            change = t_new / t_old
             verdict = "ok"
-            if r > limit:
-                # measure twice more: worse in 2 of 3 fails
-                again = [ratios(dict(measure([by_name[name]], runs))[name]).get(k, r) for _ in range(2)]
-                worse = 1 + sum(x > limit for x in again)
-                r = sorted([r, *again])[1]
+            if change > 1 + tol:
+                # measured twice more: worse in 2 of 3 fails
+                again = [pair(b, old, new, runs, inject)[key] for _ in range(2)]
+                worse = 1 + sum(n / o > 1 + tol for o, n in again)
+                change = sorted([change, *(n / o for o, n in again)])[1]
                 verdict = "**slower**" if worse >= 2 else "ok (noise)"
                 if worse >= 2:
-                    failed.append(f"{name} ({where})")
-            elif r < b["ratio"] * (1 - b["tolerance"]):
+                    failed.append(f"{b.name} ({where})")
+            elif change < 1 - tol:
                 verdict = "faster"
-                faster.append(f"{name} ({where})")
-            lines.append(f"| {name} | {where} | {b['ratio']:.2f}× | {r:.2f}× | {(r / b['ratio'] - 1) * 100:+.0f}% | {b['tolerance'] * 100:.0f}% | {verdict} |")
+                faster.append(f"{b.name} ({where})")
+            lines.append(f"| {b.name} | {where} | {t_old:.3f} s | {t_new:.3f} s | {(change - 1) * 100:+.0f}% | {tol * 100:.0f}% | {verdict} |")
     lines.append("")
     if failed:
-        lines.append(f"**Slower than the baseline:** {', '.join(failed)}.")
+        lines.append(f"**Slower:** {', '.join(failed)}.")
     if faster:
-        lines.append(f"Faster than the baseline: {', '.join(faster)}; update it with `bench/run.py --baseline`.")
+        lines.append(f"Faster: {', '.join(faster)}.")
     if not failed and not faster:
-        lines.append("Every ratio is within its tolerance.")
+        lines.append("Every benchmark is within its tolerance.")
     (HERE / "gate.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n" + "\n".join(lines))
     return 1 if failed else 0
