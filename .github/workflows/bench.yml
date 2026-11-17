@@ -122,4 +122,5 @@ jobs:
             bench/results.md
             bench/history.jsonl
             bench/noise/
+            bench/target/machine-*.json
           if-no-files-found: ignore
