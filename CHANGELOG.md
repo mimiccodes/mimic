@@ -4,6 +4,10 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Added
+- **Install and update from the terminal:** `curl -fsSL https://mimic.codes/install.sh | sh` (macOS, Linux, WSL) and `irm https://mimic.codes/install.ps1 | iex` (Windows) install the latest Mimic or update to it (or say it is the latest), checked against the release's `SHA256SUMS`, with `--version`, `--check`, `--force` and `--uninstall`. `curl -fsSL https://mimic.codes/vscode.sh | sh` (`vscode.ps1` on Windows) installs or updates the extension in VS Code, Cursor, Windsurf and VSCodium. They avoid the update problems met before: a running `mimic` replaced safely, Windows' `tar` instead of `Expand-Archive`, Rosetta terminals on Apple silicon, musl Linux reported clearly, no GitHub API limits. Tested in CI on Linux, macOS and Windows.
+- **`mimic upgrade`**: the same from Mimic itself (`--check`, `--version`, `--force`; `--editors` updates the extension too).
+
 ## 0.3.16 — 2026-11-17
 
 A speed round on byte, pixel and state-machine code (found with four new benchmarks and a video transcoding example), types on lambda parameters, and `os::run_in`.
@@ -191,7 +195,7 @@ Downloadable builds for Linux, macOS and Windows; Windows as a target and as a h
 
 ## 0.1.0 — 2026-11-14
 
-The first version: the foundations listed in [docs/versions.md](docs/versions.md#the-plan).
+The first version: the foundations listed in [docs/versions.md](docs/versions.md#01--foundations).
 
 - **Language:** arrays with glyphs and words, records, unions, generics, closures, functions as values, loop words, patterns, implicit futures, `test` blocks.
 - **Parallel by default:** fused array kernels on all cores, `¨` in parallel, fork-join recursion, interaction nets, SIMD across elements, Metal GPU kernels.

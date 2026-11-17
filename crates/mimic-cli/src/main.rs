@@ -21,6 +21,7 @@ mod repl;
 mod report;
 mod targets;
 mod toolchain;
+mod upgrade;
 mod web;
 
 use clap::{Args, Parser, Subcommand};
@@ -328,6 +329,21 @@ enum Cmd {
         /// Arguments for the program (after `--`)
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    /// Install the latest Mimic (or a version), as the install scripts do; `--editors` updates the editor extension too
+    Upgrade {
+        /// A release instead of the latest (e.g. 0.3.16)
+        #[arg(long)]
+        version: Option<String>,
+        /// Reinstall even when that version is installed
+        #[arg(long)]
+        force: bool,
+        /// Only say whether a newer Mimic is available
+        #[arg(long)]
+        check: bool,
+        /// Also install or update the extension in VS Code, Cursor, Windsurf and VSCodium
+        #[arg(long)]
+        editors: bool,
     },
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
@@ -698,6 +714,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             dap::serve()?;
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Upgrade { version, force, check, editors } => upgrade::run(upgrade::Options { version, force, check, editors }),
         Cmd::Lsp { .. } => {
             lsp::serve()?;
             Ok(ExitCode::SUCCESS)

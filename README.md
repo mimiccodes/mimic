@@ -21,9 +21,28 @@ mimic build --release --target x86_64-linux-musl   # a static Linux binary, from
 
 ## Install
 
-Download the release for your machine from [Releases](https://github.com/mimiccodes/mimic/releases) (macOS arm64, Linux x86_64, Windows x86_64), unpack it and run `install.sh` (or `install.cmd` on Windows): `mimic` goes into `~/.mimic/bin` and onto your `PATH`. One binary holds the compiler, Clang, LLD and the C libraries for cross builds; nothing else is needed (on macOS, the Xcode Command Line Tools).
+macOS (Apple silicon), Linux (x86_64, glibc 2.28 or newer) and WSL:
 
-In VS Code, install the [Mimic extension](https://github.com/mimiccodes/mimic-vscode/releases) (`.vsix`: *Extensions* → `…` → *Install from VSIX…*); it finds `mimic`, or installs and updates it for you.
+```sh
+curl -fsSL https://mimic.codes/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://mimic.codes/install.ps1 | iex
+```
+
+The same command updates an installed `mimic` to the latest release (or says it is already the latest); `mimic upgrade` does the same from Mimic itself. `mimic` goes into `~/.mimic/bin` and onto your `PATH`, without administrator rights; the download is checked against the release's `SHA256SUMS`. One binary holds the compiler, Clang, LLD and the C libraries for cross builds; nothing else is needed (on macOS, the Xcode Command Line Tools). Options: `sh -s -- --version 0.3.16`, `--check`, `--force`, `--uninstall` (on Windows, `$env:MIMIC_VERSION`, `MIMIC_FORCE`, `MIMIC_UNINSTALL`).
+
+The Mimic extension for VS Code, Cursor, Windsurf and VSCodium (every one installed), installed or updated:
+
+```sh
+curl -fsSL https://mimic.codes/vscode.sh | sh        # macOS, Linux, WSL
+irm https://mimic.codes/vscode.ps1 | iex             # Windows
+```
+
+The scripts are in [tools/get](tools/get) (also at `https://raw.githubusercontent.com/mimiccodes/mimic/main/tools/get/install.sh` and so on); or download a release from [Releases](https://github.com/mimiccodes/mimic/releases), unpack it and run its `install.sh` (`install.cmd` on Windows). The extension's `.vsix` is on [its releases](https://github.com/mimiccodes/mimic-vscode/releases); it finds `mimic`, or installs and updates it for you.
 
 ## Status
 

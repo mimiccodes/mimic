@@ -1,0 +1,114 @@
+name: install scripts
+# The scripts behind `curl -fsSL https://mimic.codes/install.sh | sh` and
+# `irm https://mimic.codes/install.ps1 | iex` (tools/get), run as users run
+# them, against the published releases: a fresh install, the same command
+# again (up to date), an update over the previous release while its
+# language server runs (as an open editor does), and uninstalling; then
+# the extension's scripts against a real VS Code.
+on:
+  push:
+    branches: [main]
+    paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
+  pull_request:
+    paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
+  release:
+    types: [published]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, again, update while running, uninstall
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=$(gh release list --repo mimiccodes/mimic --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[0].tagName' | sed 's/^v//')
+          previous=$(gh release list --repo mimiccodes/mimic --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName' | sed 's/^v//')
+          echo "latest $latest, previous $previous"
+          cat tools/get/install.sh | sh -s -- --check
+          cat tools/get/install.sh | sh
+          ~/.mimic/bin/mimic --version | grep -q "mimic $latest"
+          cat tools/get/install.sh | sh | tee out.txt
+          grep -q "already installed" out.txt
+          cat tools/get/install.sh | sh -s -- --version "$previous"
+          ~/.mimic/bin/mimic --version | grep -q "mimic $previous"
+          (sleep 120 | ~/.mimic/bin/mimic lsp > /dev/null 2>&1 &)
+          sleep 2
+          cat tools/get/install.sh | sh
+          ~/.mimic/bin/mimic --version | grep -q "mimic $latest"
+          pkill -f "mimic lsp" || true
+          cat tools/get/install.sh | sh -s -- --uninstall
+          test ! -e ~/.mimic/bin/mimic
+      - name: The extension, in a real VS Code
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o vscode.tar.gz "https://update.code.visualstudio.com/latest/linux-x64/stable"
+          mkdir -p "$RUNNER_TEMP/vscode" && tar -xzf vscode.tar.gz -C "$RUNNER_TEMP/vscode" --strip-components=1
+          export PATH="$RUNNER_TEMP/vscode/bin:$PATH"
+          cat tools/get/vscode.sh | sh
+          code --list-extensions --show-versions | grep -i "^mimiccodes.mimic@"
+          cat tools/get/vscode.sh | sh | tee out.txt
+          grep -q "already installed" out.txt
+
+  windows:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, again, update while running, uninstall
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $latest = (gh release list --repo mimiccodes/mimic --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[0].tagName').TrimStart('v')
+          $previous = (gh release list --repo mimiccodes/mimic --exclude-drafts --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName').TrimStart('v')
+          Write-Host "latest $latest, previous $previous"
+          Set-ExecutionPolicy -Scope CurrentUser Restricted -Force
+          $script = Get-Content tools/get/install.ps1 -Raw
+          $exe = "$env:USERPROFILE\.mimic\bin\mimic.exe"
+          Invoke-Expression $script
+          if (-not ((& $exe --version) -match "mimic $latest")) { throw "not $latest after installing" }
+          $again = (Invoke-Expression $script | Out-String)
+          Write-Host $again
+          $env:MIMIC_VERSION = $previous
+          Invoke-Expression $script
+          Remove-Item Env:MIMIC_VERSION
+          if (-not ((& $exe --version) -match "mimic $previous")) { throw "not $previous" }
+          # the old mimic.exe running, as an editor's language server
+          $psi = New-Object System.Diagnostics.ProcessStartInfo $exe, "lsp"
+          $psi.RedirectStandardInput = $true
+          $psi.UseShellExecute = $false
+          $lsp = [System.Diagnostics.Process]::Start($psi)
+          Start-Sleep -Seconds 2
+          Invoke-Expression $script
+          if (-not ((& $exe --version) -match "mimic $latest")) { throw "not updated to $latest while running" }
+          $lsp.Kill()
+          $env:MIMIC_UNINSTALL = '1'
+          Invoke-Expression $script
+          if (Test-Path $exe) { throw "still installed after uninstalling" }
+      - name: The extension, in a real VS Code
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -UseBasicParsing -Uri "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile vscode.zip
+          & "$env:SystemRoot\System32\tar.exe" -xf vscode.zip -C "$env:RUNNER_TEMP"
+          $env:Path = "$env:RUNNER_TEMP\bin;$env:Path"
+          Invoke-Expression (Get-Content tools/get/vscode.ps1 -Raw)
+          $list = (& "$env:RUNNER_TEMP\bin\code.cmd" --list-extensions --show-versions)
+          if (-not ($list -match "^mimiccodes.mimic@")) { throw "the extension is not installed: $list" }

@@ -8,13 +8,25 @@ order: 1
 
 ## Install
 
-`mimic` is a single executable. Put it anywhere on your `PATH` and check that it works:
+On macOS (Apple silicon), Linux and WSL:
+
+```sh
+curl -fsSL https://mimic.codes/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://mimic.codes/install.ps1 | iex
+```
+
+`mimic` goes into `~/.mimic/bin` and onto your `PATH`. Open a new terminal and check that it works:
 
 ```sh
 mimic --version
 ```
 
-There is nothing else to install. The compiler carries LLVM, Clang, a linker and the C libraries it needs for every target it supports.
+`mimic` is a single executable, and there is nothing else to install. The compiler carries LLVM, Clang, a linker and the C libraries it needs for every target it supports. To update later, run `mimic upgrade` (or the same install command again). For your editor, `curl -fsSL https://mimic.codes/vscode.sh | sh` (on Windows, `irm https://mimic.codes/vscode.ps1 | iex`) installs the Mimic extension in VS Code, Cursor, Windsurf and VSCodium.
 
 ## Your first program
 

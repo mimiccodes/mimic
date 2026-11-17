@@ -299,4 +299,4 @@ error: timed out
 
 `echo` runs as a task of its own while `main` talks to it. It answers to whatever address each packet came from.
 
-Next: the full list of networking functions is in the [standard library reference](../std.md#networking). Back to the [index](index.md).
+Next: the full list of networking functions is in the [standard library reference](../std.md#networking-the-http-ws-tcp-and-udp-modules). Back to the [index](index.md).
