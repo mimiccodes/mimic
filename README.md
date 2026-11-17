@@ -113,7 +113,7 @@ Also `fmt`, `doc`, `lsp`, `dap` and `mcp` (tools for AI agents). Every command: 
 
 ## Speed, honestly
 
-Every benchmark exists in Mimic, C, Rust and Go with the same algorithm, and must print the same result. Time relative to C on Linux x86-64 (GitHub's CI machines, 2026-11-17). **Lower is faster; below 1.00× beats C.**
+Every benchmark exists in Mimic, C and Rust with the same algorithm, and must print the same result. Time relative to C on Linux x86-64 (GitHub's CI machines, 2026-11-17). **Lower is faster; below 1.00× beats C.**
 
 | Benchmark | Mimic, one core | Mimic, all cores | Rust + Rayon, all cores |
 |---|---|---|---|
@@ -131,7 +131,7 @@ Mimic's parallel numbers need no annotations; Rayon's are parallelised by hand. 
 
 ## Status and roadmap
 
-**Latest release: 0.3.17** ([changelog](CHANGELOG.md)).
+**Latest release: 0.3.18** ([changelog](CHANGELOG.md)).
 
 | Era | Versions | |
 |---|---|---|

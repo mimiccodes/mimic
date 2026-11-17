@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Mimic's benchmark suite (see BENCHMARK.md).
 
-Every folder here holds one benchmark in Mimic, C, Rust and Go (main.mim,
-main.c, main.rs, main.go) and the output they must all print (expected.txt).
+Every folder here holds one benchmark in Mimic, C and Rust (main.mim,
+main.c, main.rs) and the output they must all print (expected.txt).
 A Rust version that needs crates is a cargo project in rust/ instead of
 main.rs (built --offline: the crates must be in the local cargo cache).
 A rayon/ cargo project is the parallel Rust version (with Rayon), timed on
 all cores next to Mimic on all cores.
 
-A folder with a load/ directory (a Go program) is a server benchmark: each
+A folder with a load/ directory (load/main.rs, the load generator) is a
+server benchmark: each
 version is a server on port 18432, and the time is how long the load
 generator takes to send its requests and check every response body
 (expected.txt).
@@ -19,6 +20,10 @@ and writes results.md with each time as a ratio to C.
     bench/run.py                 # everything
     bench/run.py fib sort        # some benchmarks
     bench/run.py --runs 3        # fewer timed runs
+    bench/run.py --json out.json # also write the times as JSON
+    bench/run.py --noise 10      # everything 10 times: how much each
+                                 # ratio to C varies on this machine
+                                 # (bench/noise/<platform>.json)
 
 Every run also appends its times to bench/history.jsonl (with the date, the
 commit and the machine) and reports any Mimic time more than 10% slower
@@ -82,11 +87,14 @@ def build(lang: str, src: Path, name: str) -> Path | None:
         if not shutil.which("rustc"):
             return None
         run(["rustc", "-C", "opt-level=3", "-C", "target-cpu=native", "--edition", "2021", str(src), "-o", str(exe)])
-    elif lang == "go":
-        if not shutil.which("go"):
-            return None
-        run(["go", "build", "-o", str(exe), str(src)], env={**os.environ, "GO111MODULE": "off"})
     return exe
+
+
+def platform_id() -> str:
+    """linux-x86_64, macos-arm64, windows-x86_64, …"""
+    system = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux" if sys.platform.startswith("linux") else sys.platform)
+    arch = {"amd64": "x86_64", "aarch64": "arm64"}.get(platform.machine().lower(), platform.machine().lower())
+    return f"{system}-{arch}"
 
 
 def time_runs(exe: Path, env: dict, runs: int, expected: str) -> float:
@@ -142,25 +150,36 @@ def main() -> int:
     ap.add_argument("names", nargs="*", help="benchmarks to run (default: all)")
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--history", default=str(HERE / "history.jsonl"), help="where to append this run's times ('' for nowhere)")
+    ap.add_argument("--json", default="", help="also write this run's times to this JSON file")
+    ap.add_argument("--noise", type=int, default=0, metavar="N", help="run everything N times and write how much each ratio to C varies (bench/noise/<platform>.json)")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
     if a.names:
         benches = [b for b in benches if b.name in a.names]
-    one = {"MIMIC_THREADS": "1", "GOMAXPROCS": "1", "TOKIO_WORKER_THREADS": "1"}
+    if a.noise:
+        return noise(benches, a.runs, a.noise)
+    rows = measure(benches, a.runs)
+    report(rows, a.runs, a.history, a.json)
+    return 0
+
+
+def measure(benches, runs: int):
+    """Build, check and time every version of each benchmark: [(name, {lang: seconds})]."""
+    one = {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}
     rows = []
     for b in benches:
         expected = (b / "expected.txt").read_text().strip()
         times = {}
         load = None
         if (b / "load").is_dir():
-            if not shutil.which("go"):
-                print(f"  {b.name}: skipped (the load generator needs Go)")
+            if not shutil.which("rustc"):
+                print(f"  {b.name}: skipped (the load generator needs Rust)")
                 continue
             load = OUT / f"{b.name}-load{EXE}"
-            run(["go", "build", "-o", str(load), "."], cwd=b / "load", env={**os.environ, "GO111MODULE": "off"})
-        timed = (lambda exe, env: time_server(exe, load, env, a.runs, expected)) if load else (lambda exe, env: time_runs(exe, env, a.runs, expected))
-        for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("rayon", "rayon"), ("go", "main.go"), ("mimic", "main.mim")]:
+            run(["rustc", "-C", "opt-level=3", "--edition", "2024", str(b / "load" / "main.rs"), "-o", str(load)])
+        timed = (lambda exe, env: time_server(exe, load, env, runs, expected)) if load else (lambda exe, env: time_runs(exe, env, runs, expected))
+        for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("rayon", "rayon"), ("mimic", "main.mim")]:
             src = b / file
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
                 src = b / "rust"
@@ -183,8 +202,11 @@ def main() -> int:
             else:
                 print(f" {times[lang]:.3f} s")
         rows.append((b.name, times))
+    return rows
 
-    c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
+
+def machine() -> tuple[str, float]:
+    """This machine's CPU model, and the load average now."""
     load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     try:
         cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
@@ -192,24 +214,61 @@ def main() -> int:
         cpu = ""
     if not cpu and Path("/proc/cpuinfo").exists():
         cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines() if l.startswith("model name")), "")
-    cpu = cpu or platform.processor() or platform.machine()
+    return cpu or platform.processor() or platform.machine(), load
+
+
+def report(rows, runs: int, history: str, json_out: str) -> None:
+    """results.md, the table on the terminal, the history, and JSON if asked."""
+    c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
+    cpu, load = machine()
     lines = [
         "# Benchmark results",
         "",
         f"{cpu}, {platform.system()} {platform.release()}, {os.cpu_count()} cores, load average {load:.1f} at the end.",
-        f"Best of {a.runs} runs after a warm-up; the ratio is to C (below 1.0 is faster than C).",
-        "C, Rust and Go run their straightforward (sequential) versions on one core; Rust + Rayon is the parallel Rust version on all cores.",
+        f"Best of {runs} runs after a warm-up; the ratio is to C (below 1.0 is faster than C).",
+        "C and Rust run their straightforward (sequential) versions on one core; Rust + Rayon is the parallel Rust version on all cores.",
         "",
-        "| Benchmark | C | Rust | Go | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |",
-        "|---|---|---|---|---|---|---|",
+        "| Benchmark | C | Rust | Mimic, 1 core | Rust + Rayon, all cores | Mimic, all cores |",
+        "|---|---|---|---|---|---|",
     ]
     for name, t in rows:
         cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
-        lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'go')} | {c(t, 'mimic')} | {c(t, 'rayon')} | {c(t, 'mimic-all')} |")
+        lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'mimic')} | {c(t, 'rayon')} | {c(t, 'mimic-all')} |")
     (HERE / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[6:]))
-    if a.history:
-        record(Path(a.history), cpu, a.runs, load, rows)
+    if json_out:
+        Path(json_out).write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "runs": runs, "results": {n: t for n, t in rows}}, indent=1) + "\n", encoding="utf-8")
+    if history:
+        record(Path(history), cpu, runs, load, rows)
+
+
+def noise(benches, runs: int, times: int) -> int:
+    """Run everything `times` times, unchanged, and record how much each
+    ratio to C moves between rounds: the noise a speed gate has to allow
+    for on this machine (bench/noise/<platform>.json)."""
+    rounds = []
+    for i in range(times):
+        print(f"round {i + 1} of {times}")
+        rounds.append(dict(measure(benches, runs)))
+    out = {}
+    for name in rounds[0]:
+        for k in ("mimic", "mimic-all"):
+            ratios = [r[name][k] / r[name]["c"] for r in rounds if name in r and k in r[name] and r[name].get("c")]
+            if len(ratios) < 2:
+                continue
+            mid = sorted(ratios)[len(ratios) // 2]
+            # the widest move from the median, as a share of it
+            spread = max(abs(x - mid) for x in ratios) / mid
+            out.setdefault(name, {})[k] = {"median": round(mid, 4), "spread": round(spread, 4), "ratios": [round(x, 4) for x in ratios]}
+    cpu, _ = machine()
+    path = HERE / "noise" / f"{platform_id()}.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "rounds": times, "runs": runs, "date": time.strftime("%Y-%m-%d"), "benchmarks": out}, indent=1) + "\n", encoding="utf-8")
+    print(f"\n{'benchmark':<16} {'1 core':>8} {'all cores':>10}   (widest move of the ratio to C)")
+    for name, v in out.items():
+        cell = lambda k: f"{v[k]['spread'] * 100:.1f}%" if k in v else "—"
+        print(f"{name:<16} {cell('mimic'):>8} {cell('mimic-all'):>10}")
+    print(f"\nwritten to {path.relative_to(ROOT)}")
     return 0
 
 
