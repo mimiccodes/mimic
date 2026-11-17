@@ -1,0 +1,52 @@
+module main
+
+// components: the connected components of the bfs graph at half the size
+// (100,000 nodes), taken as undirected, with every third edge left out
+// (about 333,000 edges), with union-find (each root joined under the
+// smaller one; no path compression: a find that changed the links copied
+// them today, docs/gaps.md), as C and Rust do: a `settle` over the edges
+// with a named step function, so the parent links change in place. Prints the components and the size of the
+// largest. The reference is bench/components/ref.py.
+
+type U = { e: i64, parent: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the first position in the sorted list `xs` holding `v` or more
+fn lower(xs: [i64], v: i64) -> i64 {
+    ((0, ≢ xs) ▷ settle(s => {
+        let mid = (s.0 + s.1) div 2
+        if xs[mid] < v { (mid + 1, s.1) } else { (s.0, mid) }
+    }, s => s.0 >= s.1)).0
+}
+
+// the root of `x` (only reading)
+fn root(parent: [i64], x: i64) -> i64 {
+    if parent[x] == x { x } else { root(parent, parent[x]) }
+}
+
+// one edge: the two roots joined under the smaller
+fn join(u: U, n: i64) -> U {
+    if u.e % 3 == 0 { { u with e: u.e + 1 } }
+    else {
+        let a = root(u.parent, mix(2 * u.e + 1) % n)
+        let b = root(u.parent, mix(2 * u.e + 2) % n)
+        if a == b { { u with e: u.e + 1 } }
+        else { { u with e: u.e + 1, parent: put(u.parent, a ⌈ b, a ⌊ b) } }
+    }
+}
+
+fn main() {
+    let (n, m) = (100000, 500000)
+    let u = U { e: 0, parent: ⍳ n } ▷ settle(s => join(s, n), s => s.e == m)
+    let roots = ⍳ n ¨ (v => root(u.parent, v))
+    let sorted = sort(roots)
+    let breaks = ⍳ n ⌿ (⍳ n ¨ (i => i == 0 or sorted[i] != sorted[i - 1]))
+    let sizes = push(breaks ↓ 1, n) - breaks
+    print("{≢ breaks} {⌈/ sizes}")
+}

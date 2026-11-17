@@ -1,0 +1,66 @@
+module main
+
+// topo: a topological order of a DAG (the bfs graph with each edge
+// pointing from the smaller node to the larger, every second edge, edges
+// to themselves left out) by Kahn's algorithm, level by level, ascending
+// within a level, as C and Rust do: a `settle` with named step functions,
+// so the in-degrees change in place. Prints the levels and a checksum of
+// the order. The reference is bench/topo/ref.py.
+
+type K = { i: i64, level: [i64], next: [i64], indeg: [i64], pos: i64, check: i64, levels: i64 }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the first position in the sorted list `xs` holding `v` or more
+fn lower(xs: [i64], v: i64) -> i64 {
+    ((0, ≢ xs) ▷ settle(s => {
+        let mid = (s.0 + s.1) div 2
+        if xs[mid] < v { (mid + 1, s.1) } else { (s.0, mid) }
+    }, s => s.0 >= s.1)).0
+}
+
+// the edges out of a node at positions j … end: each target loses one
+// incoming edge, and goes into the next level when it has none left
+fn relax(k: K, out: [i64], j: i64, end: i64) -> K {
+    if j == end { k }
+    else {
+        let w = out[j]
+        let d = k.indeg[w] - 1
+        if d == 0 { relax({ k with indeg: put(k.indeg, w, d), next: push(k.next, w) }, out, j + 1, end) }
+        else { relax({ k with indeg: put(k.indeg, w, d) }, out, j + 1, end) }
+    }
+}
+
+fn step(k: K, out: [i64], start: [i64]) -> K {
+    if k.i == ≢ k.level {
+        { k with i: 0, level: sort(k.next), next: [], levels: k.levels + (if ≢ k.next > 0 { 1 } else { 0 }) }
+    } else {
+        let v = k.level[k.i]
+        relax({ k with i: k.i + 1, pos: k.pos + 1, check: (k.check + k.pos * v) % 1000000007 }, out, start[v], start[v + 1])
+    }
+}
+
+fn main() {
+    let (n, m) = (200000, 1000000)
+    let even = ⍳ (m div 2) ¨ (k => 2 * k)
+    let x = even ¨ (e => mix(2 * e + 1) % n)
+    let y = even ¨ (e => mix(2 * e + 2) % n)
+    let differ = x != y
+    let a = (x ⌊ y) ⌿ differ
+    let b = (x ⌈ y) ⌿ differ
+    let order = sort_index(a)
+    let out = order ¨ (k => b[k])
+    let from = order ¨ (k => a[k])
+    let start = ⍳ (n + 1) ¨ (v => lower(from, v))
+    let by_target = sort(b)
+    let indeg = ⍳ n ¨ (v => lower(by_target, v + 1) - lower(by_target, v))
+    let first = ⍳ n ⌿ (indeg == 0)
+    let begin = K { i: 0, level: first, next: [], indeg: indeg, pos: 0, check: 0, levels: if ≢ first > 0 { 1 } else { 0 } }
+    let k = begin ▷ settle(s => step(s, out, start), s => ≢ s.level == 0)
+    print("{k.levels} {k.check}")
+}

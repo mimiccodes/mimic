@@ -1,0 +1,47 @@
+module main
+
+// pagerank: 20 iterations of PageRank (damping 0.85; rank from nodes
+// without outgoing edges is not passed on) on the bfs graph. Written over
+// whole arrays: every node, in parallel, sums what the edges into it bring
+// (in order of their source, as the reference does). Prints the sum of the
+// ranks and the largest rank times n, to 6 decimals; the graph is the bfs
+// one at half the size (100,000 nodes, 500,000 edges). The reference is
+// bench/pagerank/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the first position in the sorted list `xs` holding `v` or more
+fn lower(xs: [i64], v: i64) -> i64 {
+    ((0, ≢ xs) ▷ settle(s => {
+        let mid = (s.0 + s.1) div 2
+        if xs[mid] < v { (mid + 1, s.1) } else { (s.0, mid) }
+    }, s => s.0 >= s.1)).0
+}
+
+// the rank arriving over positions a … b of the sorted edges
+fn arriving(from: [i64], share: [f64], a: i64, b: i64) -> f64 {
+    ((a, 0.0) ▷ settle(s => (s.0 + 1, s.1 + share[from[s.0]]), s => s.0 == b)).1
+}
+
+fn main() {
+    let (n, m) = (100000, 500000)
+    let src = ⍳ m ¨ (e => mix(2 * e + 1) % n)
+    let dst = ⍳ m ¨ (e => mix(2 * e + 2) % n)
+    let order = sort_index(⍳ m ¨ (e => dst[e] * n + src[e]))
+    let to = order ¨ (e => dst[e])
+    let from = order ¨ (e => src[e])
+    let start = ⍳ (n + 1) ¨ (v => lower(to, v))
+    let by_src = sort(src)
+    let outdeg = ⍳ n ¨ (v => lower(by_src, v + 1) - lower(by_src, v))
+    let rank = ⍳ n ¨ (_ => 1.0 / n) ▷ evolve(20, pr => {
+        let share = ⍳ n ¨ (u => if outdeg[u] > 0 { pr[u] / outdeg[u] } else { 0.0 })
+        ⍳ n ¨ (v => 0.15 / n + 0.85 * arriving(from, share, start[v], start[v + 1]))
+    })
+    let total = (0, 0.0) ▷ settle(s => (s.0 + 1, s.1 + rank[s.0]), s => s.0 == n)
+    print("{total.1:.6} {⌈/ rank * n:.6}")
+}
