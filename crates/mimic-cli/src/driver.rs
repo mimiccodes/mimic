@@ -1142,7 +1142,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_gpu.c"), RUNTIME_GPU_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("wepoll.c"), RUNTIME_WEPOLL_C.as_bytes())?;
     mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
-    let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
+    let tmp = mimic_toolchain::jobs::temp_beside(&obj);
     let mut c = toolchain::cc(tc, target);
     c.args(&flags).arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
