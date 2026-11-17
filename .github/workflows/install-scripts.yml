@@ -101,6 +101,8 @@ jobs:
           $env:MIMIC_UNINSTALL = '1'
           Invoke-Expression $script
           if (Test-Path $exe) { throw "still installed after uninstalling" }
+          # as it was, so the runner can run the next step's script
+          Set-ExecutionPolicy -Scope CurrentUser Undefined -Force
       - name: The extension, in a real VS Code
         shell: powershell
         run: |
