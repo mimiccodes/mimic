@@ -50,6 +50,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 |---|---|
 | Hashing and checksums | `crc32`, `adler32`, `fnv1a`, `murmur3`, `xxhash32` (8 MiB each), `sha256` (2 MiB) |
 | Parsing | `csv` (400,000 rows, quoted fields), `expr` (300,000 expressions, precedence climbing), `tokenize` (200,000 lines of C-like code), `url` (300,000 URLs), `http_parse` (200,000 requests in one stream) |
+| Compression and encoding | `rle` (8 MiB, run-length), `base64` (6 MiB, encode and decode), `lz77` (512 KiB, greedy LZ77 and its decoder; the reference in `bench/lz77/ref.py`) |
 
 ## Building the suite, step by step
 

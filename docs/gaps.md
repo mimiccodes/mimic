@@ -96,6 +96,8 @@ Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust)
 | `find(s, part)` from a position, so a parser can walk a long text without slicing it; `http_parse` splits the stream into lines first | `slice` then `find` (a copy) | 0.4.12 |
 | `"x" * 3` is `[360]` (the character's code times 3), not `"xxx"`; nothing warns | `repeat("x", 3)`; it should be a compile error that names `repeat` | 0.4.5 |
 | A parameter named like a built-in word (`keep`, `len`) loses to the word with a confusing message (`keep takes 2 arguments`); `let len = …` says clearly that it is built in | rename it | 0.4.5 |
+| A growing list held by a `settle` state as fast as a vector: `lz77`'s decoder is 476× C. `push(o, o[i])` in `evolve` and `concat(out, …)` copy the whole list (it is still held by the state), and pushing bytes goes through the generic array paths | copy a match as a slice (`concat` of `↓`/`↑`) where it can; the copies remain | 0.4.2 (changed in place: the state is not used again), 0.4.3 |
+| Many small lists as fast as a flat array: `rle` 66× C builds a two-element list per run | `flatten` is linear now (it was quadratic, found by `rle`) | 0.4.3 (unboxed), 0.4.8 (data layout) |
 | Bytes as `[u8]` in fused code: the corpus builds its data as `[i64]`, 8 bytes per byte | `[u8]` exists; `⍳ n ¨ …` makes `[i64]` | 0.4.7 (bits, bytes and small vectors) |
 
 ## Not gaps: other names, or left out on purpose
