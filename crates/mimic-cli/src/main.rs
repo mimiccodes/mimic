@@ -344,6 +344,15 @@ enum Cmd {
         /// Also install or update the extension in VS Code, Cursor, Windsurf and VSCodium
         #[arg(long)]
         editors: bool,
+        /// Previews of the next version (the newest preview, or stable when newer); remembered for later upgrades
+        #[arg(long, conflicts_with_all = ["nightly", "stable"])]
+        preview: bool,
+        /// Nightly builds of the development branch; remembered for later upgrades
+        #[arg(long, conflicts_with = "stable")]
+        nightly: bool,
+        /// Stable releases again (the default channel)
+        #[arg(long)]
+        stable: bool,
     },
     /// The language server for editors (VS Code, Neovim, Helix, Zed, …), over stdin and stdout
     Lsp {
@@ -714,7 +723,18 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             dap::serve()?;
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Upgrade { version, force, check, editors } => upgrade::run(upgrade::Options { version, force, check, editors }),
+        Cmd::Upgrade { version, force, check, editors, preview, nightly, stable } => {
+            let channel = if preview {
+                Some("preview")
+            } else if nightly {
+                Some("nightly")
+            } else if stable {
+                Some("stable")
+            } else {
+                None
+            };
+            upgrade::run(upgrade::Options { version, force, check, editors, channel })
+        }
         Cmd::Lsp { .. } => {
             lsp::serve()?;
             Ok(ExitCode::SUCCESS)

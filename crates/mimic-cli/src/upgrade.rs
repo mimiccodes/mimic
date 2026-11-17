@@ -3,6 +3,8 @@
 //! `curl -fsSL https://mimic.codes/install.sh | sh` and
 //! `irm https://mimic.codes/install.ps1 | iex`. They are carried inside
 //! mimic, so upgrading needs no script from the network, only the release.
+//! `--preview` and `--nightly` switch to those channels (remembered by the
+//! scripts for later upgrades); `--stable` switches back.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -17,6 +19,8 @@ pub struct Options {
     pub force: bool,
     pub check: bool,
     pub editors: bool,
+    /// "stable", "preview" or "nightly"; None keeps the installed channel
+    pub channel: Option<&'static str>,
 }
 
 /// Write a script to a temporary file and run it; its exit status.
@@ -66,6 +70,9 @@ pub fn run(o: Options) -> Result<ExitCode, String> {
         if o.check {
             env.push(("MIMIC_CHECK", "1".to_string()));
         }
+        if let Some(c) = o.channel {
+            env.push(("MIMIC_CHANNEL", c.to_string()));
+        }
         run_script("install.ps1", INSTALL_PS1, &[], &env)?
     } else {
         let mut args = vec![];
@@ -78,6 +85,9 @@ pub fn run(o: Options) -> Result<ExitCode, String> {
         }
         if o.check {
             args.push("--check".to_string());
+        }
+        if let Some(c) = o.channel {
+            args.push(format!("--{c}"));
         }
         run_script("install.sh", INSTALL_SH, &args, &[])?
     };

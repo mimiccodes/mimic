@@ -26,7 +26,7 @@ irm https://mimic.codes/install.ps1 | iex
 mimic --version
 ```
 
-`mimic` is a single executable, and there is nothing else to install. The compiler carries LLVM, Clang, a linker and the C libraries it needs for every target it supports. To update later, run `mimic upgrade` (or the same install command again). For your editor, `curl -fsSL https://mimic.codes/vscode.sh | sh` (on Windows, `irm https://mimic.codes/vscode.ps1 | iex`) installs the Mimic extension in VS Code, Cursor, Windsurf and VSCodium.
+`mimic` is a single executable, and there is nothing else to install. The compiler carries LLVM, Clang, a linker and the C libraries it needs for every target it supports. To update later, run `mimic upgrade` (or the same install command again); `mimic upgrade --preview` follows the previews of the next version instead, and `mimic upgrade --nightly` the nightly builds (`--stable` goes back). For your editor, `curl -fsSL https://mimic.codes/vscode.sh | sh` (on Windows, `irm https://mimic.codes/vscode.ps1 | iex`) installs the Mimic extension in VS Code, Cursor, Windsurf and VSCodium.
 
 ## Your first program
 
