@@ -16,6 +16,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **`bench/run.py --json`** writes a run's times as JSON, and **`--noise N`** runs everything N times unchanged and records how much each ratio to C varies on the machine (`bench/noise/<platform>.json`; the bench workflow's `noise` input runs it on GitHub's machines). It is the first part of 0.4.0: the speed gate's tolerances come from this measured noise.
 
 ### Fixed
+- **No release without its files:** a release is now published only after its binaries and checksums are uploaded. Before, for a moment a new release could be the latest with nothing to download, and the install command failed with "Not Found" (the install scripts' check on the 0.3.18 release did). That check now runs when the release workflow finishes; it never ran on a release before.
 - **`flatten` is linear:** it joined the lists two at a time, copying the growing result again for every list, so flattening many small lists was quadratic (200,000 pairs: about a minute; now milliseconds). Each element is now placed once, in parallel. The same in the `ui` module. Found by the 0.4.0 benchmark corpus.
 
 ## 0.3.18 — 2026-11-17
