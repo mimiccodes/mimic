@@ -16,6 +16,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **`bench/run.py --json`** writes a run's times as JSON, and **`--noise N`** runs everything N times unchanged and records how much each ratio to C varies on the machine (`bench/noise/<platform>.json`; the bench workflow's `noise` input runs it on GitHub's machines). It is the first part of 0.4.0: the speed gate's tolerances come from this measured noise.
 
 ### Fixed
+- **Builds at the same time no longer spoil the runtime:** files Mimic writes "atomically" (through a temporary file) used a temporary name per process, so two threads of one build writing the same runtime file shared it and could interleave their bytes; CI saw `redefinition of 'MIM_UI_JS'` once. Every write now has a temporary name of its own, the runtime's object file too.
 - **`flatten` is linear:** it joined the lists two at a time, copying the growing result again for every list, so flattening many small lists was quadratic (200,000 pairs: about a minute; now milliseconds). Each element is now placed once, in parallel. The same in the `ui` module. Found by the 0.4.0 benchmark corpus.
 
 ## 0.3.18 — 2026-11-17
