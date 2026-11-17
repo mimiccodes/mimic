@@ -1,0 +1,59 @@
+module main
+
+// vm: a stack-based bytecode virtual machine (as scripting languages run)
+// executing a loop of 400,000 passes, acc = (acc × 31 + i × i) mod
+// 1,000,003: about 7.6 million instructions. The operand stack is a
+// fixed array with a stack pointer; the run is a `settle` with a named
+// step function, so the stack and registers change in place. Prints the
+// instructions run and the result. The reference is bench/vm/ref.py.
+
+// operations
+fn op_push() -> i64 { 0 }
+fn op_load() -> i64 { 1 }
+fn op_store() -> i64 { 2 }
+fn op_add() -> i64 { 3 }
+fn op_mul() -> i64 { 4 }
+fn op_mod() -> i64 { 5 }
+fn op_lt() -> i64 { 6 }
+fn op_jz() -> i64 { 7 }
+fn op_jmp() -> i64 { 8 }
+fn op_halt() -> i64 { 9 }
+
+type V = { pc: i64, sp: i64, steps: i64, stack: [i64], regs: [i64] }
+
+// a binary operation on the two top values
+fn binary(v: V, op: i64) -> V {
+    let (a, b) = (v.stack[v.sp - 2], v.stack[v.sp - 1])
+    let r = if op == 3 { a + b } else if op == 4 { a * b } else if op == 5 { a % b } else if a < b { 1 } else { 0 }
+    { v with pc: v.pc + 1, sp: v.sp - 1, steps: v.steps + 1, stack: put(v.stack, v.sp - 2, r) }
+}
+
+fn step(v: V, code: [i64], arg: [i64]) -> V {
+    let op = code[v.pc]
+    let x = arg[v.pc]
+    if op == 0 { { v with pc: v.pc + 1, sp: v.sp + 1, steps: v.steps + 1, stack: put(v.stack, v.sp, x) } }
+    else if op == 1 { { v with pc: v.pc + 1, sp: v.sp + 1, steps: v.steps + 1, stack: put(v.stack, v.sp, v.regs[x]) } }
+    else if op == 2 { { v with pc: v.pc + 1, sp: v.sp - 1, steps: v.steps + 1, regs: put(v.regs, x, v.stack[v.sp - 1]) } }
+    else if op == 7 { { v with pc: if v.stack[v.sp - 1] == 0 { x } else { v.pc + 1 }, sp: v.sp - 1, steps: v.steps + 1 } }
+    else if op == 8 { { v with pc: x, steps: v.steps + 1 } }
+    else if op == 9 { { v with pc: ¯1, steps: v.steps + 1 } }
+    else { binary(v, op) }
+}
+
+fn main() {
+    // [operation, argument] pairs: i = 0; acc = 0; while i < N { acc =
+    // (acc × 31 + i × i) mod 1000003; i = i + 1 }
+    let program = [
+        [op_push(), 0] [op_store(), 0] [op_push(), 0] [op_store(), 1]
+        [op_load(), 0] [op_push(), 400000] [op_lt(), 0] [op_jz(), 23]
+        [op_load(), 1] [op_push(), 31] [op_mul(), 0] [op_load(), 0] [op_load(), 0] [op_mul(), 0] [op_add(), 0]
+        [op_push(), 1000003] [op_mod(), 0] [op_store(), 1]
+        [op_load(), 0] [op_push(), 1] [op_add(), 0] [op_store(), 0] [op_jmp(), 4]
+        [op_halt(), 0]
+    ]
+    let code = program ¨ (p => p[0])
+    let arg = program ¨ (p => p[1])
+    let start = V { pc: 0, sp: 0, steps: 0, stack: ⍳ 16 ¨ (_ => 0), regs: ⍳ 4 ¨ (_ => 0) }
+    let v = start ▷ settle(s => step(s, code, arg), s => s.pc < 0)
+    print("{v.steps} {v.regs[1]}")
+}
