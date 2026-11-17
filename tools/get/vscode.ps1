@@ -17,6 +17,20 @@
 function Install-MimicExtension {
     param([string]$Version, [string]$Only, [switch]$Force)
     $ErrorActionPreference = "Stop"
+    # An editor's command line may print warnings on stderr (Node deprecation
+    # notices, for one). Under "Stop", Windows PowerShell 5.1 turns redirected
+    # stderr into a terminating error, so run it under "Continue", keep every
+    # line as text, and judge by the exit status alone.
+    function Invoke-Editor([string]$exe, [string[]]$arguments) {
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $lines = & $exe @arguments 2>&1 | ForEach-Object { "$_" }
+            return @{ Output = $lines; Code = $LASTEXITCODE }
+        } finally {
+            $ErrorActionPreference = $saved
+        }
+    }
     $ProgressPreference = "SilentlyContinue"
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $repo = "mimiccodes/mimic-vscode"
@@ -72,7 +86,7 @@ function Install-MimicExtension {
     try {
         foreach ($n in $editors.Keys) {
             $e = $editors[$n]
-            $have = (& $e --list-extensions --show-versions 2>$null | Where-Object { $_ -like "$id@*" } | ForEach-Object { ($_ -split "@")[1] } | Select-Object -First 1)
+            $have = (Invoke-Editor $e @("--list-extensions", "--show-versions")).Output | Where-Object { $_ -like "$id@*" } | ForEach-Object { ($_ -split "@")[1] } | Select-Object -First 1
             if ($have -eq $Version -and -not $Force) {
                 Write-Host "${n}: the Mimic extension $Version is already installed"
                 continue
@@ -83,8 +97,8 @@ function Install-MimicExtension {
             if ($have -eq $Version) { Write-Host "${n}: reinstalling the Mimic extension $Version" }
             elseif ($have) { Write-Host "${n}: updating the Mimic extension $have to $Version" }
             else { Write-Host "${n}: installing the Mimic extension $Version" }
-            $out = (& $e --install-extension $vsix --force 2>&1)
-            if ($LASTEXITCODE -ne 0) { $out | Write-Host; throw "$n could not install the extension (exit status $LASTEXITCODE)" }
+            $r = Invoke-Editor $e @("--install-extension", $vsix, "--force")
+            if ($r.Code -ne 0) { $r.Output | Write-Host; throw "$n could not install the extension (exit status $($r.Code))" }
             $changed = $true
         }
         if ($changed) { Write-Host "done: reload the editor's window (or restart it) to use the new version" }
