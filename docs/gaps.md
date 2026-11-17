@@ -83,6 +83,17 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
 | Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | ✅ (native CPU, real naps, bigger scan chunks) | 0.2.9 |
 
+## Found by the 0.4.0 corpus
+
+Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust) that is awkward to write in Mimic, or slow, is a gap here, with the step of stage 0.4 that closes it. Times are on one core, as a ratio to C.
+
+| Gap | Today | Version |
+|---|---|---|
+| A fold over a list with a function (`fold(xs, f, start)`), as Rust, Python (`reduce`) and others have; `/` takes only an operator | `settle` over a tuple of (position, state) | 0.4.5 |
+| A sequential pass over an array as fast as C's loop: `crc32` 21×, `adler32` 28×, `fnv1a` 57×, `murmur3` 21×, `xxhash32` 13× (`settle` over a tuple) | the tuple is boxed each step and the array read with checks | 0.4.3 (loops and values in registers), 0.4.4 (checks proven away) |
+| Small fixed arrays as working state: `sha256` 170× (a new 8-word array every round, the message schedule grown one `push` at a time) | each step allocates | 0.4.2 (changed in place), 0.4.3 (unboxed) |
+| Bytes as `[u8]` in fused code: the corpus builds its data as `[i64]`, 8 bytes per byte | `[u8]` exists; `⍳ n ¨ …` makes `[i64]` | 0.4.7 (bits, bytes and small vectors) |
+
 ## Not gaps: other names, or left out on purpose
 
 | You might look for | In Mimic |

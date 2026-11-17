@@ -1,0 +1,14 @@
+module main
+
+// adler32: the Adler-32 checksum (as zlib uses) of 8 MiB of generated
+// bytes: two running sums modulo 65521, one sequential pass.
+
+fn main() {
+    let n = 1 << 23
+    let data = ⍳ n ¨ (i => (i * 2654435761 >> 13) & 255)
+    let (_, a, b) = (0, 1, 0) ▷ settle(s => {
+        let a = (s.1 + data[s.0]) % 65521
+        (s.0 + 1, a, (s.2 + a) % 65521)
+    }, s => s.0 == n)
+    print(b << 16 | a)
+}

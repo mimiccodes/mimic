@@ -1,0 +1,17 @@
+module main
+
+// crc32: the CRC-32 (IEEE 802.3, as zip and PNG use) of 8 MiB of generated
+// bytes, with the usual 256-entry table. Each step needs the last, so it is
+// one sequential pass: a `settle` over (position, crc).
+
+fn table() -> [i64] {
+    ⍳ 256 ¨ (n => n ▷ evolve(8, c => if c & 1 == 1 { 0xEDB88320 ^ (c >>> 1) } else { c >>> 1 }))
+}
+
+fn main() {
+    let n = 1 << 23
+    let data = ⍳ n ¨ (i => (i * 2654435761 >> 13) & 255)
+    let t = table()
+    let (_, crc) = (0, 0xFFFFFFFF) ▷ settle(s => (s.0 + 1, t[(s.1 ^ data[s.0]) & 255] ^ (s.1 >>> 8)), s => s.0 == n)
+    print(crc ^ 0xFFFFFFFF)
+}

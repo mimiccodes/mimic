@@ -98,5 +98,9 @@ check c_global        '    print(c::counter)' "$c"
 check c_stdout        '    c::fflush(c::stdout)' "$c"
 check c_array_field   '    print(c::use_buf(c::Buf { data: [0 0 0 0 0 0 0 0], len: 0 }))' "$c"
 check c_union         '    let n = c::Num { i: 1 }' "$c"
+
+# found by the 0.4.0 corpus (the speed gaps are measured by bench/run.py)
+check fold            '    print(fold([1 2 3 4], (+), 0))'
+
 echo
 echo "$missing of $total checks missing (docs/gaps.md)"
