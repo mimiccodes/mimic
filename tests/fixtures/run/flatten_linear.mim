@@ -1,0 +1,13 @@
+module main
+
+// flatten: empty lists anywhere, other element types, and many small lists
+// (once quadratic: each list copied the growing result again)
+
+fn main() {
+    print(flatten([[1 2] [] [3] [] [4 5 6]]))
+    print(≢ flatten([[] []]))
+    print(flatten([["a" "b"] ["c"]]))
+    print(flatten([[(1, "x")] [(2, "y") (3, "z")]]))
+    let many = flatten(⍳ 200000 ¨ (i => [i, i % 7]))
+    print("{≢ many} {+/ many}")
+}

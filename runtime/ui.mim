@@ -711,9 +711,19 @@ pub module ui {
         if ≢ names == 0 { all } else { concat(all, ["data-e" join(names, " ")]) }
     }
 
-    // one list from a list of lists (joined in parallel)
+    // one list from a list of lists, each element placed once (see the
+    // prelude's flatten)
     fn flatten[T](xss: [[T]]) -> [T] {
-        if ≢ xss == 0 { [] } else { xss ▷ gather((x, y) => concat(x, y)) }
+        let m = ≢ xss
+        if m == 0 { [] } else {
+            let lens = xss ¨ (x => ≢ x)
+            let ends = lens ▷ trail(+)
+            let owner = ⍳ m ⌿ lens
+            ⍳ ends[m - 1] ¨ (k => {
+                let o = owner[k]
+                xss[o][k - ends[o] + lens[o]]
+            })
+        }
     }
 
     fn event_name[M](a: Attr[M]) -> str {

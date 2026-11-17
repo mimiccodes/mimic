@@ -272,9 +272,21 @@ pub fn count(xs, f) { +/ (xs ¨ f) }
 // A map from each `f(x)` to the elements with that value, in order.
 pub fn group_by(xs, f) { group(xs ¨ f, xs) }
 
-// One list from a list of lists.
+// One list from a list of lists. Linear: each element is placed once, in
+// parallel (each list's start from a running sum of the lengths, and each
+// position's list by replicating the list numbers), where joining the lists
+// two at a time copied the growing result again for every list.
 pub fn flatten(xss) {
-    if (≢ xss) == 0 { [] } else { xss ▷ gather(concat) }
+    let m = ≢ xss
+    if m == 0 { [] } else {
+        let lens = xss ¨ (x => ≢ x)
+        let ends = lens ▷ trail(+)
+        let owner = ⍳ m ⌿ lens
+        ⍳ ends[m - 1] ¨ (k => {
+            let o = owner[k]
+            xss[o][k - ends[o] + lens[o]]
+        })
+    }
 }
 
 // The element with the smallest (largest) `f(x)`, or `None` for no elements.
