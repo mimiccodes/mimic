@@ -4,6 +4,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+## 0.3.18 — 2026-11-17
+
 Release channels: previews of the next version and nightly builds, alongside stable releases.
 
 ### Added
