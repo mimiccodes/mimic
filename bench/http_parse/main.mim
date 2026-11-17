@@ -1,0 +1,61 @@
+module main
+
+// http_parse: 200,000 HTTP/1.1 requests (GET, POST and PUT, with headers
+// and JSON bodies) back to back in one stream, read as a server reads
+// them: the request line, headers to the blank line, then as many body
+// bytes as Content-Length says, and the next request right after. Prints
+// the requests, the headers, the body bytes, the total path length and
+// the POSTs.
+
+fn request(i: i64) -> str {
+    let method = ["GET" "POST" "PUT"][i % 3]
+    let head = "{method} /api/items/{i} HTTP/1.1\r\nHost: example.com\r\nUser-Agent: bench/{i % 7}\r\nAccept: */*\r\n"
+    if method == "GET" {
+        head + "\r\n"
+    } else {
+        let body = "\{\"id\":{i},\"v\":\"{repeat("x", i % 17)}\"}"
+        head + "Content-Type: application/json\r\nContent-Length: {≢ body}\r\n\r\n" + body
+    }
+}
+
+fn after(s: str, sep: str) -> str {
+    let at = find(s, sep) else { return "" }
+    slice(s, at + ≢ sep, ≢ s)
+}
+
+fn before(s: str, sep: str) -> str {
+    let at = find(s, sep) else { return s }
+    slice(s, 0, at)
+}
+
+fn num(s: str) -> i64 {
+    let n = parse_int(s) else { return 0 }
+    n
+}
+
+type P = { i: i64, cur: str, head: bool, clen: i64, reqs: i64, headers: i64, body: i64, paths: i64, posts: i64 }
+
+// one line of the stream (`cur`, line `i` of the split)
+fn step(s: P, ls: [str]) -> P {
+    let next = if s.i + 1 < ≢ ls { ls[s.i + 1] } else { "" }
+    if not s.head {
+        let method = before(s.cur, " ")
+        let path = before(after(s.cur, " "), " ")
+        { s with i: s.i + 1, cur: next, head: true, clen: 0, reqs: s.reqs + 1, paths: s.paths + ≢ path, posts: s.posts + (if method == "POST" { 1 } else { 0 }) }
+    } else if s.cur == "" {
+        // the body is the start of the next line; the next request follows it
+        { s with i: s.i + 1, cur: slice(next, s.clen, ≢ next), head: false, body: s.body + s.clen }
+    } else {
+        let clen = if starts_with(s.cur, "Content-Length: ") { num(after(s.cur, ": ")) } else { s.clen }
+        { s with i: s.i + 1, cur: next, clen: clen, headers: s.headers + 1 }
+    }
+}
+
+fn main() {
+    let n = 200000
+    let stream = join(⍳ n ¨ request, "")
+    let ls = split(stream, "\r\n")
+    let start = P { i: 0, cur: ls[0], head: false, clen: 0, reqs: 0, headers: 0, body: 0, paths: 0, posts: 0 }
+    let e = start ▷ settle(s => step(s, ls), s => s.i >= ≢ ls or not s.head and s.cur == "")
+    print("{e.reqs} {e.headers} {e.body} {e.paths} {e.posts}")
+}

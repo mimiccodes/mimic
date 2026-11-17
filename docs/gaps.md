@@ -92,6 +92,10 @@ Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust)
 | A fold over a list with a function (`fold(xs, f, start)`), as Rust, Python (`reduce`) and others have; `/` takes only an operator | `settle` over a tuple of (position, state) | 0.4.5 |
 | A sequential pass over an array as fast as C's loop: `crc32` 21×, `adler32` 28×, `fnv1a` 57×, `murmur3` 21×, `xxhash32` 13× (`settle` over a tuple) | the tuple is boxed each step and the array read with checks | 0.4.3 (loops and values in registers), 0.4.4 (checks proven away) |
 | Small fixed arrays as working state: `sha256` 170× (a new 8-word array every round, the message schedule grown one `push` at a time) | each step allocates | 0.4.2 (changed in place), 0.4.3 (unboxed) |
+| A pass over the characters of a string as fast as C's: `tokenize` 25× (a `settle` over positions, one byte at a time) | as above | 0.4.3, 0.4.4 |
+| `find(s, part)` from a position, so a parser can walk a long text without slicing it; `http_parse` splits the stream into lines first | `slice` then `find` (a copy) | 0.4.12 |
+| `"x" * 3` is `[360]` (the character's code times 3), not `"xxx"`; nothing warns | `repeat("x", 3)`; it should be a compile error that names `repeat` | 0.4.5 |
+| A parameter named like a built-in word (`keep`, `len`) loses to the word with a confusing message (`keep takes 2 arguments`); `let len = …` says clearly that it is built in | rename it | 0.4.5 |
 | Bytes as `[u8]` in fused code: the corpus builds its data as `[i64]`, 8 bytes per byte | `[u8]` exists; `⍳ n ¨ …` makes `[i64]` | 0.4.7 (bits, bytes and small vectors) |
 
 ## Not gaps: other names, or left out on purpose

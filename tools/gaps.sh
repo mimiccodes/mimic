@@ -101,6 +101,7 @@ check c_union         '    let n = c::Num { i: 1 }' "$c"
 
 # found by the 0.4.0 corpus (the speed gaps are measured by bench/run.py)
 check fold            '    print(fold([1 2 3 4], (+), 0))'
+check find_from       '    print(find("a,b,c", ",", 2))'
 
 echo
 echo "$missing of $total checks missing (docs/gaps.md)"

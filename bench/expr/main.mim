@@ -1,0 +1,60 @@
+module main
+
+// expr: 300,000 arithmetic expressions (four shapes, with parentheses and
+// precedence) written out as text, then tokenized, parsed by precedence
+// climbing and evaluated; prints the sum of their values. Each expression
+// is independent, so `¨` runs them in parallel.
+
+fn num(i: i64, k: i64) -> i64 { (i * k + k * 31) % 97 + 1 }
+
+fn text(i: i64) -> str {
+    let (a, b, c, d, e, f) = (num(i, 3), num(i, 7), num(i, 11), num(i, 13), num(i, 17), num(i, 19))
+    match i % 4 {
+        0 => "{a} + {b} * {c} - {d}",
+        1 => "( {a} + {b} ) * ( {c} - {d} ) + {e}",
+        2 => "{a} * ( {b} + {c} * ( {d} - {e} ) ) - {f}",
+        _ => "( ( {a} - {b} ) * {c} + {d} ) * ( {e} + {f} )",
+    }
+}
+
+fn prec(op: str) -> i64 {
+    match op {
+        "+" | "-" => 1,
+        "*" => 2,
+        _ => 0,
+    }
+}
+
+fn apply(op: str, a: i64, b: i64) -> i64 {
+    match op {
+        "+" => a + b,
+        "-" => a - b,
+        _ => a * b,
+    }
+}
+
+// a number or a parenthesised expression at `p`: (value, next position)
+fn atom(t: [str], p: i64) -> (i64, i64) {
+    if t[p] == "(" {
+        let (v, q) = expr(t, p + 1, 1)
+        (v, q + 1)
+    } else {
+        let v = parse_int(t[p]) else { return (0, p + 1) }
+        (v, p + 1)
+    }
+}
+
+// operators of precedence `least` or more, left to right
+fn expr(t: [str], p: i64, least: i64) -> (i64, i64) {
+    atom(t, p) ▷ settle(s => {
+        let op = t[s.1]
+        let (r, q) = expr(t, s.1 + 1, prec(op) + 1)
+        (apply(op, s.0, r), q)
+    }, s => s.1 >= ≢ t or prec(t[s.1]) < least)
+}
+
+fn main() {
+    let n = 300000
+    let values = ⍳ n ¨ (i => expr(words(text(i)), 0, 1).0)
+    print(+/ values)
+}
