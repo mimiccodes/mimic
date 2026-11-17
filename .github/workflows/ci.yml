@@ -77,6 +77,11 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # lints: a new clippy warning fails CI (clippy.toml has the settings)
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
+
       # Windows programs are cross-built here and run by the windows job
       - name: Windows programs (cross-built)
         if: runner.os == 'Linux'

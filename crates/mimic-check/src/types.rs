@@ -1518,11 +1518,10 @@ impl Walk<'_, '_> {
                     return Ty::Never;
                 }
                 // ⍳ 5: five numbers, a length the compiler knows
-                if *prim == Prim::Iota && args.len() == 1 {
-                    if let ExprKind::Int(k) = args[0].kind {
+                if *prim == Prim::Iota && args.len() == 1
+                    && let ExprKind::Int(k) = args[0].kind {
                         return Ty::Arr(El::I64, fixed_len(El::I64, k.max(0) as usize));
                     }
-                }
                 prim_ty(*prim, a, b)
             }
             // a lambda as a value: its parameters can be anything

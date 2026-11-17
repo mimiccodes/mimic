@@ -106,7 +106,7 @@ fn array_work_in(walk: impl FnOnce(&mut dyn FnMut(&Expr))) -> bool {
     walk(&mut |x| match &x.kind {
         ExprKind::Prim { prim: Prim::Iota | Prim::Range, .. } if small(x) => {}
         ExprKind::Prim { prim: Prim::Each, args } if small(&args[0]) || matches!(&args[0].kind, ExprKind::Prim { prim: Prim::Each, args: a2 } if small(&a2[0])) => {}
-        ExprKind::Prim { prim, .. } if matches!(prim, Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul) => found = true,
+        ExprKind::Prim { prim: Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul, .. } => found = true,
         _ => {}
     });
     found
