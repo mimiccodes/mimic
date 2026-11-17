@@ -75,7 +75,7 @@ fn main() {
 
 ## Install
 
-| | |
+| On | Run |
 |---|---|
 | **macOS, Linux, WSL** | `curl -fsSL https://mimic.codes/install.sh \| sh` |
 | **Windows** (PowerShell) | `irm https://mimic.codes/install.ps1 \| iex` |
