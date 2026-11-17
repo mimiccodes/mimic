@@ -52,7 +52,7 @@ tools/deps.sh          fetches and builds the native dependencies
 tools/get/             the install scripts behind mimic.codes/install.sh, install.ps1, vscode.sh, vscode.ps1
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
 tests/nets             interaction-net programs (*.mnet + .out)
-bench/                 benchmarks in Mimic, C, Rust (and Rayon) and Go
+bench/                 benchmarks in Mimic, C and Rust (and Rayon)
 examples/              larger programs: a tour of the language, video transcoding
 docs/                  the reference, the tutorial and the guides (also inside `mimic man`)
 editors/               mimic-syntax and mimic-vscode (submodules)

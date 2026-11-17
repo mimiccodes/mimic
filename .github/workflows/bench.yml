@@ -1,4 +1,4 @@
-# The benchmark suite (bench/run.py: Mimic against C, Rust and Go) on
+# The benchmark suite (bench/run.py: Mimic against C and Rust) on
 # GitHub's runners: by hand, and every Monday. The results table is shown on
 # the run's page and kept as a download with the run's history line.
 # (Shared runners are noisy: compare ratios to C, not absolute times.)
@@ -6,6 +6,11 @@ name: bench
 
 on:
   workflow_dispatch:
+    inputs:
+      noise:
+        description: "Instead: run everything this many times unchanged and record how much each ratio to C varies (0: a normal run)"
+        type: number
+        default: 0
   schedule:
     - cron: "0 3 * * 1"
 
@@ -40,11 +45,6 @@ jobs:
 
       - name: Rust
         run: rustup update stable && rustup default stable
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-          cache: false
 
       - name: LLVM (from the llvm workflow)
         env:
@@ -99,7 +99,15 @@ jobs:
         run: for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch); done
 
       - name: Benchmarks
+        if: ${{ !inputs.noise }}
         run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl'
+
+      # the noise of this runner, for the speed gate's tolerances
+      - name: Noise
+        if: ${{ inputs.noise }}
+        run: |
+          "$(command -v python3 || command -v python)" bench/run.py --noise ${{ inputs.noise }} | tee noise.txt
+          { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Results
         if: always()
@@ -113,4 +121,5 @@ jobs:
           path: |
             bench/results.md
             bench/history.jsonl
+            bench/noise/
           if-no-files-found: ignore
