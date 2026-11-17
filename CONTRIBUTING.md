@@ -1,0 +1,53 @@
+# Contributing to Mimic
+
+Thank you for helping. Questions are welcome on [Discord](https://discord.gg/gSyJjddnTm) or in an [issue](https://github.com/mimiccodes/mimic/issues); bugs and slow programs especially. A program that Mimic runs slower than C is a bug too.
+
+## Building mimic
+
+You need:
+
+* **Rust** 1.88 or newer
+* **LLVM 23** (`brew install llvm` on macOS). `.cargo/config.toml` points `LLVM_SYS_231_PREFIX` at `/opt/homebrew/opt/llvm`; change it if yours lives elsewhere.
+* the editors' parts, which are submodules: clone with `--recursive`, or run `git submodule update --init`
+
+```sh
+tools/deps.sh                  # once: the sources of the embedded Clang, LLD and musl
+cargo build --release          # → target/release/mimic
+cargo test --release           # unit tests, golden programs, the tutorial's examples
+tools/gaps.sh                  # the known gaps (docs/gaps.md), each checked against the compiler
+```
+
+## Making a change
+
+* **Tests.** A new feature or fix comes with a golden program in `tests/fixtures/run` (`name.mim` and the expected output in `name.out`), or an expected failure in `tests/fixtures/fail`.
+* **Docs in the same change.** Anything a user can see goes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md), and into the tutorial (`docs/tutorial`) and the reference (`docs/*.md`) where it belongs. The examples in the tutorial are run by the tests, so they stay true.
+* **Speed.** Changes to code generation or the runtime run the benchmarks (`python3 bench/run.py`, see [BENCHMARK.md](BENCHMARK.md)). Numbers in the docs are measured, never estimated.
+* **New library features** go in a module (`fs::`, `http::`, …), not in the global namespace.
+* **Parallel by default.** Mimic has no annotations for parallelism; the compiler decides. A change that needs one is a design question: open an issue first.
+
+Versions and what each must pass are in [docs/versions.md](docs/versions.md).
+
+## Repository layout
+
+```
+crates/mimic-cli       the `mimic` binary: commands, build driver, the engine, lsp, dap, mcp, edit, repl, profile, upgrade
+crates/mimic-syntax    lexer, parser, AST, glyph table, config format
+crates/mimic-check     module tree, name resolution, visibility, mutability, FFI rules
+crates/mimic-codegen   LLVM code generation (inkwell): fused kernels, SIMD, GPU, fork-join, ownership
+crates/mimic-project   mim.mim / build.mim, scaffolding, ~/.mimic/libraries
+crates/mimic-net       interaction-net IR, .mnet parser, encoder to the runtime book, a reference reducer (trace)
+crates/mimic-toolchain embedded Clang + LLD, bundled musl / compiler-rt, C library builds
+runtime/               C runtime: the array layer and the interaction-net reducer (compiled per target by the embedded Clang)
+tools/deps.sh          fetches and builds the native dependencies
+tools/get/             the install scripts behind mimic.codes/install.sh, install.ps1, vscode.sh, vscode.ps1
+tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
+tests/nets             interaction-net programs (*.mnet + .out)
+bench/                 benchmarks in Mimic, C, Rust (and Rayon) and Go
+examples/              larger programs: a tour of the language, video transcoding
+docs/                  the reference, the tutorial and the guides (also inside `mimic man`)
+editors/               mimic-syntax and mimic-vscode (submodules)
+```
+
+## License
+
+By contributing, you agree that your contribution is licensed under the [Apache License, Version 2.0](LICENSE), like the rest of Mimic.
