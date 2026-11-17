@@ -198,7 +198,7 @@ def measure(benches, runs: int):
     one = {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}
     rows = []
     for b in benches:
-        expected = (b / "expected.txt").read_text().strip()
+        expected = (b / "expected.txt").read_text(encoding="utf-8").strip()
         times = {}
         load = None
         if (b / "load").is_dir():
@@ -242,7 +242,7 @@ def machine() -> tuple[str, float]:
     except OSError:
         cpu = ""
     if not cpu and Path("/proc/cpuinfo").exists():
-        cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines() if l.startswith("model name")), "")
+        cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines() if l.startswith("model name")), "")
     return cpu or platform.processor() or platform.machine(), load
 
 
@@ -267,7 +267,7 @@ def limits(fresh: bool = False) -> dict:
     path = OUT / f"machine-{platform_id()}.json"
     if not fresh and path.exists():
         try:
-            m = json.loads(path.read_text())
+            m = json.loads(path.read_text(encoding="utf-8"))
             if m.get("cpu") == cpu and m.get("cores") == cores:
                 return m
         except ValueError:
@@ -311,7 +311,7 @@ def shares(rows) -> list:
         f = HERE / name / "meta.json"
         if not f.exists():
             continue
-        meta = json.loads(f.read_text())
+        meta = json.loads(f.read_text(encoding="utf-8"))
         bound = meta.get("bound")
         if bound not in ("compute", "memory"):
             continue
@@ -381,7 +381,7 @@ def tolerance(name: str, key: str) -> float:
     """Twice the noise measured on this platform, within 3% … 25%."""
     f = HERE / "noise" / f"{platform_id()}.json"
     try:
-        spread = json.loads(f.read_text())["benchmarks"][name][key]["spread"]
+        spread = json.loads(f.read_text(encoding="utf-8"))["benchmarks"][name][key]["spread"]
     except (OSError, ValueError, KeyError):
         return DEFAULT
     return min(HIGHEST, max(LOWEST, 2 * spread))
@@ -402,7 +402,7 @@ def write_baseline(rows) -> None:
     old = {}
     if path.exists():
         try:
-            old = json.loads(path.read_text()).get("benchmarks", {})
+            old = json.loads(path.read_text(encoding="utf-8")).get("benchmarks", {})
         except ValueError:
             pass
     # benchmarks not run this time keep their baseline
@@ -417,9 +417,9 @@ def gate(rows, benches, runs: int) -> int:
     if not path.exists():
         print(f"\nno baseline for {platform_id()} ({path.relative_to(ROOT)}): nothing to compare")
         return 0
-    base = json.loads(path.read_text())["benchmarks"]
+    base = json.loads(path.read_text(encoding="utf-8"))["benchmarks"]
     by_name = {b.name: b for b in benches}
-    lines = [f"## Speed gate ({platform_id()}, baseline {json.loads(path.read_text()).get('commit', '?')})", "", "| Benchmark | | Baseline | Now | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
+    lines = [f"## Speed gate ({platform_id()}, baseline {json.loads(path.read_text(encoding="utf-8")).get('commit', '?')})", "", "| Benchmark | | Baseline | Now | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
     failed, faster = [], []
     for name, t in rows:
         now = ratios(t)
@@ -504,7 +504,7 @@ def record(path: Path, cpu: str, runs: int, load: float, rows) -> None:
     }
     last = None
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 e = json.loads(line)
             except ValueError:
