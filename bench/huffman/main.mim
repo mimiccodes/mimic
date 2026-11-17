@@ -1,0 +1,86 @@
+module main
+
+// huffman: 256 KiB of generated text Huffman-coded and decoded again. The
+// byte counts (in parallel), a tree merged in a fixed order (by weight,
+// then by node number: leaves 0-255 by byte, merged nodes numbered from 256
+// as they are made), the code lengths, canonical codes, the text packed
+// into 64-bit words most significant bit first, then decoded bit by bit.
+// Prints the encoded size in bits, the longest code, a checksum of the
+// packed words, and 1 when decoding gives the text back. The reference is
+// bench/huffman/ref.py.
+
+type T = { keys: [i64], parent: [i64], next: i64 }
+type E = { i: i64, pos: i64, words: [i64] }
+type D = { p: i64, cur: i64, l: i64, out: [i64] }
+
+fn vocabulary() -> [str] {
+    ["the" "of" "and" "to" "in" "is" "parallel" "array" "kernel" "fusion" "memory" "vector" "mimic" "cache" "thread" "core" "loop" "value" "zebra" "quartz"]
+}
+
+fn piece(words: [str], i: i64) -> str {
+    let w = words[if i % 7 != 0 { (i * 2654435761 >> 13) % 20 } else { (i * 40503 >> 7) % 20 }]
+    w + (if i % 11 == 10 { ". " } else { " " })
+}
+
+// merge the two lightest nodes (a key is weight × 1024 + node number)
+fn merge(t: T) -> T {
+    let k1 = ⌊/ t.keys
+    let r1 = t.keys ⌿ (t.keys != k1)
+    let k2 = ⌊/ r1
+    let r2 = r1 ⌿ (r1 != k2)
+    let parent = put(put(t.parent, k1 % 1024, t.next), k2 % 1024, t.next)
+    { t with keys: push(r2, (k1 div 1024 + k2 div 1024) * 1024 + t.next), parent: parent, next: t.next + 1 }
+}
+
+// one byte's code (of `l` bits) placed at bit `pos`, most significant first;
+// a named step function, so the words are changed in place
+fn encode(s: E, d: [i64], code: [i64], length: [i64]) -> E {
+    let b = d[s.i]
+    let (c, l, w, off) = (code[b], length[b], s.pos div 64, s.pos % 64)
+    if off + l <= 64 {
+        { s with i: s.i + 1, pos: s.pos + l, words: put(s.words, w, s.words[w] | c << (64 - off - l)) }
+    } else {
+        let spill = off + l - 64
+        { s with i: s.i + 1, pos: s.pos + l, words: put(put(s.words, w, s.words[w] | c >>> spill), w + 1, (c & (1 << spill) - 1) << (64 - spill)) }
+    }
+}
+
+// one bit read; a code complete in `table` gives its byte
+fn decode(s: D, words: [i64], table: [i64]) -> D {
+    let cur = s.cur << 1 | words[s.p div 64] >>> (63 - s.p % 64) & 1
+    let hit = table[(s.l + 1) * 32768 + cur]
+    if hit >= 0 { { s with p: s.p + 1, cur: 0, l: 0, out: push(s.out, hit) } }
+    else { { s with p: s.p + 1, cur: cur, l: s.l + 1 } }
+}
+
+// a 64-bit word, read as unsigned, modulo m
+fn umod(w: i64, m: i64) -> i64 { ((w >>> 1) % m * 2 + (w & 1)) % m }
+
+fn main() {
+    let n = 1 << 18
+    let words = vocabulary()
+    let d = bytes::of_text(join(⍳ (n div 2) ¨ (i => piece(words, i)), "")) ↑ n ¨ (b => b + 0)
+    let count = ⍳ 256 ¨ (b => +/ (d == b))
+    let used = ⍳ 256 ⌿ (count > 0)
+    let start = T { keys: used ¨ (b => count[b] * 1024 + b), parent: ⍳ 512 ¨ (_ => -1), next: 256 }
+    let tree = start ▷ settle(merge, t => ≢ t.keys == 1)
+    let length = ⍳ 256 ¨ (b => if count[b] == 0 { 0 } else { ((b, 0) ▷ settle(s => (tree.parent[s.0], s.1 + 1), s => tree.parent[s.0] < 0)).1 })
+    // canonical codes, in order of (length, byte)
+    let order = sort(used ¨ (b => length[b] * 256 + b)) ¨ (k => k % 256)
+    let (_, _, _, code) = (0, 0, 0, ⍳ 256 ¨ (_ => 0)) ▷ settle(s => {
+        let b = order[s.0]
+        let c = s.1 << (length[b] - s.2)
+        (s.0 + 1, c + 1, length[b], put(s.3, b, c))
+    }, s => s.0 == ≢ order)
+    let bits = +/ (count * length)
+    let e = E { i: 0, pos: 0, words: ⍳ ((bits + 63) div 64) ¨ (_ => 0) } ▷ settle(s => encode(s, d, code, length), s => s.i == n)
+    let check = (0, 0) ▷ settle(s => (s.0 + 1, (s.1 * 31 + umod(e.words[s.0], 1000000007)) % 1000000007), s => s.0 == ≢ e.words)
+    // decoding: (length, code) → byte, for codes up to 15 bits
+    let table = (0, ⍳ (16 * 32768) ¨ (_ => -1)) ▷ settle(s => {
+        let b = used[s.0]
+        (s.0 + 1, put(s.1, length[b] * 32768 + code[b], b))
+    }, s => s.0 == ≢ used)
+    let dec = D { p: 0, cur: 0, l: 0, out: [] } ▷ settle(s => decode(s, e.words, table.1), s => s.p == bits)
+    let same = if ≢ dec.out == n and +/ (dec.out != d) == 0 { 1 } else { 0 }
+    print("{bits} {⌈/ length} {check.1} {same}")
+}
