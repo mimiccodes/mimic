@@ -78,15 +78,20 @@ latest() {
 }
 
 # the newest preview or stable release: the first in the releases' feed
-# (newest first) that is either (the feed, not the API, which limits how
-# often it may be asked)
+# (newest first) that is either and has its files (the feed also lists a
+# tag whose release is still being built; and not the API, which limits
+# how often it may be asked)
 newest_preview() {
     fetch "https://github.com/$REPO/releases.atom" "$1" ||
         fail "could not list the releases on GitHub (check your connection, or pass --version)"
-    v=$(grep -o 'releases/tag/v[^"]*"' "$1" | sed 's|.*/v\([^"]*\)"$|\1|' |
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-(preview|fix)\.[0-9]+)?$' | head -1)
-    [ -n "$v" ] || fail "found no preview or stable release on GitHub"
-    printf '%s' "$v"
+    for v in $(grep -o 'releases/tag/v[^"]*"' "$1" | sed 's|.*/v\([^"]*\)"$|\1|' |
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-(preview|fix)\.[0-9]+)?$' | head -5); do
+        if fetch "https://github.com/$REPO/releases/download/v$v/SHA256SUMS" "$1.sums" 2>/dev/null; then
+            printf '%s' "$v"
+            return 0
+        fi
+    done
+    fail "found no preview or stable release with files on GitHub"
 }
 
 sha256() {
