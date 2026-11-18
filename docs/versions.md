@@ -23,9 +23,10 @@ Mimic follows [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
    * builds `mimic` on each tier-1 platform;
    * runs the tests there;
    * attaches the binaries, checksums and changelog section to a GitHub release.
-5. **Before every tag:** the owner approves it.
+5. **Before every tag:** the owner approves it. Merging into `main` publishes nothing; only a tag does, so every release and preview reaches users through the owner's yes.
 6. **Branches:**
-   * `main` holds released code only: each commit on it is a release, merged from `dev` by a pull request the owner merges, then tagged. `git log --first-parent main` lists the releases.
+   * `main` holds released code only: each commit on it is a release, merged from `dev` by a pull request once every required check passes (the tests on Linux, macOS and Windows and the speed gate), then tagged with the owner's approval. `git log --first-parent main` lists the releases.
+   * Between releases, `main` takes one other kind of pull request: changes only to CI, meaning `.github/workflows/` and the scripts those workflows run (`bench/run.py`, `bench/record.py`, `bench/noise/`, `bench/http/load/`, `tools/ledger.py`). GitHub starts scheduled and hand-started workflows only from `main`, so new ones must reach it before the next release. They pass the same required checks; Mimic itself does not change.
    * `dev` is where work comes together. Every change reaches it as a pull request from a short-lived branch (`feat/0.4.1-ir-calls`, `fix/…`, `docs/…`), squashed into one commit once CI passes on Linux, macOS and Windows. Its version is the next one marked `-dev` (`0.4.1-dev`).
    * An urgent fix to a stable release is a `hotfix/…` branch from `main`, released as `vX.Y.Z-fix.N` and merged back into `dev`.
    * When an era of the roadmap is complete, a read-only branch keeps it as it was: `ideation` (0.1 to 0.3, at 0.3.17), then `core` (0.4), `acceleration` (0.6), `domains` (0.7), `everywhere` (0.11) and `maturity` (0.13).
