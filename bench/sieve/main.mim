@@ -8,7 +8,7 @@ module main
 // bench/sieve/ref.py.
 
 // crossing out: the prime's index, the prime, its next multiple, the flags
-type S = { i: i64, p: i64, m: i64, f: [u8] }
+type S = { i: i64, p: i64, m: i64, f: [i64] }
 
 // the first multiple of p to cross out in a segment starting at lo
 fn first(p: i64, lo: i64) -> i64 {
@@ -33,7 +33,7 @@ fn small(k: i64, d: i64) -> bool {
 fn segment(g: i64, ps: [i64], n: i64, size: i64) -> [i64] {
     let lo = g * size
     let hi = if lo + size < n { lo + size } else { n }
-    let s = S { i: 0, p: ps[0], m: first(ps[0], lo), f: bytes::from(⍳ (hi - lo) ¨ (_ => 1)) } ▷ settle(s => if s.m >= hi { next(s, ps, lo) } else { cross(s, lo) }, s => s.p * s.p >= hi)
+    let s = S { i: 0, p: ps[0], m: first(ps[0], lo), f: ⍳ (hi - lo) ¨ (_ => 1) } ▷ settle(s => if s.m >= hi { next(s, ps, lo) } else { cross(s, lo) }, s => s.p * s.p >= hi)
     let f = s.f
     let low = if lo == 0 { 2 } else { 0 }
     let top = ⍳ (hi - lo) ¨ (j => if f[j] == 1 and lo + j >= 2 { lo + j } else { -1 }) ▷ ⌈/
