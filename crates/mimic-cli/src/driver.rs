@@ -236,6 +236,12 @@ pub extern \"mimic\" {
 // A broken `requires` or `ensures` (debug builds and tests): stops the
 // program with what was promised. Pure, like a bounds check, so functions
 // with contracts still run in parallel.
+// flatten's fast way (see runtime/mimic_std.c): private to the prelude
+extern \"mimic\" pure {
+    fn flat_plain(xss: any) -> bool
+    fn concat_plain(xss: any) -> [any]
+}
+
 pub extern \"mimic\" pure {
     fn contract_failed(message: str)
 }
@@ -287,7 +293,7 @@ pub fn group_by(xs, f) { group(xs ¨ f, xs) }
 // two at a time copied the growing result again for every list.
 pub fn flatten(xss) {
     let m = ≢ xss
-    if m == 0 { [] } else {
+    if m == 0 { [] } else if flat_plain(xss) { concat_plain(xss) } else {
         let lens = xss ¨ (x => ≢ x)
         let ends = lens ▷ trail(+)
         let owner = ⍳ m ⌿ lens
