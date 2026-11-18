@@ -273,11 +273,13 @@ jobs:
           mv gate-real.md bench/gate.md
           echo "- the gate failed a build without the optimizer, as it should" >> "$GITHUB_STEP_SUMMARY"
 
-      # the noise of this runner, for the speed gate's tolerances (unsplit)
+      # the noise of this runner, for the speed gate's tolerances: each
+      # machine measures its third, as in the gate (the whole corpus on one
+      # machine no longer fits in the job's time)
       - name: Noise
-        if: ${{ env.FIRST == 'true' && inputs.noise > 0 }}
+        if: ${{ inputs.noise > 0 }}
         run: |
-          "$(command -v python3 || command -v python)" bench/run.py --runs 3 --noise ${{ inputs.noise }} | tee noise.txt
+          "$(command -v python3 || command -v python)" bench/run.py --runs 3 --noise ${{ inputs.noise }} --shard ${{ matrix.shard }}/3 | tee noise.txt
           { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Results

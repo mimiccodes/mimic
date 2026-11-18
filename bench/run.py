@@ -492,7 +492,14 @@ def noise(benches, runs: int, times: int) -> int:
     move is what the gate must allow for on this machine
     (bench/noise/<platform>.json)."""
     me = Path(mimic_exe())
-    out = {}
+    path = HERE / "noise" / f"{platform_id()}.json"
+    # what is already measured stays: CI measures a third of the benchmarks
+    # on each machine (--shard), and each benchmark carries its own date
+    try:
+        out = json.loads(path.read_text(encoding="utf-8"))["benchmarks"]
+    except (OSError, ValueError, KeyError):
+        out = {}
+    measured = []
     for b in benches:
         if not (b / "main.mim").exists():
             continue
@@ -501,14 +508,15 @@ def noise(benches, runs: int, times: int) -> int:
         for _ in range(times):
             for key, (t_old, t_new) in pair(b, me, me, runs, False).items():
                 changes.setdefault(key, []).append(t_new / t_old)
+        out[b.name] = {"date": time.strftime("%Y-%m-%d")}
         for key, rs in changes.items():
-            out.setdefault(b.name, {})[key] = {"spread": round(max(abs(r - 1) for r in rs), 4), "ratios": [round(r, 4) for r in rs]}
+            out[b.name][key] = {"spread": round(max(abs(r - 1) for r in rs), 4), "ratios": [round(r, 4) for r in rs]}
+        measured.append(b.name)
     cpu, _ = machine()
-    path = HERE / "noise" / f"{platform_id()}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "rounds": times, "runs": runs, "date": time.strftime("%Y-%m-%d"), "how": "the same compiler on both sides of the gate's comparison", "benchmarks": out}, indent=1) + "\n", encoding="utf-8")
     print(f"\n{'benchmark':<16} {'1 core':>8} {'all cores':>10}   (widest move, same compiler both sides)")
-    for name, v in out.items():
+    for name, v in ((n, out[n]) for n in measured):
         cell = lambda k: f"{v[k]['spread'] * 100:.1f}%" if k in v else "—"
         print(f"{name:<16} {cell('mimic'):>8} {cell('mimic-all'):>10}")
     print(f"\nwritten to {path.relative_to(ROOT)}")
