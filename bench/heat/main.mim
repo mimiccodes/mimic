@@ -1,0 +1,34 @@
+module main
+
+// heat: heat spreading over a 1,024 × 1,024 plate for 400 steps: each
+// inner cell becomes the average of itself (weighted 4) and its four
+// neighbours (weighted 1 each); the edge keeps its temperature. The
+// starting temperatures come from splitmix64. Each step computes every
+// cell from the last step's plate, so the cells of a step run in
+// parallel. Prints the sum of all cells and the centre, in thousandths
+// (each cell rounded down on its own, so the sum's order does not
+// matter). The reference is bench/heat/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn cell(g: [f64], n: i64, p: i64) -> f64 {
+    let (r, c) = (p div n, p % n)
+    if r == 0 or c == 0 or r == n - 1 or c == n - 1 { g[p] }
+    else {
+        let x = g[p]
+        (x + x + x + x + g[p - n] + g[p + n] + g[p - 1] + g[p + 1]) * 0.125
+    }
+}
+
+fn main() {
+    let n = 1024
+    let start = ⍳ (n * n) ¨ (p => (mix(p) % 100000) / 1000.0)
+    let g = start ▷ evolve(400, g => ⍳ (n * n) ¨ (p => cell(g, n, p)))
+    let total = g ¨ (x => math::to_int(x * 1000.0)) ▷ +/
+    print("{total} {math::to_int(g[n * (n div 2) + n div 2] * 1000.0)}")
+}

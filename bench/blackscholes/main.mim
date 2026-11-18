@@ -1,0 +1,50 @@
+module main
+
+// blackscholes: the prices of 20,000,000 European options, a call and a
+// put each, by the Black-Scholes formula with the normal distribution
+// approximated as in Abramowitz and Stegun (26.2.17). Each option's
+// spot, strike, time, rate and volatility come from splitmix64. Options are
+// independent, so the sum is parallel; each price is rounded to whole
+// cents first, so the sum does not depend on its order. Prints the
+// options and the total of every call and put in cents. The reference is
+// bench/blackscholes/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// a number in [0, 1)
+fn unit(v: i64) -> f64 { (mix(v) >>> 10) / 9007199254740992.0 }
+
+// the standard normal distribution at x
+fn cnd(x: f64) -> f64 {
+    let k = 1.0 / (1.0 + 0.2316419 * ∣x)
+    let poly = k * (0.319381530 + k * (-0.356563782 + k * (1.781477937 + k * (-1.821255978 + k * 1.330274429))))
+    let w = 1.0 - 0.3989422804014327 * math::exp(-0.5 * x * x) * poly
+    if x < 0.0 { 1.0 - w } else { w }
+}
+
+fn cents(x: f64) -> i64 { math::to_int(math::round(x * 100.0)) }
+
+// the call and the put, in cents
+fn price(i: i64) -> i64 {
+    let s = 50.0 + 100.0 * unit(5 * i)
+    let k = 50.0 + 100.0 * unit(5 * i + 1)
+    let t = 0.1 + 2.0 * unit(5 * i + 2)
+    let r = 0.01 + 0.05 * unit(5 * i + 3)
+    let v = 0.1 + 0.5 * unit(5 * i + 4)
+    let root = v * math::sqrt(t)
+    let d1 = (math::ln(s / k) + (r + 0.5 * v * v) * t) / root
+    let d2 = d1 - root
+    let far = k * math::exp(-r * t)
+    cents(s * cnd(d1) - far * cnd(d2)) + cents(far * cnd(-d2) - s * cnd(-d1))
+}
+
+fn main() {
+    let n = 20000000
+    let total = ⍳ n ¨ price ▷ +/
+    print("{n} {total}")
+}
