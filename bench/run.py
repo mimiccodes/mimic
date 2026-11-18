@@ -180,6 +180,7 @@ def main() -> int:
     ap.add_argument("--machine", action="store_true", help="measure this machine's limits again (and only that, without benchmark names)")
     ap.add_argument("--gate", default="", metavar="OLD", help="the speed gate: compare Mimic as built here with the mimic at OLD, on this machine, in turns")
     ap.add_argument("--inject", action="store_true", help="with --gate: build the new side without LLVM's optimizer (the gate must fail)")
+    ap.add_argument("--shard", default="", metavar="I/N", help="only every N-th benchmark, starting with the I-th (from 0): CI splits the gate across machines")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     if a.machine:
@@ -189,6 +190,10 @@ def main() -> int:
     benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
     if a.names:
         benches = [b for b in benches if b.name in a.names]
+    if a.shard:
+        i, n = map(int, a.shard.split("/"))
+        benches = benches[i::n]
+        print(f"shard {i}/{n}: {' '.join(b.name for b in benches)}")
     if a.noise:
         return noise(benches, a.runs, a.noise)
     if a.gate:
