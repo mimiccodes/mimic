@@ -1,0 +1,66 @@
+module main
+
+// fft: the product of two polynomials of 524,288 coefficients each (0 to
+// 99, from splitmix64) by fast Fourier transform: both transformed
+// (radix 2, 2^20 points), multiplied point by point, transformed back and
+// rounded to whole numbers. Each stage of a transform computes every
+// point from the last stage, so the points of a stage run in parallel.
+// Prints the sum of the product's coefficients, a checksum of them and
+// the middle one. The reference is bench/fft/ref.py.
+
+// a transform: the half-width of this stage's butterflies, and the points
+type F = { h: i64, re: [f64], im: [f64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// p with its low m bits reversed
+fn rev(p: i64, m: i64, acc: i64) -> i64 {
+    if m == 0 { acc } else { rev(p >>> 1, m - 1, acc * 2 + p % 2) }
+}
+
+// point p after the stage of half-width h (a power of two, so `&` finds
+// p's place in its butterfly): the upper (j < h) or lower half; sign is
+// -1 forwards and 1 back
+fn point(re: [f64], im: [f64], h: i64, stride: i64, tr: [f64], ti: [f64], sign: f64, p: i64, real: bool) -> f64 {
+    let j = p & (2 * h - 1)
+    let k = j & (h - 1)
+    let b = p - j + k
+    let t = k * stride
+    let (wr, wi) = (tr[t], sign * ti[t])
+    let (xr, xi) = (re[b + h], im[b + h])
+    let up = if j < h { 1.0 } else { -1.0 }
+    if real { re[b] + up * (wr * xr - wi * xi) } else { im[b] + up * (wr * xi + wi * xr) }
+}
+
+fn stage(f: F, tr: [f64], ti: [f64], n: i64, sign: f64) -> F {
+    let (re, im, h) = (f.re, f.im, f.h)
+    let stride = n div (2 * h)
+    F { h: h * 2, re: ⍳ n ¨ (p => point(re, im, h, stride, tr, ti, sign, p, true)), im: ⍳ n ¨ (p => point(re, im, h, stride, tr, ti, sign, p, false)) }
+}
+
+fn transform(re: [f64], im: [f64], order: [i64], tr: [f64], ti: [f64], sign: f64) -> F {
+    let n = ≢ re
+    F { h: 1, re: order ¨ (q => re[q]), im: order ¨ (q => im[q]) } ▷ settle(f => stage(f, tr, ti, n, sign), f => f.h == n)
+}
+
+fn main() {
+    let (m, n) = (20, 1048576)
+    let half = n div 2
+    let order = ⍳ n ¨ (p => rev(p, m, 0))
+    let tr = ⍳ half ¨ (k => math::cos(2.0 * math::pi() * k / n))
+    let ti = ⍳ half ¨ (k => math::sin(2.0 * math::pi() * k / n))
+    let zero = ⍳ n ¨ (_ => 0.0)
+    let a = transform(⍳ n ¨ (i => if i < half { (mix(i) % 100) * 1.0 } else { 0.0 }), zero, order, tr, ti, -1.0)
+    let b = transform(⍳ n ¨ (i => if i < half { (mix(n + i) % 100) * 1.0 } else { 0.0 }), zero, order, tr, ti, -1.0)
+    let pr = ⍳ n ¨ (p => a.re[p] * b.re[p] - a.im[p] * b.im[p])
+    let pi = ⍳ n ¨ (p => a.re[p] * b.im[p] + a.im[p] * b.re[p])
+    let back = transform(pr, pi, order, tr, ti, 1.0)
+    let c = back.re ¨ (x => math::to_int(math::round(x / n)))
+    let check = ⍳ n ¨ (i => c[i] % 1000 * (i % 1000)) ▷ +/
+    print("{+/ c} {check} {c[half - 1]}")
+}

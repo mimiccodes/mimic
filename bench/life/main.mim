@@ -1,0 +1,31 @@
+module main
+
+// life: Conway's Game of Life on a 1,024 × 1,024 board whose edges wrap
+// around, for 150 generations, from a random start (a third of the cells
+// alive, from splitmix64). Each generation computes every cell from the
+// last, so the cells run in parallel. Prints the live cells at the end
+// and how many of the first row are alive. The reference is
+// bench/life/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn cell(g: [i64], n: i64, p: i64) -> i64 {
+    let (r, c) = (p div n, p % n)
+    let (up, down) = ((r + n - 1) % n * n, (r + 1) % n * n)
+    let (left, right) = ((c + n - 1) % n, (c + 1) % n)
+    let row = r * n
+    let around = g[up + left] + g[up + c] + g[up + right] + g[row + left] + g[row + right] + g[down + left] + g[down + c] + g[down + right]
+    if around == 3 or (around == 2 and g[p] == 1) { 1 } else { 0 }
+}
+
+fn main() {
+    let n = 1024
+    let start = ⍳ (n * n) ¨ (p => if mix(p) % 3 == 0 { 1 } else { 0 })
+    let g = start ▷ evolve(150, g => ⍳ (n * n) ¨ (p => cell(g, n, p)))
+    print("{+/ g} {+/ (g ↑ n)}")
+}
