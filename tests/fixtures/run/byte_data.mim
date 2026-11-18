@@ -29,5 +29,7 @@ fn main() {
     print(fs::read_bytes(p))
     print(fs::remove(p))
     print(json::encode(b))
+    print((put(b, 1, 0), b))                       // b is shared: put copies
+    print(bytes::from([0 0 0]) ▷ evolve(3, f => put(f, 1, ≢ f + 250)))  // held once: in place
 }
 fn checksum(data: [u8]) -> i64 { data ▷ gather((a, b) => (a + b) % 65521) }

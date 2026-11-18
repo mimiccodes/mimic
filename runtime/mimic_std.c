@@ -425,6 +425,36 @@ mim_val *mim_put_i64_own(mim_val *xs, int64_t i, int64_t v) {
     return r;
 }
 
+/* put(xs, i, v) on a list of bytes held once, with raw numbers: no boxing;
+ * anything else (shared, out of range, not a byte) goes the general way,
+ * which copies, converts or stops with the same message */
+mim_val *mim_put_u8_own(mim_val *xs, int64_t i, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_U8 && i >= 0 && i < xs->len && v >= 0 && v <= 255) {
+        ((uint8_t *)xs->data)[i] = (uint8_t)v;
+        return xs;
+    }
+    mim_val *k = mim_int(i), *x = mim_int(v);
+    mim_val *r = mim_std_put_own(xs, k, x);
+    mim_release(k);
+    mim_release(x);
+    return r;
+}
+
+/* put(xs, i, v) off the fast path, xs owned. Held once but the value's
+ * type differs (an integer into bytes, a float into integers): the indexed
+ * store converts it exactly as the copying path does, in place when it can.
+ * (Out of line, so the fast path stays small enough to inline.) */
+static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_val *k, mim_val *v) {
+    if (own_plain(xs) && v != xs) {
+        mim_val *slot = xs;
+        mim_set_index(&slot, k, v);
+        return slot;
+    }
+    mim_val *r = mim_std_put(xs, k, v);
+    mim_release(xs);
+    return r;
+}
+
 /* put(xs, i, v) on a list, xs owned */
 mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
     if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
@@ -434,9 +464,7 @@ mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
             return xs;
         }
     }
-    mim_val *r = mim_std_put(xs, k, v);
-    mim_release(xs);
-    return r;
+    return put_own_slow(xs, k, v);
 }
 
 mim_val *mim_std_push(mim_val *xs, mim_val *x) {
