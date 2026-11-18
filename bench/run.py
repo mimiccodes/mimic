@@ -35,7 +35,7 @@ each in turn (old, new, old, new, …), on one core and on all, so both
 meet the same machine and the same moment. A new time worse than the old
 by more than the benchmark's tolerance is measured twice more and fails
 if it is worse in 2 of the 3. The tolerance is twice the noise measured
-for the benchmark on this platform (bench/noise/), at least 3% and at
+for the benchmark on this platform (bench/noise/), at least 5% and at
 most 25%. Comparing with numbers recorded on another run does not work on
 shared machines: a CI job gets a different machine each time. --inject
 builds the new side without LLVM's optimizer (MIMIC_DEBUG_DISABLE), a
@@ -373,11 +373,13 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
         record(Path(history), cpu, runs, load, rows)
 
 
-LOWEST, HIGHEST, DEFAULT = 0.03, 0.25, 0.10
+# at least 5%: two builds of the same code differ by a few percent (where
+# the code lands in memory), which one binary measured twice cannot show
+LOWEST, HIGHEST, DEFAULT = 0.05, 0.25, 0.10
 
 
 def tolerance(name: str, key: str) -> tuple[float, bool]:
-    """Twice the noise measured on this platform, within 3% … 25%, and
+    """Twice the noise measured on this platform, within 5% … 25%, and
     whether the benchmark is gated here: one whose noise needs more than
     25% is measured and reported but cannot fail the gate (no tolerance
     would tell its slowdowns from its noise)."""
