@@ -20,30 +20,27 @@ fn mix(v: i64) -> i64 {
     (x3 ^ x3 >>> 31) >>> 1
 }
 
-fn dist(cx: [i64], cy: [i64], j: i64, x: i64, y: i64) -> i64 {
-    let (dx, dy) = (cx[j] - x, cy[j] - y)
+fn dist(c: C, j: i64, x: i64, y: i64) -> i64 {
+    let (dx, dy) = (c.x[j] - x, c.y[j] - y)
     dx * dx + dy * dy
 }
 
 // the nearest of centres j… to (x, y), given the best so far
-fn nearest(cx: [i64], cy: [i64], x: i64, y: i64, j: i64, best: i64, at: i64) -> i64 {
-    if j == ≢ cx { at }
+fn nearest(c: C, x: i64, y: i64, j: i64, best: i64, at: i64) -> i64 {
+    if j == ≢ c.x { at }
     else {
-        let d = dist(cx, cy, j, x, y)
-        if d < best { nearest(cx, cy, x, y, j + 1, d, j) } else { nearest(cx, cy, x, y, j + 1, best, at) }
+        let d = dist(c, j, x, y)
+        if d < best { nearest(c, x, y, j + 1, d, j) } else { nearest(c, x, y, j + 1, best, at) }
     }
 }
 
-// the centres' lists are taken out of the record before `¨`: a record
-// used inside `¨` is retained and released for every element (docs/gaps.md)
 fn round(c: C, xs: [i64], ys: [i64]) -> C {
-    let (cx, cy) = (c.x, c.y)
-    let near = ⍳ ≢ xs ¨ (i => nearest(cx, cy, xs[i], ys[i], 0, 0x7FFFFFFFFFFFFFFF, 0))
-    let k = ≢ cx
+    let near = ⍳ ≢ xs ¨ (i => nearest(c, xs[i], ys[i], 0, 0x7FFFFFFFFFFFFFFF, 0))
+    let k = ≢ c.x
     let counts = ⍳ k ¨ (j => near ¨ (a => if a == j { 1 } else { 0 }) ▷ +/)
     let sx = ⍳ k ¨ (j => xs ⌿ (near == j) ▷ +/)
     let sy = ⍳ k ¨ (j => ys ⌿ (near == j) ▷ +/)
-    C { x: ⍳ k ¨ (j => if counts[j] == 0 { cx[j] } else { sx[j] div counts[j] }), y: ⍳ k ¨ (j => if counts[j] == 0 { cy[j] } else { sy[j] div counts[j] }) }
+    C { x: ⍳ k ¨ (j => if counts[j] == 0 { c.x[j] } else { sx[j] div counts[j] }), y: ⍳ k ¨ (j => if counts[j] == 0 { c.y[j] } else { sy[j] div counts[j] }) }
 }
 
 fn main() {
@@ -51,9 +48,8 @@ fn main() {
     let xs = ⍳ n ¨ (i => mix(2 * i) % 100001)
     let ys = ⍳ n ¨ (i => mix(2 * i + 1) % 100001)
     let c = C { x: xs ↑ k, y: ys ↑ k } ▷ evolve(25, c => round(c, xs, ys))
-    let (cx, cy) = (c.x, c.y)
-    let near = ⍳ n ¨ (i => nearest(cx, cy, xs[i], ys[i], 0, 0x7FFFFFFFFFFFFFFF, 0))
+    let near = ⍳ n ¨ (i => nearest(c, xs[i], ys[i], 0, 0x7FFFFFFFFFFFFFFF, 0))
     let first = near ¨ (a => if a == 0 { 1 } else { 0 }) ▷ +/
-    let spread = ⍳ n ¨ (i => dist(cx, cy, near[i], xs[i], ys[i])) ▷ +/
-    print("{+/ cx + +/ cy} {first} {spread}")
+    let spread = ⍳ n ¨ (i => dist(c, near[i], xs[i], ys[i])) ▷ +/
+    print("{+/ c.x + +/ c.y} {first} {spread}")
 }
