@@ -1,0 +1,42 @@
+# The last safety net for AWS machines (aws-runner.yml): every 30 minutes,
+# end any machine tagged Project=mimic-runner that has been running for
+# more than 3 hours. Each machine already ends itself after its job, after
+# its own time limit, and through the workflow's stop step; this catches
+# one that somehow did not. It can end only machines with that tag.
+name: aws-sweeper
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: End machines older than 3 hours
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%S)
+          old=$(aws ec2 describe-instances \
+            --filters Name=tag:Project,Values=mimic-runner Name=instance-state-name,Values=pending,running,stopping,stopped \
+            --query "Reservations[].Instances[?LaunchTime<='$cutoff'].InstanceId" --output text)
+          running=$(aws ec2 describe-instances \
+            --filters Name=tag:Project,Values=mimic-runner Name=instance-state-name,Values=pending,running \
+            --query 'length(Reservations[].Instances[])' --output text)
+          echo "mimic-runner machines running now: $running"
+          if [ -n "$old" ]; then
+            echo "::warning::ending machines older than 3 hours: $old"
+            aws ec2 terminate-instances --instance-ids $old --query 'TerminatingInstances[].[InstanceId,CurrentState.Name]' --output text
+          else
+            echo "none older than 3 hours"
+          fi
