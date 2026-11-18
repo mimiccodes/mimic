@@ -1,0 +1,208 @@
+# A machine on AWS for one job: started when a workflow needs precise or
+# heavy work (benchmarks on dedicated cores, arm64, later GPUs), then gone.
+#
+#   jobs:
+#     machine:
+#       uses: ./.github/workflows/aws-runner.yml
+#       with: { action: start, instance_type: c7a.4xlarge, arch: x86_64 }
+#       secrets: inherit
+#     work:
+#       needs: machine
+#       runs-on: [self-hosted, "${{ needs.machine.outputs.label }}"]
+#       …
+#     done:
+#       needs: [machine, work]
+#       if: always()
+#       uses: ./.github/workflows/aws-runner.yml
+#       with: { action: stop, instance: "${{ needs.machine.outputs.instance }}" }
+#       secrets: inherit
+#
+# How it stays safe and cheap:
+# * AWS is reached through GitHub's OIDC: no keys anywhere. The role
+#   (vars.AWS_ROLE_ARN) trusts only workflows running from main or dev, never
+#   pull requests, and may only launch and end machines tagged
+#   Project=mimic-runner.
+# * The machine registers as a just-in-time runner: it takes exactly one
+#   job, then the runner exits and the machine powers off, which terminates
+#   it (shutdown behaviour: terminate). It also powers off after
+#   max_minutes whatever happens, and `stop` terminates it.
+# * The firewall (vars.AWS_RUNNER_SG) lets nothing in.
+# * The runner's registration needs the RUNNER_ADMIN_TOKEN secret (a token
+#   allowed to administer this repository's runners, nothing else).
+name: aws-runner
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: "start or stop"
+        type: string
+        required: true
+      instance_type:
+        description: "EC2 type, e.g. c7a.4xlarge (x86_64) or c8g.4xlarge (arm64)"
+        type: string
+        default: c7a.large
+      arch:
+        description: "x86_64 or arm64 (must match the instance type)"
+        type: string
+        default: x86_64
+      spot:
+        description: "spot capacity (cheaper; may be taken back)"
+        type: boolean
+        default: false
+      max_minutes:
+        description: "the machine powers off after this, whatever happens"
+        type: number
+        default: 120
+      disk_gb:
+        type: number
+        default: 60
+      instance:
+        description: "stop: the instance to end"
+        type: string
+        default: ""
+    outputs:
+      label:
+        description: "the runner label to run the job on"
+        value: ${{ jobs.start.outputs.label }}
+      instance:
+        value: ${{ jobs.start.outputs.instance }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  start:
+    if: inputs.action == 'start'
+    runs-on: ubuntu-24.04
+    outputs:
+      label: ${{ steps.launch.outputs.label }}
+      instance: ${{ steps.launch.outputs.instance }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Launch
+        id: launch
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+          TYPE: ${{ inputs.instance_type }}
+          ARCH: ${{ inputs.arch }}
+          SPOT: ${{ inputs.spot }}
+          MAX: ${{ inputs.max_minutes }}
+          DISK: ${{ inputs.disk_gb }}
+          SG: ${{ vars.AWS_RUNNER_SG }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            x86_64) ami_arch=amd64; runner_arch=x64 ;;
+            arm64) ami_arch=arm64; runner_arch=arm64 ;;
+            *) echo "::error::arch must be x86_64 or arm64"; exit 1 ;;
+          esac
+          label="mimic-aws-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+
+          # a one-time registration: this runner takes one job, then is gone
+          jit=$(gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runners/generate-jitconfig" \
+            -f name="$label" -F runner_group_id=1 -f 'labels[]=self-hosted' -f "labels[]=$label" \
+            --jq .encoded_jit_config)
+          echo "::add-mask::$jit"
+          version=$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')
+
+          # the newest official Ubuntu 24.04 image (Canonical's account)
+          ami=$(aws ec2 describe-images --owners 099720109477 \
+            --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-$ami_arch-server-*" Name=state,Values=available \
+            --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+          echo "image $ami, runner $version"
+
+          # what the machine does when it boots
+          cat > boot.sh <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          # whatever happens, power off (and so terminate) after $MAX minutes
+          shutdown -h +$MAX
+          useradd -m -s /bin/bash runner
+          echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+          cd /home/runner
+          curl -fsSL --retry 5 -o runner.tgz "https://github.com/actions/runner/releases/download/v$version/actions-runner-linux-$runner_arch-$version.tar.gz"
+          tar xzf runner.tgz
+          rm runner.tgz
+          ./bin/installdependencies.sh
+          chown -R runner:runner /home/runner
+          # one job, then the runner exits
+          su - runner -c "cd /home/runner && ./run.sh --jitconfig $jit" || true
+          shutdown -h now
+          EOF
+
+          market=()
+          if [ "$SPOT" = true ]; then
+            market=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+          fi
+          instance=$(aws ec2 run-instances \
+            --image-id "$ami" --instance-type "$TYPE" --count 1 \
+            --security-group-ids "$SG" \
+            --instance-initiated-shutdown-behavior terminate \
+            --metadata-options HttpTokens=required \
+            --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$DISK,VolumeType=gp3,DeleteOnTermination=true}" \
+            --user-data file://boot.sh \
+            "${market[@]}" \
+            --tag-specifications \
+              "ResourceType=instance,Tags=[{Key=Project,Value=mimic-runner},{Key=Name,Value=$label},{Key=Run,Value=$GITHUB_RUN_ID}]" \
+              "ResourceType=volume,Tags=[{Key=Project,Value=mimic-runner},{Key=Run,Value=$GITHUB_RUN_ID}]" \
+            --query 'Instances[0].InstanceId' --output text)
+          rm boot.sh
+          echo "started $instance ($TYPE, $ARCH, spot: $SPOT) as $label"
+          echo "- AWS machine \`$instance\`: $TYPE ($ARCH), spot: $SPOT, at most $MAX minutes" >> "$GITHUB_STEP_SUMMARY"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+          echo "instance=$instance" >> "$GITHUB_OUTPUT"
+
+  stop:
+    if: inputs.action == 'stop' && inputs.instance != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # (usually it has ended itself already; terminating it again is harmless)
+      - name: End the machine
+        env:
+          INSTANCE: ${{ inputs.instance }}
+        run: |
+          aws ec2 terminate-instances --instance-ids "$INSTANCE" --query 'TerminatingInstances[0].CurrentState.Name' --output text
+
+      # how long it ran (at most: until now) and about what it cost: spot at
+      # the price AWS charged then (its price history), on-demand at an
+      # approximate hourly price; the billed amount shows in the billing
+      # console about a day later
+      - name: Usage and cost
+        if: always()
+        env:
+          INSTANCE: ${{ inputs.instance }}
+        run: |
+          set -euo pipefail
+          read -r type az launched lifecycle state < <(aws ec2 describe-instances --instance-ids "$INSTANCE" \
+            --query 'Reservations[0].Instances[0].[InstanceType,Placement.AvailabilityZone,LaunchTime,InstanceLifecycle,State.Name]' --output text)
+          minutes=$(( ($(date -u +%s) - $(date -u -d "$launched" +%s)) / 60 ))
+          if [ "$lifecycle" = spot ]; then
+            price=$(aws ec2 describe-spot-price-history --instance-types "$type" --availability-zone "$az" \
+              --product-descriptions Linux/UNIX --max-items 1 --query 'SpotPriceHistory[0].SpotPrice' --output text)
+            kind="spot, \$$price/h now"
+          else
+            # on-demand Linux prices in us-east-1 per hour, approximate (AWS's
+            # pricing pages are the authority; the bill is exact)
+            case "$type" in
+              c7a.large) price=0.10264 ;; c7a.xlarge) price=0.20528 ;; c7a.2xlarge) price=0.41056 ;; c7a.4xlarge) price=0.82112 ;; c7a.8xlarge) price=1.64224 ;;
+              c8g.large) price=0.07976 ;; c8g.xlarge) price=0.15952 ;; c8g.2xlarge) price=0.31904 ;; c8g.4xlarge) price=0.63808 ;; c8g.8xlarge) price=1.27616 ;;
+              *) price="" ;;
+            esac
+            kind="on-demand, about \$${price:-?}/h"
+          fi
+          # the disk (gp3, about \$0.08 a GB-month) and the public address (\$0.005/h) on top
+          cost=$(python3 -c "m=$minutes; p=float('${price:-0}' or 0); print(f'{m/60*(p+0.005+0.0066):.3f}')")
+          line="- AWS machine \`$INSTANCE\` ($type, $kind): ran about $minutes min, now $state; estimated cost \$$cost (the billed amount shows in AWS billing about a day later)"
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
