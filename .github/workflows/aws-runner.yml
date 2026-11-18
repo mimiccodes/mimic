@@ -127,6 +127,8 @@ jobs:
           set -euo pipefail
           # whatever happens, power off (and so terminate) after $MAX minutes
           shutdown -h +$MAX
+          # and at once if setting up the runner fails
+          trap 'shutdown -h now' ERR
           useradd -m -s /bin/bash runner
           echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
           cd /home/runner

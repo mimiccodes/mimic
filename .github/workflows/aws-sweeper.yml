@@ -1,5 +1,5 @@
-# The last safety net for AWS machines (aws-runner.yml): every 15 minutes,
-# end any machine tagged Project=mimic-runner that is past its deadline
+# The last safety net for AWS machines (aws-runner.yml): after every CI,
+# bench and AWS run, and on a schedule GitHub may run late or skip, end any machine tagged Project=mimic-runner that is past its deadline
 # (its own time limit plus 10 minutes to boot, tagged at launch), or, with
 # no deadline, has run more than 3 hours. Each machine already ends itself
 # after its job and after its own time limit, and the workflow's stop step
@@ -8,6 +8,12 @@
 name: aws-sweeper
 
 on:
+  # GitHub's timer runs this repository's schedules hours late or not at
+  # all (the 03:00 nightly started at 10:55), so the sweep also follows
+  # the runs that happen many times a day
+  workflow_run:
+    workflows: [ci, bench, nightly, aws-bench, aws-smoke]
+    types: [completed]
   schedule:
     # off the hour and quarter-hours: GitHub drops scheduled runs at the
     # busiest minutes, and "*/15" never started on its own
@@ -17,6 +23,11 @@ on:
 permissions:
   id-token: write
   contents: read
+
+# one sweep at a time; a newer one waits instead of piling up
+concurrency:
+  group: aws-sweeper
+  cancel-in-progress: false
 
 jobs:
   sweep:

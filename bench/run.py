@@ -56,6 +56,7 @@ than the last run on the same machine.
 import argparse
 import socket
 import json
+import math
 import os
 import platform
 import shutil
@@ -381,6 +382,9 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
 # at least 5%: two builds of the same code differ by a few percent (where
 # the code lands in memory), which one binary measured twice cannot show
 LOWEST, HIGHEST, DEFAULT = 0.05, 0.25, 0.10
+# the gate times a benchmark until each side has run this long (seconds),
+# in at most MOST_RUNS runs
+SPAN, MOST_RUNS = 1.0, 30
 
 
 def tolerance(name: str, key: str) -> tuple[float, bool]:
@@ -421,9 +425,15 @@ def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
     out = {}
     for key, env in (("mimic", {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}), ("mimic-all", {})):
         best = [float("inf"), float("inf")]
-        for _ in range(runs):
+        done, want = 0, runs
+        while done < want:
             for side in (0, 1):
                 best[side] = min(best[side], once(exes[side], env))
+            done += 1
+            if done == runs:
+                # a short benchmark is timed until each side has run for
+                # SPAN seconds: the best of 3 runs of 50 ms still moved 20%
+                want = max(runs, min(MOST_RUNS, math.ceil(SPAN / max(min(best), 1e-3))))
         out[key] = tuple(best)
     return out
 
