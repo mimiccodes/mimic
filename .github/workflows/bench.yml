@@ -79,11 +79,15 @@ jobs:
       run:
         shell: bash
     steps:
+      # (this change's checkout, for the setup action; the compiler before
+      # it is built from a worktree beside it)
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.base_ref || 'main' }}
       - id: sha
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
       - id: cache
         uses: actions/cache@v4
         with:
@@ -95,12 +99,16 @@ jobs:
           platform: ${{ matrix.platform }}
       - name: Build
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
         run: |
-          cargo build --release
+          git worktree add --detach ../before "$SHA"
+          if [ "$RUNNER_OS" != Windows ]; then ln -sfn "$HOME/.mimic/deps/llvm-$LLVM_VERSION" ../before/.llvm; fi
+          (cd ../before && cargo build --release)
           mkdir -p before-bin
-          cp target/release/mimic* before-bin/ 2>/dev/null || true
-          rm -f before-bin/*.d before-bin/*.pdb
-          ls before-bin
+          exe=mimic; [ "$RUNNER_OS" = Windows ] && exe=mimic.exe
+          cp "../before/target/release/$exe" before-bin/
+          ls -l before-bin
       - uses: actions/upload-artifact@v4
         with:
           name: before-${{ matrix.platform }}
