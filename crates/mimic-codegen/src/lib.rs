@@ -5993,11 +5993,13 @@ impl<'ctx> Cg<'ctx, '_> {
                     let op = *op;
                     let rest = early_rest[k][lvl].clone();
                     let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
+                    let u8_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::U8, 0));
                     let i64t = self.ctx.i64_type();
                     // a list of i64 and raw numbers: the typed versions
                     let typed: Option<(&str, Vec<BasicMetadataValueEnum>)> = match (op, rest.as_slice()) {
                         ("push", [V::I(x)]) if i64_list => Some(("mim_push_i64_own", vec![list.into(), (*x).into()])),
                         ("put", [V::I(i), V::I(x)]) if i64_list => Some(("mim_put_i64_own", vec![list.into(), (*i).into(), (*x).into()])),
+                        ("put", [V::I(i), V::I(x)]) if u8_list => Some(("mim_put_u8_own", vec![list.into(), (*i).into(), (*x).into()])),
                         ("concat", [V::A(a, El::I64)]) if i64_list => {
                             let at = a.get_type();
                             let buf = self.entry_alloca_ty(at.into(), "concat_buf")?;
