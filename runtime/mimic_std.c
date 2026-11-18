@@ -487,6 +487,34 @@ mim_val *mim_std_push(mim_val *xs, mim_val *x) {
     return r;
 }
 
+/* flatten's fast way: a list of lists that all hold one plain element type
+ * (numbers, bytes, booleans; not strings, records or lists) */
+mim_val *mim_std_flat_plain(mim_val *xss) {
+    if (!xss || xss->rank != 1 || xss->dtype != MIM_BOXED || xss->len == 0) return mim_bool(0);
+    mim_val **xs = (mim_val **)xss->data;
+    int dt = xs[0]->dtype;
+    if (IS_HANDLES(xs[0]) || is_str(xs[0])) return mim_bool(0);
+    for (int64_t i = 0; i < xss->len; i++)
+        if (xs[i]->rank != 1 || xs[i]->dtype != dt) return mim_bool(0);
+    return mim_bool(1);
+}
+
+/* the lists flat_plain accepted, joined: one allocation, one copy each */
+mim_val *mim_std_concat_plain(mim_val *xss) {
+    mim_val **xs = (mim_val **)xss->data;
+    int dt = xs[0]->dtype;
+    size_t es = elsize(dt);
+    int64_t n = 0;
+    for (int64_t i = 0; i < xss->len; i++) n += xs[i]->len;
+    mim_val *r = alloc(dt, 1, n);
+    char *at = (char *)r->data;
+    for (int64_t i = 0; i < xss->len; i++) {
+        memcpy(at, xs[i]->data, (size_t)xs[i]->len * es);
+        at += (size_t)xs[i]->len * es;
+    }
+    return r;
+}
+
 mim_val *mim_std_concat(mim_val *xs, mim_val *ys) {
     need(xs, "concat");
     need(ys, "concat");
