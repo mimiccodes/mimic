@@ -440,6 +440,21 @@ mim_val *mim_put_u8_own(mim_val *xs, int64_t i, int64_t v) {
     return r;
 }
 
+/* put(xs, i, v) off the fast path, xs owned. Held once but the value's
+ * type differs (an integer into bytes, a float into integers): the indexed
+ * store converts it exactly as the copying path does, in place when it can.
+ * (Out of line, so the fast path stays small enough to inline.) */
+static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_val *k, mim_val *v) {
+    if (own_plain(xs) && v != xs) {
+        mim_val *slot = xs;
+        mim_set_index(&slot, k, v);
+        return slot;
+    }
+    mim_val *r = mim_std_put(xs, k, v);
+    mim_release(xs);
+    return r;
+}
+
 /* put(xs, i, v) on a list, xs owned */
 mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
     if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
@@ -449,17 +464,7 @@ mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
             return xs;
         }
     }
-    /* held once but the value's type differs (an integer into bytes, a
-     * float into integers): the indexed store converts it exactly as the
-     * copying path below does, in place when it can */
-    if (own_plain(xs) && v != xs) {
-        mim_val *slot = xs;
-        mim_set_index(&slot, k, v);
-        return slot;
-    }
-    mim_val *r = mim_std_put(xs, k, v);
-    mim_release(xs);
-    return r;
+    return put_own_slow(xs, k, v);
 }
 
 mim_val *mim_std_push(mim_val *xs, mim_val *x) {
