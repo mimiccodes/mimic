@@ -6,13 +6,18 @@ name: install scripts
 # language server runs (as an open editor does), and uninstalling; then
 # the extension's scripts against a real VS Code.
 on:
+  # (not on pushes to main: each is a release, whose files arrive minutes
+  # later; the release workflow finishing, below, tests it once they are
+  # there. GitHub starts no workflow for a release the workflow token
+  # published, so `release: published` never ran.)
   push:
-    branches: [main, dev]
+    branches: [dev]
     paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
   pull_request:
     paths: ["tools/get/**", ".github/workflows/install-scripts.yml"]
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -22,6 +27,7 @@ permissions:
 
 jobs:
   unix:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +79,7 @@ jobs:
           grep -q "already installed" out.txt
 
   windows:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ github.token }}
