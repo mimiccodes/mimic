@@ -239,7 +239,7 @@ pub extern \"mimic\" {
 // flatten's fast way (see runtime/mimic_std.c): private to the prelude
 extern \"mimic\" pure {
     fn flat_plain(xss: any) -> bool
-    fn concat_plain(xss: any) -> any
+    fn concat_plain(xss: any) -> [any]
 }
 
 pub extern \"mimic\" pure {
