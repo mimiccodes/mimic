@@ -1,0 +1,71 @@
+# A test of the AWS machines (aws-runner.yml): start one, install Mimic on
+# it, build and run a program and a benchmark, and end it. By hand only.
+name: aws-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: "EC2 type (2 vCPUs fit a new account's limit: c7a.large, c8g.large)"
+        default: c7a.large
+      arch:
+        description: "x86_64 or arm64"
+        default: x86_64
+      spot:
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  machine:
+    uses: ./.github/workflows/aws-runner.yml
+    with:
+      action: start
+      instance_type: ${{ inputs.instance_type }}
+      arch: ${{ inputs.arch }}
+      spot: ${{ inputs.spot }}
+      max_minutes: 45
+    secrets: inherit
+
+  work:
+    needs: machine
+    runs-on: [self-hosted, "${{ needs.machine.outputs.label }}"]
+    timeout-minutes: 40
+    steps:
+      - name: The machine
+        run: |
+          {
+            echo "### $(uname -m), $(nproc) cores"
+            echo '```'
+            lscpu | grep -E 'Model name|Thread|Core|Socket|Flags' | cut -c1-200
+            free -g | head -2
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Mimic, installed as users install it
+        run: |
+          # Linux programs are linked with the system's C compiler
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang > /dev/null
+          curl -fsSL https://mimic.codes/install.sh | sh
+          ~/.mimic/bin/mimic --version
+      - name: A program and a benchmark
+        run: |
+          export PATH="$HOME/.mimic/bin:$PATH"
+          cd "$RUNNER_TEMP" && mimic create hello && cd hello && mimic run
+          printf 'module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn main() { print(fib(35)) }\n' > src/main.mim
+          mimic build
+          exe=$(mimic build --emit-json | python3 -c 'import json,sys; print(json.load(sys.stdin)["artifacts"][0]["path"])')
+          TIMEFORMAT='%R s'
+          { echo -n "- fib(35), one core: "; { time MIMIC_THREADS=1 "$exe" > /dev/null; } 2>&1; } | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo -n "- fib(35), all cores: "; { time "$exe" > /dev/null; } 2>&1; } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  done:
+    needs: [machine, work]
+    if: always()
+    uses: ./.github/workflows/aws-runner.yml
+    with:
+      action: stop
+      instance: ${{ needs.machine.outputs.instance }}
+    secrets: inherit
