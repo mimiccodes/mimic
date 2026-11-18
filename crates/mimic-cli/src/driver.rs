@@ -1125,29 +1125,59 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
         return Ok(obj);
     }
     // each runtime version gets its own directory: mimic_rt.c #includes mimic_net.c
-    let src_dir = dir.join(format!("src-{key:016x}"));
-    fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
-    // written atomically: other mimic processes may compile from here at the
-    // same time (the header lives beside the sources, one copy per version)
+    let src_dir = runtime_sources(&dir, key)?;
     let src = src_dir.join("mimic_rt.c");
-    mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_sched.c"), RUNTIME_SCHED_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_ui.c"), RUNTIME_UI_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_json.c"), RUNTIME_JSON_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_window.c"), RUNTIME_WINDOW_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_gpu.c"), RUNTIME_GPU_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("wepoll.c"), RUNTIME_WEPOLL_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
     let tmp = mimic_toolchain::jobs::temp_beside(&obj);
     let mut c = toolchain::cc(tc, target);
     c.args(&flags).arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
     fs::rename(&tmp, &obj).map_err(|e| e.to_string())?;
     Ok(obj)
+}
+
+/// The runtime's sources for one version, written once. A finished
+/// directory is never written again: replacing a file other builds are
+/// compiling from frees its inode, the next file written can get the same
+/// number, and the C compiler, which knows files by inode, then takes one
+/// file for another (`redefinition of 'MIM_UI_JS'`: mimic_json.c read as
+/// mimic_ui.c). So the files go into a private directory, which is moved
+/// into place whole; a build that finds the shared one complete uses it,
+/// and one that cannot move its own there (another build was first, or the
+/// shared one lost files to a cleaner) compiles from its own.
+fn runtime_sources(dir: &Path, key: u64) -> Result<PathBuf, String> {
+    const MARKER: &str = ".complete";
+    let shared = dir.join(format!("sources-{key:016x}"));
+    if mimic_toolchain::jobs::intact(&shared, MARKER) {
+        return Ok(shared);
+    }
+    let own = mimic_toolchain::jobs::temp_beside(&shared);
+    fs::create_dir_all(&own).map_err(|e| format!("cannot create {}: {e}", own.display()))?;
+    for (name, text) in [
+        ("mimic_rt.c", RUNTIME_C),
+        ("mimic_net.c", RUNTIME_NET_C),
+        ("mimic_std.c", RUNTIME_STD_C),
+        ("mimic_sched.c", RUNTIME_SCHED_C),
+        ("mimic_io.c", RUNTIME_IO_C),
+        ("mimic_ui.c", RUNTIME_UI_C),
+        ("mimic_socket.c", RUNTIME_SOCKET_C),
+        ("mimic_json.c", RUNTIME_JSON_C),
+        ("mimic_window.c", RUNTIME_WINDOW_C),
+        ("mimic_gpu.c", RUNTIME_GPU_C),
+        ("wepoll.c", RUNTIME_WEPOLL_C),
+        ("mimic_rt.h", RUNTIME_H),
+    ] {
+        let path = own.join(name);
+        fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    mimic_toolchain::jobs::seal(&own, MARKER)?;
+    if fs::rename(&own, &shared).is_ok() {
+        return Ok(shared);
+    }
+    if mimic_toolchain::jobs::intact(&shared, MARKER) {
+        let _ = fs::remove_dir_all(&own);
+        return Ok(shared);
+    }
+    Ok(own)
 }
 
 pub struct Artifact {
