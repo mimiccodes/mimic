@@ -397,7 +397,18 @@ def tolerance(name: str, key: str) -> tuple[float, bool]:
         spread = json.loads(f.read_text(encoding="utf-8"))["benchmarks"][name][key]["spread"]
     except (OSError, ValueError, KeyError):
         return DEFAULT, True
-    return min(HIGHEST, max(LOWEST, 2 * spread)), 2 * spread <= HIGHEST
+    return min(HIGHEST, max(lowest(key), 2 * spread)), 2 * spread <= HIGHEST
+
+
+def lowest(key: str) -> float:
+    """The least tolerance for a measurement. On all cores of the shared
+    macOS runners (three cores, other jobs beside), a run-to-run swing of 10
+    to 16% came and went on a different benchmark each time: six false
+    alarms in one week (2026-11-18/19), where eight rounds on one machine
+    measured 1 to 5%. The two real slowdowns the gate caught there in that
+    week showed on one core (vm +11%, diff +18%). So all cores on macOS
+    allow at least 15%."""
+    return 0.15 if key == "mimic-all" and platform_id() == "macos-arm64" else LOWEST
 
 
 def build_with(compiler: Path, src: Path, env: dict, side: str) -> Path:
