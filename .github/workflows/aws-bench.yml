@@ -1,0 +1,145 @@
+# The benchmark suite on a dedicated AWS machine and on GitHub's standard
+# Linux runner at the same time, with the same compiler (a published Mimic,
+# installed as users install it), side by side: what a dedicated machine
+# gives over a shared one. Both runs go into the benchmark history (the
+# bench branch); the AWS machine's usage and cost into the ledger. By hand.
+name: aws-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: "EC2 type (c7a.4xlarge: 16 real AMD cores; c8g.4xlarge: 16 Graviton4 cores, arch arm64)"
+        default: c7a.4xlarge
+      arch:
+        description: "x86_64 or arm64"
+        default: x86_64
+      spot:
+        type: boolean
+        default: true
+      mimic:
+        description: "the Mimic release to measure"
+        default: 0.4.0-preview.1
+      runs:
+        description: "timed runs per benchmark (best of)"
+        default: "3"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  machine:
+    uses: ./.github/workflows/aws-runner.yml
+    with:
+      action: start
+      instance_type: ${{ inputs.instance_type }}
+      arch: ${{ inputs.arch }}
+      spot: ${{ inputs.spot }}
+      max_minutes: 120
+    secrets: inherit
+
+  suite:
+    needs: machine
+    strategy:
+      fail-fast: false
+      matrix:
+        where: [aws, github]
+    name: suite (${{ matrix.where }})
+    runs-on: ${{ matrix.where == 'aws' && fromJSON(format('["self-hosted","{0}"]', needs.machine.outputs.label)) || 'ubuntu-24.04' }}
+    timeout-minutes: 100
+    permissions:
+      contents: write
+    env:
+      MACHINE: ${{ matrix.where == 'aws' && format('aws-{0}', inputs.instance_type) || 'github-linux-x86_64' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The machine
+        run: |
+          {
+            echo "### $MACHINE: $(nproc) cores"
+            lscpu | sed -n 's/^Model name: *//p'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Mimic, Rust and the crates
+        env:
+          VERSION: ${{ inputs.mimic }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang > /dev/null
+          curl -fsSL https://mimic.codes/install.sh | sh -s -- --version "$VERSION"
+          if ! command -v cargo > /dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal > /dev/null
+          fi
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch -q); done
+          ~/.mimic/bin/mimic --version
+
+      - name: The suite
+        run: |
+          MIMIC_EXE="$HOME/.mimic/bin/mimic" python3 bench/run.py --runs ${{ inputs.runs }} --history '' --json result.json
+          cat bench/results.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: suite-${{ matrix.where }}
+          path: |
+            result.json
+            bench/results.md
+
+      - uses: actions/checkout@v4
+        with:
+          ref: bench
+          path: history
+      - name: Into the history
+        run: |
+          set -euo pipefail
+          MIMIC_EXE="$HOME/.mimic/bin/mimic" python3 bench/record.py result.json bench/results.md history "$MACHINE"
+          cd history
+          git config user.name "mimic-ci"
+          git config user.email "mimic-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Run $GITHUB_RUN_ID on $MACHINE (Mimic ${{ inputs.mimic }})"
+          for i in 1 2 3 4 5; do git push -q origin HEAD:bench && break; git pull -q --rebase origin bench; sleep $((i * 5)); done
+
+  done:
+    needs: [machine, suite]
+    if: always()
+    uses: ./.github/workflows/aws-runner.yml
+    with:
+      action: stop
+      instance: ${{ needs.machine.outputs.instance }}
+      purpose: suite against GitHub's runner
+    secrets: inherit
+
+  compare:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Side by side
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          def load(w):
+              try:
+                  return json.load(open(f"suite-{w}/result.json"))
+              except OSError:
+                  return None
+          a, g = load("aws"), load("github")
+          if not a or not g:
+              print("One side has no results; nothing to compare.")
+              raise SystemExit
+          print(f"## {a['cpu']} ({a['cores']} cores) against GitHub's {g['cpu']} ({g['cores']} cores)\n")
+          print("Time on the AWS machine as a share of the time on GitHub's runner (below 1 is faster on AWS), and each one's Mimic/C ratio.\n")
+          print("| Benchmark | C | Mimic, 1 core | Mimic, all cores | Mimic/C on AWS | Mimic/C on GitHub |")
+          print("|---|---|---|---|---|---|")
+          share = lambda k, x, y: f"{x[k] / y[k]:.2f}" if k in x and k in y and y[k] else "—"
+          ratio = lambda t: f"{t['mimic'] / t['c']:.2f}×" if "mimic" in t and t.get("c") else "—"
+          for name in sorted(set(a["results"]) & set(g["results"])):
+              x, y = a["results"][name], g["results"][name]
+              print(f"| {name} | {share('c', x, y)} | {share('mimic', x, y)} | {share('mimic-all', x, y)} | {ratio(x)} | {ratio(y)} |")
+          PY

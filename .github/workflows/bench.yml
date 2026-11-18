@@ -195,6 +195,14 @@ jobs:
           py="$(command -v python3 || command -v python)"
           me=target/release/mimic; [ "$RUNNER_OS" = Windows ] && me=$(cygpath -w "$PWD/target/release/mimic.exe")
           cp bench/gate.md gate-real.md
+          # (a compiler from before the switch existed, such as a stable
+          # release's on main, cannot build without its optimizer: skip)
+          built=target/release/mimic; [ -f target/release/mimic.exe ] && built=target/release/mimic.exe
+          if ! grep -qa MIMIC_DEBUG_DISABLE "$built"; then
+            echo "::notice::this compiler has no MIMIC_DEBUG_DISABLE (older than 0.4.0): the self-check is skipped"
+            echo "- self-check skipped: this compiler is older than the switch it needs" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if "$py" bench/run.py fib mandelbrot sum_of_squares --runs 3 --gate "$me" --inject > injected.txt; then
             cat injected.txt
             echo "::error::a build without the optimizer passed the speed gate"
