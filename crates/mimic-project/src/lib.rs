@@ -430,7 +430,7 @@ pub fn scaffold(dir: &Path, name: &str, bin: bool, lib: bool) -> Result<Vec<Path
         put("src/lib.mim", lib_template(name))?;
     }
     put(".gitignore", "/target\n".into())?;
-    put("README.md", format!("# {name}\n\nA [Mimic](https://github.com/harcorp/mimic) project.\n"))?;
+    put("README.md", format!("# {name}\n\nA [Mimic](https://mimic.codes) project.\n"))?;
     Ok(written)
 }
 
