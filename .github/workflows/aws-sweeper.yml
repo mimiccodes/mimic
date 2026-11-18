@@ -9,7 +9,9 @@ name: aws-sweeper
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # off the hour and quarter-hours: GitHub drops scheduled runs at the
+    # busiest minutes, and "*/15" never started on its own
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
