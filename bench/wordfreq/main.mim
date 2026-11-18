@@ -1,0 +1,45 @@
+module main
+
+// wordfreq: about 1,000,000 generated words (syllables chosen from a
+// skewed draw of 6,000 word numbers, from splitmix64) with spaces, commas,
+// full stops and line breaks, as bytes. The words are found where letters
+// start and stop (array operations over the whole text), each hashed with
+// FNV-1a (in parallel, `¨`), the hashes sorted and the runs of equal ones
+// counted. Prints the words, the distinct words, and how often the most
+// common one occurs. The reference (bench/wordfreq/ref.py) uses Python's
+// re and Counter.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn spelled(v: i64, cons: [str], vowels: [str]) -> str {
+    join(⍳ (1 + v % 4) ¨ (k => cons[(v >> (3 * k + 2)) % 16] + vowels[(v >> (3 * k + 7)) % 5]), "")
+}
+
+fn separator(i: i64) -> str {
+    if i % 15 == 14 { "\n" } else if i % 13 == 12 { ". " } else if i % 13 == 5 { ", " } else { " " }
+}
+
+// FNV-1a over the bytes from..to
+fn fnv(t: [i64], from: i64, to: i64, h: i64) -> i64 {
+    if from == to { h } else { fnv(t, from + 1, to, (h ^ t[from]) * 0x100000001B3) }
+}
+
+fn main() {
+    let cons = ["b" "c" "d" "f" "g" "h" "k" "l" "m" "n" "p" "r" "s" "t" "v" "z"]
+    let vowels = ["a" "e" "i" "o" "u"]
+    let t = bytes::of_text(join(⍳ 1000000 ¨ (i => spelled(mix(2 * i) % (1 + mix(2 * i + 1) % 6000), cons, vowels) + separator(i)), "")) ¨ (b => b + 0)
+    let n = ≢ t
+    let letter = ⍳ n ¨ (i => if t[i] >= 97 and t[i] <= 122 { 1 } else { 0 })
+    let starts = ⍳ n ⌿ (⍳ n ¨ (i => letter[i] == 1 and (i == 0 or letter[i - 1] == 0)))
+    let ends = ⍳ n ⌿ (⍳ n ¨ (i => letter[i] == 1 and (i == n - 1 or letter[i + 1] == 0)))
+    let hashes = sort(⍳ ≢ starts ¨ (w => fnv(t, starts[w], ends[w] + 1, 0xCBF29CE484222325)))
+    let m = ≢ hashes
+    let firsts = ⍳ m ⌿ (⍳ m ¨ (i => i == 0 or hashes[i] != hashes[i - 1]))
+    let runs = ⍳ ≢ firsts ¨ (r => (if r + 1 == ≢ firsts { m } else { firsts[r + 1] }) - firsts[r])
+    print("{m} {≢ firsts} {⌈/ runs}")
+}

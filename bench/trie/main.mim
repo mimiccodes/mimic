@@ -1,0 +1,63 @@
+module main
+
+// trie: 200,000 generated words (4 to 14 letters of a 4-letter alphabet,
+// from splitmix64) put one letter at a time into a trie stored as flat
+// arrays (four child slots per node, and whether a word ends there), then
+// 200,000 other words looked up, half from the same range; the lookups are
+// independent, so `¨` runs them in parallel. Prints the trie's nodes, the
+// lookups found as words and those found as prefixes. The reference
+// (bench/trie/ref.py) uses Python's sets.
+
+// building: word w, its letter k, the node reached, the nodes so far
+type T = { w: i64, k: i64, cur: i64, n: i64, kids: [i64], ends: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn word(k: i64) -> [i64] {
+    ⍳ (4 + mix(k * 31) % 11) ¨ (i => mix(k * 1000 + i) % 4)
+}
+
+// a new node in slot `at`, or the child already there (the arrays change
+// here, not where they are read)
+fn grow(t: T, at: i64, k: i64) -> T {
+    { t with k: k, n: t.n + 1, cur: t.n, kids: put(t.kids, at, t.n) }
+}
+
+fn follow(t: T, child: i64, k: i64) -> T {
+    { t with k: k, cur: child }
+}
+
+fn mark(t: T) -> T {
+    { t with w: t.w + 1, k: 0, cur: 0, ends: put(t.ends, t.cur, 1) }
+}
+
+fn insert(t: T, words: [[i64]]) -> T {
+    let w = words[t.w]
+    let k = t.k
+    if k == ≢ w { mark(t) }
+    else {
+        let at = t.cur * 4 + w[k]
+        let child = t.kids[at]
+        if child < 0 { grow(t, at, k + 1) } else { follow(t, child, k + 1) }
+    }
+}
+
+// the node a word leads to, or -1
+fn walk(kids: [i64], w: [i64], k: i64, node: i64) -> i64 {
+    if node < 0 or k == ≢ w { node } else { walk(kids, w, k + 1, kids[node * 4 + w[k]]) }
+}
+
+fn main() {
+    let words = ⍳ 200000 ¨ word
+    let size = 1 + +/ (words ¨ (w => ≢ w))
+    let t = T { w: 0, k: 0, cur: 0, n: 1, kids: ⍳ (size * 4) ¨ (_ => -1), ends: ⍳ size ¨ (_ => 0) } ▷ settle(s => insert(s, words), s => s.w == ≢ words)
+    let found = ⍳ 200000 ¨ (q => walk(t.kids, word(100000 + q), 0, 0))
+    let as_word = +/ (found ¨ (x => if x >= 0 { t.ends[x] } else { 0 }))
+    let as_prefix = +/ (found ¨ (x => if x >= 0 { 1 } else { 0 }))
+    print("{t.n} {as_word} {as_prefix}")
+}
