@@ -1,0 +1,37 @@
+# What building Mimic needs on a runner: Rust, the LLVM the llvm workflow
+# published, and tools/deps.sh. (bench.yml's jobs share it.)
+name: setup
+description: Rust, LLVM and Mimic's other build dependencies
+inputs:
+  platform:
+    description: linux-x86_64, macos-arm64 or windows-x86_64
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Rust
+      shell: bash
+      run: rustup update stable && rustup default stable
+
+    - name: LLVM (from the llvm workflow)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        deps="$HOME/.mimic/deps"
+        mkdir -p "$deps"
+        gh release download "$TAG" -p "llvm-$LLVM_VERSION-$PLATFORM.tar.xz" -D "$deps"
+        tar -xJf "$deps/llvm-$LLVM_VERSION-$PLATFORM.tar.xz" -C "$deps"
+        rm "$deps/llvm-$LLVM_VERSION-$PLATFORM.tar.xz"
+        if [ "$RUNNER_OS" = Windows ]; then
+          # Windows paths for what Rust reads (Git Bash's tools take the others)
+          echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
+          echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
+        else
+          ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
+        fi
+
+    - name: Other dependencies (tools/deps.sh)
+      shell: bash
+      run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
