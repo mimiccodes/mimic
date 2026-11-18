@@ -1,0 +1,21 @@
+module main
+
+// collatz: for every number below 3,000,000, the steps of its Collatz
+// sequence (n/2 when even, 3n+1 when odd) until it reaches 1. Numbers are
+// independent, so `¨` runs them in parallel; each is a recursion over
+// the number and its steps. Prints the number with the longest sequence (the
+// smallest, on a tie), its steps, and the sum of all steps. The reference
+// is bench/collatz/ref.py.
+
+// the steps from x to 1, given s so far
+fn steps(x: i64, s: i64) -> i64 {
+    if x <= 1 { s } else if x % 2 == 0 { steps(x div 2, s + 1) } else { steps(3 * x + 1, s + 1) }
+}
+
+fn main() {
+    let n = 3000000
+    let s = ⍳ n ¨ (i => steps(i + 1, 0))
+    let most = ⌈/ s
+    let at = ⍳ n ⌿ (s == most)
+    print("{at[0] + 1} {most} {+/ s}")
+}

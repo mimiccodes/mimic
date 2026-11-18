@@ -1,0 +1,31 @@
+module main
+
+// knapsack: the best value from 2,000 items (weights 1 to 1,000 and values
+// 1 to 10,000, from splitmix64) in a knapsack of capacity 100,000, each
+// item taken at most once, by the usual table: one row per item, where a
+// capacity's best is the best without the item or with it. A row's
+// capacities are independent, so `¨` computes each row in parallel; the
+// rows follow one another (`evolve`). Prints the best value and the best
+// at half the capacity. The reference is bench/knapsack/ref.py.
+
+type K = { i: i64, best: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the row after taking item k into account
+fn row(s: K) -> K {
+    let (w, v) = (1 + mix(2 * s.i) % 1000, 1 + mix(2 * s.i + 1) % 10000)
+    let prev = s.best
+    { s with i: s.i + 1, best: ⍳ (≢ prev) ¨ (c => if c >= w { prev[c] ⌈ (prev[c - w] + v) } else { prev[c] }) }
+}
+
+fn main() {
+    let (n, cap) = (2000, 100000)
+    let k = K { i: 0, best: ⍳ (cap + 1) ¨ (_ => 0) } ▷ evolve(n, row)
+    print("{k.best[cap]} {k.best[cap div 2]}")
+}

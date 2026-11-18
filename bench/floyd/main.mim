@@ -1,0 +1,43 @@
+module main
+
+// floyd: the shortest paths between all pairs of 800 nodes by
+// Floyd–Warshall. Each node has edges to 8 others (from splitmix64, weights
+// 1 to 1,000); the matrix is one list of 800×800 distances, "far" where
+// there is no path yet. Step k lets every path go through node k: the
+// pairs are independent, so `¨` updates them in parallel; the steps follow
+// one another (`evolve`). Prints the sum of the distances that exist, how
+// many pairs have no path, and the longest shortest path. The reference is
+// bench/floyd/ref.py (numpy).
+
+type F = { k: i64, d: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn far() -> i64 { 1000000000000 }
+
+// the weight of the edge i → j (0 to itself, far when there is none):
+// node i's 8 edges go to mix(8i + e) % n, weight 1 + mix(…) % 1000; of two
+// edges to one node the lighter counts
+fn edge(n: i64, i: i64, j: i64) -> i64 {
+    if i == j { 0 }
+    else {
+        ⍳ 8 ¨ (e => if mix(8 * i + e) % n == j { 1 + mix(1000000 + 8 * i + e) % 1000 } else { far() }) ▷ ⌊/
+    }
+}
+
+fn through(s: F, n: i64) -> F {
+    let (k, d) = (s.k, s.d)
+    { s with k: k + 1, d: ⍳ (n * n) ¨ (p => d[p] ⌊ (d[(p div n) * n + k] + d[k * n + p % n])) }
+}
+
+fn main() {
+    let n = 800
+    let f = F { k: 0, d: ⍳ (n * n) ¨ (p => edge(n, p div n, p % n)) } ▷ evolve(n, s => through(s, n))
+    let some = f.d ⌿ (f.d < far())
+    print("{+/ some} {(n * n) - ≢ some} {⌈/ some}")
+}
