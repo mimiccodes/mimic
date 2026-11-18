@@ -68,4 +68,5 @@ jobs:
     with:
       action: stop
       instance: ${{ needs.machine.outputs.instance }}
+      purpose: launcher test
     secrets: inherit

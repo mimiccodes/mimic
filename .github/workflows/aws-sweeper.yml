@@ -1,13 +1,15 @@
-# The last safety net for AWS machines (aws-runner.yml): every 30 minutes,
-# end any machine tagged Project=mimic-runner that has been running for
-# more than 3 hours. Each machine already ends itself after its job, after
-# its own time limit, and through the workflow's stop step; this catches
-# one that somehow did not. It can end only machines with that tag.
+# The last safety net for AWS machines (aws-runner.yml): every 15 minutes,
+# end any machine tagged Project=mimic-runner that is past its deadline
+# (its own time limit plus 10 minutes to boot, tagged at launch), or, with
+# no deadline, has run more than 3 hours. Each machine already ends itself
+# after its job and after its own time limit, and the workflow's stop step
+# ends it too; this catches one that somehow did not. It can end only
+# machines with that tag.
 name: aws-sweeper
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,26 +19,36 @@ permissions:
 jobs:
   sweep:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: End machines older than 3 hours
+      - name: End machines past their deadline
         run: |
           set -euo pipefail
-          cutoff=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%S)
-          old=$(aws ec2 describe-instances \
+          aws ec2 describe-instances \
             --filters Name=tag:Project,Values=mimic-runner Name=instance-state-name,Values=pending,running,stopping,stopped \
-            --query "Reservations[].Instances[?LaunchTime<='$cutoff'].InstanceId" --output text)
-          running=$(aws ec2 describe-instances \
-            --filters Name=tag:Project,Values=mimic-runner Name=instance-state-name,Values=pending,running \
-            --query 'length(Reservations[].Instances[])' --output text)
-          echo "mimic-runner machines running now: $running"
+            --query 'Reservations[].Instances[].{id:InstanceId,launched:LaunchTime,tags:Tags}' --output json > machines.json
+          old=$(python3 - <<'PY'
+          import json, time, datetime
+          now = time.time()
+          for m in json.load(open("machines.json")):
+              tags = {t["Key"]: t["Value"] for t in m.get("tags") or []}
+              launched = datetime.datetime.fromisoformat(m["launched"].replace("Z", "+00:00")).timestamp()
+              deadline = float(tags["Deadline"]) if tags.get("Deadline", "").isdigit() else launched + 3 * 3600
+              left = (deadline - now) / 60
+              print(f"{m['id']} {tags.get('Name', '?')}: {(now - launched) / 60:.0f} min old, "
+                    + (f"{left:.0f} min to its deadline" if left > 0 else "PAST its deadline"), file=__import__("sys").stderr)
+              if now > deadline:
+                  print(m["id"])
+          PY
+          )
           if [ -n "$old" ]; then
-            echo "::warning::ending machines older than 3 hours: $old"
+            echo "::warning::ending machines past their deadline: $old"
             aws ec2 terminate-instances --instance-ids $old --query 'TerminatingInstances[].[InstanceId,CurrentState.Name]' --output text
           else
-            echo "none older than 3 hours"
+            echo "nothing past its deadline"
           fi

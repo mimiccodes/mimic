@@ -61,6 +61,10 @@ on:
         description: "stop: the instance to end"
         type: string
         default: ""
+      purpose:
+        description: "stop: what the machine was for, for the spending ledger"
+        type: string
+        default: ""
     outputs:
       label:
         description: "the runner label to run the job on"
@@ -140,6 +144,9 @@ jobs:
           if [ "$SPOT" = true ]; then
             market=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
           fi
+          # past this moment (its own limit plus 10 minutes to boot) the
+          # sweeper ends it, should it somehow still run
+          deadline=$(( $(date -u +%s) + MAX * 60 + 600 ))
           instance=$(aws ec2 run-instances \
             --image-id "$ami" --instance-type "$TYPE" --count 1 \
             --security-group-ids "$SG" \
@@ -149,7 +156,7 @@ jobs:
             --user-data file://boot.sh \
             "${market[@]}" \
             --tag-specifications \
-              "ResourceType=instance,Tags=[{Key=Project,Value=mimic-runner},{Key=Name,Value=$label},{Key=Run,Value=$GITHUB_RUN_ID}]" \
+              "ResourceType=instance,Tags=[{Key=Project,Value=mimic-runner},{Key=Name,Value=$label},{Key=Run,Value=$GITHUB_RUN_ID},{Key=Deadline,Value=$deadline}]" \
               "ResourceType=volume,Tags=[{Key=Project,Value=mimic-runner},{Key=Run,Value=$GITHUB_RUN_ID}]" \
             --query 'Instances[0].InstanceId' --output text)
           rm boot.sh
@@ -159,8 +166,12 @@ jobs:
           echo "instance=$instance" >> "$GITHUB_OUTPUT"
 
   stop:
-    if: inputs.action == 'stop' && inputs.instance != ''
+    # runs even when the start step lost the machine's id: it then ends
+    # every machine this run started
+    if: inputs.action == 'stop'
     runs-on: ubuntu-24.04
+    env:
+      HAS_LEDGER: ${{ secrets.LEDGER_TOKEN != '' }}
     steps:
       - uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
@@ -169,19 +180,59 @@ jobs:
 
       # (usually it has ended itself already; terminating it again is harmless)
       - name: End the machine
+        id: end
         env:
           INSTANCE: ${{ inputs.instance }}
         run: |
-          aws ec2 terminate-instances --instance-ids "$INSTANCE" --query 'TerminatingInstances[0].CurrentState.Name' --output text
+          set -euo pipefail
+          ids="$INSTANCE"
+          if [ -z "$ids" ]; then
+            ids=$(aws ec2 describe-instances \
+              --filters Name=tag:Project,Values=mimic-runner "Name=tag:Run,Values=$GITHUB_RUN_ID" Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' --output text)
+            echo "no machine id was passed; this run's machines: ${ids:-none}"
+          fi
+          if [ -n "$ids" ]; then
+            aws ec2 terminate-instances --instance-ids $ids --query 'TerminatingInstances[].[InstanceId,CurrentState.Name]' --output text
+          fi
+          echo "instance=$(echo $ids | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # a registration whose machine never came up stays behind: remove it
+      - name: Remove this run's runner registrations
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+        run: |
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runners" --paginate \
+              --jq ".runners[] | select(.name | startswith(\"mimic-aws-$GITHUB_RUN_ID-\")) | .id"); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/runners/$id" && echo "removed runner $id" || true
+          done
+
+      # nothing this run started may still be running
+      - name: Check nothing is left running
+        if: always()
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5 6; do
+            left=$(aws ec2 describe-instances \
+              --filters Name=tag:Project,Values=mimic-runner "Name=tag:Run,Values=$GITHUB_RUN_ID" Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' --output text)
+            [ -z "$left" ] && { echo "nothing from this run is running"; exit 0; }
+            [ "$i" = 1 ] || aws ec2 terminate-instances --instance-ids $left > /dev/null
+            sleep 10
+          done
+          echo "::error::still running after ending them: $left (the sweeper will retry)"
+          exit 1
 
       # how long it ran (at most: until now) and about what it cost: spot at
       # the price AWS charged then (its price history), on-demand at an
       # approximate hourly price; the billed amount shows in the billing
       # console about a day later
       - name: Usage and cost
-        if: always()
+        id: usage
+        if: always() && steps.end.outputs.instance != ''
         env:
-          INSTANCE: ${{ inputs.instance }}
+          INSTANCE: ${{ steps.end.outputs.instance }}
         run: |
           set -euo pipefail
           read -r type az launched lifecycle state < <(aws ec2 describe-instances --instance-ids "$INSTANCE" \
@@ -206,3 +257,47 @@ jobs:
           line="- AWS machine \`$INSTANCE\` ($type, $kind): ran about $minutes min, now $state; estimated cost \$$cost (the billed amount shows in AWS billing about a day later)"
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "type=$type"
+            echo "lifecycle=$([ "$lifecycle" = spot ] && echo spot || echo on-demand)"
+            echo "minutes=$minutes"
+            echo "cost=$cost"
+          } >> "$GITHUB_OUTPUT"
+
+      # the private spending ledger (mimiccodes/mimic-ledger): one line per
+      # machine, and the month's balance sheet
+      - uses: actions/checkout@v4
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        with:
+          sparse-checkout: tools/ledger.py
+          sparse-checkout-cone-mode: false
+          path: mimic
+      - uses: actions/checkout@v4
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        with:
+          repository: mimiccodes/mimic-ledger
+          token: ${{ secrets.LEDGER_TOKEN }}
+          path: ledger
+      - name: Into the ledger
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        env:
+          INSTANCE: ${{ steps.end.outputs.instance }}
+          PURPOSE: ${{ inputs.purpose || github.workflow }}
+          TYPE: ${{ steps.usage.outputs.type }}
+          LIFECYCLE: ${{ steps.usage.outputs.lifecycle }}
+          MINUTES: ${{ steps.usage.outputs.minutes }}
+          COST: ${{ steps.usage.outputs.cost }}
+        run: |
+          set -euo pipefail
+          python3 mimic/tools/ledger.py ledger run "$(date -u +%Y-%m-%d)" "$GITHUB_RUN_ID" "$GITHUB_WORKFLOW" "$PURPOSE" "$INSTANCE" "$TYPE" "$LIFECYCLE" "$MINUTES" "$COST"
+          cd ledger
+          git config user.name "mimic-ci"
+          git config user.email "mimic-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "$TYPE ($LIFECYCLE), $MINUTES min, about \$$COST: $PURPOSE (run $GITHUB_RUN_ID)"
+          # other machines may finish at the same time: rebase and retry
+          for i in 1 2 3 4 5; do
+            git push -q && break
+            git pull -q --rebase || { git rebase --abort; git reset -q --hard origin/main; python3 ../mimic/tools/ledger.py . run "$(date -u +%Y-%m-%d)" "$GITHUB_RUN_ID" "$GITHUB_WORKFLOW" "$PURPOSE" "$INSTANCE" "$TYPE" "$LIFECYCLE" "$MINUTES" "$COST"; git add -A; git commit -q -m "$TYPE ($LIFECYCLE), $MINUTES min: $PURPOSE (run $GITHUB_RUN_ID)"; }
+            sleep $((i * 3))
+          done

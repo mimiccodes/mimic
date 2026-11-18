@@ -243,14 +243,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=${INPUT_VERSION:-${TAG#v}}
+          # a release is made as a draft, gets its files, and only then is
+          # published: the install scripts never see a release without them
           if [ "$TAG" = nightly ]; then
             # one nightly at a time: the last one goes, tag included
             gh release delete nightly --cleanup-tag -y 2>/dev/null || true
-            gh release create nightly --target "$REF" --prerelease --title "Mimic nightly $VERSION" --notes-file notes.md
+            gh release create nightly --draft --target "$REF" --prerelease --title "Mimic nightly $VERSION" --notes-file notes.md
           elif ! gh release view "$TAG" >/dev/null 2>&1; then
             case "$TAG" in
-            *-preview.*) gh release create "$TAG" --title "Mimic $VERSION" --notes-file notes.md --verify-tag --prerelease ;;
-            *) gh release create "$TAG" --title "Mimic $VERSION" --notes-file notes.md --verify-tag ;;
+            *-preview.*) gh release create "$TAG" --draft --title "Mimic $VERSION" --notes-file notes.md --verify-tag --prerelease ;;
+            *) gh release create "$TAG" --draft --title "Mimic $VERSION" --notes-file notes.md --verify-tag ;;
             esac
           fi
           gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false
