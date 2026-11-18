@@ -20,7 +20,7 @@ tools/gaps.sh                  # the known gaps (docs/gaps.md), each checked aga
 
 ## Making a change
 
-Work happens on `dev`; `main` holds releases only (see [docs/versions.md](docs/versions.md#how-a-version-is-made)).
+Work happens on `dev`; `main` holds releases only, and CI changes between releases (see [docs/versions.md](docs/versions.md#how-a-version-is-made)). Pull requests merge once their required checks pass; a release reaches users only when the owner approves its tag.
 
 1. Branch from `dev`: `feat/0.4.5-grade` for a step of the plan, `fix/…` for a bug, `docs/…` for writing.
 2. Open a pull request into `dev`. CI builds and tests it on Linux, macOS and Windows; it is merged, squashed into one commit, once CI passes.
