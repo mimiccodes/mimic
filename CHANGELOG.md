@@ -4,7 +4,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
-Stage 0.4.0, the measuring stick, so far (0.4.0-preview.1): a benchmark corpus of everyday algorithms, each in Mimic, C and Rust; the machine's limits; and a speed gate that fails CI on a slowdown. The corpus already found two bugs and the gaps the rest of stage 0.4 closes.
+Stage 0.4.0, the measuring stick, so far (0.4.0-preview.2): a benchmark corpus of 54 everyday algorithms (hashing, parsing, graphs, text, interpreters, compression, numbers and simulations), each in Mimic, C and Rust; the machine's limits; and a speed gate that fails CI on a slowdown. The corpus already found bugs and the gaps the rest of stage 0.4 closes.
 
 ### Changed
 - **The speed gate times short benchmarks longer:** each side runs until it has run for a second (at most 30 runs) before the best time is taken. Benchmarks of 50–130 ms raised false alarms of 6–22% with the best of 3.
