@@ -55,6 +55,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Interpreters | `brainf` (a Brainf**k interpreter, 15.8 million instructions), `vm` (a stack bytecode VM, 7.6 million instructions) |
 | Compression and encoding | `rle` (8 MiB, run-length), `base64` (6 MiB, encode and decode), `lz77` (512 KiB, greedy LZ77 and its decoder; the reference in `bench/lz77/ref.py`), `huffman` (256 KiB, canonical codes, bit packing and decoding), `bwt` (256 KiB in 8 KiB blocks: the Burrows-Wheeler transform by prefix doubling, move-to-front and the inverse) |
 | Numbers and simulations | `sieve` (primes below 100,000,000, segmented), `montecarlo` (π from 200,000,000 points), `blackscholes` (20,000,000 options), `heat` (a 1,024² plate, 400 steps), `life` (Game of Life, 1,024², 150 generations), `fft` (a polynomial product by radix-2 FFT, 2^20 points), `kmeans` (1,000,000 points, 16 clusters, 25 rounds), `bigmul` (two 120,000-digit numbers, schoolbook); results in whole numbers or rounded per element, so they do not depend on the order of a parallel sum |
+| Puzzles and tables | `nqueens` (15 queens, bit masks, 2,279,184 solutions), `knapsack` (0/1, 2,000 items, capacity 100,000, a row per item), `floyd` (Floyd–Warshall, 800 nodes; numpy is the reference), `collatz` (every number below 3,000,000) |
 
 ## Building the suite, step by step
 

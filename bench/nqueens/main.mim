@@ -1,0 +1,37 @@
+module main
+
+// nqueens: the number of ways to put 15 queens on a 15×15 board so that
+// none attacks another, by backtracking over rows with bit masks of the
+// columns and both diagonals taken. The first two rows' choices are
+// independent, so `¨` counts their subtrees in parallel. Prints the count.
+// The reference is bench/nqueens/ref.py.
+
+// the solutions below a row, given the columns and diagonals taken
+// (`free` is the squares of this row still open; each step takes the
+// lowest)
+fn place(n: i64, cols: i64, left: i64, right: i64, free: i64) -> i64 {
+    if free == 0 { 0 }
+    else {
+        let bit = free & (0 - free)
+        let rest = free ^ bit
+        let below = solve(n, cols | bit, (left | bit) << 1, (right | bit) >> 1)
+        below + place(n, cols, left, right, rest)
+    }
+}
+
+fn solve(n: i64, cols: i64, left: i64, right: i64) -> i64 {
+    let all = (1 << n) - 1
+    if cols == all { 1 } else { place(n, cols, left, right, all & ~(cols | left | right)) }
+}
+
+fn main() {
+    let n = 15
+    // the first two rows: queens in columns a and b (b not attacking a)
+    let starts = ⍳ (n * n) ¨ (s => {
+        let (a, b) = (s div n, s % n)
+        let (ca, cb) = (1 << a, 1 << b)
+        if b == a or b == a - 1 or b == a + 1 { 0 }
+        else { solve(n, ca | cb, ((ca << 1) | cb) << 1, ((ca >> 1) | cb) >> 1) }
+    })
+    print(starts ▷ +/)
+}
