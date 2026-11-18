@@ -30,6 +30,10 @@ on:
         description: "Instead: run everything this many times unchanged and record how much each ratio to C varies (0: a normal run)"
         type: number
         default: 0
+      tag:
+        description: "Measure this release tag (e.g. v0.4.0) and record it as that version's phase"
+        type: string
+        default: ""
   schedule:
     - cron: "0 4 * * *"
 
@@ -64,7 +68,7 @@ jobs:
   # the compiler the change goes into, once per system, cached by commit
   before:
     needs: scope
-    if: needs.scope.outputs.run == 'true' && !inputs.noise
+    if: needs.scope.outputs.run == 'true' && !(inputs.noise > 0)
     strategy:
       fail-fast: false
       matrix:
@@ -144,8 +148,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the nightly run measures dev, where the work is
-          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+          # the nightly run measures dev, where the work is; by hand, a tag
+          ref: ${{ inputs.tag || (github.event_name == 'schedule' && 'dev' || '') }}
 
       - uses: ./.github/actions/setup
         with:
@@ -186,21 +190,21 @@ jobs:
 
       # the whole suite, against C and Rust: nightly and by hand
       - name: Benchmarks
-        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !(inputs.noise > 0) && github.event_name != 'pull_request' }}
         run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl --json result.json'
 
       # the run into the benchmark history (the bench branch); a tag's run is
       # also that version's phase
       - uses: actions/checkout@v4
-        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !(inputs.noise > 0) && github.event_name != 'pull_request' }}
         with:
           ref: bench
           path: history
       - name: Into the history
-        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !(inputs.noise > 0) && github.event_name != 'pull_request' }}
         env:
           MACHINE: github-${{ matrix.platform }}
-          PHASE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          PHASE: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || '' }}
         run: |
           set -euo pipefail
           py="$(command -v python3 || command -v python)"
@@ -215,7 +219,7 @@ jobs:
 
       # the compiler before the change, from the before job (built meanwhile)
       - name: The compiler before the change
-        if: ${{ !inputs.noise }}
+        if: ${{ !(inputs.noise > 0) }}
         run: |
           for i in $(seq 1 60); do
             gh run view "$GITHUB_RUN_ID" --json jobs --jq '.jobs[] | select(.name == "before (${{ matrix.platform }})") | .status' | grep -q completed && break
@@ -224,12 +228,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@v4
-        if: ${{ !inputs.noise }}
+        if: ${{ !(inputs.noise > 0) }}
         with:
           name: before-${{ matrix.platform }}
           path: ${{ runner.temp }}/before
       - name: Where it is
-        if: ${{ !inputs.noise }}
+        if: ${{ !(inputs.noise > 0) }}
         run: |
           exe=mimic; [ "$RUNNER_OS" = Windows ] && exe=mimic.exe
           chmod +x "$RUNNER_TEMP/before/$exe"
@@ -237,7 +241,7 @@ jobs:
 
       - name: The speed gate
         id: gate
-        if: ${{ !inputs.noise }}
+        if: ${{ !(inputs.noise > 0) }}
         run: |
           before="$BEFORE"
           [ "$RUNNER_OS" = Windows ] && before=$(cygpath -w "$BEFORE")
@@ -247,7 +251,7 @@ jobs:
       # LLVM's optimizer, against itself (pull requests into main, nightly)
       - name: The gate catches a slowdown
         id: self
-        if: ${{ env.FIRST == 'true' && !inputs.noise && (github.event_name != 'pull_request' || github.base_ref == 'main') }}
+        if: ${{ env.FIRST == 'true' && !(inputs.noise > 0) && (github.event_name != 'pull_request' || github.base_ref == 'main') }}
         run: |
           py="$(command -v python3 || command -v python)"
           me=target/release/mimic; [ "$RUNNER_OS" = Windows ] && me=$(cygpath -w "$PWD/target/release/mimic.exe")
@@ -271,7 +275,7 @@ jobs:
 
       # the noise of this runner, for the speed gate's tolerances (unsplit)
       - name: Noise
-        if: ${{ env.FIRST == 'true' && inputs.noise }}
+        if: ${{ env.FIRST == 'true' && inputs.noise > 0 }}
         run: |
           "$(command -v python3 || command -v python)" bench/run.py --runs 3 --noise ${{ inputs.noise }} | tee noise.txt
           { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -288,7 +292,7 @@ jobs:
         run: |
           mkdir -p verdict
           ok=fail
-          if [ "${{ inputs.noise && 'noise' || '' }}" = noise ] || { [ "${{ steps.gate.outcome }}" = success ] && [ "${{ steps.self.outcome }}" != failure ]; }; then ok=pass; fi
+          if [ "${{ inputs.noise > 0 && 'noise' || '' }}" = noise ] || { [ "${{ steps.gate.outcome }}" = success ] && [ "${{ steps.self.outcome }}" != failure ]; }; then ok=pass; fi
           echo "$ok" > verdict/${{ matrix.shard }}
           [ -f bench/gate.md ] && cp bench/gate.md verdict/gate-${{ matrix.shard }}.md || true
           echo "verdict: $ok"
