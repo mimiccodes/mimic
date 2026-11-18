@@ -1,0 +1,45 @@
+module main
+
+// levenshtein: the edit distance of 20,000 pairs of generated DNA-like
+// strings (30 to 60 letters of "acgt", each from splitmix64), by the usual
+// dynamic program, one row after another. Pairs are independent, so `¨`
+// runs them in parallel; within a pair, named step functions keep each row
+// growing in place. Prints the sum of the distances and the largest. The
+// reference is bench/levenshtein/ref.py.
+
+type Row = { j: i64, cur: [i64] }
+type Grid = { i: i64, prev: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn word(k: i64) -> [i64] {
+    ⍳ (30 + mix(k * 1000) % 31) ¨ (i => mix(k * 1000 + 1 + i) % 4)
+}
+
+// one cell of the row for letter `x` of the first string
+fn cell(r: Row, prev: [i64], x: i64, b: [i64]) -> Row {
+    let j = r.j
+    let v = (prev[j] + 1) ⌊ (r.cur[j - 1] + 1) ⌊ (prev[j - 1] + (if x == b[j - 1] { 0 } else { 1 }))
+    { r with j: j + 1, cur: push(r.cur, v) }
+}
+
+fn row(g: Grid, a: [i64], b: [i64]) -> Grid {
+    let x = a[g.i]
+    let r = Row { j: 1, cur: [g.i + 1] } ▷ settle(s => cell(s, g.prev, x, b), s => s.j > ≢ b)
+    { g with i: g.i + 1, prev: r.cur }
+}
+
+fn distance(a: [i64], b: [i64]) -> i64 {
+    let g = Grid { i: 0, prev: ⍳ (≢ b + 1) } ▷ settle(s => row(s, a, b), s => s.i == ≢ a)
+    g.prev[≢ b]
+}
+
+fn main() {
+    let d = ⍳ 20000 ¨ (p => distance(word(2 * p), word(2 * p + 1)))
+    print("{+/ d} {⌈/ d}")
+}

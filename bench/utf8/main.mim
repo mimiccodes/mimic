@@ -1,0 +1,69 @@
+module main
+
+// utf8: 20,000 generated documents of 50 to 300 characters (ASCII, 2-, 3-
+// and 4-byte ones, from splitmix64), encoded as UTF-8 and validated by a
+// strict state machine (RFC 3629: no overlong forms, no surrogates,
+// nothing past U+10FFFF), one byte at a time. Every fifth document has one
+// byte replaced by 0xFF; the one after each loses its last byte.
+// Documents are independent, so `¨` checks them in parallel. Prints the
+// valid documents, their characters, and all the bytes checked. The
+// reference (bench/utf8/ref.py) is Python's strict decoder.
+
+// state: how many continuation bytes are still needed, the range the
+// next one must be in, and the characters so far
+type V = { i: i64, need: i64, lo: i64, hi: i64, chars: i64, ok: bool }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn char(r: i64) -> i64 {
+    let (kind, v) = (r % 10, r >> 8)
+    if kind < 6 { 0x20 + v % 95 }
+    else if kind < 8 { 0xA0 + v % (0x800 - 0xA0) }
+    else if kind < 9 {
+        let c = 0x800 + v % (0x10000 - 0x800)
+        if c >= 0xD800 and c <= 0xDFFF { c + 0x800 } else { c }
+    } else { 0x10000 + v % 0x100000 }
+}
+
+fn encode(c: i64) -> [i64] {
+    if c < 0x80 { [c] }
+    else if c < 0x800 { [0xC0 | c >> 6, 0x80 | c & 63] }
+    else if c < 0x10000 { [0xE0 | c >> 12, 0x80 | c >> 6 & 63, 0x80 | c & 63] }
+    else { [0xF0 | c >> 18, 0x80 | c >> 12 & 63, 0x80 | c >> 6 & 63, 0x80 | c & 63] }
+}
+
+fn step(v: V, b: [i64]) -> V {
+    let x = b[v.i]
+    if v.need > 0 {
+        if x < v.lo or x > v.hi { { v with ok: false } }
+        else { { v with i: v.i + 1, need: v.need - 1, lo: 0x80, hi: 0xBF, chars: v.chars + (if v.need == 1 { 1 } else { 0 }) } }
+    }
+    else if x < 0x80 { { v with i: v.i + 1, chars: v.chars + 1 } }
+    else if x >= 0xC2 and x <= 0xDF { { v with i: v.i + 1, need: 1, lo: 0x80, hi: 0xBF } }
+    else if x == 0xE0 { { v with i: v.i + 1, need: 2, lo: 0xA0, hi: 0xBF } }
+    else if x == 0xED { { v with i: v.i + 1, need: 2, lo: 0x80, hi: 0x9F } }
+    else if x >= 0xE1 and x <= 0xEF { { v with i: v.i + 1, need: 2, lo: 0x80, hi: 0xBF } }
+    else if x == 0xF0 { { v with i: v.i + 1, need: 3, lo: 0x90, hi: 0xBF } }
+    else if x >= 0xF1 and x <= 0xF3 { { v with i: v.i + 1, need: 3, lo: 0x80, hi: 0xBF } }
+    else if x == 0xF4 { { v with i: v.i + 1, need: 3, lo: 0x80, hi: 0x8F } }
+    else { { v with ok: false } }
+}
+
+// [1 if valid, characters, bytes]
+fn document(d: i64) -> [i64] {
+    let full = flatten(⍳ (50 + mix(d * 7777) % 251) ¨ (i => encode(char(mix(d * 100000 + i)))))
+    let b = if d % 5 == 0 { put(full, mix(d * 31) % ≢ full, 0xFF) } else if d % 5 == 1 { full ↓ ¯1 } else { full }
+    let v = V { i: 0, need: 0, lo: 0x80, hi: 0xBF, chars: 0, ok: true } ▷ settle(s => step(s, b), s => s.i == ≢ b or not s.ok)
+    let valid = v.ok and v.need == 0
+    [(if valid { 1 } else { 0 }) (if valid { v.chars } else { 0 }) (≢ b)]
+}
+
+fn main() {
+    let r = ⍳ 20000 ¨ document
+    print("{+/ (r ¨ (x => x[0]))} {+/ (r ¨ (x => x[1]))} {+/ (r ¨ (x => x[2]))}")
+}
