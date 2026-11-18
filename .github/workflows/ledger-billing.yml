@@ -1,0 +1,57 @@
+# What AWS actually billed, into the private spending ledger
+# (mimiccodes/mimic-ledger): every day, the last three days' costs by
+# service from Cost Explorer (they settle over a day or so), and the
+# month's balance sheet rewritten. One Cost Explorer query a day (AWS
+# charges $0.01 each). The role may only read costs (its read-costs
+# policy).
+name: ledger-billing
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  billing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/ledger.py
+          sparse-checkout-cone-mode: false
+          path: mimic
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: The last three days, by service
+        run: |
+          aws ce get-cost-and-usage \
+            --time-period "Start=$(date -u -d '3 days ago' +%Y-%m-%d),End=$(date -u +%Y-%m-%d)" \
+            --granularity DAILY --metrics UnblendedCost \
+            --group-by Type=DIMENSION,Key=SERVICE > costs.json
+          python3 -c "import json; r=json.load(open('costs.json'))['ResultsByTime']; [print(d['TimePeriod']['Start'], round(sum(float(g['Metrics']['UnblendedCost']['Amount']) for g in d['Groups']), 4)) for d in r]" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: mimiccodes/mimic-ledger
+          token: ${{ secrets.LEDGER_TOKEN }}
+          path: ledger
+
+      - name: Into the ledger
+        run: |
+          set -euo pipefail
+          python3 mimic/tools/ledger.py ledger billing costs.json
+          cd ledger
+          git config user.name "mimic-ci"
+          git config user.email "mimic-ci@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "Billed by AWS, to $(date -u -d yesterday +%Y-%m-%d)"
+          for i in 1 2 3 4 5; do git push -q && break; git pull -q --rebase; sleep $((i * 3)); done

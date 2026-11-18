@@ -61,6 +61,10 @@ on:
         description: "stop: the instance to end"
         type: string
         default: ""
+      purpose:
+        description: "stop: what the machine was for, for the spending ledger"
+        type: string
+        default: ""
     outputs:
       label:
         description: "the runner label to run the job on"
@@ -161,6 +165,8 @@ jobs:
   stop:
     if: inputs.action == 'stop' && inputs.instance != ''
     runs-on: ubuntu-24.04
+    env:
+      HAS_LEDGER: ${{ secrets.LEDGER_TOKEN != '' }}
     steps:
       - uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
@@ -179,6 +185,7 @@ jobs:
       # approximate hourly price; the billed amount shows in the billing
       # console about a day later
       - name: Usage and cost
+        id: usage
         if: always()
         env:
           INSTANCE: ${{ inputs.instance }}
@@ -206,3 +213,47 @@ jobs:
           line="- AWS machine \`$INSTANCE\` ($type, $kind): ran about $minutes min, now $state; estimated cost \$$cost (the billed amount shows in AWS billing about a day later)"
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "type=$type"
+            echo "lifecycle=$([ "$lifecycle" = spot ] && echo spot || echo on-demand)"
+            echo "minutes=$minutes"
+            echo "cost=$cost"
+          } >> "$GITHUB_OUTPUT"
+
+      # the private spending ledger (mimiccodes/mimic-ledger): one line per
+      # machine, and the month's balance sheet
+      - uses: actions/checkout@v4
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        with:
+          sparse-checkout: tools/ledger.py
+          sparse-checkout-cone-mode: false
+          path: mimic
+      - uses: actions/checkout@v4
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        with:
+          repository: mimiccodes/mimic-ledger
+          token: ${{ secrets.LEDGER_TOKEN }}
+          path: ledger
+      - name: Into the ledger
+        if: always() && env.HAS_LEDGER == 'true' && steps.usage.outputs.minutes != ''
+        env:
+          INSTANCE: ${{ inputs.instance }}
+          PURPOSE: ${{ inputs.purpose || github.workflow }}
+          TYPE: ${{ steps.usage.outputs.type }}
+          LIFECYCLE: ${{ steps.usage.outputs.lifecycle }}
+          MINUTES: ${{ steps.usage.outputs.minutes }}
+          COST: ${{ steps.usage.outputs.cost }}
+        run: |
+          set -euo pipefail
+          python3 mimic/tools/ledger.py ledger run "$(date -u +%Y-%m-%d)" "$GITHUB_RUN_ID" "$GITHUB_WORKFLOW" "$PURPOSE" "$INSTANCE" "$TYPE" "$LIFECYCLE" "$MINUTES" "$COST"
+          cd ledger
+          git config user.name "mimic-ci"
+          git config user.email "mimic-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "$TYPE ($LIFECYCLE), $MINUTES min, about \$$COST: $PURPOSE (run $GITHUB_RUN_ID)"
+          # other machines may finish at the same time: rebase and retry
+          for i in 1 2 3 4 5; do
+            git push -q && break
+            git pull -q --rebase || { git rebase --abort; git reset -q --hard origin/main; python3 ../mimic/tools/ledger.py . run "$(date -u +%Y-%m-%d)" "$GITHUB_RUN_ID" "$GITHUB_WORKFLOW" "$PURPOSE" "$INSTANCE" "$TYPE" "$LIFECYCLE" "$MINUTES" "$COST"; git add -A; git commit -q -m "$TYPE ($LIFECYCLE), $MINUTES min: $PURPOSE (run $GITHUB_RUN_ID)"; }
+            sleep $((i * 3))
+          done

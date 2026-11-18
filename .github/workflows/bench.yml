@@ -57,6 +57,9 @@ jobs:
   bench:
     needs: scope
     if: needs.scope.outputs.run == 'true'
+    # (write: the history on the bench branch, never on pull requests)
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -137,7 +140,31 @@ jobs:
       # the whole suite, against C and Rust: nightly and by hand
       - name: Benchmarks
         if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
-        run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl'
+        run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl --json result.json'
+
+      # the run into the benchmark history (the bench branch); a tag's run is
+      # also that version's phase
+      - uses: actions/checkout@v4
+        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        with:
+          ref: bench
+          path: history
+      - name: Into the history
+        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        env:
+          MACHINE: github-${{ matrix.platform }}
+          PHASE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          py="$(command -v python3 || command -v python)"
+          "$py" bench/record.py result.json bench/results.md history "$MACHINE" "${PHASE#v}"
+          cd history
+          git config user.name "mimic-ci"
+          git config user.email "mimic-ci@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Run $GITHUB_RUN_ID on $MACHINE${PHASE:+ ($PHASE)}"
+          # the three systems finish at about the same time: rebase and retry
+          for i in 1 2 3 4 5; do git push -q origin HEAD:bench && break; git pull -q --rebase origin bench; sleep $((i * 5)); done
 
       # the compiler the change goes into, built beside it
       - name: The compiler before the change
