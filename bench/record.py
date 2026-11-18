@@ -26,7 +26,7 @@ ROOT = HERE.parent
 
 
 def version() -> tuple[str, str]:
-    exe = ROOT / "target" / "release" / ("mimic.exe" if os.name == "nt" else "mimic")
+    exe = os.environ.get("MIMIC_EXE") or ROOT / "target" / "release" / ("mimic.exe" if os.name == "nt" else "mimic")
     try:
         line = subprocess.run([str(exe), "--version"], capture_output=True, text=True).stdout.split("\n")[0]
         parts = line.split()
