@@ -1,0 +1,17 @@
+run_id,date,commit,version,machine,benchmark,c,rust,mimic,rayon,mimic_all
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,fib,0.0910,0.1047,0.0871,0.0088,0.0083
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,filters,0.1987,0.1429,0.2552,0.0319,0.0226
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,http,0.2227,0.4467,0.2913,,0.1079
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,json,0.2825,0.2252,0.2979,,0.2452
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,mandelbrot,0.4905,0.5709,0.1572,0.0380,0.0158
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,matmul,0.1622,0.1619,0.0654,0.0652,0.0196
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,nbody,0.0883,0.0939,0.0542,,0.0552
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,paths,0.0487,0.0551,0.1171,0.0356,0.1188
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,prefix_sum,0.4183,0.4781,0.4071,0.1132,0.1102
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,qoi,0.0231,0.0320,0.2926,0.0146,0.1625
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,records,0.0245,0.0926,0.0922,0.0562,0.0259
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,scale,0.1790,0.4322,0.4951,0.0483,0.0506
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,sort,0.7172,0.1993,0.2298,0.0492,0.1155
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,sum_of_squares,0.0152,0.0390,0.0142,0.0049,0.0025
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,tree,0.4758,0.6888,0.3148,0.3429,0.1791
+44244835548,2026-11-18,unknown,0.4.0-preview.1,aws-c7a.4xlarge,ui,,,0.0878,,0.1043
