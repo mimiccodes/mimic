@@ -173,3 +173,36 @@ jobs:
           INSTANCE: ${{ inputs.instance }}
         run: |
           aws ec2 terminate-instances --instance-ids "$INSTANCE" --query 'TerminatingInstances[0].CurrentState.Name' --output text
+
+      # how long it ran (at most: until now) and about what it cost: spot at
+      # the price AWS charged then (its price history), on-demand at an
+      # approximate hourly price; the billed amount shows in the billing
+      # console about a day later
+      - name: Usage and cost
+        if: always()
+        env:
+          INSTANCE: ${{ inputs.instance }}
+        run: |
+          set -euo pipefail
+          read -r type az launched lifecycle state < <(aws ec2 describe-instances --instance-ids "$INSTANCE" \
+            --query 'Reservations[0].Instances[0].[InstanceType,Placement.AvailabilityZone,LaunchTime,InstanceLifecycle,State.Name]' --output text)
+          minutes=$(( ($(date -u +%s) - $(date -u -d "$launched" +%s)) / 60 ))
+          if [ "$lifecycle" = spot ]; then
+            price=$(aws ec2 describe-spot-price-history --instance-types "$type" --availability-zone "$az" \
+              --product-descriptions Linux/UNIX --max-items 1 --query 'SpotPriceHistory[0].SpotPrice' --output text)
+            kind="spot, \$$price/h now"
+          else
+            # on-demand Linux prices in us-east-1 per hour, approximate (AWS's
+            # pricing pages are the authority; the bill is exact)
+            case "$type" in
+              c7a.large) price=0.10264 ;; c7a.xlarge) price=0.20528 ;; c7a.2xlarge) price=0.41056 ;; c7a.4xlarge) price=0.82112 ;; c7a.8xlarge) price=1.64224 ;;
+              c8g.large) price=0.07976 ;; c8g.xlarge) price=0.15952 ;; c8g.2xlarge) price=0.31904 ;; c8g.4xlarge) price=0.63808 ;; c8g.8xlarge) price=1.27616 ;;
+              *) price="" ;;
+            esac
+            kind="on-demand, about \$${price:-?}/h"
+          fi
+          # the disk (gp3, about \$0.08 a GB-month) and the public address (\$0.005/h) on top
+          cost=$(python3 -c "m=$minutes; p=float('${price:-0}' or 0); print(f'{m/60*(p+0.005+0.0066):.3f}')")
+          line="- AWS machine \`$INSTANCE\` ($type, $kind): ran about $minutes min, now $state; estimated cost \$$cost (the billed amount shows in AWS billing about a day later)"
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
