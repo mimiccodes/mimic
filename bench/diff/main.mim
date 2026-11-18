@@ -1,0 +1,66 @@
+module main
+
+// diff: the shortest edit script between 1,000 pairs of "files" (1,000 to
+// 2,000 lines, each one of 50 texts, from splitmix64; the second is the
+// first with about 3% of lines deleted, 3% changed and 3% added), by
+// Myers' algorithm: for each number of edits d, the furthest each diagonal
+// reaches, following runs of equal lines ("snakes"). Pairs are
+// independent, so `¨` diffs them in parallel. Prints the sum of the edit
+// lengths and the largest. The reference is bench/diff/ref.py.
+
+// the search: edits d, diagonal k, the furthest x on each diagonal, the
+// answer once found
+type M = { d: i64, k: i64, v: [i64], found: i64 }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn edited(p: i64, i: i64, line: i64) -> [i64] {
+    let r = mix(p * 100000 + 50000 + i) % 100
+    if r < 3 { [] }
+    else if r < 6 { [mix(p * 100000 + 70000 + i) % 50] }
+    else if r < 9 { [(mix(p * 100000 + 90000 + i) % 50) line] }
+    else { [line] }
+}
+
+// follow equal lines from (x, y) along the diagonal
+fn snake(a: [i64], b: [i64], x: i64, y: i64) -> i64 {
+    if x < ≢ a {
+        if y < ≢ b {
+            if a[x] == b[y] { snake(a, b, x + 1, y + 1) } else { x }
+        } else { x }
+    } else { x }
+}
+
+// record the furthest x on diagonal k, then move to the next diagonal (or
+// the next d, or stop)
+fn reach(s: M, off: i64, x: i64, done: bool) -> M {
+    let (d, k) = (s.d, s.k)
+    if done { { s with v: put(s.v, off + k, x), found: d } }
+    else if k + 2 > d { { s with d: d + 1, k: 0 - d - 1, v: put(s.v, off + k, x) } }
+    else { { s with k: k + 2, v: put(s.v, off + k, x) } }
+}
+
+fn step(s: M, a: [i64], b: [i64], off: i64) -> M {
+    let (d, k) = (s.d, s.k)
+    let start = if k == 0 - d or (k != d and s.v[off + k - 1] < s.v[off + k + 1]) { s.v[off + k + 1] } else { s.v[off + k - 1] + 1 }
+    let x = snake(a, b, start, start - k)
+    reach(s, off, x, x >= ≢ a and x - k >= ≢ b)
+}
+
+fn distance(p: i64) -> i64 {
+    let a = ⍳ (1000 + mix(p * 10) % 1001) ¨ (i => mix(p * 100000 + i) % 50)
+    let b = flatten(⍳ ≢ a ¨ (i => edited(p, i, a[i])))
+    let off = ≢ a + ≢ b + 1
+    let s = M { d: 0, k: 0, v: ⍳ (2 * off + 1) ¨ (_ => 0), found: -1 } ▷ settle(s => step(s, a, b, off), s => s.found >= 0)
+    s.found
+}
+
+fn main() {
+    let d = ⍳ 1000 ¨ distance
+    print("{+/ d} {⌈/ d}")
+}
