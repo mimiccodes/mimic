@@ -1,8 +1,8 @@
 # The benchmark suite (bench/run.py: Mimic against C and Rust) on GitHub's
 # runners, and the speed gate: Mimic as changed against the compiler it
-# changes, both built and timed in turns on the same machine, each benchmark
-# within the tolerance its measured noise allows (BENCHMARK.md). (Numbers
-# from another run cannot be compared: each job gets a different machine.)
+# changes, both timed in turns on the same machine, each benchmark within
+# the tolerance its measured noise allows (BENCHMARK.md). (Numbers from
+# another run cannot be compared: each job gets a different machine.)
 #
 # * pull requests into dev that touch the compiler, the runtime or the
 #   benchmarks: against dev, reported (it does not block);
@@ -10,8 +10,15 @@
 # * every night, on dev: the whole suite, and the gate against main;
 # * by hand: the suite and the gate against main, or `noise`.
 #
-# Every gate run also checks the gate itself: the new compiler building
-# without LLVM's optimizer (MIMIC_DEBUG_DISABLE=optimizer) must fail it.
+# For speed, each system's gate is split across three machines (each
+# compares old and new on its own third of the benchmarks, so every
+# comparison stays on one machine), and the compiler before the change is
+# built once per system while they build the new one. `bench (<system>)`,
+# the required check, collects their verdicts.
+#
+# Pull requests into main and the nightly run also check the gate itself:
+# the new compiler without LLVM's optimizer (MIMIC_DEBUG_DISABLE=optimizer)
+# must fail it.
 name: bench
 
 on:
@@ -54,56 +61,95 @@ jobs:
           fi
           echo "run=$run" | tee -a "$GITHUB_OUTPUT"
 
-  bench:
+  # the compiler the change goes into, once per system, cached by commit
+  before:
     needs: scope
-    if: needs.scope.outputs.run == 'true'
-    # (write: the history on the bench branch, never on pull requests)
-    permissions:
-      contents: write
+    if: needs.scope.outputs.run == 'true' && !inputs.noise
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-          - os: macos-15
-            platform: macos-arm64
-          - os: windows-2025
-            platform: windows-x86_64
-    name: bench (${{ matrix.platform }})
+          - { os: ubuntu-24.04, platform: linux-x86_64 }
+          - { os: macos-15, platform: macos-arm64 }
+          - { os: windows-2025, platform: windows-x86_64 }
+    name: before (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # (this change's checkout, for the setup action; the compiler before
+      # it is built from a worktree beside it)
+      - uses: actions/checkout@v4
+      - id: sha
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: before-bin
+          key: before-${{ matrix.platform }}-${{ steps.sha.outputs.sha }}
+      - uses: ./.github/actions/setup
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          platform: ${{ matrix.platform }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          git worktree add --detach ../before "$SHA"
+          if [ "$RUNNER_OS" != Windows ]; then ln -sfn "$HOME/.mimic/deps/llvm-$LLVM_VERSION" ../before/.llvm; fi
+          (cd ../before && cargo build --release)
+          mkdir -p before-bin
+          exe=mimic; [ "$RUNNER_OS" = Windows ] && exe=mimic.exe
+          cp "../before/target/release/$exe" before-bin/
+          ls -l before-bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: before-${{ matrix.platform }}
+          path: before-bin/
+          retention-days: 1
+
+  gate:
+    needs: scope
+    if: needs.scope.outputs.run == 'true'
+    # (write: the history on the bench branch, never on pull requests;
+    # actions: to see when the before job is done)
+    permissions:
+      contents: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, macos-arm64, windows-x86_64]
+        shard: [0, 1, 2]
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04 }
+          - { platform: macos-arm64, os: macos-15 }
+          - { platform: windows-x86_64, os: windows-2025 }
+    name: gate (${{ matrix.platform }}, ${{ matrix.shard }}/3)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
+    env:
+      # the nightly run, the self-check and noise run on the first machine
+      FIRST: ${{ matrix.shard == 0 }}
     steps:
       - uses: actions/checkout@v4
         with:
           # the nightly run measures dev, where the work is
           ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
 
-      - name: Rust
-        run: rustup update stable && rustup default stable
-
-      - name: LLVM (from the llvm workflow)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          deps="$HOME/.mimic/deps"
-          mkdir -p "$deps"
-          gh release download "$TAG" -p "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -D "$deps"
-          tar -xJf "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -C "$deps"
-          rm "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz"
-          if [ "$RUNNER_OS" = Windows ]; then
-            # Windows paths for what Rust reads (Git Bash's tools take the others)
-            echo "LLVM_SYS_231_PREFIX=$(cygpath -w "$deps/llvm-$LLVM_VERSION")" >> $GITHUB_ENV
-            echo "MIMIC_DEPS=$(cygpath -w "$deps")" >> $GITHUB_ENV
-          else
-            ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
-          fi
-
-      - name: Other dependencies (tools/deps.sh)
-        run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
+      - uses: ./.github/actions/setup
+        with:
+          platform: ${{ matrix.platform }}
 
       - name: Build mimic
         run: cargo build --release
@@ -112,6 +158,7 @@ jobs:
       # release build of the SIMD fixture (native CPU: AVX2/AVX-512 on x86,
       # NEON on arm64).
       - name: SIMD check
+        if: env.FIRST == 'true'
         run: |
           {
             echo "### CPU and SIMD (${{ matrix.platform }})"
@@ -135,22 +182,22 @@ jobs:
           [ $((ymm + zmm + neon)) -gt 0 ]
 
       - name: Crates for the Rust versions
-        run: for d in bench/*/rust bench/*/rayon; do (cd "$d" && cargo fetch); done
+        run: for d in bench/*/rust bench/*/rayon; do [ -d "$d" ] && (cd "$d" && cargo fetch); done; true
 
       # the whole suite, against C and Rust: nightly and by hand
       - name: Benchmarks
-        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
         run: '"$(command -v python3 || command -v python)" bench/run.py --history bench/history.jsonl --json result.json'
 
       # the run into the benchmark history (the bench branch); a tag's run is
       # also that version's phase
       - uses: actions/checkout@v4
-        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
         with:
           ref: bench
           path: history
       - name: Into the history
-        if: ${{ !inputs.noise && github.event_name != 'pull_request' }}
+        if: ${{ env.FIRST == 'true' && !inputs.noise && github.event_name != 'pull_request' }}
         env:
           MACHINE: github-${{ matrix.platform }}
           PHASE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
@@ -166,31 +213,41 @@ jobs:
           # the three systems finish at about the same time: rebase and retry
           for i in 1 2 3 4 5; do git push -q origin HEAD:bench && break; git pull -q --rebase origin bench; sleep $((i * 5)); done
 
-      # the compiler the change goes into, built beside it
+      # the compiler before the change, from the before job (built meanwhile)
       - name: The compiler before the change
         if: ${{ !inputs.noise }}
-        env:
-          BASE: ${{ github.base_ref || 'main' }}
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE"
-          git worktree add --detach ../before FETCH_HEAD
-          if [ "$RUNNER_OS" != Windows ]; then ln -sfn "$HOME/.mimic/deps/llvm-$LLVM_VERSION" ../before/.llvm; fi
-          (cd ../before && cargo build --release)
+          for i in $(seq 1 60); do
+            gh run view "$GITHUB_RUN_ID" --json jobs --jq '.jobs[] | select(.name == "before (${{ matrix.platform }})") | .status' | grep -q completed && break
+            sleep 20
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: ${{ !inputs.noise }}
+        with:
+          name: before-${{ matrix.platform }}
+          path: ${{ runner.temp }}/before
+      - name: Where it is
+        if: ${{ !inputs.noise }}
+        run: |
           exe=mimic; [ "$RUNNER_OS" = Windows ] && exe=mimic.exe
-          echo "BEFORE=$(cd ../before && pwd)/target/release/$exe" >> "$GITHUB_ENV"
-          echo "before: $BASE at $(git -C ../before rev-parse --short HEAD)"
+          chmod +x "$RUNNER_TEMP/before/$exe"
+          echo "BEFORE=$RUNNER_TEMP/before/$exe" >> "$GITHUB_ENV"
 
       - name: The speed gate
+        id: gate
         if: ${{ !inputs.noise }}
         run: |
           before="$BEFORE"
           [ "$RUNNER_OS" = Windows ] && before=$(cygpath -w "$BEFORE")
-          "$(command -v python3 || command -v python)" bench/run.py --runs 3 --gate "$before"
+          "$(command -v python3 || command -v python)" bench/run.py --runs 3 --shard ${{ matrix.shard }}/3 --gate "$before"
 
       # the gate must catch a real slowdown: the new compiler without
-      # LLVM's optimizer, against itself
+      # LLVM's optimizer, against itself (pull requests into main, nightly)
       - name: The gate catches a slowdown
-        if: ${{ !inputs.noise }}
+        id: self
+        if: ${{ env.FIRST == 'true' && !inputs.noise && (github.event_name != 'pull_request' || github.base_ref == 'main') }}
         run: |
           py="$(command -v python3 || command -v python)"
           me=target/release/mimic; [ "$RUNNER_OS" = Windows ] && me=$(cygpath -w "$PWD/target/release/mimic.exe")
@@ -212,9 +269,9 @@ jobs:
           mv gate-real.md bench/gate.md
           echo "- the gate failed a build without the optimizer, as it should" >> "$GITHUB_STEP_SUMMARY"
 
-      # the noise of this runner, for the speed gate's tolerances
+      # the noise of this runner, for the speed gate's tolerances (unsplit)
       - name: Noise
-        if: ${{ inputs.noise }}
+        if: ${{ env.FIRST == 'true' && inputs.noise }}
         run: |
           "$(command -v python3 || command -v python)" bench/run.py --runs 3 --noise ${{ inputs.noise }} | tee noise.txt
           { echo '```'; sed -n '/^benchmark /,$p' noise.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -225,10 +282,27 @@ jobs:
           [ -f bench/gate.md ] && cat bench/gate.md >> "$GITHUB_STEP_SUMMARY" || true
           [ -f bench/results.md ] && cat bench/results.md >> "$GITHUB_STEP_SUMMARY" || true
 
+      # this machine's verdict, for bench (<system>)
+      - name: Verdict
+        if: always()
+        run: |
+          mkdir -p verdict
+          ok=fail
+          if [ "${{ inputs.noise && 'noise' || '' }}" = noise ] || { [ "${{ steps.gate.outcome }}" = success ] && [ "${{ steps.self.outcome }}" != failure ]; }; then ok=pass; fi
+          echo "$ok" > verdict/${{ matrix.shard }}
+          [ -f bench/gate.md ] && cp bench/gate.md verdict/gate-${{ matrix.shard }}.md || true
+          echo "verdict: $ok"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: bench-${{ matrix.platform }}-${{ github.sha }}
+          name: verdict-${{ matrix.platform }}-${{ matrix.shard }}
+          path: verdict/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.platform }}-${{ matrix.shard }}-${{ github.sha }}
           path: |
             bench/results.md
             bench/history.jsonl
@@ -236,3 +310,31 @@ jobs:
             bench/gate.md
             bench/target/machine-*.json
           if-no-files-found: ignore
+
+  # the required check: every machine of this system passed
+  bench:
+    needs: [scope, gate]
+    if: always() && needs.scope.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, macos-arm64, windows-x86_64]
+    name: bench (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: verdict-${{ matrix.platform }}-*
+          path: verdicts
+          merge-multiple: true
+      - name: All three machines
+        run: |
+          ls verdicts 2>/dev/null || true
+          cat verdicts/gate-*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          bad=0
+          for i in 0 1 2; do
+            v=$(cat "verdicts/$i" 2>/dev/null || echo missing)
+            echo "machine $i/3: $v"
+            [ "$v" = pass ] || bad=1
+          done
+          exit $bad
