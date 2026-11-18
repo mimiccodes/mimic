@@ -7,6 +7,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 Stage 0.4.0, the measuring stick, so far (0.4.0-preview.2): a benchmark corpus of 54 everyday algorithms (hashing, parsing, graphs, text, interpreters, compression, numbers and simulations), each in Mimic, C and Rust; the machine's limits; and a speed gate that fails CI on a slowdown. The corpus already found bugs and the gaps the rest of stage 0.4 closes.
 
 ### Changed
+- **`sieve` and `kmeans` are written as one would write them:** `sieve` keeps its flags in bytes, as C does, and `kmeans` passes its centres as a record. Both workarounds are gone now that `put` on bytes is in place and a record passed along a recursion is borrowed.
 - **The speed gate times short benchmarks longer:** each side runs until it has run for a second (at most 30 runs) before the best time is taken. Benchmarks of 50–130 ms raised false alarms of 6–22% with the best of 3.
 - **The gate's noise is measured as the gate compares:** `bench/run.py --noise` now runs the gate's comparison with the same compiler on both sides; a benchmark too noisy for the 25% limit on a platform is reported there, not gated. (The first noise data, ratios to C across whole rounds, overstated it, and a preview's identical compiler failed the gate on `tree` and `ui`.)
 - **Benchmarks against C and Rust only:** the Go versions are gone, from the suite and from the tables in BENCHMARK.md and on the website. The http benchmark's load generator is now a Rust program (`bench/http/load/main.rs`).
