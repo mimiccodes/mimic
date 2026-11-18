@@ -37,7 +37,7 @@ Every change:
 
 Versions, branches, channels and what each release must pass are in [docs/versions.md](docs/versions.md).
 
-**Machines on AWS.** Precise and heavy work (benchmarks on dedicated cores, arm64, later GPUs) can run on an AWS machine started for one job and gone after it: `.github/workflows/aws-runner.yml` (and `aws-smoke.yml` to try it). It reaches AWS without keys (GitHub's OIDC), only from `main` and `dev`, never for pull requests, and may only start and end machines tagged `Project=mimic-runner`; each machine runs one job, powers off after at most two hours, and lets nothing in; `aws-sweeper.yml` ends any such machine older than three hours, every 30 minutes.
+**Machines on AWS.** Precise and heavy work (benchmarks on dedicated cores, arm64, later GPUs) can run on an AWS machine started for one job and gone after it: `.github/workflows/aws-runner.yml` (and `aws-smoke.yml` to try it). It reaches AWS without keys (GitHub's OIDC), only from `main` and `dev`, never for pull requests, and may only start and end machines tagged `Project=mimic-runner`; each machine runs one job, powers off after at most two hours, and lets nothing in; `aws-sweeper.yml` ends any such machine older than three hours, every 30 minutes. Every run's results go to the `bench` branch (`bench/record.py`: one file per run, a history per machine, a summary per release), and every machine's cost to a private ledger (`tools/ledger.py`; `ledger-billing.yml` adds what AWS billed, daily).
 
 ## Repository layout
 
