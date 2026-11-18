@@ -479,17 +479,18 @@ void mim_par_for_contig(int64_t n, int64_t grain, void (*f)(void *, int64_t, int
 }
 
 /* A compiled loop whose elements may each be much work (they call into
- * recursion): time the first element, then share out the rest (in small
+ * recursion): time the first elements, then share out the rest (in small
  * chunks: one element each when there are few) when that is worth waking
  * the threads, as mim_each_fn does. */
 typedef struct {
     void (*f)(void *, int64_t, int64_t);
     void *ctx;
+    int64_t from; /* the first element the pool takes */
 } timed_ctx;
 
 static void timed_range(void *c, int64_t lo, int64_t hi) {
     timed_ctx *t = (timed_ctx *)c;
-    t->f(t->ctx, lo + 1, hi + 1);
+    t->f(t->ctx, lo + t->from, hi + t->from);
 }
 
 void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
@@ -504,16 +505,28 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
         parallel_for(n, f, ctx);
         return;
     }
+    /* a few elements here, 1, then 2, 4, 8, … at a time, timed: once the
+     * rest would take longer than waking the pool costs (at the pace so
+     * far), the pool takes the rest. Not from the first element alone: a
+     * cheap first one (an edge case, an empty input) says little about the
+     * others, and n-queens' first start, two queens in one column, costs
+     * nothing while every other start is a search. */
     struct timespec a, b;
     clock_gettime(CLOCK_MONOTONIC, &a);
-    f(ctx, 0, 1);
-    clock_gettime(CLOCK_MONOTONIC, &b);
-    int64_t one = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-    if (one * (n - 1) > 50000) {
-        timed_ctx c = {f, ctx};
-        parallel_for_grain(n - 1, fine_grain(n - 1), timed_range, &c);
-    } else {
-        f(ctx, 1, n);
+    int64_t done = 0, step = 1;
+    while (done < n) {
+        int64_t hi = done + step < n ? done + step : n;
+        f(ctx, done, hi);
+        done = hi;
+        if (done == n) return;
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+        if (spent / done * (n - done) > 50000) {
+            timed_ctx c = {f, ctx, done};
+            parallel_for_grain(n - done, fine_grain(n - done), timed_range, &c);
+            return;
+        }
+        step *= 2;
     }
 }
 int64_t mim_par_grain(void);
@@ -3528,15 +3541,25 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
         /* effects that may overlap (waiting): a task per element */
     } else if (f->dtype == MIM_FN && FN_DESC(f)->pure && n > 1 && g_nthreads > 1 && !t_in_parallel) {
         /* Waking the threads costs tens of microseconds: time the first
-         * element, and share out the rest only when it is worth that. */
+         * elements (1, 2, 4, … at a time, as mim_par_for_timed does), and
+         * share out the rest once it is worth that. */
         struct timespec a, b;
         clock_gettime(CLOCK_MONOTONIC, &a);
-        each_fn_range(&c, 0, 1);
-        clock_gettime(CLOCK_MONOTONIC, &b);
-        int64_t one = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-        c.base = 1;
-        if (one * (n - 1) > 50000) parallel_for_grain(n - 1, fine_grain(n - 1), each_fn_range, &c);
-        else each_fn_range(&c, 0, n - 1);
+        int64_t done = 0, step = 1;
+        while (done < n) {
+            int64_t hi = done + step < n ? done + step : n;
+            each_fn_range(&c, done, hi);
+            done = hi;
+            if (done == n) break;
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+            if (spent / done * (n - done) > 50000) {
+                c.base = done;
+                parallel_for_grain(n - done, fine_grain(n - done), each_fn_range, &c);
+                break;
+            }
+            step *= 2;
+        }
     } else if (f->dtype == MIM_FN && FN_DESC(f)->pure) {
         parallel_for_grain(n, fine_grain(n), each_fn_range, &c);
     } else {
