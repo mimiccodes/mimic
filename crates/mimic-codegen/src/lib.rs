@@ -1575,6 +1575,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
             "mim_cstr" | "mim_dataptr" | "mim_from_cstr" => ptr.fn_type(&[p], false),
             "mim_check_type" => void.fn_type(&[p, i32t, p], false),
@@ -5588,6 +5589,49 @@ impl<'ctx> Cg<'ctx, '_> {
                 let phi = self.b.build_phi(self.ctx.bool_type(), "logic").s()?;
                 phi.add_incoming(&[(&a, pre), (&b, more_end)]);
                 self.as_ty(V::B(phi.as_basic_value().into_int_value()), ty, "operator result")
+            }
+            // the same when a side's type is known only when it runs: the
+            // right side runs unless the left is a single truth value that
+            // decides; otherwise both go to the generic operator (lists:
+            // element by element)
+            ExprKind::Binary { op: op @ (BinOp::And | BinOp::Or), lhs, rhs }
+                if matches!(self.ty_of(lhs), Ty::Bool | Ty::Dyn) && matches!(self.ty_of(rhs), Ty::Bool | Ty::Dyn) =>
+            {
+                let is_or = *op == BinOp::Or;
+                let a = self.expr(lhs)?;
+                let decides = match a {
+                    V::B(b) if is_or => b,
+                    V::B(b) => self.b.build_not(b, "").s()?,
+                    _ => {
+                        let a = self.boxed(a)?;
+                        let d = self.call_rt("mim_decides", &[self.basic(a).into(), self.ctx.i64_type().const_int(is_or as u64, false).into()])?.unwrap().into_int_value();
+                        self.b.build_int_compare(IntPredicate::NE, d, self.ctx.i64_type().const_zero(), "").s()?
+                    }
+                };
+                let f = self.cur_fn.ok_or("internal compiler error: `and` outside a function")?;
+                let short = self.ctx.append_basic_block(f, "logic_short");
+                let more = self.ctx.append_basic_block(f, if is_or { "or_rhs" } else { "and_rhs" });
+                let done = self.ctx.append_basic_block(f, "logic_done");
+                self.b.build_conditional_branch(decides, short, more).s()?;
+                self.b.position_at_end(short);
+                let sv = self.own(self.boxed(V::B(self.ctx.bool_type().const_int(is_or as u64, false)))?)?;
+                self.drop_tmp(a)?;
+                let short_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(more);
+                let b = self.expr(rhs)?;
+                let ab = self.boxed(a)?;
+                let bb = self.boxed(b)?;
+                let r = self.call_rt_ptr("mim_binop", &[self.i32c(*op as i32), self.basic(ab).into(), self.basic(bb).into()])?;
+                self.drop_tmp(ab)?;
+                self.drop_tmp(bb)?;
+                let r = self.own(r)?;
+                let more_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(done);
+                let phi = self.b.build_phi(self.ptr, "logic").s()?;
+                phi.add_incoming(&[(&self.basic(sv), short_end), (&self.basic(r), more_end)]);
+                self.as_ty(V::P(phi.as_basic_value().into_pointer_value(), true), ty, "operator result")
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;

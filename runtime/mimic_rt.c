@@ -4144,6 +4144,15 @@ int64_t mim_vec_len(mim_val *v, int32_t dtype) {
     return v->len;
 }
 
+/* `a or b` / `a and b` with a value whose type is known only when it runs:
+ * whether a alone decides (a single truth value: true for `or`, false for
+ * `and`), so b need not run; lists go element by element (mim_binop) */
+int64_t mim_decides(mim_val *a, int64_t is_or) {
+    if (!a || IS_HANDLES(a) || a->rank != 0) return 0;
+    int t = getf(a, 0) != 0;
+    return is_or ? t : !t;
+}
+
 int64_t mim_truthy(mim_val *v) {
     need(v, "condition");
     if (IS_HANDLES(v)) mim_panic("condition must be a number or bool, found a record or list");
