@@ -10,7 +10,7 @@ the runner and the rules) lives on `main` in
 |---|---|
 | `phases/` | One summary per stage, preview and release: every benchmark against C and Rust, and what changed since the phase before. `0.1-0.3.md` is the history up to 0.3.18. |
 | `runs/YYYY/MM/DD/` | Every run, as JSON (the machine, the compiler's commit, every time) and as a table: nightly runs, release runs, the speed gate and the runs on dedicated machines. |
-| `history.csv` | One line per benchmark per run, for charts over time. |
+| `history/<machine>.csv` | One line per benchmark per run on that machine, for charts over time. |
 | `machines.md` | The machines the numbers come from. |
 
 Written by CI (`bench` workflow); nothing here is edited by hand. Times
