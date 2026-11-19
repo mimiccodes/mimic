@@ -1,0 +1,39 @@
+module main
+
+// bigfact: 20,000! as a list of limbs of 9 decimal digits (lowest first),
+// multiplied by 2, 3, … 20,000 one after another: each multiplication one
+// pass over the limbs carrying to the next (a named step taking the number
+// whole, `put` in place), new limbs pushed at the top. Prints the number of
+// decimal digits, their sum, and the number of trailing zeros. The
+// reference is bench/bigfact/ref.py (Python's big integers).
+
+fn base() -> i64 { 1000000000 }
+
+// the number, the multiplier, the next limb and the carry into it
+type F = { limbs: [i64], k: i64, i: i64, carry: i64 }
+
+// limbs i … times k, carrying
+fn times(f: F) -> F {
+    if f.i == ≢ f.limbs {
+        if f.carry == 0 { f } else { times({ f with limbs: push(f.limbs, f.carry % base()), carry: f.carry div base(), i: f.i + 1 }) }
+    } else {
+        let v = f.limbs[f.i] * f.k + f.carry
+        times({ f with limbs: put(f.limbs, f.i, v % base()), carry: v div base(), i: f.i + 1 })
+    }
+}
+
+fn next(f: F) -> F { times({ f with k: f.k + 1, i: 0, carry: 0 }) }
+
+// the digits of one limb (9 of them, or fewer for the top one)
+fn digit_sum(x: i64, s: i64) -> i64 { if x == 0 { s } else { digit_sum(x div 10, s + x % 10) } }
+fn digit_count(x: i64, c: i64) -> i64 { if x == 0 { c } else { digit_count(x div 10, c + 1) } }
+fn trailing(x: i64, c: i64) -> i64 { if x % 10 != 0 or c == 9 { c } else { trailing(x div 10, c + 1) } }
+
+fn main() {
+    let f = F { limbs: [1], k: 1, i: 0, carry: 0 } ▷ evolve(19999, next)
+    let ls = f.limbs
+    let m = ≢ ls
+    let digits = 9 * (m - 1) + digit_count(ls[m - 1], 0)
+    let zero_limbs = (⍳ m ⌿ (ls ¨ (x => x != 0)))[0]
+    print("{digits} {ls ¨ (x => digit_sum(x, 0)) ▷ +/} {9 * zero_limbs + trailing(ls[zero_limbs], 0)}")
+}

@@ -1,0 +1,56 @@
+module main
+
+// lru: an LRU cache of 10,000 entries over 4,000,000 accesses to keys
+// below 100,000, most of them to 2,000 hot keys (from splitmix64). The
+// recency order is a doubly linked list through the keys (prev and next
+// lists, with a sentinel 100,000 whose next is the least recently used),
+// changed in place: each access is `touch(evict(s))`, every helper taking
+// the cache whole. Prints the hits, the misses, and the sum of the keys
+// left in the cache. The reference is bench/lru/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn head() -> i64 { 100000 }
+fn cap() -> i64 { 10000 }
+
+// the key asked for at access t
+fn key(t: i64) -> i64 { if mix(t + 10000000) % 4 == 0 { mix(t) % 100000 } else { mix(t) % 2000 } }
+
+type C = { t: i64, prev: [i64], next: [i64], inc: [i64], size: i64, hits: i64, misses: i64 }
+
+// a miss on a full cache: drop the least recently used key first
+fn evict(s: C) -> C {
+    let k = key(s.t)
+    if s.inc[k] == 1 or s.size < cap() { s } else {
+        let old = s.next[head()]
+        let q = s.next[old]
+        { s with next: put(s.next, head(), q), prev: put(s.prev, q, head()), inc: put(s.inc, old, 0), size: s.size - 1 }
+    }
+}
+
+// the key becomes the most recently used (unlinked first on a hit)
+fn touch(s: C) -> C {
+    let k = key(s.t)
+    if s.inc[k] == 1 {
+        let (p, q) = (s.prev[k], s.next[k])
+        let m = if q == head() { p } else { s.prev[head()] }
+        { s with t: s.t + 1, hits: s.hits + 1, next: put(put(put(s.next, p, q), m, k), k, head()), prev: put(put(put(s.prev, q, p), k, m), head(), k) }
+    } else {
+        let m = s.prev[head()]
+        { s with t: s.t + 1, misses: s.misses + 1, size: s.size + 1, inc: put(s.inc, k, 1), next: put(put(s.next, m, k), k, head()), prev: put(put(s.prev, k, m), head(), k) }
+    }
+}
+
+fn access(s: C) -> C { touch(evict(s)) }
+
+fn main() {
+    let n = head() + 1
+    let start = C { t: 0, prev: ⍳ n ¨ (_ => head()), next: ⍳ n ¨ (_ => head()), inc: ⍳ n ¨ (_ => 0), size: 0, hits: 0, misses: 0 }
+    let s = start ▷ evolve(4000000, access)
+    print("{s.hits} {s.misses} {⍳ head() ¨ (k => k * s.inc[k]) ▷ +/}")
+}

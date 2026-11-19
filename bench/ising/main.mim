@@ -1,0 +1,45 @@
+module main
+
+// ising: the 2D Ising model on a 512 × 512 torus at β = 0.44, 100 sweeps of
+// Metropolis updates in checkerboard order, with random numbers from
+// splitmix64 and the acceptance thresholds fixed as integers. Each half
+// sweep (one colour) is one map over the sites, in parallel. Prints the
+// magnetisation and the energy at the end. The reference is
+// bench/ising/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn l() -> i64 { 512 }
+
+// the spin at (x, y), wrapping round
+fn at(s: [i64], x: i64, y: i64) -> i64 { s[(y + l()) % l() * l() + (x + l()) % l()] }
+
+// half sweep h (sweep h div 2, colour h % 2) and the spins
+type I = { h: i64, s: [i64] }
+
+fn half(st: I) -> I {
+    let (s, h, n) = (st.s, st.h, l() * l())
+    let next = ⍳ n ¨ (i => {
+        let (x, y) = (i % l(), i div l())
+        let v = s[i]
+        if (x + y) % 2 != h % 2 { v } else {
+            let de = 2 * v * (at(s, x - 1, y) + at(s, x + 1, y) + at(s, x, y - 1) + at(s, x, y + 1))
+            let r = mix((1 << 30) + h * n + i) % (1 << 32)
+            let t = if de == 4 { 738927063 } else if de == 8 { 127128606 } else { 0 }
+            if de <= 0 or r < t { 0 - v } else { v }
+        }
+    })
+    { st with h: h + 1, s: next }
+}
+
+fn main() {
+    let n = l() * l()
+    let s = (I { h: 0, s: ⍳ n ¨ (i => if mix(i) % 2 == 1 { 1 } else { ¯1 }) } ▷ evolve(200, half)).s
+    let bonds = ⍳ n ¨ (i => s[i] * (at(s, i % l() + 1, i div l()) + at(s, i % l(), i div l() + 1))) ▷ +/
+    print("{s ▷ +/} {0 - bonds}")
+}

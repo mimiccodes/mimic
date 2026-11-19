@@ -1,0 +1,45 @@
+module main
+
+// bitset: 100 sets over the numbers below 2^20, each 16,384 words of 64
+// bits (about one bit in eight set, from splitmix64), and for every pair
+// the sizes of their intersection and union: a function that calls itself
+// over the words, counting bits with the usual shifts and masks (Mimic has
+// no population count yet), the 4,950 pairs in parallel. Prints the sum of
+// the intersection sizes, the sum of the union sizes, and the pair with
+// the largest intersection as i × 100 + j. The reference is
+// bench/bitset/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn words() -> i64 { 16384 }
+
+fn popcount(x: i64) -> i64 {
+    let a = x - (x >>> 1 & 0x5555555555555555)
+    let b = (a & 0x3333333333333333) + (a >>> 2 & 0x3333333333333333)
+    let c = (b + (b >>> 4)) & 0x0F0F0F0F0F0F0F0F
+    (c * 0x0101010101010101) >>> 56
+}
+
+// (intersection, union) of sets i and j over words w on
+fn sizes(ws: [i64], i: i64, j: i64, w: i64, a: i64, u: i64) -> (i64, i64) {
+    if w == words() { (a, u) } else {
+        let (x, y) = (ws[i * words() + w], ws[j * words() + w])
+        sizes(ws, i, j, w + 1, a + popcount(x & y), u + popcount(x | y))
+    }
+}
+
+fn main() {
+    let s = 100
+    let ws = ⍳ (s * words()) ¨ (k => mix(3 * k) & mix(3 * k + 1) & mix(3 * k + 2))
+    let pairs = ⍳ (s * s) ⌿ (⍳ (s * s) ¨ (p => p div s < p % s))
+    let both = pairs ¨ (p => sizes(ws, p div s, p % s, 0, 0, 0))
+    let inter = both ¨ (b => b.0)
+    let best = inter ▷ ⌈/
+    let at = (⍳ (≢ pairs) ⌿ (inter ¨ (a => a == best)))[0]
+    print("{inter ▷ +/} {both ¨ (b => b.1) ▷ +/} {pairs[at] div s * 100 + pairs[at] % s}")
+}

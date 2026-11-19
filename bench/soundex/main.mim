@@ -1,0 +1,59 @@
+module main
+
+// soundex: 1,000,000 generated names coded by American Soundex (the first
+// letter, then up to three digits of the consonants that follow, equal
+// neighbours once, h and w not separating them, padded with 0). Each code
+// is one number (letter × 1000 + digits), worked out for every name in
+// parallel; the codes are sorted and counted in runs. Prints how many
+// distinct codes there are, the most common one and how often it occurs,
+// and the sum of the digits of all the codes. The reference is
+// bench/soundex/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn name(k: i64) -> str {
+    let s = join(⍳ (4 + mix(k) % 7) ¨ (j => char_of(97 + mix(16 * k + j) % 26)), "")
+    upper(slice(s, 0, 1)) + slice(s, 1, ≢ s)
+}
+
+// the Soundex digit of a lower-case letter (0: a vowel, or h, w, y)
+fn digit(c: i64) -> i64 {
+    let l = char_of(c)
+    if contains("bfpv", l) { 1 } else if contains("cgjkqsxz", l) { 2 } else if contains("dt", l) { 3 }
+    else if l == "l" { 4 } else if contains("mn", l) { 5 } else if l == "r" { 6 } else { 0 }
+}
+
+// the digits from letter i on, after `last`, with `got` of them in `out`
+fn digits(b: [u8], i: i64, last: i64, out: i64, got: i64) -> i64 {
+    if got == 3 or i == ≢ b { out * (⍳ (3 - got) ¨ (_ => 10) ▷ ×/) } else {
+        let c = b[i]
+        if c == 104 or c == 119 { digits(b, i + 1, last, out, got) } else {
+            let d = digit(c)
+            if d != 0 and d != last { digits(b, i + 1, d, out * 10 + d, got + 1) } else { digits(b, i + 1, d, out, got) }
+        }
+    }
+}
+
+fn code(n: str) -> i64 {
+    let b = bytes::of_text(lower(n))
+    (b[0] - 97) * 1000 + digits(b, 1, digit(b[0]), 0, 0)
+}
+
+fn text_of(c: i64) -> str { char_of(65 + c div 1000) + pad_start(string(c % 1000), 3, "0") }
+
+fn main() {
+    let codes = sort(⍳ 1000000 ¨ (k => code(name(k))))
+    let n = ≢ codes
+    let firsts = ⍳ n ⌿ (⍳ n ¨ (i => i == 0 or codes[i] != codes[i - 1]))
+    let m = ≢ firsts
+    let sizes = ⍳ m ¨ (g => (if g + 1 < m { firsts[g + 1] } else { n }) - firsts[g])
+    let most = sizes ▷ ⌈/
+    let top = (⍳ m ⌿ (sizes ¨ (s => s == most)))[0]
+    let digit_sum = codes ¨ (c => c % 10 + c div 10 % 10 + c div 100 % 10) ▷ +/
+    print("{m} {text_of(codes[firsts[top]])} {most} {digit_sum}")
+}
