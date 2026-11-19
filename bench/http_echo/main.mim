@@ -1,0 +1,17 @@
+module main
+
+// http_echo: POST /echo answers its body in upper case (keep-alive
+// connections, bodies of 16 to 400 bytes or so); any other request is a
+// 404. bench/run.py measures it with load/main.rs, which checks every
+// body.
+
+fn handle(req: http::Request) -> http::Response {
+    match (req.method, req.path) {
+        ("POST", "/echo") => http::ok(upper(req.body)),
+        _ => http::not_found(),
+    }
+}
+
+fn main() {
+    http::serve(18432, handle)
+}
