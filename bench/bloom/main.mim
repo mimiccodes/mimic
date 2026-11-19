@@ -1,0 +1,42 @@
+module main
+
+// bloom: a Bloom filter of 8,388,608 one-byte cells and 7 hashes per key
+// (double hashing from splitmix64): 1,000,000 keys go in, one cell after
+// another (`evolve`, each `put` in place), then 2,000,000 lookups (half of them keys
+// that went in) run in parallel with `¨`. Prints how many lookups say
+// "maybe" and how many cells are set. The reference is bench/bloom/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn cells() -> i64 { 8388608 }
+
+// the j-th cell of key x: h1 + j·h2 (h2 odd), wrapped to the table
+fn cell(x: i64, j: i64) -> i64 {
+    let (h1, h2) = (mix(2 * x), mix(2 * x + 1) | 1)
+    (h1 + j * h2) & (cells() - 1)
+}
+
+// setting cell k % 7 of key k div 7
+type B = { k: i64, f: [u8] }
+
+fn set(b: B) -> B {
+    { b with k: b.k + 1, f: put(b.f, cell(b.k div 7, b.k % 7), 1) }
+}
+
+fn has(f: [u8], x: i64) -> bool {
+    ⍳ 7 ¨ (j => f[cell(x, j)]) ▷ ⌊/ == 1
+}
+
+fn main() {
+    let n = 1000000
+    let b = B { k: 0, f: bytes::from(⍳ cells() ¨ (_ => 0)) } ▷ evolve(7 * n, set)
+    let f = b.f
+    // lookups: keys 0 … 999,999 went in, 1,000,000 … 1,999,999 did not
+    let maybe = ⍳ (2 * n) ¨ (x => if has(f, x) { 1 } else { 0 }) ▷ +/
+    print("{maybe} {+/ f}")
+}
