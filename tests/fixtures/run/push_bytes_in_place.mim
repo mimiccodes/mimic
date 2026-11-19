@@ -1,0 +1,22 @@
+module main
+
+// Bytes grown by push stay bytes and grow in place when held once (LEB128
+// encoding pushes millions), in a record and as a bare local. A value that
+// is not a byte makes the list a list of integers, as before, and a list
+// still shared is copied.
+
+type B = { out: [u8] }
+fn pb(b: B) -> B { { b with out: push(b.out, b.out ▷ ≢ % 256) } }
+fn main() {
+    let b = B { out: bytes::from([]) } ▷ evolve(300, pb)
+    print("{≢ b.out} {b.out ▷ +/} {b.out[299]}")
+    let mut xs = bytes::from([1 2])
+    xs = push(xs, 255)
+    print(xs)
+    let ys = push(bytes::from([1 2]), 256)
+    print(ys)
+    let shared = bytes::from([9])
+    let a = B { out: shared }
+    let c = { a with out: push(a.out, 10) }
+    print("{shared} {c.out}")
+}

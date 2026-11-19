@@ -6042,6 +6042,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     // a list of i64 and raw numbers: the typed versions
                     let typed: Option<(&str, Vec<BasicMetadataValueEnum>)> = match (op, rest.as_slice()) {
                         ("push", [V::I(x)]) if i64_list => Some(("mim_push_i64_own", vec![list.into(), (*x).into()])),
+                        ("push", [V::I(x)]) if u8_list => Some(("mim_push_u8_own", vec![list.into(), (*x).into()])),
                         ("put", [V::I(i), V::I(x)]) if i64_list => Some(("mim_put_i64_own", vec![list.into(), (*i).into(), (*x).into()])),
                         ("put", [V::I(i), V::I(x)]) if u8_list => Some(("mim_put_u8_own", vec![list.into(), (*i).into(), (*x).into()])),
                         ("concat", [V::A(a, El::I64)]) if i64_list => {
