@@ -1,0 +1,54 @@
+module main
+
+// dct: the 8 × 8 two-dimensional DCT (as JPEG uses it) of every block of
+// ten 1920 × 1080 8-bit frames, in fixed point (a 64-entry cosine table
+// scaled by 4096): one map for the rows (R = B C^T), one for the columns
+// (Y = C R), each value at the place of its pixel, in parallel. Prints
+// the sum of the absolute values of the coefficients and a checksum that
+// weighs each by its place. The reference is bench/dct/ref.py.
+
+fn w() -> i64 { 1920 }
+fn h() -> i64 { 1080 }
+
+fn table() -> [i64] {
+    [1448 1448 1448 1448 1448 1448 1448 1448
+     2009 1703 1138 400 ¯400 ¯1138 ¯1703 ¯2009
+     1892 784 ¯784 ¯1892 ¯1892 ¯784 784 1892
+     1703 ¯400 ¯2009 ¯1138 1138 2009 400 ¯1703
+     1448 ¯1448 ¯1448 1448 1448 ¯1448 ¯1448 1448
+     1138 ¯2009 400 1703 ¯1703 ¯400 2009 ¯1138
+     784 ¯1892 1892 ¯784 ¯784 1892 ¯1892 784
+     400 ¯1138 1703 ¯2009 2009 ¯1703 1138 ¯400]
+}
+
+fn frame(f: i64) -> [i64] {
+    ⍳ (w() * h()) ¨ (i => {
+        let (x, y) = (i % w(), i div w())
+        let noise = ((i + f * 7919) * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        (x * 7 + y * 13 + x * y % 31 + noise + f * 3) % 256 - 128
+    })
+}
+
+// the coefficients of frame f, at the places of its pixels
+fn transform(f: i64, c: [i64]) -> [i64] {
+    let b = frame(f)
+    // row ry of a block, entry u: sum over x of C[u][x] b[ry][x]
+    let r = ⍳ (w() * h()) ¨ (i => {
+        let (u, start) = (i % 8, i - i % 8)
+        ⍳ 8 ¨ (x => c[u * 8 + x] * b[start + x]) ▷ +/
+    })
+    // entry (v, u) of a block: sum over y of C[v][y] R[y][u]
+    ⍳ (w() * h()) ¨ (i => {
+        let (v, top) = (i div w() % 8, i - i div w() % 8 * w())
+        ((⍳ 8 ¨ (y => c[v * 8 + y] * r[top + y * w()]) ▷ +/) + (1 << 23)) div (1 << 24)
+    })
+}
+
+fn main() {
+    let c = table()
+    let sums = ⍳ 10 ¨ (f => {
+        let out = transform(f, c)
+        (out ¨ (v => ∣ v) ▷ +/, ⍳ (≢ out) ¨ (i => out[i] * (i % 251 + 1)) ▷ +/)
+    })
+    print("{sums ¨ (s => s.0) ▷ +/} {sums ¨ (s => s.1) ▷ +/}")
+}

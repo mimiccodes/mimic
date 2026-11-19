@@ -1,0 +1,46 @@
+module main
+
+// rangemin: range-minimum queries over 1,000,000 values (from splitmix64)
+// with a sparse table: level k holds the minimum of each run of 2^k values,
+// built from level k - 1 by one parallel map; the levels sit one after
+// another in one flat list (each n long, the end padded). Each of the
+// 4,000,000 queries [a, b] is the smaller of two overlapping runs. Prints
+// the sum of the answers and the sum of the query lengths. The reference
+// is bench/rangemin/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn n() -> i64 { 1000000 }
+
+// the levels built so far
+type Table = { k: i64, t: [i64] }
+
+fn level(s: Table) -> Table {
+    let (k, t) = (s.k, s.t)
+    let (base, h) = ((k - 1) * n(), 1 << (k - 1))
+    let next = ⍳ n() ¨ (i => t[base + i] ⌊ t[base + ((i + h) ⌊ (n() - 1))])
+    { s with k: k + 1, t: concat(t, next) }
+}
+
+// the largest k with 2^k <= x
+fn log2(x: i64, k: i64) -> i64 { if 2 << k > x { k } else { log2(x, k + 1) } }
+
+fn main() {
+    let m = 4000000
+    let levels = log2(n(), 0) + 1
+    let xs = ⍳ n() ¨ (i => mix(i) % 1000000000)
+    let t = (Table { k: 1, t: xs } ▷ evolve(levels - 1, level)).t
+    let lo = ⍳ m ¨ (q => (mix(m + 2 * q) % n()) ⌊ (mix(m + 2 * q + 1) % n()))
+    let hi = ⍳ m ¨ (q => (mix(m + 2 * q) % n()) ⌈ (mix(m + 2 * q + 1) % n()))
+    let answers = ⍳ m ¨ (q => {
+        let (a, b) = (lo[q], hi[q])
+        let k = log2(b - a + 1, 0)
+        t[k * n() + a] ⌊ t[k * n() + b - (1 << k) + 1]
+    })
+    print("{answers ▷ +/} {⍳ m ¨ (q => hi[q] - lo[q] + 1) ▷ +/}")
+}

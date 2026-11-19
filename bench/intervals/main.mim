@@ -1,0 +1,29 @@
+module main
+
+// intervals: 2,000,000 intervals [s, s + l) (from splitmix64) sorted by
+// start and merged where they overlap or touch. In start order, an
+// interval begins a new group exactly when its start is past the running
+// maximum (`trail(⌈)`) of the ends before it, so the merge is a few
+// parallel maps: the group starts, and each group's end is that running
+// maximum at its last interval. Prints the number of merged intervals,
+// the total length they cover, and the longest. The reference is
+// bench/intervals/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn main() {
+    let n = 2000000
+    // start × 1024 + length - 1: sorts by start, then length
+    let keys = sort(⍳ n ¨ (k => (mix(2 * k) % 1000000000) * 1024 + mix(2 * k + 1) % 1000))
+    let starts = keys ¨ (k => k div 1024)
+    let reach = ⍳ n ¨ (i => starts[i] + keys[i] % 1024 + 1) ▷ trail(⌈)
+    let firsts = ⍳ n ⌿ (⍳ n ¨ (i => i == 0 or starts[i] > reach[i - 1]))
+    let m = ≢ firsts
+    let lengths = ⍳ m ¨ (g => reach[(if g + 1 < m { firsts[g + 1] } else { n }) - 1] - starts[firsts[g]])
+    print("{m} {lengths ▷ +/} {lengths ▷ ⌈/}")
+}

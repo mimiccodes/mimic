@@ -1,0 +1,36 @@
+module main
+
+// traffic: the Nagel-Schreckenberg traffic model on a ring road of
+// 1,000,000 cells with 200,000 cars and top speed 5, for 500 steps (random
+// slowing from splitmix64). Every car moves at once, so each step is one
+// map over the cars (in road order, which never changes), in parallel.
+// Prints the total distance driven, the sum of the speeds at the end, and
+// how many cars end standing. The reference is bench/traffic/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn road() -> i64 { 1000000 }
+
+// the step, the cars' places and speeds, and the distance so far
+type Road = { t: i64, pos: [i64], v: [i64], driven: i64 }
+
+fn step(r: Road) -> Road {
+    let (pos, v, n) = (r.pos, r.v, ≢ r.pos)
+    let speeds = ⍳ n ¨ (c => {
+        let gap = (pos[(c + 1) % n] - pos[c] - 1 + road()) % road()
+        let s = (v[c] + 1) ⌊ 5 ⌊ gap
+        if mix(n * r.t + c) % 4 == 0 { (s - 1) ⌈ 0 } else { s }
+    })
+    { r with t: r.t + 1, pos: ⍳ n ¨ (c => (pos[c] + speeds[c]) % road()), v: speeds, driven: r.driven + (speeds ▷ +/) }
+}
+
+fn main() {
+    let cars = 200000
+    let r = Road { t: 0, pos: ⍳ cars ¨ (c => 5 * c), v: ⍳ cars ¨ (_ => 0), driven: 0 } ▷ evolve(500, step)
+    print("{r.driven} {r.v ▷ +/} {count(r.v, s => s == 0)}")
+}

@@ -1,0 +1,44 @@
+module main
+
+// sandpile: an abelian sandpile on a 128 × 128 grid, cell i starting with
+// 4 + mix(i) mod 30 grains (splitmix64). In each round every cell at once
+// sends s div 4 grains to each neighbour and keeps s mod 4 (grains sent
+// off the edge are lost), until no cell has 4 or more: `settle` over a
+// record, each round one parallel map. Prints the number of rounds, the
+// grains left, and how many cells end with 0, 1, 2 and 3. The reference is
+// bench/sandpile/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn l() -> i64 { 128 }
+
+// the grains cell (x, y) sends each neighbour (none from outside)
+fn give(s: [i64], x: i64, y: i64) -> i64 {
+    if x < 0 or y < 0 or x >= l() or y >= l() { 0 } else { s[y * l() + x] div 4 }
+}
+
+// the rounds so far, the grid, and its largest pile
+type Pile = { rounds: i64, s: [i64], top: i64 }
+
+fn topple(p: Pile) -> Pile {
+    let s = p.s
+    let next = ⍳ (≢ s) ¨ (i => {
+        let (x, y) = (i % l(), i div l())
+        s[i] % 4 + give(s, x - 1, y) + give(s, x + 1, y) + give(s, x, y - 1) + give(s, x, y + 1)
+    })
+    { p with rounds: p.rounds + 1, s: next, top: next ▷ ⌈/ }
+}
+
+fn stable(p: Pile) -> bool { p.top < 4 }
+
+fn main() {
+    let s = ⍳ (l() * l()) ¨ (i => 4 + mix(i) % 30)
+    let p = Pile { rounds: 0, s: s, top: s ▷ ⌈/ } ▷ settle(topple, stable)
+    let left = ⍳ 4 ¨ (v => count(p.s, x => x == v))
+    print("{p.rounds} {p.s ▷ +/} {left[0]} {left[1]} {left[2]} {left[3]}")
+}

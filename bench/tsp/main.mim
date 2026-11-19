@@ -1,0 +1,55 @@
+module main
+
+// tsp: the shortest round trip through 20 cities (from splitmix64,
+// Manhattan distances) by the Held-Karp dynamic programme: dp[S][j] is the
+// shortest path from city 0 through the set S of the other cities, ending
+// at j. The table is one flat list; each set size is one parallel map
+// over the whole table that fills the entries of that size from the ones
+// before. Prints the length of the shortest tour and the sum of dp over
+// the full set. The reference is bench/tsp/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn inf() -> i64 { 1 << 50 }
+
+// the number of bits set in s
+fn bits(s: i64, c: i64) -> i64 { if s == 0 { c } else { bits(s & (s - 1), c + 1) } }
+
+// the best way into j through prev, over the cities k from k on
+fn best(dp: [i64], d: [i64], m: i64, prev: i64, j: i64, k: i64, b: i64) -> i64 {
+    if k == m { b } else {
+        let c = if prev >>> k & 1 == 1 { dp[prev * m + k] + d[(k + 1) * (m + 1) + j + 1] } else { inf() }
+        best(dp, d, m, prev, j, k + 1, b ⌊ c)
+    }
+}
+
+// the table, and the set size filled next
+type H = { c: i64, dp: [i64] }
+
+fn layer(h: H, d: [i64], m: i64, pop: [i64]) -> H {
+    let dp = h.dp
+    let next = ⍳ (≢ dp) ¨ (e => {
+        let (s, j) = (e div m, e % m)
+        if pop[s] != h.c or s >>> j & 1 == 0 { dp[e] } else { best(dp, d, m, s ^ (1 << j), j, 0, inf()) }
+    })
+    { h with c: h.c + 1, dp: next }
+}
+
+fn main() {
+    let n = 20
+    let m = n - 1
+    let xs = ⍳ n ¨ (c => mix(2 * c) % 1000)
+    let ys = ⍳ n ¨ (c => mix(2 * c + 1) % 1000)
+    let d = ⍳ (n * n) ¨ (e => ∣ (xs[e div n] - xs[e % n]) + ∣ (ys[e div n] - ys[e % n]))
+    let pop = ⍳ (1 << m) ¨ (s => bits(s, 0))
+    let start = ⍳ ((1 << m) * m) ¨ (e => if e div m == 1 << (e % m) { d[e % m + 1] } else { inf() })
+    let dp = (H { c: 2, dp: start } ▷ evolve(m - 1, h => layer(h, d, m, pop))).dp
+    let full = (1 << m) - 1
+    let ends = ⍳ m ¨ (j => dp[full * m + j])
+    print("{⍳ m ¨ (j => ends[j] + d[(j + 1) * n]) ▷ ⌊/} {ends ▷ +/}")
+}

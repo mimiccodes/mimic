@@ -1,0 +1,88 @@
+module main
+
+// maze: a 500 × 500 maze carved by a depth-first search with a stack (the
+// way on chosen by splitmix64), then a breadth-first search from the
+// top-left cell for the distance to every cell. Both are state machines
+// (`settle` with named steps) whose lists change in place: the stack, the
+// openings (4 bits a cell) and the visited marks, then the queue and the
+// distances. Prints the distance to the bottom-right cell, the number of
+// dead ends, and the sum of all distances. The reference is
+// bench/maze/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn w() -> i64 { 500 }
+
+// the cell one step from c in direction d (up, right, down, left), or ¯1
+// off the edge
+fn step_to(c: i64, d: i64) -> i64 {
+    let (x, y) = (c % w(), c div w())
+    if d == 0 { if y == 0 { ¯1 } else { c - w() } }
+    else if d == 1 { if x == w() - 1 { ¯1 } else { c + 1 } }
+    else if d == 2 { if y == w() - 1 { ¯1 } else { c + w() } }
+    else { if x == 0 { ¯1 } else { c - 1 } }
+}
+
+// carving: the steps taken, the stack (top cells), the openings and the
+// visited marks
+type Carve = { step: i64, top: i64, stack: [i64], opened: [i64], seen: [u8] }
+
+// the directions from c to unvisited cells, as bits
+fn free(seen: [u8], c: i64) -> i64 {
+    ⍳ 4 ¨ (d => {
+        let t = step_to(c, d)
+        if t >= 0 and seen[t] == 0 { 1 << d } else { 0 }
+    }) ▷ +/
+}
+
+// the k-th set bit of mask (from the lowest)
+fn nth_bit(mask: i64, k: i64, d: i64) -> i64 {
+    if mask >>> d & 1 == 1 { if k == 0 { d } else { nth_bit(mask, k - 1, d + 1) } } else { nth_bit(mask, k, d + 1) }
+}
+
+fn carve(s: Carve) -> Carve {
+    let c = s.stack[s.top - 1]
+    let f = free(s.seen, c)
+    if f == 0 { { s with step: s.step + 1, top: s.top - 1 } } else {
+        let count = (f & 1) + (f >>> 1 & 1) + (f >>> 2 & 1) + (f >>> 3 & 1)
+        let d = nth_bit(f, mix(s.step) % count, 0)
+        let t = step_to(c, d)
+        let (oc, ot) = (s.opened[c], s.opened[t])
+        { s with step: s.step + 1, top: s.top + 1, stack: put(s.stack, s.top, t), seen: put(s.seen, t, 1), opened: put(put(s.opened, c, oc | 1 << d), t, ot | 1 << ((d + 2) % 4)) }
+    }
+}
+
+// the search: the queue (from head on) and the distances
+type Search = { head: i64, queue: [i64], dist: [i64] }
+
+fn look(s: Search, opened: [i64], d: i64) -> Search {
+    let c = s.queue[s.head]
+    let t = step_to(c, d)
+    if opened[c] >>> d & 1 == 0 or s.dist[t] >= 0 { s } else {
+        let dc = s.dist[c]
+        { s with dist: put(s.dist, t, dc + 1), queue: push(s.queue, t) }
+    }
+}
+
+fn advance(s: Search) -> Search { { s with head: s.head + 1 } }
+
+// the four looks, then the head moves on (the state handed on whole: a
+// `let done = look(…)` in between would leave it shared, and copied)
+fn expand(s: Search, opened: [i64]) -> Search {
+    advance(look(look(look(look(s, opened, 0), opened, 1), opened, 2), opened, 3))
+}
+
+fn main() {
+    let n = w() * w()
+    let start = Carve { step: 0, top: 1, stack: ⍳ n ¨ (_ => 0), opened: ⍳ n ¨ (_ => 0), seen: bytes::from(⍳ n ¨ (c => if c == 0 { 1 } else { 0 })) }
+    let opened = (start ▷ settle(carve, s => s.top == 0)).opened
+    let s0 = Search { head: 0, queue: [0], dist: ⍳ n ¨ (c => if c == 0 { 0 } else { ¯1 }) }
+    let dist = (s0 ▷ settle(s => expand(s, opened), s => s.head == ≢ s.queue)).dist
+    let dead = count(opened, o => (o & 1) + (o >>> 1 & 1) + (o >>> 2 & 1) + (o >>> 3 & 1) == 1)
+    print("{dist[n - 1]} {dead} {dist ▷ +/}")
+}

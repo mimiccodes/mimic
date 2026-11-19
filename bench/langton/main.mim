@@ -1,0 +1,26 @@
+module main
+
+// langton: Langton's ant on a 1,024 × 1,024 torus, all cells white at
+// first, for 20,000,000 steps from the centre facing up: on white it turns
+// right, on black left, flips the cell and moves on. One step at a time
+// (`evolve` with a named step), the grid as bytes changed in place. Prints
+// the number of black cells at the end, and the ant's column, row and
+// direction. The reference is bench/langton/ref.py.
+
+fn l() -> i64 { 1024 }
+
+type Ant = { x: i64, y: i64, d: i64, grid: [u8] }
+
+fn step(a: Ant) -> Ant {
+    let i = a.y * l() + a.x
+    let c = a.grid[i]
+    let d = if c == 0 { (a.d + 1) % 4 } else { (a.d + 3) % 4 }
+    let dx = if d == 1 { 1 } else if d == 3 { ¯1 } else { 0 }
+    let dy = if d == 2 { 1 } else if d == 0 { ¯1 } else { 0 }
+    { a with d: d, x: (a.x + dx + l()) % l(), y: (a.y + dy + l()) % l(), grid: put(a.grid, i, 1 - c) }
+}
+
+fn main() {
+    let a = Ant { x: l() div 2, y: l() div 2, d: 0, grid: bytes::from(⍳ (l() * l()) ¨ (_ => 0)) } ▷ evolve(20000000, step)
+    print("{a.grid ▷ +/} {a.x} {a.y} {a.d}")
+}

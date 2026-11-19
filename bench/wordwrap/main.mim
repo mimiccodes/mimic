@@ -1,0 +1,38 @@
+module main
+
+// wordwrap: 2,000,000 words (from splitmix64) joined by spaces into one
+// text, split again and wrapped greedily at 72 columns: one pass over the
+// word lengths (`evolve` with a named step, numbers only). Prints the
+// number of lines, the sum over the lines of the square of the room left,
+// and the length of the longest line. Checked against Python's textwrap.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn width() -> i64 { 72 }
+
+// the next word, the line so far (its length), and the totals of the
+// lines done
+type Wrap = { i: i64, line: i64, lines: i64, ragged: i64, longest: i64 }
+
+fn place(w: Wrap, lens: [i64]) -> Wrap {
+    let l = lens[w.i]
+    if w.line == 0 { { w with i: w.i + 1, line: l } }
+    else if w.line + 1 + l <= width() { { w with i: w.i + 1, line: w.line + 1 + l } }
+    else {
+        let room = width() - w.line
+        { w with i: w.i + 1, line: l, lines: w.lines + 1, ragged: w.ragged + room * room, longest: w.longest ⌈ w.line }
+    }
+}
+
+fn main() {
+    let text = join(⍳ 2000000 ¨ (k => repeat(char_of(97 + mix(k) % 26), 1 + mix(k) % 12)), " ")
+    let lens = words(text) ¨ (s => ≢ s)
+    let w = Wrap { i: 0, line: 0, lines: 0, ragged: 0, longest: 0 } ▷ evolve(≢ lens, w => place(w, lens))
+    let room = width() - w.line
+    print("{w.lines + 1} {w.ragged + room * room} {w.longest ⌈ w.line}")
+}
