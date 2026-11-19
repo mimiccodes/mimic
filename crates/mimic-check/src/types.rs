@@ -998,12 +998,10 @@ impl Walk<'_, '_> {
                     match (decl.name.as_str(), args.as_slice()) {
                         // not known yet (inference has not reached it): wait,
                         // so an early guess does not stick to the result
-                        ("put" | "sort" | "concat" | "push", a) if a.contains(&Ty::Never) => return Ty::Never,
-                        // concat of two lists of one kind of number, and
-                        // push of a number of the list's kind: that kind of
-                        // list (the runtime copies such lists as they are)
+                        ("put" | "sort" | "concat", a) if a.contains(&Ty::Never) => return Ty::Never,
+                        // concat of two lists of one kind of number: that
+                        // kind of list (the runtime copies them as they are)
                         ("concat", [Ty::Arr(e1 @ (El::I64 | El::F64 | El::Bool | El::U8), _), Ty::Arr(e2, _)]) if e1 == e2 => return Ty::Arr(*e1, 0),
-                        ("push", [Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _), x]) if *x == Ty::of_el(*el) => return Ty::Arr(*el, 0),
                         ("put", [a @ Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _), Ty::I64 | Ty::Bool, x])
                             if *x == Ty::of_el(*el) || (*el == El::F64 && *x == Ty::I64) =>
                         {
