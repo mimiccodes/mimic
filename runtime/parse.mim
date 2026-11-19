@@ -1,0 +1,135 @@
+// Parsers for common text formats: parse::csv(text), parse::url(s),
+// parse::semver(s). The same parsers the benchmark corpus measures
+// (bench/csv, bench/url, bench/semver), checked against Python's csv and
+// urllib.parse. (Appended to the prelude.)
+pub module parse {
+    // The rows of a CSV text (RFC 4180, as Python's csv reads it): fields
+    // apart by commas, rows by newlines (\n or \r\n); a field in double
+    // quotes may hold commas, newlines and doubled quotes ("" for one).
+    // A blank line is a row of no fields.
+    pub fn csv(text: str) -> [[str]] {
+        let b = bytes::of_text(text)
+        let st = Csv { i: 0, quoted: false, fs: ⍳ 0, fe: ⍳ 0, rows: ⍳ 0, start: 0, row: false } ▷ settle(c => csv_step(c, b), c => c.i >= ≢ b)
+        // the last row, if the text does not end with a newline
+        let fin = if ≢ b > 0 and b[≢ b - 1] != 10 { csv_end_field(csv_open_row(st), ≢ b) } else { st }
+        let n = ≢ fin.fs
+        let firsts = fin.rows
+        let m = ≢ firsts
+        ⍳ m ¨ (r => {
+            let (lo, hi) = (firsts[r], if r + 1 < m { firsts[r + 1] } else { n })
+            ⍳ (hi - lo) ¨ (f => field(text, fin.fs[lo + f], fin.fe[lo + f]))
+        })
+    }
+
+    // A URL split into its parts as RFC 3986 reads it (and Python's
+    // urllib.parse.urlsplit): "https://u:p@host:8080/a/b?x=1#top" has the
+    // scheme "https", the user "u", the password "p", the host "host", the
+    // port 8080 (¯1 when none is given), the path "/a/b", the query "x=1"
+    // and the fragment "top". Parts that are absent are "".
+    pub type Url = { scheme: str, user: str, password: str, host: str, port: i64, path: str, query: str, fragment: str }
+
+    pub fn url(s: str) -> Url {
+        let (rest0, fragment) = cut(s, "#")
+        let (rest1, query) = cut(rest0, "?")
+        let colon = find_index(rest1, ":")
+        let has_scheme = colon > 0 and all(chars(slice(rest1, 0, colon)) ¨ (c => contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-.", c)))
+        let scheme = if has_scheme { lower(slice(rest1, 0, colon)) } else { "" }
+        let rest2 = if has_scheme { slice(rest1, colon + 1, ≢ rest1) } else { rest1 }
+        if not starts_with(rest2, "//") { Url { scheme: scheme, user: "", password: "", host: "", port: ¯1, path: rest2, query: query, fragment: fragment } } else {
+            let after = slice(rest2, 2, ≢ rest2)
+            let slash = find_index(after, "/")
+            let authority = if slash < 0 { after } else { slice(after, 0, slash) }
+            let path = if slash < 0 { "" } else { slice(after, slash, ≢ after) }
+            let at = last_index(authority, "@")
+            let userinfo = if at < 0 { "" } else { slice(authority, 0, at) }
+            let hostport = if at < 0 { authority } else { slice(authority, at + 1, ≢ authority) }
+            let (user, password) = cut(userinfo, ":")
+            let pcolon = last_index(hostport, ":")
+            let digits = pcolon >= 0 and pcolon + 1 < ≢ hostport and is_int(slice(hostport, pcolon + 1, ≢ hostport))
+            let named = if digits or pcolon == ≢ hostport - 1 { slice(hostport, 0, pcolon) } else { hostport }
+            // an IPv6 address comes in brackets
+            let host = lower(if starts_with(named, "[") and ends_with(named, "]") { slice(named, 1, ≢ named - 1) } else { named })
+            let port = if digits { to_int(slice(hostport, pcolon + 1, ≢ hostport)) } else { ¯1 }
+            Url { scheme: scheme, user: user, password: password, host: host, port: port, path: path, query: query, fragment: fragment }
+        }
+    }
+
+    // A version by Semantic Versioning 2.0.0: MAJOR.MINOR.PATCH, a
+    // pre-release after "-" and build metadata after "+".
+    pub type Version = { major: i64, minor: i64, patch: i64, pre: str, build: str }
+
+    // The version s writes, or None if it is not one.
+    pub fn semver(s: str) -> Option[Version] {
+        let (main0, build) = cut(s, "+")
+        let (core, pre) = cut(main0, "-")
+        let nums = split(core, ".")
+        let ok = ≢ nums == 3 and all(nums ¨ (x => is_int(x) and not starts_with(x, "-") and not starts_with(x, "+") and (x == "0" or not starts_with(x, "0"))))
+        if not ok or (contains(main0, "-") and pre == "") { None } else { Some(Version { major: to_int(nums[0]), minor: to_int(nums[1]), patch: to_int(nums[2]), pre: pre, build: build }) }
+    }
+
+    // ¯1, 0 or 1 as a comes before, with, or after b in Semantic Versioning
+    // precedence: numbers as numbers, a pre-release before its release,
+    // pre-release identifiers numbers before words and one by one; build
+    // metadata ignored.
+    pub fn semver_compare(a: Version, b: Version) -> i64 {
+        if a.major != b.major { cmp(a.major, b.major) } else if a.minor != b.minor { cmp(a.minor, b.minor) } else if a.patch != b.patch { cmp(a.patch, b.patch) }
+        else if a.pre == b.pre { 0 } else if a.pre == "" { 1 } else if b.pre == "" { ¯1 } else { pre_cmp(split(a.pre, "."), split(b.pre, "."), 0) }
+    }
+
+    // ---- the parts ----
+
+    // s before and after the first sep ("" after when there is none)
+    fn cut(s: str, sep: str) -> (str, str) {
+        let at = find_index(s, sep)
+        if at < 0 { (s, "") } else { (slice(s, 0, at), slice(s, at + ≢ sep, ≢ s)) }
+    }
+    fn last_index(s: str, part: str) -> i64 {
+        let at = text::find_all(s, part)
+        if ≢ at == 0 { ¯1 } else { at[≢ at - 1] }
+    }
+    fn cmp(a: i64, b: i64) -> i64 { if a < b { ¯1 } else if a > b { 1 } else { 0 } }
+    fn pre_cmp(x: [str], y: [str], i: i64) -> i64 {
+        if i == ≢ x and i == ≢ y { 0 } else if i == ≢ x { ¯1 } else if i == ≢ y { 1 } else {
+            let (p, q) = (x[i], y[i])
+            let (pn, qn) = (is_int(p), is_int(q))
+            let c = if pn and qn { cmp(to_int(p), to_int(q)) } else if pn { ¯1 } else if qn { 1 } else if p < q { ¯1 } else if p > q { 1 } else { 0 }
+            if c != 0 { c } else { pre_cmp(x, y, i + 1) }
+        }
+    }
+
+    // CSV: the next byte, whether it is inside quotes, the fields found
+    // (their start and end bytes, quotes included), where each row's first
+    // field is, where the current field starts, and whether a row is open
+    // (after a comma, an empty field still follows)
+    type Csv = { i: i64, quoted: bool, fs: [i64], fe: [i64], rows: [i64], start: i64, row: bool }
+    // Every step ends in a call that takes the state whole, so the lists
+    // grow in place (a `with` on a helper's result would only borrow it).
+    fn csv_open_row(c: Csv) -> Csv { if c.row { c } else { { c with row: true, rows: push(c.rows, ≢ c.fs) } } }
+    fn csv_end_field(c: Csv, end: i64) -> Csv { { c with fs: push(c.fs, c.start), fe: push(c.fe, end) } }
+    // on to byte i, the next field starting at `start`
+    fn csv_at(c: Csv, i: i64, start: i64) -> Csv { { c with i: i, start: start } }
+    fn csv_quote(c: Csv, on: bool, i: i64) -> Csv { { c with i: i, quoted: on } }
+    fn csv_close_row(c: Csv, i: i64) -> Csv { { c with i: i, start: i, row: false } }
+    fn csv_blank(c: Csv, i: i64) -> Csv { { c with i: i, start: i, rows: push(c.rows, ≢ c.fs) } }
+    fn csv_step(c: Csv, b: [u8]) -> Csv {
+        let (i, x) = (c.i, b[c.i])
+        if c.quoted {
+            if x != 34 { csv_quote(c, true, i + 1) }
+            else if i + 1 < ≢ b and b[i + 1] == 34 { csv_quote(c, true, i + 2) }
+            else { csv_quote(c, false, i + 1) }
+        } else if x == 34 and i == c.start { csv_quote(csv_open_row(c), true, i + 1) }
+        else if x == 44 { csv_at(csv_end_field(csv_open_row(c), i), i + 1, i + 1) }
+        else if x == 10 {
+            let end = if i > c.start and b[i - 1] == 13 { i - 1 } else { i }
+            if c.row or i > c.start { csv_close_row(csv_end_field(csv_open_row(c), end), i + 1) } else { csv_blank(c, i + 1) }
+        } else { csv_quote(csv_open_row(c), false, i + 1) }
+    }
+    // the text of a field: without its quotes, doubled quotes as one
+    fn field(text: str, s: i64, e: i64) -> str {
+        let f = slice(text, s, e)
+        if starts_with(f, "\"") and ≢ f >= 2 {
+            let close = last_index(f, "\"")
+            replace(slice(f, 1, close), "\"\"", "\"") + slice(f, close + 1, ≢ f)
+        } else { f }
+    }
+}

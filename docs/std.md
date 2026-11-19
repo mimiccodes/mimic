@@ -223,6 +223,26 @@ Nodes are numbered `0` … `n - 1`; edge `e` goes from `from[e]` to `to[e]`, wit
 | `graph::topo(n, from, to)` | `Option[[i64]]`: an order in which every edge goes forwards (Kahn's algorithm, first come first served from the smallest node), or `None` if the edges make a cycle |
 | `graph::mst(n, a, b, w)` | `[i64]`: the edges of a minimum spanning forest of the undirected graph, by number (Kruskal's algorithm; equal weights by their place in the lists) |
 
+### `order`: searching sorted lists (pure)
+
+| Function | Result |
+|---|---|
+| `order::lower_bound(xs, x)`, `order::upper_bound(xs, x)` | In the sorted list `xs`, the first place whose value is not below `x`, and the first whose value is above it (binary search); their difference counts the `x`s |
+| `order::select(xs, k)` | The `k`-th smallest value (from 0), as `sort(xs)[k]` without sorting all of it (quickselect) |
+| `order::merge(a, b)` | Two sorted lists as one sorted list (equal values from `a` first) |
+| `order::is_sorted(xs)` | Whether `xs` never goes down |
+
+The module is called `order` because `sort` is the global function.
+
+### `parse`: common text formats (pure)
+
+| Function | Result |
+|---|---|
+| `parse::csv(text)` | `[[str]]`: the rows of a CSV text as Python's `csv` reads it (RFC 4180): fields apart by commas, rows by `\n` or `\r\n`, a field in double quotes may hold commas, newlines and doubled quotes; a blank line is a row of no fields |
+| `parse::url(s)` | A `parse::Url` record `{ scheme, user, password, host, port, path, query, fragment }`, as Python's `urllib.parse.urlsplit` reads it: absent parts are `""`, an absent port `¯1`, the scheme and host in lower case, an IPv6 host without its brackets |
+| `parse::semver(s)` | `Option[parse::Version]`: `{ major, minor, patch, pre, build }` by Semantic Versioning 2.0.0, or `None` |
+| `parse::semver_compare(a, b)` | `¯1`, `0` or `1` by Semantic Versioning precedence (a pre-release before its release; build metadata ignored) |
+
 ### `hash`: checksums and hashes (pure)
 
 Each function is the standard algorithm on `[u8]`, checked against the usual references (Python's `zlib`, `hashlib`, `xxhash` and `mmh3`, and the published test vectors), and is the same code the benchmark corpus measures. None of them is for passwords or signatures; `md5` and `sha1` are broken for security and are here for old formats.
