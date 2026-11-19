@@ -1520,6 +1520,50 @@ mim_val *mim_std_sort_index(mim_val *keys) {
     need(keys, "sort_by");
     if (keys->rank != 1) mim_panic("sort_by: the keys must form a list");
     int64_t n = keys->len;
+    /* integers (or bytes): the same stable merge sort on the raw keys, with
+     * no boxing (the general way below boxes each key and compares pairs
+     * through cmp_vals, 2,000,000 keys in seconds) */
+    if (keys->dtype == MIM_I64 || keys->dtype == MIM_U8 || keys->dtype == MIM_I32) {
+        /* (key, index) pairs side by side, so the merges read memory in
+         * order instead of reaching each key through its index */
+        typedef struct { int64_t k, i; } kv_pair;
+        kv_pair *a = (kv_pair *)malloc(sizeof(kv_pair) * (size_t)(n + 1)), *b = (kv_pair *)malloc(sizeof(kv_pair) * (size_t)(n + 1));
+        for (int64_t i = 0; i < n; i++) {
+            a[i].k = geti(keys, i);
+            a[i].i = i;
+        }
+        /* runs of 16 by insertion first (stable), then merges */
+        for (int64_t lo = 0; lo < n; lo += 16) {
+            int64_t hi = lo + 16 < n ? lo + 16 : n;
+            for (int64_t i = lo + 1; i < hi; i++) {
+                kv_pair x = a[i];
+                int64_t j = i;
+                while (j > lo && a[j - 1].k > x.k) {
+                    a[j] = a[j - 1];
+                    j--;
+                }
+                a[j] = x;
+            }
+        }
+        for (int64_t w = 16; w < n; w *= 2) {
+            for (int64_t lo = 0; lo < n; lo += 2 * w) {
+                int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
+                int64_t i = lo, j = mid, o = lo;
+                while (i < mid && j < hi) b[o++] = a[j].k < a[i].k ? a[j++] : a[i++];
+                while (i < mid) b[o++] = a[i++];
+                while (j < hi) b[o++] = a[j++];
+            }
+            kv_pair *t = a;
+            a = b;
+            b = t;
+        }
+        mim_val *r = alloc(MIM_I64, 1, n);
+        int64_t *out = (int64_t *)r->data;
+        for (int64_t i = 0; i < n; i++) out[i] = a[i].i;
+        free(a);
+        free(b);
+        return r;
+    }
     mim_val **k = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1)), *out = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) {
