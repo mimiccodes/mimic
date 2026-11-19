@@ -500,6 +500,15 @@ mim_val *mim_std_push(mim_val *xs, mim_val *x) {
         return r;
     }
     int64_t n = xs->len;
+    /* a plain list and a value of its kind: one copy of the elements (the
+     * general way below boxes every element, then unboxes them again) */
+    if (x && x != xs && x->rank == 0 && x->dtype == xs->dtype && !IS_HANDLES(xs) && xs->dtype != MIM_CHAR) {
+        size_t es = elsize(xs->dtype);
+        mim_val *r = alloc(xs->dtype, 1, n + 1);
+        memcpy(r->data, xs->data, (size_t)n * es);
+        memcpy((char *)r->data + (size_t)n * es, x->data, es);
+        return r;
+    }
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = scalar_at(xs, i);
     mim_retain(x);
