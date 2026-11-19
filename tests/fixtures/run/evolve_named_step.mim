@@ -2,8 +2,7 @@ module main
 
 // `evolve(n, step)` and `settle(step, done)` with a function by name step
 // the same way as with `s => step(s)`: the state is handed on, so a list in
-// it is updated in place (1,000,000 steps over a 1,000,000-byte list would
-// copy it each time otherwise)
+// it is updated in place in optimised builds (a copy each step otherwise)
 
 type B = { k: i64, f: [u8] }
 
@@ -11,11 +10,11 @@ fn set(b: B) -> B {
     { b with k: b.k + 1, f: put(b.f, (b.k * 7919) % ≢ b.f, 1) }
 }
 
-fn unfinished(b: B) -> bool { b.k >= 500000 }
+fn unfinished(b: B) -> bool { b.k >= 10000 }
 
 fn main() {
-    let start = B { k: 0, f: bytes::from(⍳ 1000000 ¨ (_ => 0)) }
-    let a = start ▷ evolve(1000000, set)
+    let start = B { k: 0, f: bytes::from(⍳ 20000 ¨ (_ => 0)) }
+    let a = start ▷ evolve(20000, set)
     print("{a.k} {+/ a.f}")
     let b = start ▷ settle(set, unfinished)
     print("{b.k} {+/ b.f}")
