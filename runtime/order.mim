@@ -1,0 +1,65 @@
+// Searching and ordering beyond `sort` and `sort_index`: binary search in
+// a sorted list, the k-th smallest, merging two sorted lists. The same
+// algorithms the benchmark corpus measures (bench/bsearch, bench/select).
+// (Appended to the prelude.)
+pub module order {
+    // The first place in the sorted list xs whose value is not below x
+    // (≢ xs if every value is): where x would go, before any equal values.
+    pub fn lower_bound(xs: [i64], x: i64) -> i64 { lower(xs, x, 0, ≢ xs) }
+
+    // The first place whose value is above x: where x would go, after any
+    // equal values. upper_bound(xs, x) - lower_bound(xs, x) counts the xs.
+    pub fn upper_bound(xs: [i64], x: i64) -> i64 { upper(xs, x, 0, ≢ xs) }
+
+    // Whether xs never goes down.
+    pub fn is_sorted(xs: [i64]) -> bool { all(⍳ (0 ⌈ (≢ xs - 1)) ¨ (i => xs[i] <= xs[i + 1])) }
+
+    // The k-th smallest value of xs (from 0), by quickselect: as
+    // `sort(xs)[k]`, without sorting all of it. Stops the program when k
+    // is not a place in xs.
+    pub fn select(xs: [i64], k: i64) -> i64 {
+        if k < 0 or k >= ≢ xs { panic("order::select: {k} is not a place in a list of {≢ xs}") }
+        (Pick { xs: xs, k: k, found: false, v: 0 } ▷ settle(narrow, p => p.found)).v
+    }
+
+    // Two sorted lists merged into one sorted list (equal values from a
+    // first).
+    pub fn merge(a: [i64], b: [i64]) -> [i64] {
+        (Merge { i: 0, j: 0, out: ⍳ 0 } ▷ evolve(≢ a + ≢ b, m => merge_step(m, a, b))).out
+    }
+
+    // ---- the parts ----
+
+    fn lower(xs: [i64], x: i64, lo: i64, hi: i64) -> i64 {
+        if lo >= hi { lo } else {
+            let mid = (lo + hi) div 2
+            if xs[mid] < x { lower(xs, x, mid + 1, hi) } else { lower(xs, x, lo, mid) }
+        }
+    }
+    fn upper(xs: [i64], x: i64, lo: i64, hi: i64) -> i64 {
+        if lo >= hi { lo } else {
+            let mid = (lo + hi) div 2
+            if xs[mid] <= x { upper(xs, x, mid + 1, hi) } else { upper(xs, x, lo, mid) }
+        }
+    }
+
+    // quickselect: the values still in play, the place sought among them
+    type Pick = { xs: [i64], k: i64, found: bool, v: i64 }
+    fn narrow(p: Pick) -> Pick {
+        let xs = p.xs
+        let pivot = xs[≢ xs div 2]
+        let below = xs ⌿ (xs < pivot)
+        let above = xs ⌿ (xs > pivot)
+        let (lo, hi) = (≢ below, ≢ xs - ≢ above)
+        if p.k < lo { Pick { xs: below, k: p.k, found: false, v: 0 } }
+        else if p.k < hi { Pick { xs: below ↑ 0, k: 0, found: true, v: pivot } }
+        else { Pick { xs: above, k: p.k - hi, found: false, v: 0 } }
+    }
+
+    // merging: the next of each list, and the output so far
+    type Merge = { i: i64, j: i64, out: [i64] }
+    fn merge_step(m: Merge, a: [i64], b: [i64]) -> Merge {
+        if m.j == ≢ b or (m.i < ≢ a and a[m.i] <= b[m.j]) { { m with i: m.i + 1, out: push(m.out, a[m.i]) } }
+        else { { m with j: m.j + 1, out: push(m.out, b[m.j]) } }
+    }
+}

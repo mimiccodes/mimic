@@ -1,0 +1,20 @@
+0/0 0/3 33/36 2535/2541 4992/5000 5000/5000
+-999992 -999947 -2575 999958 999985
+1663112524032685 True
+47 30334
+[name;age] | [Ada, Countess;36] | [say "hi";] | [] | [x;multi
+line;z] | [last;row]
+https|u|p|example.com|8080|/a/b|x=1&y=2|top
+http|||host|-1|/path||
+mailto||||-1|ada@example.com||
+|||cdn.net|-1|/lib.js||
+file||||-1|/tmp/x.txt||
+ftp|||::1|21|/||
+http|||h|-1|/p||
+||||-1|relative/path|q|f
+-1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+1 1 1 1 1 1 1 1 1 1
+0
+1.2.3[][] none none none 1.2.3[][build.5] 1.2.3[rc.1][b] none none
+[]
+[["a" "b"] ["" "c"]]

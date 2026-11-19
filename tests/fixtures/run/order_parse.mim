@@ -1,0 +1,48 @@
+module main
+
+// order and parse: lower_bound, upper_bound and select against Python's
+// bisect and sorted, merge against sorted; csv against Python's csv (quoted
+// commas and newlines, doubled quotes, a blank line, CRLF, no final
+// newline); url against urllib.parse.urlsplit; semver against the
+// precedence chain of semver.org.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn ver(s: str) -> parse::Version {
+    match parse::semver(s) { Some(v) => v, None => panic("not a version: " + s) }
+}
+
+fn main() {
+    let xs = sort(⍳ 5000 ¨ (i => mix(i) % 1000))
+    print(join([¯5 0 7 500 999 1000] ¨ (x => "{order::lower_bound(xs, x)}/{order::upper_bound(xs, x)}"), " "))
+    let ys = ⍳ 100001 ¨ (i => mix(i) % 2000001 - 1000000)
+    print(join([0 1 50000 99999 100000] ¨ (k => string(order::select(ys, k))), " "))
+    let s = sort(ys)
+    let byref = sort(ys)
+    print("{⍳ (≢ s) ¨ (i => i * s[i]) ▷ +/} {if order::is_sorted(s) and all(⍳ (≢ s) ¨ (i => s[i] == byref[i])) { "True" } else { "False" }}")
+    let m = order::merge(sort(xs ↑ 30), sort(⍳ 17 ¨ (i => mix(i + 9) % 100)))
+    print("{≢ m} {⍳ (≢ m) ¨ (i => i * m[i]) ▷ +/}")
+    let text = "name,age\r\n\"Ada, Countess\",36\n\"say \"\"hi\"\"\",\n\nx,\"multi\nline\",z\nlast,row"
+    print(join(parse::csv(text) ¨ (r => "[" + join(r, ";") + "]"), " | "))
+    let urls = ["https://u:p@Example.com:8080/a/b?x=1&y=2#top" "http://host/path" "mailto:ada@example.com" "//cdn.net/lib.js" "file:///tmp/x.txt" "ftp://[::1]:21/" "http://h:/p" "relative/path?q#f"]
+    print(join(urls ¨ (s => {
+        let u = parse::url(s)
+        join([u.scheme u.user u.password u.host string(u.port) u.path u.query u.fragment], "|")
+    }), "\n"))
+    // the precedence chain from semver.org
+    let chain = ["1.0.0-alpha" "1.0.0-alpha.1" "1.0.0-alpha.beta" "1.0.0-beta" "1.0.0-beta.2" "1.0.0-beta.11" "1.0.0-rc.1" "1.0.0" "1.0.1" "1.1.0" "2.0.0"]
+    let vs = chain ¨ ver
+    print(join(⍳ (≢ vs - 1) ¨ (i => string(parse::semver_compare(vs[i], vs[i + 1]))), " "))
+    print(join(⍳ (≢ vs - 1) ¨ (i => string(parse::semver_compare(vs[i + 1], vs[i]))), " "))
+    print(parse::semver_compare(ver("1.2.3+build.5"), ver("1.2.3")))
+    let tries = ["1.2.3" "01.2.3" "1.2" "1.2.3-" "1.2.3+build.5" "1.2.3-rc.1+b" "a.b.c" "1.2.3.4"]
+    print(join(tries ¨ (s => match parse::semver(s) { Some(v) => "{v.major}.{v.minor}.{v.patch}[{v.pre}][{v.build}]", None => "none" }), " "))
+    print(parse::csv(""))
+    print(parse::csv("a,b\n,c\n"))
+
+}
