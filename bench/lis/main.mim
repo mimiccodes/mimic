@@ -1,0 +1,38 @@
+module main
+
+// lis: the longest strictly increasing subsequence of 4,000,000 values
+// (from splitmix64) by patience sorting: tails[l] is the smallest last
+// value of an increasing subsequence of length l + 1; each value replaces
+// the first tail not below it (a binary search) or extends the tails (one
+// `put` or `push` in place a step, `evolve` with a named step). Prints the
+// length and the sum of the tails. The reference is bench/lis/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the first position in tails[lo … hi) whose value is not below v
+fn lower(tails: [i64], v: i64, lo: i64, hi: i64) -> i64 {
+    if lo >= hi { lo } else {
+        let mid = (lo + hi) div 2
+        if tails[mid] < v { lower(tails, v, mid + 1, hi) } else { lower(tails, v, lo, mid) }
+    }
+}
+
+// the next value's index, and the tails so far
+type P = { k: i64, tails: [i64] }
+
+fn next(s: P) -> P {
+    let v = mix(s.k) % 1000000000
+    let at = lower(s.tails, v, 0, ≢ s.tails)
+    if at == ≢ s.tails { { s with k: s.k + 1, tails: push(s.tails, v) } }
+    else { { s with k: s.k + 1, tails: put(s.tails, at, v) } }
+}
+
+fn main() {
+    let s = P { k: 0, tails: ⍳ 0 } ▷ evolve(4000000, next)
+    print("{≢ s.tails} {s.tails ▷ +/}")
+}
