@@ -130,7 +130,7 @@ A pure interpreter of nets is several times slower per core than compiled code. 
 
 The result is native speed on one core and native speed on every core in parallel.
 
-* **Deep recursion.** Native recursion is bounded at 2048 frames, and worker threads have 32 MB stacks. Deeper calls go back to the heap-allocated net, so `tri(100000)` (100,000-deep non-tail recursion) runs without overflowing the stack.
+* **Deep recursion.** Native recursion is bounded at 2048 frames, and worker threads have 32 MB stacks. Deeper calls go back to the heap-allocated net, so `tri(100000)` (100,000-deep non-tail recursion) runs without overflowing the stack. A function that takes a list or returns a tuple comes back to native code from the net, so its native stack still grows; past roughly 50,000 levels it can overflow (docs/gaps.md; loop such a walk with `evolve` or `settle` until 0.4.3).
 * **Comparing.** `--no-net` turns all of this off. The golden tests run every program both ways and require identical output.
 
 ### fib(32): unmodified Mimic code, M3 Pro (6P+6E), best of 3
