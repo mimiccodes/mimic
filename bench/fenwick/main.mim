@@ -1,0 +1,45 @@
+module main
+
+// fenwick: a Fenwick tree (binary indexed tree) over 1,048,576 counters:
+// 1,000,000 updates (add 1 to 1,000 at a position, from splitmix64) one
+// after another, each walking up the tree with `put`s in place, then
+// 2,000,000 prefix sums in parallel with `¨`, each walking down. Prints the
+// sum of the prefix sums and the total. The reference is
+// bench/fenwick/ref.py.
+
+// the tree (1-based: t[0] unused) and the next update
+type F = { k: i64, t: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn size() -> i64 { 1048576 }
+
+// add d at position i and every node above it
+fn add(f: F, i: i64, d: i64) -> F {
+    if i > size() { f } else {
+        let x = f.t[i]
+        add({ f with t: put(f.t, i, x + d) }, i + (i & (0 - i)), d)
+    }
+}
+
+fn update(f: F) -> F {
+    let k = f.k
+    add({ f with k: k + 1 }, 1 + mix(2 * k) % size(), 1 + mix(2 * k + 1) % 1000)
+}
+
+// the sum of positions 1 … i
+fn prefix(t: [i64], i: i64, s: i64) -> i64 {
+    if i == 0 { s } else { prefix(t, i - (i & (0 - i)), s + t[i]) }
+}
+
+fn main() {
+    let n = 1000000
+    let f = F { k: 0, t: ⍳ (size() + 1) ¨ (_ => 0) } ▷ evolve(n, update)
+    let sums = ⍳ (2 * n) ¨ (q => prefix(f.t, 1 + mix(3000000 + q) % size(), 0))
+    print("{+/ sums} {prefix(f.t, size(), 0)}")
+}
