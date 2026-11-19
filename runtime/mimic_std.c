@@ -365,6 +365,13 @@ mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
         memcpy((char *)xs->data + (size_t)n * elsize(xs->dtype), x->data, elsize(xs->dtype));
         return xs;
     }
+    /* an integer that is a byte onto bytes: stays bytes, in place */
+    if (own_plain(xs) && xs->dtype == MIM_U8 && x && x->rank == 0 && (x->dtype == MIM_I64 || x->dtype == MIM_I32) && geti(x, 0) >= 0 && geti(x, 0) <= 255) {
+        int64_t n = xs->len, b = geti(x, 0);
+        xs = grow_owned(xs, n + 1);
+        ((uint8_t *)xs->data)[n] = (uint8_t)b;
+        return xs;
+    }
     mim_val *r = mim_std_push(xs, x);
     mim_release(xs);
     return r;
@@ -391,6 +398,21 @@ mim_val *mim_push_i64_own(mim_val *xs, int64_t v) {
         int64_t n = xs->len;
         xs = grow_owned(xs, n + 1);
         ((int64_t *)xs->data)[n] = v;
+        return xs;
+    }
+    mim_val *x = mim_int(v);
+    mim_val *r = mim_std_push_own(xs, x);
+    mim_release(x);
+    return r;
+}
+
+/* push(xs, v) on a list of bytes held once, with a raw number: no boxing;
+ * anything else (shared, not a byte) goes the general way */
+mim_val *mim_push_u8_own(mim_val *xs, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_U8 && v >= 0 && v <= 255) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + 1);
+        ((uint8_t *)xs->data)[n] = (uint8_t)v;
         return xs;
     }
     mim_val *x = mim_int(v);
