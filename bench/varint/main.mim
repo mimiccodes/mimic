@@ -1,0 +1,55 @@
+module main
+
+// varint: 4,000,000 readings of a counter that mostly moves a little and
+// every 97th step jumps (from splitmix64), stored as differences,
+// zigzag-mapped and written as LEB128 bytes (7 bits a byte, low bits
+// first), then decoded again. The readings are a running sum (`trail(+)`)
+// of the steps; encoding and decoding are sequential passes (`evolve` with
+// named steps, `push` in place). Prints the number of bytes, a checksum
+// that weighs every byte by its position, and 1 when decoding gives the
+// values back. The reference is bench/varint/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// encoding: the next value, and the bytes so far
+type E = { i: i64, vals: [i64], out: [u8] }
+
+// z's bytes, low 7 bits first, the high bit on all but the last
+fn bytes_of(e: E, z: i64) -> E {
+    if z < 128 { { e with out: push(e.out, z) } }
+    else { bytes_of({ e with out: push(e.out, z & 127 | 128) }, z >>> 7) }
+}
+
+fn encode(e: E) -> E {
+    let d = e.vals[e.i] - (if e.i == 0 { 0 } else { e.vals[e.i - 1] })
+    bytes_of({ e with i: e.i + 1 }, (d << 1) ^ (d >> 63))
+}
+
+// decoding: the next byte, the number so far and its shift, the last
+// value, and the values so far
+type D = { p: i64, z: i64, shift: i64, prev: i64, out: [i64] }
+
+fn decode(s: D, data: [u8]) -> D {
+    let b = data[s.p]
+    let z = s.z | (b & 127) << s.shift
+    if b >= 128 { { s with p: s.p + 1, z: z, shift: s.shift + 7 } }
+    else {
+        let v = s.prev + ((z >>> 1) ^ (0 - (z & 1)))
+        { s with p: s.p + 1, z: 0, shift: 0, prev: v, out: push(s.out, v) }
+    }
+}
+
+fn main() {
+    let n = 4000000
+    let vals = ⍳ n ¨ (k => if k % 97 == 0 { mix(k) % 1000000000 } else { mix(k) % 2001 - 1000 }) ▷ trail(+) ¨ (s => s + 1000000)
+    let data = (E { i: 0, vals: vals, out: bytes::from([]) } ▷ evolve(n, encode)).out
+    let check = ⍳ (≢ data) ¨ (i => data[i] * (i % 251 + 1)) ▷ +/
+    let back = (D { p: 0, z: 0, shift: 0, prev: 0, out: ⍳ 0 } ▷ evolve(≢ data, s => decode(s, data))).out
+    let same = if ≢ back == n and all(⍳ n ¨ (i => back[i] == vals[i])) { 1 } else { 0 }
+    print("{≢ data} {check} {same}")
+}

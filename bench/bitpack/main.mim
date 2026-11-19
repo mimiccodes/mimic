@@ -1,0 +1,45 @@
+module main
+
+// bitpack: 8,000,000 values of 13 bits (from splitmix64) packed into 64-bit
+// words, low bits first, then unpacked again. Both ways are one map: a word
+// gathers the (at most six) values whose bits fall in it, and a value reads
+// the one or two words that hold it, so both run in parallel. Prints the
+// number of words, the sum of every word modulo 1,000,003, and 1 when
+// unpacking gives the values back. The reference is bench/bitpack/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn b() -> i64 { 13 }
+
+// word w: the values from k up to `last` that reach into it, each shifted
+// to its place (their bits do not overlap, so adding is or-ing)
+fn word(vals: [i64], w: i64, k: i64, last: i64, acc: i64) -> i64 {
+    if k > last { acc } else {
+        let o = k * b() - 64 * w
+        word(vals, w, k + 1, last, acc + (if o >= 0 { vals[k] << o } else { vals[k] >>> (0 - o) }))
+    }
+}
+
+// a 64-bit word, read as unsigned, modulo m
+fn umod(w: i64, m: i64) -> i64 { ((w >>> 1) % m * 2 + (w & 1)) % m }
+
+fn main() {
+    let n = 8000000
+    let vals = ⍳ n ¨ (k => mix(k) % (1 << b()))
+    let nw = (n * b() + 63) div 64
+    let words = ⍳ nw ¨ (w => word(vals, w, 64 * w div b(), ((64 * w + 63) div b()) ⌊ (n - 1), 0))
+    let check = words ¨ (w => umod(w, 1000003)) ▷ +/
+    let back = ⍳ n ¨ (k => {
+        let (w, o) = (k * b() div 64, k * b() % 64)
+        let lo = words[w] >>> o
+        let hi = if o + b() > 64 { words[w + 1] << (64 - o) } else { 0 }
+        (lo | hi) & ((1 << b()) - 1)
+    })
+    let same = if all(⍳ n ¨ (k => back[k] == vals[k])) { 1 } else { 0 }
+    print("{nw} {check} {same}")
+}

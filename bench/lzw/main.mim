@@ -1,0 +1,81 @@
+module main
+
+// lzw: 4,000,000 bytes (letters a-e in runs, from splitmix64) compressed
+// by LZW with 12-bit codes and decompressed again. The dictionary is a
+// table child[code × 256 + byte] (frozen once full); decompressing keeps
+// each code's prefix, last and first byte and length, and writes a code's
+// string from its end. Both are sequential passes (`evolve` with named
+// steps, `put` and `push` in place). Prints the number of codes, a
+// checksum that weighs every code by its position, and 1 when
+// decompressing gives the bytes back. The reference is bench/lzw/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn codes_max() -> i64 { 4096 }
+
+// compressing: the next byte, the code of the string so far, the next new
+// code, the dictionary and the codes out
+type E = { i: i64, w: i64, next: i64, child: [i64], codes: [i64] }
+
+fn compress(e: E, data: [u8]) -> E {
+    let ch = data[e.i]
+    let k = e.child[e.w * 256 + ch]
+    if k >= 0 { { e with i: e.i + 1, w: k } }
+    else if e.next < codes_max() {
+        { e with i: e.i + 1, w: ch, next: e.next + 1, codes: push(e.codes, e.w), child: put(e.child, e.w * 256 + ch, e.next) }
+    } else { { e with i: e.i + 1, w: ch, codes: push(e.codes, e.w) } }
+}
+
+// decompressing: the next code, the next new code, the last code, where
+// the output goes on, each code's prefix, last and first byte and length,
+// and the output
+type D = { i: i64, next: i64, prev: i64, pos: i64, prefix: [i64], last: [i64], first: [i64], len: [i64], out: [u8] }
+
+// the string of code k, from position `at` backwards
+fn write(d: D, k: i64, at: i64) -> D {
+    if k < 0 { d } else {
+        let (b, p) = (d.last[k], d.prefix[k])
+        write({ d with out: put(d.out, at, b) }, p, at - 1)
+    }
+}
+
+// a new code, before code i is written: the last code's string and the
+// first byte of this one
+fn learn(d: D, codes: [i64]) -> D {
+    let c = codes[d.i]
+    if d.prev < 0 or d.next >= codes_max() { d } else {
+        let b = if c < d.next { d.first[c] } else { d.first[d.prev] }
+        let (f, l) = (d.first[d.prev], d.len[d.prev] + 1)
+        { d with next: d.next + 1, prefix: put(d.prefix, d.next, d.prev), last: put(d.last, d.next, b), first: put(d.first, d.next, f), len: put(d.len, d.next, l) }
+    }
+}
+
+// code i written out
+fn emit(d: D, codes: [i64]) -> D {
+    let c = codes[d.i]
+    let end = d.pos + d.len[c]
+    write({ d with i: d.i + 1, prev: c, pos: end }, c, end - 1)
+}
+
+// each step hands the state on whole (learn, then emit), so the output is
+// written in place
+fn expand(d: D, codes: [i64]) -> D { emit(learn(d, codes), codes) }
+
+fn main() {
+    let n = 4000000
+    let data = bytes::from(⍳ n ¨ (i => 97 + mix(i div 4 + mix(i div 64) % 3) % 5))
+    let start = E { i: 1, w: data[0], next: 256, child: ⍳ (codes_max() * 256) ¨ (_ => ¯1), codes: ⍳ 0 }
+    let e = start ▷ evolve(n - 1, s => compress(s, data))
+    let codes = push(e.codes, e.w)
+    let check = ⍳ (≢ codes) ¨ (i => codes[i] * (i % 251 + 1)) ▷ +/
+    let byte = ⍳ codes_max() ¨ (c => if c < 256 { c } else { 0 })
+    let d0 = D { i: 0, next: 256, prev: ¯1, pos: 0, prefix: ⍳ codes_max() ¨ (_ => ¯1), last: byte, first: byte, len: ⍳ codes_max() ¨ (_ => 1), out: bytes::from(⍳ n ¨ (_ => 0)) }
+    let d = d0 ▷ evolve(≢ codes, s => expand(s, codes))
+    let same = if d.pos == n and all(⍳ n ¨ (i => d.out[i] == data[i])) { 1 } else { 0 }
+    print("{≢ codes} {check} {same}")
+}
