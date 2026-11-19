@@ -452,14 +452,14 @@ def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
 def gate(benches, old: Path, runs: int, inject: bool) -> int:
     """Mimic as built here against the mimic at `old`, benchmark by
     benchmark on this machine; slower beyond the tolerance in 2 of 3
-    measurements fails. Writes bench/gate.md; returns the exit code."""
+    measurements, and again in 2 of 3 at the end of the run, fails. Writes bench/gate.md; returns the exit code."""
     new = Path(mimic_exe())
     if not old.exists():
         print(f"error: no mimic at {old}", file=sys.stderr)
         return 2
     title = "the new side built without the optimizer" if inject else f"against {old}"
     lines = [f"## Speed gate ({platform_id()}, {title})", "", "| Benchmark | | Before | After | Change | Tolerance | |", "|---|---|---|---|---|---|---|"]
-    failed, faster = [], []
+    failed, faster, suspects = [], [], []
     for b in benches:
         if not (b / "main.mim").exists():
             continue
@@ -479,12 +479,33 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
                 change = sorted([change, *(n / o for o, n in again)])[1]
                 verdict = "**slower**" if worse >= 2 else "ok (noise)"
                 if worse >= 2:
-                    failed.append(f"{b.name} ({where})")
+                    # confirmed at the end of the run, minutes later
+                    suspects.append((b, key, tol, where, len(lines)))
             elif change < 1 - tol:
                 verdict = "faster"
                 faster.append(f"{b.name} ({where})")
             limit = f"{tol * 100:.0f}%" if gated else "not gated"
             lines.append(f"| {b.name} | {where} | {t_old:.3f} s | {t_new:.3f} s | {(change - 1) * 100:+.0f}% | {limit} | {verdict} |")
+    # A benchmark slower here is measured 3 times more once every other has
+    # run, minutes later: it fails only if slower in 2 of those 3 too. The
+    # shared machines (macOS above all) slow down for a while now and then,
+    # and the three measurements above, seconds apart, all fall into such a
+    # spell; a real slowdown is still there minutes later.
+    # (not in the self-check, where nearly everything is slower: it only
+    # has to fail)
+    for b, key, tol, where, at in suspects:
+        if inject:
+            failed.append(f"{b.name} ({where})")
+            continue
+        print(f"  {b.name} ({where}) again", flush=True)
+        later = [pair(b, old, new, runs + 2, inject)[key] for _ in range(3)]
+        worse = sum(n / o > 1 + tol for o, n in later)
+        mid = sorted(n / o for o, n in later)[1]
+        if worse >= 2:
+            failed.append(f"{b.name} ({where})")
+            lines[at] = lines[at].replace("| **slower** |", f"| **slower** (again later: {(mid - 1) * 100:+.0f}%) |")
+        else:
+            lines[at] = lines[at].replace("| **slower** |", f"| ok (noise: {(mid - 1) * 100:+.0f}% later) |")
     lines.append("")
     if failed:
         lines.append(f"**Slower:** {', '.join(failed)}.")
