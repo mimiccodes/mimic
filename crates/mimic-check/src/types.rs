@@ -1453,6 +1453,15 @@ impl Walk<'_, '_> {
                         (_, r) => r,             // `¨` on a scalar applies f once
                     };
                 }
+                // xs ▷ trail(+) / gather(+) over numbers (+ × max min): the
+                // running results are numbers of the same kind, and the
+                // whole gathered is one (the runtime scans such lists typed)
+                if matches!(prim, Prim::Trail | Prim::Gather)
+                    && let Ty::Arr(el @ (El::I64 | El::F64), _) = a
+                    && matches!(&args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul | BinOp::Max | BinOp::Min))
+                {
+                    return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { Ty::of_el(el) };
+                }
                 // x ▷ evolve(n, step) / x ▷ settle(step, done): the step
                 // function takes the state; when it gives back the same type,
                 // the state keeps that type throughout (else it is dynamic)

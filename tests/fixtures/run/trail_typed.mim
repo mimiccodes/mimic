@@ -1,0 +1,18 @@
+module main
+
+// `trail` and `gather` with + × ⌈ ⌊ over numbers keep the numbers' type:
+// the running sums index like any list of i64, and arithmetic on them is
+// typed (a lookup table built by trail(+), as histeq builds one)
+fn main() {
+    let hist = ⍳ 8 ¨ (v => v % 3)
+    let cdf = hist ▷ trail(+)
+    let lut = cdf ¨ (c => c * 2 + 1)
+    print("{cdf} {lut} {cdf[7] + 1}")
+    let pixels = ⍳ 20 ¨ (i => i * 5 % 8)
+    print(pixels ¨ (p => lut[p]) ▷ +/)
+    let f = [1.5 2.5 3.0] ▷ trail(+)
+    print("{f} {f[2] / 2.0} {[4.0 1.0 9.0] ▷ gather(max)}")
+    print("{[3 1 2] ▷ trail(min)} {⍳ 5 ¨ (i => i + 1) ▷ trail(×)}")
+    let none: [f64] = [1.0] ↓ 1
+    print(none ▷ trail(+))
+}
