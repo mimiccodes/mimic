@@ -1,0 +1,29 @@
+module main
+
+// select: 20,000,000 values (from splitmix64) and their k-th smallest for
+// k at 1%, 10%, 50%, 90% and 99%, each by quickselect: the pivot is the
+// middle element, the values below it and above it are kept (`⌿`, one
+// parallel pass each), and the search goes on in the side that holds k.
+// Prints the five values. The reference is bench/select/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the k-th smallest of xs (from 0)
+fn select(xs: [i64], k: i64) -> i64 {
+    let p = xs[≢ xs div 2]
+    let below = xs ⌿ (xs < p)
+    let above = xs ⌿ (xs > p)
+    let (lo, hi) = (≢ below, ≢ xs - ≢ above)
+    if k < lo { select(below, k) } else if k < hi { p } else { select(above, k - hi) }
+}
+
+fn main() {
+    let n = 20000000
+    let xs = ⍳ n ¨ (k => mix(k) % 1000000000)
+    print(join([1 10 50 90 99] ¨ (p => string(select(xs, n * p div 100))), " "))
+}
