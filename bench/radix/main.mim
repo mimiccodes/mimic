@@ -1,0 +1,59 @@
+module main
+
+// radix: 8,000,000 32-bit keys (from splitmix64) sorted by LSD radix sort,
+// four passes of 8 bits. Each pass counts the digits (in parallel, a chunk
+// of keys at a time, `put` in place), turns the counts into where each
+// digit starts (`trail(+)`), and places the keys one after another (a
+// named step with `evolve`, two `put`s in place a key). Prints the
+// smallest, the median and the largest, and a checksum that weighs every
+// key by its position. The reference is bench/radix/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn digit(x: i64, s: i64) -> i64 { (x >>> s) & 255 }
+
+// counting keys[c.i … end) by digit
+type Count = { i: i64, bins: [i64] }
+
+fn tally(keys: [i64], s: i64, end: i64, c: Count) -> Count {
+    if c.i == end { c } else {
+        let d = digit(keys[c.i], s)
+        let k = c.bins[d]
+        tally(keys, s, end, { c with i: c.i + 1, bins: put(c.bins, d, k + 1) })
+    }
+}
+
+// placing the keys: the next one, where each digit's next key goes, and
+// the output
+type Place = { i: i64, s: i64, keys: [i64], pos: [i64], out: [i64] }
+
+fn place(p: Place) -> Place {
+    let x = p.keys[p.i]
+    let d = digit(x, p.s)
+    let at = p.pos[d]
+    { p with i: p.i + 1, pos: put(p.pos, d, at + 1), out: put(p.out, at, x) }
+}
+
+fn chunk() -> i64 { 65536 }
+
+fn pass(keys: [i64], s: i64) -> [i64] {
+    let n = ≢ keys
+    let parts = ⍳ ((n + chunk() - 1) div chunk()) ¨ (c => tally(keys, s, ((c + 1) * chunk()) ⌊ n, Count { i: c * chunk(), bins: ⍳ 256 ¨ (_ => 0) }))
+    let counts = ⍳ 256 ¨ (d => parts ¨ (p => p.bins[d]) ▷ +/)
+    let ends = counts ▷ trail(+)
+    let starts = ⍳ 256 ¨ (d => ends[d] - counts[d])
+    (Place { i: 0, s: s, keys: keys, pos: starts, out: ⍳ n ¨ (_ => 0) } ▷ evolve(n, place)).out
+}
+
+fn main() {
+    let n = 8000000
+    let keys = ⍳ n ¨ (k => mix(k) % 4294967296)
+    let sorted = pass(pass(pass(pass(keys, 0), 8), 16), 24)
+    let check = ⍳ n ¨ (i => sorted[i] * (i % 251 + 1)) ▷ +/
+    print("{sorted[0]} {sorted[n div 2]} {sorted[n - 1]} {check}")
+}
