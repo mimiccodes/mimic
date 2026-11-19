@@ -160,6 +160,32 @@ true
 ["the quick brown" "fox jumps over" "the lazy dog"]
 ```
 
+### Graphs
+
+The `graph` module works on nodes numbered from 0 and edges given as lists: edge `e` goes from `from[e]` to `to[e]`, with weight `w[e]` where one is needed.
+
+```mimic run
+module main
+
+fn main() {
+    // six nodes; edge e goes from[e] → to[e], with weight w[e]
+    let (from, to, w) = ([0 0 1 2 3], [1 2 3 3 4], [4 1 2 5 1])
+    print(graph::bfs(6, from, to, 0))             // hops from node 0 (¯1: none)
+    print(graph::shortest(6, from, to, w, 0))     // cheapest paths
+    print(graph::components(6, from, to))         // node 5 stands alone
+    print(graph::topo(6, from, to))
+    print(graph::mst(6, from, to, w))             // the edges a spanning forest takes
+}
+```
+
+```output
+[0 1 1 2 3 -1]
+[0 4 1 6 7 -1]
+[0 0 0 0 0 5]
+Some([0 5 1 2 3 4])
+[0 1 2 4]
+```
+
 ## Lists
 
 ```mimic run

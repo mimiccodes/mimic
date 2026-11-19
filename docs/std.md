@@ -211,6 +211,18 @@ How channels behave:
 | `text::soundex(name)` | The American Soundex code: `"R163"` for both `"Robert"` and `"Rupert"`; letters other than A-Z are skipped |
 | `text::wrap(s, width)` | `[str]`: the words of `s` in lines of at most `width` characters, filled greedily (a longer word gets a line of its own), as Python's `textwrap.wrap` does with `break_long_words=False` |
 
+### `graph`: graph algorithms (pure)
+
+Nodes are numbered `0` … `n - 1`; edge `e` goes from `from[e]` to `to[e]`, with weight `w[e]` where one is needed. Each function is checked against networkx.
+
+| Function | Result |
+|---|---|
+| `graph::bfs(n, from, to, start)` | `[i64]`: the number of edges from `start` to each node along directed edges (breadth-first search); `¯1` where it cannot be reached |
+| `graph::shortest(n, from, to, w, start)` | `[i64]`: the length of the shortest path from `start` to each node along directed edges of weights `w` (none negative), by Dijkstra's algorithm with a binary heap; `¯1` where it cannot be reached |
+| `graph::components(n, a, b)` | `[i64]`: the connected components of the undirected graph, each node labelled with the smallest node of its component (union-find) |
+| `graph::topo(n, from, to)` | `Option[[i64]]`: an order in which every edge goes forwards (Kahn's algorithm, first come first served from the smallest node), or `None` if the edges make a cycle |
+| `graph::mst(n, a, b, w)` | `[i64]`: the edges of a minimum spanning forest of the undirected graph, by number (Kruskal's algorithm; equal weights by their place in the lists) |
+
 ### `hash`: checksums and hashes (pure)
 
 Each function is the standard algorithm on `[u8]`, checked against the usual references (Python's `zlib`, `hashlib`, `xxhash` and `mmh3`, and the published test vectors), and is the same code the benchmark corpus measures. None of them is for passwords or signatures; `md5` and `sha1` are broken for security and are here for old formats.

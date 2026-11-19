@@ -1,0 +1,32 @@
+module main
+
+// graph: bfs, components, shortest and mst against networkx, topo against
+// Kahn's algorithm in Python (and checked to be an order networkx accepts),
+// on random graphs from splitmix64 of 1 to 20,000 nodes; a cycle gives None.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn line(n: i64, m: i64, seed: i64) -> str {
+    let a = ⍳ m ¨ (e => mix(seed + 3 * e) % n)
+    let b = ⍳ m ¨ (e => mix(seed + 3 * e + 1) % n)
+    let w = ⍳ m ¨ (e => 1 + mix(seed + 3 * e + 2) % 20)
+    let bfs = graph::bfs(n, a, b, 0)
+    let label = graph::components(n, a, b)
+    let sp = graph::shortest(n, a, b, w, 0)
+    let taken = graph::mst(n, a, b, w)
+    let proper = ⍳ m ⌿ (⍳ m ¨ (e => a[e] != b[e]))
+    let order = graph::topo(n, proper ¨ (e => a[e] ⌊ b[e]), proper ¨ (e => a[e] ⌈ b[e])) else { return "no order" }
+    let cyc = graph::topo(n, push(a, 0), push(b, 0))
+    let distinct = ⍳ n ⌿ (⍳ n ¨ (v => label[v] == v))
+    let none = match cyc { None => true, Some(_) => false }
+    "{n} {bfs ▷ +/} {count(bfs, x => x >= 0)} {bfs ▷ ⌈/} {≢ distinct} {label ▷ +/} {sp ▷ +/} {sp ▷ ⌈/} {≢ taken} {taken ¨ (e => w[e]) ▷ +/} {taken ▷ +/} {⍳ n ¨ (i => i * order[i]) ▷ +/} {if none { "True" } else { "False" }}"
+}
+
+fn main() {
+    print(join([(1, 0, 0) (6, 0, 1) (50, 60, 2) (1000, 3000, 3) (20000, 30000, 4)] ¨ (c => line(c.0, c.1, 1000 * c.2)), "\n"))
+}
