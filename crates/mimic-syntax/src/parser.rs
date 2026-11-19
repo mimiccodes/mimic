@@ -125,6 +125,26 @@ fn respan(e: &mut Expr, span: Span) {
 /// Build a primitive application. `max`, `min` and `abs` are ordinary
 /// operators underneath, so they stay unboxed fast paths everywhere.
 fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
+    // `evolve(n, step)` and `settle(step, done)` with functions by name: the
+    // same as `s => step(s)` (and `s => done(s)`), which the compiler steps
+    // in place (the state handed on, a list in it updated without a copy)
+    // where a function value is called with a state it cannot take over
+    let named: &[usize] = match prim {
+        Prim::Evolve => &[2],
+        Prim::Settle => &[1, 2],
+        _ => &[],
+    };
+    for &i in named {
+        if let Some(f) = args.get_mut(i)
+            && matches!(f.kind, ExprKind::Path(_))
+        {
+            let at = f.span;
+            let callee = std::mem::replace(f, Expr { kind: ExprKind::Path(vec![]), span: at });
+            let state = Expr { kind: ExprKind::Path(vec!["step·state".to_string()]), span: at };
+            let body = Expr { kind: ExprKind::Call { callee: Box::new(callee), args: vec![state] }, span: at };
+            *f = Expr { kind: ExprKind::Lambda { params: vec!["step·state".to_string()], body: Box::new(body) }, span: at };
+        }
+    }
     let kind = match (prim, args.len()) {
         (Prim::Max | Prim::Min, 2) => {
             let rhs = args.pop().unwrap();
