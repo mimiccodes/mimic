@@ -202,6 +202,31 @@ How channels behave:
 
 `fs::read_bytes`/`fs::write_bytes` and `tcp::send_bytes`/`tcp::receive_bytes` read and write bytes. A `[u8]` parameter accepts only bytes; passing a list of `i64` is a compile error.
 
+### `text`: text algorithms (pure)
+
+| Function | Result |
+|---|---|
+| `text::distance(a, b)` | The Levenshtein distance: the fewest insertions, deletions and substitutions of characters (UTF-8 characters count as one) that turn `a` into `b` |
+| `text::find_all(s, part)` | `[i64]`: every byte position where `part` occurs (the positions `find` and `slice` use), overlapping ones included, by Knuth-Morris-Pratt; `[]` for an empty `part` |
+| `text::soundex(name)` | The American Soundex code: `"R163"` for both `"Robert"` and `"Rupert"`; letters other than A-Z are skipped |
+| `text::wrap(s, width)` | `[str]`: the words of `s` in lines of at most `width` characters, filled greedily (a longer word gets a line of its own), as Python's `textwrap.wrap` does with `break_long_words=False` |
+
+### `hash`: checksums and hashes (pure)
+
+Each function is the standard algorithm on `[u8]`, checked against the usual references (Python's `zlib`, `hashlib`, `xxhash` and `mmh3`, and the published test vectors), and is the same code the benchmark corpus measures. None of them is for passwords or signatures; `md5` and `sha1` are broken for security and are here for old formats.
+
+| Function | Result |
+|---|---|
+| `hash::crc32(b)`, `hash::crc64(b)` | CRC-32 (as zlib and PNG compute it), CRC-64/XZ |
+| `hash::adler32(b)` | Adler-32 (as zlib computes it) |
+| `hash::fnv1a32(b)`, `hash::fnv1a64(b)` | FNV-1a |
+| `hash::murmur3(b, seed = 0)` | MurmurHash3 x86_32 |
+| `hash::xxhash32(b, seed = 0)`, `hash::xxhash64(b, seed = 0)` | xxHash |
+| `hash::siphash(b, k0, k1)` | SipHash-2-4 with a 128-bit key, for hash tables facing chosen keys |
+| `hash::md5(b)`, `hash::sha1(b)`, `hash::sha256(b)` | the digest as bytes (16, 20 and 32 of them): `bytes::hex(hash::sha256(b))` |
+
+The 32-bit results are from 0 to 2^32 - 1; the 64-bit ones use every bit, so as an `i64` they may be negative. To hash text, hash its bytes: `hash::crc32(bytes::of_text(s))`.
+
 ### `path`: paths as text (pure)
 
 | Function | Example |

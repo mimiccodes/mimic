@@ -701,7 +701,7 @@ pub module http {
     }
 }
 
-", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/ui.mim"));
+", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/hash.mim"), include_str!("../../../runtime/text.mim"), include_str!("../../../runtime/ui.mim"));
 
 pub fn prelude_file() -> SourceFile {
     let key = PathBuf::from("<prelude>");

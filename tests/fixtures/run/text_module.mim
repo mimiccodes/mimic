@@ -1,0 +1,17 @@
+module main
+
+// text: distance, find_all and wrap against Python (textwrap, and plain
+// implementations), soundex against its published examples; a pattern
+// that falls back far, and a vowel run, as loops.
+fn main() {
+    let pairs = [("", "") ("", "abc") ("kitten", "sitting") ("flaw", "lawn") ("intention", "execution") ("café", "cafe") ("日本語", "日本") ("abc", "abc")]
+    print(join(pairs ¨ (p => string(text::distance(p.0, p.1))), " "))
+    let finds = [("abababa", "aba") ("aaaa", "aa") ("hello world", "o") ("abc", "") ("abc", "abcd") ("naïve naïve", "ve") ("mississippi", "issi")]
+    print(join(finds ¨ (f => join(text::find_all(f.0, f.1) ¨ string, " ")), " | "))
+    let t = repeat("The quick brown fox jumps over the lazy dog. ", 7) + "Supercalifragilisticexpialidocious is long."
+    print(join([10 20 30] ¨ (w => join(text::wrap(t, w), " | ")), "\n"))
+    print(join(["Robert" "Rupert" "Ashcraft" "Tymczak" "Pfister" "Honeyman" "Lee" "" "O'Hara"] ¨ text::soundex, " "))
+    let p = repeat("a", 5000)
+    print(≢ text::find_all(repeat("a", 6000) + "b" + p, p + "b"))
+    print(text::soundex("B" + repeat("a", 20000) + "rt"))
+}

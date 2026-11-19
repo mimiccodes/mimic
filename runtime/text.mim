@@ -1,0 +1,116 @@
+// Text algorithms: text::distance(a, b), text::find_all(s, part),
+// text::soundex(name), text::wrap(s, width). The same algorithms the
+// benchmark corpus measures (bench/levenshtein, bench/kmp, bench/soundex,
+// bench/wordwrap), checked against Python. (Appended to the prelude.)
+pub module text {
+    // The Levenshtein distance: the fewest insertions, deletions and
+    // substitutions of characters that turn a into b.
+    pub fn distance(a: str, b: str) -> i64 {
+        let (x, y) = (codes(a), codes(b))
+        let g = Grid { i: 0, prev: ⍳ (≢ y + 1) } ▷ evolve(≢ x, g => lev_row(g, x, y))
+        g.prev[≢ y]
+    }
+
+    // Where part occurs in s, as byte positions (the ones `find` and `slice`
+    // use), overlapping ones included, by Knuth-Morris-Pratt. An empty part
+    // occurs nowhere.
+    pub fn find_all(s: str, part: str) -> [i64] {
+        let (t, p) = (bytes::of_text(s), bytes::of_text(part))
+        if ≢ p == 0 or ≢ p > ≢ t { ⍳ 0 } else {
+            let fail = (Fail { i: 1, k: 0, f: ⍳ (≢ p) ¨ (_ => 0) } ▷ evolve(≢ p - 1, f => kmp_fail(f, p))).f
+            (Scan { i: 0, k: 0, found: ⍳ 0 } ▷ evolve(≢ t, s => kmp_scan(s, t, p, fail))).found
+        }
+    }
+
+    // The American Soundex code of a name: its first letter, then the digits
+    // of the consonants after it (b f p v: 1; c g j k q s x z: 2; d t: 3;
+    // l: 4; m n: 5; r: 6), neighbours with the same digit once (h and w do
+    // not separate them, vowels do), to four characters: "Robert" is
+    // "R163". Letters other than A-Z are skipped; a name without one gives "".
+    pub fn soundex(name: str) -> str {
+        let b = bytes::of_text(lower(name)) ⌿ (bytes::of_text(lower(name)) ¨ (c => c >= 97 and c <= 122))
+        if ≢ b == 0 { "" } else {
+            let st = Sdx { i: 1, last: soundex_digit(b[0]), out: 0, got: 0 } ▷ evolve(≢ b - 1, x => soundex_step(x, b))
+            let d = st.out * (⍳ (3 - st.got) ¨ (_ => 10) ▷ ×/)
+            upper(char_of(b[0])) + pad_start(string(d), 3, "0")
+        }
+    }
+
+    // The words of s (split on spaces, tabs and newlines) in lines of at
+    // most `width` characters, filled greedily; a longer word has a line of
+    // its own.
+    pub fn wrap(s: str, width: i64) -> [str] {
+        let ws = words(s)
+        let lens = ws ¨ (w => ≢ chars(w))
+        let w = Wrap { i: 0, line: 0, breaks: ⍳ 0 } ▷ evolve(≢ ws, w => wrap_word(w, lens, width))
+        let starts = concat(⍳ 1 ¨ (_ => 0), w.breaks)
+        let ends = concat(w.breaks, ⍳ 1 ¨ (_ => ≢ ws))
+        if ≢ ws == 0 { [] } else { ⍳ (≢ starts) ¨ (l => join(ws ↓ starts[l] ↑ (ends[l] - starts[l]), " ")) }
+    }
+
+    // ---- the parts ----
+
+    // the code points of a string
+    fn codes(s: str) -> [i64] { chars(s) ¨ char_code }
+
+    // Levenshtein: the row above, and the row being made
+    type Grid = { i: i64, prev: [i64] }
+    type Row = { j: i64, cur: [i64] }
+    fn lev_cell(r: Row, prev: [i64], c: i64, y: [i64]) -> Row {
+        let j = r.j
+        let v = (prev[j] + 1) ⌊ (r.cur[j - 1] + 1) ⌊ (prev[j - 1] + (if c == y[j - 1] { 0 } else { 1 }))
+        { r with j: j + 1, cur: push(r.cur, v) }
+    }
+    fn lev_row(g: Grid, x: [i64], y: [i64]) -> Grid {
+        let (c, prev) = (x[g.i], g.prev)
+        let r = Row { j: 1, cur: ⍳ 1 ¨ (_ => g.i + 1) } ▷ evolve(≢ y, r => lev_cell(r, prev, c, y))
+        { g with i: g.i + 1, prev: r.cur }
+    }
+
+    // KMP: the failure table (the longest proper border of p[0 … i]), then
+    // the scan
+    type Fail = { i: i64, k: i64, f: [i64] }
+    // falling back along the borders until c can follow (a loop: a long
+    // pattern can fall back far)
+    fn kmp_back(f: [i64], p: [u8], c: i64, k: i64) -> i64 { k ▷ settle(j => f[j - 1], j => j == 0 or p[j] == c) }
+    fn kmp_fail(s: Fail, p: [u8]) -> Fail {
+        let c = p[s.i]
+        let k0 = kmp_back(s.f, p, c, s.k)
+        let k = if p[k0] == c { k0 + 1 } else { k0 }
+        { s with i: s.i + 1, k: k, f: put(s.f, s.i, k) }
+    }
+    type Scan = { i: i64, k: i64, found: [i64] }
+    fn kmp_scan(s: Scan, t: [u8], p: [u8], fail: [i64]) -> Scan {
+        let c = t[s.i]
+        let k0 = kmp_back(fail, p, c, s.k)
+        let k = if p[k0] == c { k0 + 1 } else { k0 }
+        if k == ≢ p { { s with i: s.i + 1, k: fail[k - 1], found: push(s.found, s.i + 1 - k) } } else { { s with i: s.i + 1, k: k } }
+    }
+
+    // Soundex
+    fn soundex_digit(c: i64) -> i64 {
+        let l = char_of(c)
+        if contains("bfpv", l) { 1 } else if contains("cgjkqsxz", l) { 2 } else if contains("dt", l) { 3 }
+        else if l == "l" { 4 } else if contains("mn", l) { 5 } else if l == "r" { 6 } else { 0 }
+    }
+    // the next letter, the last digit, and the digits so far (a loop over
+    // the letters, which stops taking digits at three)
+    type Sdx = { i: i64, last: i64, out: i64, got: i64 }
+    fn soundex_step(x: Sdx, b: [u8]) -> Sdx {
+        let c = b[x.i]
+        let d = soundex_digit(c)
+        if x.got == 3 or c == 104 or c == 119 { { x with i: x.i + 1 } }
+        else if d != 0 and d != x.last { { x with i: x.i + 1, last: d, out: x.out * 10 + d, got: x.got + 1 } }
+        else { { x with i: x.i + 1, last: d } }
+    }
+
+    // wrapping: the next word, the line's length so far, and where each line
+    // after the first starts (a word number)
+    type Wrap = { i: i64, line: i64, breaks: [i64] }
+    fn wrap_word(w: Wrap, lens: [i64], width: i64) -> Wrap {
+        let l = lens[w.i]
+        if w.i == 0 { { w with i: 1, line: l } }
+        else if w.line + 1 + l <= width { { w with i: w.i + 1, line: w.line + 1 + l } }
+        else { { w with i: w.i + 1, line: l, breaks: push(w.breaks, w.i) } }
+    }
+}

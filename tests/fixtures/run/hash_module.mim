@@ -1,0 +1,19 @@
+module main
+
+// hash: every function against values from Python's zlib, hashlib, xxhash
+// and mmh3 (and reference SipHash, CRC-64 and FNV code checked against
+// their published test vectors), at lengths around the block sizes: 0, 1,
+// 3, 4, 15, 16, 17, 31, 32, 33, 55, 56, 63, 64, 65 and 1,000 bytes.
+fn main() {
+    let check = bytes::of_text("123456789")
+    print("{hash::crc32(check)} {hash::crc64(check)} {hash::adler32(check)}")
+    print("{bytes::hex(hash::md5(check))} {bytes::hex(hash::sha1(check))}")
+    print(bytes::hex(hash::sha256(check)))
+    print(hash::siphash(bytes::from(⍳ 15), 0x0706050403020100, 0x0F0E0D0C0B0A0908) == 0xA129CA6149BE45E5)
+    let ns = [0 1 3 4 15 16 17 31 32 33 55 56 63 64 65 1000]
+    let lines = ns ¨ (n => {
+        let d = bytes::from(⍳ n ¨ (i => (i * 31 + 7) % 256))
+        "{n} {hash::crc32(d)} {hash::crc64(d)} {hash::adler32(d)} {hash::fnv1a32(d)} {hash::fnv1a64(d)} {hash::murmur3(d)} {hash::murmur3(d, 99)} {hash::xxhash32(d)} {hash::xxhash32(d, 99)} {hash::xxhash64(d)} {hash::xxhash64(d, 99)} {hash::siphash(d, 0x0706050403020100, 0x0F0E0D0C0B0A0908)} {bytes::hex(hash::md5(d))} {bytes::hex(hash::sha1(d))} {bytes::hex(hash::sha256(d))}"
+    })
+    print(join(lines, "\n"))
+}
