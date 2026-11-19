@@ -1,0 +1,38 @@
+module main
+
+// rotate: six 3840×2160 8-bit frames, each turned 90° clockwise four times
+// (3840×2160 → 2160×3840 → …, back to the start). Each turn is one map over
+// the pixels of the turned image, reading the pixel it comes from. After
+// each turn, a checksum that weighs every pixel by its position. The
+// reference is bench/rotate/ref.py.
+
+fn frame(f: i64, w: i64, h: i64) -> [u8] {
+    bytes::from(⍳ (w * h) ¨ (i => {
+        let x = i % w
+        let y = i div w
+        let noise = ((i + f * 7919) * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        (x * 7 + y * 13 + x * y % 31 + noise + f * 3) % 256
+    }))
+}
+
+// a w×h image turned clockwise: h wide, w high; the pixel at (x, y) comes
+// from (y, h - 1 - x)
+fn turn(img: [u8], w: i64, h: i64) -> [u8] {
+    bytes::from(⍳ (w * h) ¨ (i => img[(h - 1 - i % h) * w + i div h]))
+}
+
+fn check(img: [u8]) -> i64 {
+    ⍳ (≢ img) ¨ (i => img[i] * (i % 251 + 1)) ▷ +/
+}
+
+fn main() {
+    let (w, h) = (3840, 2160)
+    let lines = ⍳ 6 ¨ (f => {
+        let a = turn(frame(f, w, h), w, h)
+        let b = turn(a, h, w)
+        let c = turn(b, w, h)
+        let d = turn(c, h, w)
+        "{f} {check(a)} {check(b)} {check(c)} {check(d)}"
+    })
+    print(join(lines, "\n"))
+}

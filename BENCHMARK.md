@@ -57,6 +57,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Numbers and simulations | `sieve` (primes below 100,000,000, segmented), `montecarlo` (π from 200,000,000 points), `blackscholes` (20,000,000 options), `heat` (a 1,024² plate, 400 steps), `life` (Game of Life, 1,024², 150 generations), `fft` (a polynomial product by radix-2 FFT, 2^20 points), `kmeans` (1,000,000 points, 16 clusters, 25 rounds), `bigmul` (two 120,000-digit numbers, schoolbook); results in whole numbers or rounded per element, so they do not depend on the order of a parallel sum |
 | Puzzles and tables | `nqueens` (15 queens, bit masks, 2,279,184 solutions), `knapsack` (0/1, 2,000 items, capacity 100,000, a row per item), `floyd` (Floyd–Warshall, 800 nodes; numpy is the reference), `collatz` (every number below 3,000,000) |
 | Data structures | `bloom` (a Bloom filter, 8 MiB, 1,000,000 keys in, 2,000,000 lookups), `hashmap` (open addressing, 1,000,000 inserts, 2,000,000 lookups), `heap` (a binary heap: 1,000,000 pushes and pops), `fenwick` (a Fenwick tree: 1,000,000 updates, 2,000,000 prefix sums) |
+| Images | `histeq` (histogram equalization, six 3840×2160 frames), `rotate` (90° turns, six 3840×2160 frames, four each), `dither` (Floyd–Steinberg, 24 frames of 1280×720), `integral` (a summed-area table of 2048×2048 by two `trail(+)` scans, 8,000,000 box sums); `filters` (box, Gaussian, Sobel, median, bilateral) is above |
 
 ## Building the suite, step by step
 

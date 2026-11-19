@@ -1,0 +1,51 @@
+module main
+
+// integral: a 2048×2048 8-bit image, its summed-area table, and 8,000,000
+// box sums from it (corners from splitmix64). The table is two running
+// sums with `trail(+)`: one over the image row by row (less what earlier
+// rows added), then one over the result column by column (less what
+// earlier columns added); a row and a column of zeros go in front. Prints
+// the total of the box sums and the image's sum. The reference is
+// bench/integral/ref.py.
+
+fn w() -> i64 { 2048 }
+fn h() -> i64 { 2048 }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the table at (x, y)
+fn at(sat: [i64], x: i64, y: i64) -> i64 { sat[y * (w() + 1) + x] }
+
+fn main() {
+    let n = w() * h()
+    let img = bytes::from(⍳ n ¨ (i => {
+        let x = i % w()
+        let y = i div w()
+        let noise = (i * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        (x * 7 + y * 13 + x * y % 31 + noise) % 256
+    }))
+    // along each row: a running sum over everything, less the rows before
+    let run = ⍳ n ¨ (i => img[i]) ▷ trail(+)
+    let rows = ⍳ n ¨ (i => run[i] - (if i < w() { 0 } else { run[i - i % w() - 1] }))
+    // down each column (taken column by column), less the columns before
+    let down = ⍳ n ¨ (j => rows[j % h() * w() + j div h()]) ▷ trail(+)
+    let cols = ⍳ n ¨ (j => down[j] - (if j < h() { 0 } else { down[j - j % h() - 1] }))
+    // the table, (w + 1) × (h + 1), zeros in front
+    let sat = ⍳ ((w() + 1) * (h() + 1)) ¨ (k => {
+        let x = k % (w() + 1)
+        let y = k div (w() + 1)
+        if x == 0 or y == 0 { 0 } else { cols[(x - 1) * h() + y - 1] }
+    })
+    let total = ⍳ 8000000 ¨ (q => {
+        let (a, b) = (mix(4 * q) % w(), mix(4 * q + 1) % w())
+        let (c, d) = (mix(4 * q + 2) % h(), mix(4 * q + 3) % h())
+        let (x1, x2, y1, y2) = (a ⌊ b, a ⌈ b, c ⌊ d, c ⌈ d)
+        at(sat, x2 + 1, y2 + 1) - at(sat, x2 + 1, y1) - at(sat, x1, y2 + 1) + at(sat, x1, y1)
+    }) ▷ +/
+    print("{total} {sat[(w() + 1) * (h() + 1) - 1]}")
+}

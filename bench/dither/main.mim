@@ -1,0 +1,49 @@
+module main
+
+// dither: 24 frames of 1280×720 8-bit pixels, each dithered to black and
+// white by Floyd–Steinberg error diffusion in raster order: a pixel of 128
+// or more becomes 255, else 0, and the error e goes on as e×7, e×3, e×5
+// and e (div 16, floored) to the right, below left, below and below right.
+// Each frame is one sequential pass (`evolve` with `put`s in place); the
+// frames run in parallel (each gives back its line, printed after). The buffer has a column of padding on each side
+// and a row below, where the error that falls outside the image goes.
+// Prints, per frame, the number of white pixels and a checksum that weighs
+// every white pixel by its position. The reference is bench/dither/ref.py.
+
+fn w() -> i64 { 1280 }
+fn h() -> i64 { 720 }
+fn stride() -> i64 { w() + 2 }
+
+// the pixel i of the image in the padded buffer
+fn at(i: i64) -> i64 { i div w() * stride() + i % w() + 1 }
+
+// the next pixel: i, and the buffer (pixels become 0 or 255 as they go)
+type D = { i: i64, buf: [i64] }
+
+fn spread(d: D) -> D {
+    let p = at(d.i)
+    let old = d.buf[p]
+    let new = if old >= 128 { 255 } else { 0 }
+    let e = old - new
+    let (r, bl, b, br) = (d.buf[p + 1], d.buf[p + stride() - 1], d.buf[p + stride()], d.buf[p + stride() + 1])
+    { d with i: d.i + 1, buf: put(put(put(put(put(d.buf, p, new), p + 1, r + e * 7 div 16), p + stride() - 1, bl + e * 3 div 16), p + stride(), b + e * 5 div 16), p + stride() + 1, br + e div 16) }
+}
+
+fn dither(f: i64) -> str {
+    let n = w() * h()
+    let start = ⍳ (stride() * (h() + 1)) ¨ (q => {
+        let x = q % stride() - 1
+        let y = q div stride()
+        let i = y * w() + x
+        let noise = ((i + f * 7919) * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        if x < 0 or x >= w() or y >= h() { 0 } else { (x * 7 + y * 13 + x * y % 31 + noise + f * 3) % 256 }
+    })
+    let d = D { i: 0, buf: start } ▷ evolve(n, spread)
+    let white = ⍳ n ¨ (i => if d.buf[at(i)] == 255 { 1 } else { 0 })
+    let check = ⍳ n ¨ (i => white[i] * (i % 251 + 1)) ▷ +/
+    "{f} {white ▷ +/} {check}"
+}
+
+fn main() {
+    print(join(⍳ 24 ¨ dither, "\n"))
+}
