@@ -1,0 +1,50 @@
+module main
+
+// histeq: histogram equalization of six 3840×2160 8-bit frames of low
+// contrast (64 … 191). Each row is counted into its own 256 bins with `put`
+// in place, the rows' bins are added up, `trail(+)` gives the running sum
+// (cdf), and every pixel goes through the 256-entry table built from it.
+// Prints, per frame, the sum of the result and a checksum that weighs every
+// pixel by its position. The reference is bench/histeq/ref.py.
+
+fn w() -> i64 { 3840 }
+fn h() -> i64 { 2160 }
+
+fn frame(f: i64) -> [u8] {
+    bytes::from(⍳ (w() * h()) ¨ (i => {
+        let x = i % w()
+        let y = i div w()
+        let noise = ((i + f * 7919) * 1103515245 + 12345) % 2147483648 div 65536 % 32
+        64 + (x * 7 + y * 13 + x * y % 31 + noise + f * 3) % 128
+    }))
+}
+
+// the bins of one row, counted from position i on
+type Count = { i: i64, bins: [i64] }
+
+// count img[c.i … end) into the bins (a record, so `put` changes them in
+// place: see docs/gaps.md)
+fn tally(img: [u8], end: i64, c: Count) -> Count {
+    if c.i == end { c } else {
+        let v = img[c.i]
+        let k = c.bins[v]
+        tally(img, end, { c with i: c.i + 1, bins: put(c.bins, v, k + 1) })
+    }
+}
+
+fn equalize(f: i64) -> str {
+    let img = frame(f)
+    let n = ≢ img
+    let rows = ⍳ h() ¨ (y => tally(img, (y + 1) * w(), Count { i: y * w(), bins: ⍳ 256 ¨ (_ => 0) }))
+    let hist = ⍳ 256 ¨ (v => rows ¨ (r => r.bins[v]) ▷ +/)
+    let cdf = hist ▷ trail(+)
+    let m = cdf ⌿ (hist ¨ (c => c > 0)) ▷ ⌊/
+    let lut = cdf ¨ (c => ((c - m) * 255 + (n - m) div 2) div (n - m) ⌈ 0)
+    let out = bytes::from(img ¨ (p => lut[p]))
+    let check = ⍳ n ¨ (i => out[i] * (i % 251 + 1)) ▷ +/
+    "{f} {out ▷ +/} {check}"
+}
+
+fn main() {
+    print(join(⍳ 6 ¨ equalize, "\n"))
+}
