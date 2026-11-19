@@ -105,8 +105,9 @@ check find_from       '    print(find("a,b,c", ",", 2))'
 check paren_compare   '    let (a, b, y) = (1, 2, 0)
     print((a > y) != (b > y))'
 check continue_or     '    let a = 1
-    print(a > 0 or
-        a < 0)'
+    let b = a > 0 or
+        a < 0
+    print(b)'
 check tuple_type      '    let v: V = (1, 2)
     print(v.0)' 'type V = (i64, i64)'
 
