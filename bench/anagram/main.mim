@@ -1,0 +1,35 @@
+module main
+
+// anagram: 500,000 words of 3 to 8 letters from a-f (from splitmix64),
+// written as one text and split again, then grouped into anagram classes.
+// A word's class is its letter counts packed into one number (4 bits a
+// letter); the numbers are sorted, and the classes are the runs of equal
+// numbers. Prints the number of classes, the size of the largest, and the
+// sum of the squares of the sizes. The reference is bench/anagram/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn word(k: i64) -> str {
+    join(⍳ (3 + mix(k) % 6) ¨ (j => char_of(97 + mix(16 * k + j) % 6)), "")
+}
+
+// the letter counts of w, 4 bits each
+fn class(w: str) -> i64 {
+    bytes::of_text(w) ¨ (b => 1 << (4 * (b - 97))) ▷ +/
+}
+
+fn main() {
+    let text = join(⍳ 500000 ¨ word, " ")
+    let keys = sort(words(text) ¨ class)
+    let n = ≢ keys
+    // where each run of equal keys starts, and the run lengths
+    let starts = ⍳ n ⌿ (⍳ n ¨ (i => i == 0 or keys[i] != keys[i - 1]))
+    let m = ≢ starts
+    let sizes = ⍳ m ¨ (g => (if g + 1 < m { starts[g + 1] } else { n }) - starts[g])
+    print("{m} {sizes ▷ ⌈/} {sizes ¨ (s => s * s) ▷ +/}")
+}

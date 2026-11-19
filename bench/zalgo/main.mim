@@ -1,0 +1,39 @@
+module main
+
+// zalgo: the Z-array of 4,000,000 letters from a 4-letter alphabet (from
+// splitmix64) by the Z-algorithm: z[i] is the length of the longest common
+// prefix of the text and the text from i. One pass (`evolve` with a named
+// step), reusing the window [l, r) of the furthest match so far, `put` in
+// place. Prints the sum of z, how many positions have z of 12 or more, and
+// the largest z. The reference is bench/zalgo/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the next position, the furthest match window [l, r), and z so far
+type Z = { i: i64, l: i64, r: i64, z: [i64] }
+
+// how far the text from i matches its start, from k on
+fn extend(s: [u8], i: i64, k: i64) -> i64 {
+    if i + k < ≢ s and s[k] == s[i + k] { extend(s, i, k + 1) } else { k }
+}
+
+fn step(t: Z, s: [u8]) -> Z {
+    let i = t.i
+    let start = if i < t.r { (t.r - i) ⌊ t.z[i - t.l] } else { 0 }
+    let k = extend(s, i, start)
+    if i + k > t.r { { t with i: i + 1, l: i, r: i + k, z: put(t.z, i, k) } }
+    else { { t with i: i + 1, z: put(t.z, i, k) } }
+}
+
+fn main() {
+    let n = 4000000
+    let s = bytes::from(⍳ n ¨ (i => mix(i div 3) % 4))
+    let t = Z { i: 1, l: 0, r: 0, z: ⍳ n ¨ (_ => 0) } ▷ evolve(n - 1, t => step(t, s))
+    let z = t.z
+    print("{z ▷ +/} {z ¨ (x => if x >= 12 { 1 } else { 0 }) ▷ +/} {z ▷ ⌈/}")
+}
