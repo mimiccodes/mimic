@@ -1,0 +1,46 @@
+module main
+
+// manacher: Manacher's algorithm over 2,000,000 letters from a 2-letter
+// alphabet (from splitmix64). The letters are read with a separator
+// between each two (2n + 1 places); p[i] is the largest radius of a
+// palindrome centred at place i, found in one pass (`evolve` with a named
+// step, `put` in place) that starts each centre from its mirror in the
+// rightmost palindrome so far. Prints the number of palindromic
+// substrings, the longest one's length, and where the first of that
+// length starts. The reference is bench/manacher/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// place i: a separator (2) between the letters
+fn at(s: [u8], i: i64) -> i64 { if i % 2 == 0 { 2 } else { s[i div 2] } }
+
+// the next place, the rightmost palindrome (centre c, reaching r), radii so far
+type M = { i: i64, c: i64, r: i64, p: [i64] }
+
+fn grow(s: [u8], i: i64, k: i64) -> i64 {
+    let m = 2 * ≢ s + 1
+    if i - k - 1 >= 0 and i + k + 1 < m and at(s, i - k - 1) == at(s, i + k + 1) { grow(s, i, k + 1) } else { k }
+}
+
+fn step(t: M, s: [u8]) -> M {
+    let i = t.i
+    let start = if i < t.r { (t.r - i) ⌊ t.p[2 * t.c - i] } else { 0 }
+    let k = grow(s, i, start)
+    if i + k > t.r { { t with i: i + 1, c: i, r: i + k, p: put(t.p, i, k) } }
+    else { { t with i: i + 1, p: put(t.p, i, k) } }
+}
+
+fn main() {
+    let n = 2000000
+    let s = bytes::from(⍳ n ¨ (i => mix(i div 2) % 2))
+    let m = 2 * n + 1
+    let p = (M { i: 0, c: 0, r: 0, p: ⍳ m ¨ (_ => 0) } ▷ evolve(m, t => step(t, s))).p
+    let best = p ▷ ⌈/
+    let first = (⍳ m ⌿ (p ¨ (x => x == best)))[0]
+    print("{p ¨ (x => (x + 1) div 2) ▷ +/} {best} {(first - best) div 2}")
+}

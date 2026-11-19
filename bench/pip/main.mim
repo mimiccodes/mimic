@@ -1,0 +1,47 @@
+module main
+
+// pip: 1,000,000 points tested against a polygon of 500 vertices (a jagged
+// square, from splitmix64) by ray casting with the even-odd rule, in exact
+// integer arithmetic. Each point walks the edges with a function that
+// calls itself; the points are tested in parallel. Prints how many points
+// are inside and the sum of their x coordinates. The reference is
+// bench/pip/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn r() -> i64 { 1000000 }
+
+// vertex v: side v div 125, step v % 125 along it, moved inward
+fn vertex(v: i64) -> (i64, i64) {
+    let (s, j) = (v div 125, v % 125)
+    let t = 16000 * j - r()
+    let d = mix(500 + v) % 400000
+    if s == 0 { (t, d - r()) } else if s == 1 { (r() - d, t) } else if s == 2 { (0 - t, r() - d) } else { (d - r(), 0 - t) }
+}
+
+// 1 when (x, y) is inside, counting the edges from i on (inside so far: c)
+fn inside(xs: [i64], ys: [i64], x: i64, y: i64, i: i64, c: i64) -> i64 {
+    if i == ≢ xs { c } else {
+        let j = (i + 1) % ≢ xs
+        let (ax, ay, bx, by) = (xs[i], ys[i], xs[j], ys[j])
+        let d = by - ay
+        let t = (x - ax) * d - (y - ay) * (bx - ax)
+        let (above_a, above_b) = (ay > y, by > y)
+        let hit = above_a != above_b and (if d > 0 { t < 0 } else { t > 0 })
+        inside(xs, ys, x, y, i + 1, if hit { 1 - c } else { c })
+    }
+}
+
+fn main() {
+    let poly = ⍳ 500 ¨ vertex
+    let (xs, ys) = (poly ¨ (p => p.0), poly ¨ (p => p.1))
+    let px = ⍳ 1000000 ¨ (k => mix(2 * k) % 2200001 - 1100000)
+    let py = ⍳ 1000000 ¨ (k => mix(2 * k + 1) % 2200001 - 1100000)
+    let ins = ⍳ 1000000 ¨ (k => inside(xs, ys, px[k], py[k], 0, 0))
+    print("{ins ▷ +/} {⍳ 1000000 ¨ (k => ins[k] * px[k]) ▷ +/}")
+}
