@@ -1,0 +1,33 @@
+module main
+
+// lcs: the longest common subsequence of two sequences of 20,000 letters
+// from a 4-letter alphabet (from splitmix64), by the row-by-row table.
+// A row is prev[j - 1] + 1 where the letters match, else the larger of
+// prev[j] and the row's previous entry: since rows never go down, that is
+// the running maximum (`trail(⌈)`) of prev[j - 1] + 1 or prev[j]. So each
+// row is one map and one parallel scan. Prints the length and the sum of
+// the last row. The reference is bench/lcs/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the next letter of a, and the row so far
+type T = { i: i64, a: [i64], b: [i64], row: [i64] }
+
+fn next(t: T) -> T {
+    let (x, b, prev) = (t.a[t.i], t.b, t.row)
+    let row = ⍳ (≢ prev) ¨ (j => if j == 0 { 0 } else if x == b[j - 1] { prev[j - 1] + 1 } else { prev[j] }) ▷ trail(⌈)
+    { t with i: t.i + 1, row: row }
+}
+
+fn main() {
+    let (n, m) = (20000, 20000)
+    let a = ⍳ n ¨ (i => mix(i) % 4)
+    let b = ⍳ m ¨ (j => mix(1000000 + j) % 4)
+    let t = T { i: 0, a: a, b: b, row: ⍳ (m + 1) ¨ (_ => 0) } ▷ evolve(n, next)
+    print("{t.row[m]} {t.row ▷ +/}")
+}
