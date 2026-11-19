@@ -1,0 +1,20 @@
+module main
+
+// http_route: a small JSON API (keep-alive connections). GET /users/{id}
+// answers the user as JSON; an id that is not a number, or any other path,
+// is a 404. bench/run.py measures it with load/main.rs, which checks every
+// body.
+
+type User = { id: i64, name: str, score: i64, active: bool }
+
+fn handle(req: http::Request) -> http::Response {
+    match (req.method, req.path) {
+        ("GET", "/users/{id: i64}") => http::json(User { id: id, name: "user{id}", score: id * 7 % 100, active: id % 3 != 0 }),
+        ("GET", "/health") => http::ok("ok"),
+        _ => http::not_found(),
+    }
+}
+
+fn main() {
+    http::serve(18432, handle)
+}

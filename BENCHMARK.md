@@ -49,7 +49,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Group | Benchmarks |
 |---|---|
 | Hashing and checksums | `crc32`, `adler32`, `fnv1a`, `murmur3`, `xxhash32` (8 MiB each), `sha256` (2 MiB), `xxhash64` (8 MiB), `md5` (8 MiB, against `hashlib`), `siphash` (SipHash-2-4 of 2,000,000 16-byte keys, checked against the paper's test vector) |
-| Parsing | `csv` (400,000 rows, quoted fields), `expr` (300,000 expressions, precedence climbing), `tokenize` (200,000 lines of C-like code), `url` (300,000 URLs), `http_parse` (200,000 requests in one stream), `regex` (a Thompson NFA: 4 patterns × 50,000 strings, against Python's `re`) |
+| Parsing | `csv` (400,000 rows, quoted fields), `expr` (300,000 expressions, precedence climbing), `tokenize` (200,000 lines of C-like code), `url` (300,000 URLs), `http_parse` (200,000 requests in one stream), `regex` (a Thompson NFA: 4 patterns × 50,000 strings, against Python's `re`), `numparse` (2,000,000 integers from text), `semver` (1,000,000 versions parsed into one sortable number each, sorted, written back), `ini` (100,000 sections, every line on its own: its section is a `trail(+)` of the headers; against Python's `configparser`) |
 | Graphs | `bfs` (a queue, 200,000 nodes, 1,000,000 edges), `components` (union-find), `topo` (Kahn's algorithm by levels), `pagerank` (20 iterations), on random graphs from splitmix64; `paths` (Dijkstra and A*) is above |
 | Text | `levenshtein` (20,000 pairs of 30–60 letters), `kmp` (8 patterns in 4 MiB, overlapping), `utf8` (20,000 documents, strict validation; Python's decoder is the reference), `aho` (Aho-Corasick, 45 patterns over 4 MiB in 64 pieces), `diff` (Myers, 1,000 pairs of files), `trie` (200,000 words in, 200,000 looked up), `wordfreq` (1,000,000 words: split, FNV-1a, sort, count) |
 | Interpreters | `brainf` (a Brainf**k interpreter, 15.8 million instructions), `vm` (a stack bytecode VM, 7.6 million instructions) |
@@ -60,6 +60,7 @@ Mimic aims to be the fastest programming language. This file defines what that c
 | Images | `histeq` (histogram equalization, six 3840×2160 frames), `rotate` (90° turns, six 3840×2160 frames, four each), `dither` (Floyd–Steinberg, 24 frames of 1280×720), `integral` (a summed-area table of 2048×2048 by two `trail(+)` scans, 8,000,000 box sums); `filters` (box, Gaussian, Sobel, median, bilateral) is above |
 | Sorting and searching | `radix` (LSD radix sort, 8,000,000 32-bit keys, four passes of 8 bits), `bsearch` (1,000,000 sorted keys, 4,000,000 lower-bound lookups), `select` (quickselect: five percentiles of 20,000,000 values); `sort` (the built-in) is above |
 | Dynamic programming | `lcs` (longest common subsequence of two 20,000-letter sequences, each row a map and `trail(⌈)`), `coins` (ways to make change: 30 coins, amounts up to 3,000,000), `lis` (longest increasing subsequence of 4,000,000 values, patience sorting); `knapsack`, `levenshtein` and `floyd` are above |
+| Servers | `http_route` (a JSON API: `GET /users/{id}`, 400,000 requests with varying ids, 1 in 16 a 404), `http_echo` (`POST /echo` with 16-400-byte bodies answered in upper case); each with its own load generator that checks every answer, as `http` does |
 
 ## Building the suite, step by step
 
