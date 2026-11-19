@@ -138,6 +138,28 @@ Some(2.5)
 Some(2)
 ```
 
+### Text algorithms
+
+The `text` module has the algorithms that come up again and again: how far apart two strings are, every place a part occurs, a phonetic code for names, and wrapping words into lines.
+
+```mimic run
+module main
+
+fn main() {
+    print(text::distance("kitten", "sitting"))       // 3 edits
+    print(text::find_all("abababa", "aba"))           // overlapping ones too
+    print(text::soundex("Robert") == text::soundex("Rupert"))
+    print(text::wrap("the quick brown fox jumps over the lazy dog", 16))
+}
+```
+
+```output
+3
+[0 2 4]
+true
+["the quick brown" "fox jumps over" "the lazy dog"]
+```
+
 ## Lists
 
 ```mimic run

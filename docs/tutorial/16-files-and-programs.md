@@ -16,6 +16,7 @@ They live in a few standard **modules**, used by path from any file, with no imp
 |---|---|---|
 | `fs` | files and directories | `fs::read`, `fs::write`, `fs::list_dir`, `fs::remove` |
 | `bytes` | binary data | `bytes::from`, `bytes::hex`, `bytes::base64`, `bytes::to_text` |
+| `hash` | checksums and hashes of bytes | `hash::crc32`, `hash::xxhash64`, `hash::sha256` |
 | `path` | paths as text | `path::join`, `path::file_name`, `path::extension` |
 | `io` | standard input and error | `io::read_line`, `io::read_input`, `io::eprint` |
 | `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
@@ -122,6 +123,29 @@ TWltaWM=
 Ok("Hi")
 Ok(true)
 ```
+
+### Hashes
+
+The `hash` module checks and fingerprints bytes: checksums (`crc32`, `crc64`, `adler32`), fast hashes for tables and caches (`xxhash64`, `murmur3`, `fnv1a64`, and `siphash` with a key), and digests (`sha256`, and `md5` and `sha1` for old formats). A digest comes back as bytes, which `bytes::hex` prints.
+
+```mimic run
+module main
+
+fn main() {
+    let data = bytes::of_text("123456789")
+    print(hash::crc32(data))
+    print(bytes::hex(hash::sha256(bytes::of_text("abc"))))
+    print(hash::xxhash64(data))
+}
+```
+
+```output
+3421780262
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+-8306817102742376829
+```
+
+The 64-bit hashes use all 64 bits, so as an `i64` about half of them are negative.
 
 ## Directories
 

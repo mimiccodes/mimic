@@ -1334,9 +1334,18 @@ fn debug_info() {
         let out = mimic().arg("build").arg(&f).arg(if release { "--release" } else { "--debug" }).arg("--emit-json").output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
         let exe = std::path::PathBuf::from(v["artifacts"][0]["path"].as_str().unwrap());
-        // (on macOS the DWARF stays in the object file next to the program)
-        let obj = exe.with_extension("o");
-        let bytes = std::fs::read(&obj).unwrap();
+        // (on macOS the DWARF stays in the object files next to the program:
+        // `dwarfy.o`, and `dwarfy.part1.o` … when the code is generated in
+        // parts, as a larger prelude makes it)
+        let stem = exe.file_stem().unwrap().to_string_lossy().to_string();
+        let mut bytes = Vec::new();
+        for e in std::fs::read_dir(exe.parent().unwrap()).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with(&stem) && name.ends_with(".o") {
+                bytes.extend(std::fs::read(&p).unwrap());
+            }
+        }
         let find = |s: &str| bytes.windows(s.len()).any(|w| w == s.as_bytes());
         (find("debug_line"), find("main::area"), find("dwarfy.mim"))
     };
