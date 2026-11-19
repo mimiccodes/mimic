@@ -1,0 +1,48 @@
+module main
+
+// matchain: the cheapest order to multiply a chain of 600 matrices
+// (dimensions from splitmix64) by the interval dynamic programme. The
+// sub-chains of one length are independent: each length is one parallel
+// map over them (a function of its own, so no lambda keeps the table),
+// then the results go into the table in place (`put`, a helper taking the
+// state whole). Prints the cheapest cost of the whole chain and the sum of
+// the cheapest costs of all sub-chains. The reference is
+// bench/matchain/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn n() -> i64 { 600 }
+
+// the cheapest split of [i, j] over k … j - 1
+fn best(cost: [i64], d: [i64], i: i64, j: i64, k: i64, b: i64) -> i64 {
+    if k == j { b } else { best(cost, d, i, j, k + 1, b ⌊ (cost[i * n() + k] + cost[(k + 1) * n() + j] + d[i] * d[k + 1] * d[j + 1])) }
+}
+
+// the cheapest costs of all sub-chains of `length` matrices
+fn diagonal(cost: [i64], d: [i64], length: i64) -> [i64] {
+    ⍳ (n() - length + 1) ¨ (i => best(cost, d, i, i + length - 1, i, 1 << 62))
+}
+
+// the next length, and the table
+type T = { length: i64, cost: [i64] }
+
+// the values of the length just done into the table, from i on
+fn fill(t: T, vals: [i64], i: i64) -> T {
+    if i == ≢ vals { t } else { fill({ t with cost: put(t.cost, i * n() + i + t.length - 2, vals[i]) }, vals, i + 1) }
+}
+
+fn step(t: T, d: [i64]) -> T {
+    let vals = diagonal(t.cost, d, t.length)
+    fill({ t with length: t.length + 1 }, vals, 0)
+}
+
+fn main() {
+    let d = ⍳ (n() + 1) ¨ (i => 10 + mix(i) % 90)
+    let t = T { length: 2, cost: ⍳ (n() * n()) ¨ (_ => 0) } ▷ evolve(n() - 1, t => step(t, d))
+    print("{t.cost[n() - 1]} {t.cost ▷ +/}")
+}

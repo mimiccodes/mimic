@@ -1,0 +1,23 @@
+module main
+
+// catalan: the Catalan numbers C(0) … C(20,000) modulo 1,000,000,007 by
+// the convolution C(n + 1) = sum of C(i) C(n - i): the list grows one
+// number a step (`evolve` with a named step, `push` in place), each number
+// one parallel map and sum over the ones before. Prints C(20,000) and the
+// sum of all of them modulo the prime. The reference is
+// bench/catalan/ref.py (by the closed form).
+
+fn p() -> i64 { 1000000007 }
+
+type Cs = { cs: [i64] }
+
+fn next(s: Cs) -> Cs {
+    let (cs, n) = (s.cs, ≢ s.cs - 1)
+    let c = (⍳ (n + 1) ¨ (i => cs[i] * cs[n - i] % p()) ▷ +/) % p()
+    { s with cs: push(s.cs, c) }
+}
+
+fn main() {
+    let cs = (Cs { cs: [1] } ▷ evolve(20000, next)).cs
+    print("{cs[20000]} {(cs ▷ +/) % p()}")
+}

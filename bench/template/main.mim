@@ -1,0 +1,42 @@
+module main
+
+// template: a template with six {{placeholders}} (a raw string, in single
+// quotes, so its braces are not interpolation) rendered 300,000 times
+// with values from splitmix64, each render on its own, in parallel: the
+// template split at "{{" once, and every piece after the first a key up to
+// "}}" (replaced by its value) and the text after it. Prints the total
+// length of the rendered texts and the sum of their character codes.
+// Checked against Python's str.replace.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn items() -> [str] { ["lamp" "kettle" "chair" "notebook" "umbrella"] }
+fn days() -> [str] { ["Monday" "Tuesday" "Wednesday" "Thursday" "Friday" "Saturday" "Sunday"] }
+
+fn value(key: str, r: i64) -> str {
+    let qty = 1 + mix(r) % 9
+    if key == "name" { "user{r % 1000}" }
+    else if key == "id" { string(r) }
+    else if key == "qty" { string(qty) }
+    else if key == "item" { items()[mix(r + 1) % 5] }
+    else if key == "day" { days()[mix(r + 2) % 7] }
+    else { string(qty * (100 + mix(r + 3) % 900)) }
+}
+
+fn render(pieces: [str], r: i64) -> str {
+    pieces[0] + join(pieces ↓ 1 ¨ (p => {
+        let at = find_index(p, '}}')
+        value(slice(p, 0, at), r) + slice(p, at + 2, ≢ p)
+    }), "")
+}
+
+fn main() {
+    let pieces = split('Dear {{name}}, your order {{id}} of {{qty}} x {{item}} ships on {{day}}. Total: {{total}}.', '{{')
+    let texts = ⍳ 300000 ¨ (r => render(pieces, r))
+    print("{texts ¨ (t => ≢ t) ▷ +/} {texts ¨ (t => bytes::of_text(t) ▷ +/) ▷ +/}")
+}

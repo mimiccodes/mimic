@@ -1,0 +1,44 @@
+module main
+
+// roman: 1,000,000 numbers (from splitmix64) written as Roman numerals
+// (greedily, by a function that calls itself) and read back (a symbol
+// smaller than the next one is subtracted), each number on its own, in
+// parallel. Prints the total length of the numerals, the sum of the values
+// read back, and how many numerals contain "MM". The reference is
+// bench/roman/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn values() -> [i64] { [1000 900 500 400 100 90 50 40 10 9 5 4 1] }
+fn symbols() -> [str] { ["M" "CM" "D" "CD" "C" "XC" "L" "XL" "X" "IX" "V" "IV" "I"] }
+
+// n written from symbol k on, after `out`
+fn roman(n: i64, k: i64, out: str) -> str {
+    if n == 0 { out }
+    else if n >= values()[k] { roman(n - values()[k], k, out + symbols()[k]) }
+    else { roman(n, k + 1, out) }
+}
+
+fn digit(c: i64) -> i64 {
+    if c == 73 { 1 } else if c == 86 { 5 } else if c == 88 { 10 } else if c == 76 { 50 } else if c == 67 { 100 } else if c == 68 { 500 } else { 1000 }
+}
+
+// the value of the numeral's bytes from i on
+fn value(b: [u8], i: i64, t: i64) -> i64 {
+    if i == ≢ b { t } else {
+        let v = digit(b[i])
+        value(b, i + 1, if i + 1 < ≢ b and v < digit(b[i + 1]) { t - v } else { t + v })
+    }
+}
+
+fn main() {
+    let rs = ⍳ 1000000 ¨ (k => roman(1 + mix(k) % 3999, 0, ""))
+    let lengths = rs ¨ (r => ≢ r) ▷ +/
+    let back = rs ¨ (r => value(bytes::of_text(r), 0, 0)) ▷ +/
+    print("{lengths} {back} {count(rs, r => contains(r, "MM"))}")
+}

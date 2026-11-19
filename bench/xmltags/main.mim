@@ -1,0 +1,52 @@
+module main
+
+// xmltags: an XML document of 300,000 elements in 5 tags, nested up to 12
+// deep (a random walk from splitmix64), written and read back. The walk is
+// one pass that records each step as a number (`evolve`, `push` in place);
+// the text is then one parallel map and a join. Reading: the text split at
+// each `<`, every piece looked at on its own, the depth a running sum
+// (`trail(+)`) of +1 for an opening tag and ¯1 for a closing one. Prints
+// how many elements have each tag, the deepest nesting, and the sum of the
+// ids. Checked against Python's xml.etree.ElementTree.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn tags() -> [str] { ["item" "group" "note" "ref" "entry"] }
+
+// the walk: step k, elements made, the open tags, and the steps so far
+// (k × 16 + tag to open, or 8 + tag to close)
+type Walk = { k: i64, made: i64, stack: [i64], depth: i64, steps: [i64] }
+
+fn walk(w: Walk) -> Walk {
+    if mix(w.k + 10000000) % 3 != 0 and w.depth < 11 or w.depth == 0 {
+        let tag = mix(w.k) % 5
+        { w with k: w.k + 1, made: w.made + 1, stack: put(w.stack, w.depth, tag), depth: w.depth + 1, steps: push(w.steps, w.k * 16 + tag) }
+    } else {
+        let tag = w.stack[w.depth - 1]
+        { w with k: w.k + 1, depth: w.depth - 1, steps: push(w.steps, 8 + tag) }
+    }
+}
+
+fn text_of(s: i64) -> str {
+    if s % 16 >= 8 { "</" + tags()[s % 8] + ">" } else { "<" + tags()[s % 16] + " id=\"" + string(s div 16) + "\">t" }
+}
+
+fn main() {
+    let w0 = Walk { k: 0, made: 0, stack: ⍳ 12 ¨ (_ => 0), depth: 0, steps: ⍳ 0 }
+    let w = w0 ▷ settle(walk, w => w.made == 300000)
+    let closing = ⍳ w.depth ¨ (d => 8 + w.stack[w.depth - 1 - d])
+    let text = "<doc>" + join(concat(w.steps, closing) ¨ text_of, "") + "</doc>"
+    let pieces = split(text, "<") ↓ 1
+    let delta = pieces ¨ (p => if starts_with(p, "/") { ¯1 } else { 1 })
+    let depth = delta ▷ trail(+)
+    let opens = pieces ⌿ (delta ¨ (d => d == 1)) ↓ 1
+    let name = opens ¨ (p => split(split(p, " ")[0], ">")[0])
+    let ids = opens ¨ (p => to_int(split(split(p, "id=\"")[1], "\"")[0])) ▷ +/
+    let counts = tags() ¨ (t => count(name, n => n == t))
+    print("{join(counts ¨ string, " ")} {depth ▷ ⌈/} {ids}")
+}

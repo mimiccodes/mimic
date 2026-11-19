@@ -1,0 +1,31 @@
+module main
+
+// totient: Euler's phi for every number up to 10,000,000 by a sieve: phi
+// starts as n, and for each prime p (phi[p] still p) every multiple m
+// loses phi[m] / p. One pass over p (`evolve` with a named step), the
+// multiples by a function that calls itself, `put` in place. Prints the sum
+// of phi over 1 … n, how many n have phi(n) = n - 1, and phi(10,000,000).
+// The reference is bench/totient/ref.py.
+
+// the next p, and phi so far
+type T = { p: i64, phi: [i64] }
+
+// the multiples of p from m on
+fn strike(t: T, p: i64, m: i64) -> T {
+    if m >= ≢ t.phi { t } else {
+        let v = t.phi[m]
+        strike({ t with phi: put(t.phi, m, v - v div p) }, p, m + p)
+    }
+}
+
+fn sieve(t: T) -> T {
+    let p = t.p
+    if t.phi[p] == p { strike({ t with p: p + 1 }, p, p) } else { { t with p: p + 1 } }
+}
+
+fn main() {
+    let n = 10000000
+    let phi = (T { p: 2, phi: ⍳ (n + 1) } ▷ evolve(n - 1, sieve)).phi
+    let primes = 2 ‥ (n + 1) ¨ (k => if phi[k] == k - 1 { 1 } else { 0 }) ▷ +/
+    print("{(phi ▷ +/) - phi[0]} {primes} {phi[n]}")
+}

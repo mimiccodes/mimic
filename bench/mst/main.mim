@@ -1,0 +1,42 @@
+module main
+
+// mst: Kruskal's minimum spanning forest of a random graph of 200,000
+// nodes and 1,000,000 edges (from splitmix64). The edges are sorted as one
+// number each (weight, then edge number), then taken one after another
+// (`evolve` with a named step) with union-find by size, `put` in place.
+// Prints the total weight of the forest, its number of edges, and the sum
+// of the numbers of the edges taken. The reference is bench/mst/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn n() -> i64 { 200000 }
+
+fn find(parent: [i64], x: i64) -> i64 { if parent[x] == x { x } else { find(parent, parent[x]) } }
+
+// the next edge (in weight order), the forest, and its totals
+type K = { k: i64, parent: [i64], size: [i64], total: i64, count: i64, ids: i64 }
+
+fn join_edge(s: K, keys: [i64]) -> K {
+    let key = keys[s.k]
+    let (w, e) = (key >>> 20, key & ((1 << 20) - 1))
+    let a0 = find(s.parent, mix(3 * e) % n())
+    let b0 = find(s.parent, mix(3 * e + 1) % n())
+    if a0 == b0 { { s with k: s.k + 1 } } else {
+        let (a, b) = if s.size[a0] < s.size[b0] { (b0, a0) } else { (a0, b0) }
+        let grown = s.size[a] + s.size[b]
+        { s with k: s.k + 1, parent: put(s.parent, b, a), size: put(s.size, a, grown), total: s.total + w, count: s.count + 1, ids: s.ids + e }
+    }
+}
+
+fn main() {
+    let m = 1000000
+    let keys = sort(⍳ m ¨ (e => (mix(3 * e + 2) % 1000000) << 20 | e))
+    let start = K { k: 0, parent: ⍳ n(), size: ⍳ n() ¨ (_ => 1), total: 0, count: 0, ids: 0 }
+    let s = start ▷ evolve(m, s => join_edge(s, keys))
+    print("{s.total} {s.count} {s.ids}")
+}

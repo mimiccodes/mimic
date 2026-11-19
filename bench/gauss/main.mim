@@ -1,0 +1,67 @@
+module main
+
+// gauss: the rank and determinant of a 500 × 500 matrix modulo the prime
+// 1,000,000,007 by Gaussian elimination, for a matrix of rank 499 and for
+// the same matrix with its last row replaced (from splitmix64). The matrix
+// is one flat list; each column is one parallel map that swaps the pivot
+// row up and clears the column below it. Prints, for each matrix, the rank
+// and the determinant. The reference is bench/gauss/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn p() -> i64 { 1000000007 }
+
+// b to the power e, modulo p
+fn power(b: i64, e: i64) -> i64 {
+    if e == 0 { 1 } else {
+        let h = power(b, e div 2)
+        let h2 = h * h % p()
+        if e % 2 == 1 { h2 * b % p() } else { h2 }
+    }
+}
+
+// the next column, the rows done, the determinant so far, and the matrix
+type G = { col: i64, rank: i64, det: i64, n: i64, a: [i64] }
+
+fn step(g: G) -> G {
+    let (n, col, rank) = (g.n, g.col, g.rank)
+    let a = g.a
+    let candidates = rank ‥ n ⌿ (rank ‥ n ¨ (r => a[r * n + col] != 0))
+    if ≢ candidates == 0 { { g with col: col + 1, det: 0 } } else {
+        let piv = candidates[0]
+        let lead = a[piv * n + col]
+        let inv = power(lead, p() - 2)
+        let next = ⍳ (n * n) ¨ (k => {
+            let (i, j) = (k div n, k % n)
+            // the row that comes to place i
+            let src = if i == rank { piv } else if i == piv { rank } else { i }
+            let v = a[src * n + j]
+            if i <= rank { v } else {
+                let f = a[src * n + col] * inv % p()
+                (v - f * a[piv * n + j] % p() + p()) % p()
+            }
+        })
+        let sign = if piv != rank { p() - g.det } else { g.det }
+        { g with col: col + 1, rank: rank + 1, det: sign % p() * lead % p(), a: next }
+    }
+}
+
+fn solve(a: [i64], n: i64) -> (i64, i64) {
+    let g = G { col: 0, rank: 0, det: 1, n: n, a: a } ▷ evolve(n, step)
+    (g.rank, g.det)
+}
+
+fn main() {
+    let n = 500
+    let base = ⍳ (n * n) ¨ (k => mix(k) % p())
+    let a1 = ⍳ (n * n) ¨ (k => if k div n == n - 1 { (base[k % n] + base[n + k % n]) % p() } else { base[k] })
+    let a2 = ⍳ (n * n) ¨ (k => if k div n == n - 1 { mix(1000000 + k % n) % p() } else { base[k] })
+    let (r1, d1) = solve(a1, n)
+    let (r2, d2) = solve(a2, n)
+    print("{r1} {d1} {r2} {d2}")
+}

@@ -1,0 +1,51 @@
+module main
+
+// flood: a breadth-first flood fill on a 2,000 × 2,000 grid with 30% walls
+// (from splitmix64), from the first open cell at or after the centre. The
+// queue is a list that grows in place, read from a head that moves on;
+// each step looks at the four neighbours of the cell at the head, each
+// look a helper that takes the state whole (`settle` with a named step).
+// Prints how many cells are reached, the sum of their distances from the
+// start, and the largest distance. The reference is bench/flood/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn w() -> i64 { 2000 }
+
+// the queue (cells, read from head on) and each cell's distance (¯1: not yet)
+type F = { head: i64, queue: [i64], dist: [i64] }
+
+// neighbour k (left, right, up, down) of the cell at the head
+fn visit(s: F, wall: [u8], k: i64) -> F {
+    let c = s.queue[s.head]
+    let (x, y) = (c % w(), c div w())
+    let (nx, ny) = if k == 0 { (x - 1, y) } else if k == 1 { (x + 1, y) } else if k == 2 { (x, y - 1) } else { (x, y + 1) }
+    if nx < 0 or ny < 0 or nx >= w() or ny >= w() { s } else {
+        let nc = ny * w() + nx
+        if wall[nc] == 1 or s.dist[nc] >= 0 { s } else {
+            let d = s.dist[c] + 1
+            { s with dist: put(s.dist, nc, d), queue: push(s.queue, nc) }
+        }
+    }
+}
+
+fn advance(s: F) -> F { { s with head: s.head + 1 } }
+
+fn expand(s: F, wall: [u8]) -> F { advance(visit(visit(visit(visit(s, wall, 0), wall, 1), wall, 2), wall, 3)) }
+
+fn first_open(wall: [u8], i: i64) -> i64 { if wall[i] == 0 { i } else { first_open(wall, i + 1) } }
+
+fn main() {
+    let n = w() * w()
+    let wall = bytes::from(⍳ n ¨ (i => if mix(i) % 100 < 30 { 1 } else { 0 }))
+    let start = first_open(wall, w() * 1000 + 1000)
+    let s0 = F { head: 0, queue: [start], dist: put(⍳ n ¨ (_ => ¯1), start, 0) }
+    let s = s0 ▷ settle(s => expand(s, wall), s => s.head == ≢ s.queue)
+    let reached = s.dist ⌿ (s.dist ¨ (d => d >= 0))
+    print("{≢ reached} {reached ▷ +/} {reached ▷ ⌈/}")
+}

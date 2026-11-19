@@ -1,0 +1,56 @@
+module main
+
+// bellman: single-source shortest paths from node 0 in a random directed
+// graph of 50,000 nodes and 400,000 weighted edges (from splitmix64), by
+// Bellman-Ford rounds until nothing changes. The edges are sorted by their
+// end (one number each), each node finds its incoming ones by binary
+// search, and each round relaxes every node from them at once: one map
+// over the nodes, in parallel (`settle`). Prints the number of nodes
+// reached, the sum of their distances, and the largest distance. The
+// reference is bench/bellman/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn n() -> i64 { 50000 }
+fn inf() -> i64 { 1 << 60 }
+
+// the first place in keys[lo … hi) not below k
+fn lower(keys: [i64], k: i64, lo: i64, hi: i64) -> i64 {
+    if lo >= hi { lo } else {
+        let mid = (lo + hi) div 2
+        if keys[mid] < k { lower(keys, k, mid + 1, hi) } else { lower(keys, k, lo, mid) }
+    }
+}
+
+// the best distance into a node over its incoming edges keys[i … end)
+fn relax(d: [i64], keys: [i64], i: i64, end: i64, b: i64) -> i64 {
+    if i == end { b } else {
+        let e = keys[i] & ((1 << 20) - 1)
+        let from = d[mix(3 * e) % n()]
+        relax(d, keys, i + 1, end, if from < inf() { b ⌊ (from + 1 + mix(3 * e + 2) % 1000) } else { b })
+    }
+}
+
+// the distances, and whether the last round changed any
+type B = { d: [i64], changed: bool }
+
+fn round(b: B, keys: [i64], first: [i64]) -> B {
+    let d = b.d
+    let next = ⍳ n() ¨ (v => relax(d, keys, first[v], first[v + 1], d[v]))
+    { b with d: next, changed: any(⍳ n() ¨ (v => next[v] != d[v])) }
+}
+
+fn main() {
+    let m = 400000
+    let keys = sort(⍳ m ¨ (e => (mix(3 * e + 1) % n()) << 20 | e))
+    let first = ⍳ (n() + 1) ¨ (v => lower(keys, v << 20, 0, m))
+    let start = B { d: ⍳ n() ¨ (v => if v == 0 { 0 } else { inf() }), changed: true }
+    let d = (start ▷ settle(b => round(b, keys, first), b => not b.changed)).d
+    let reached = d ⌿ (d ¨ (x => x < inf()))
+    print("{≢ reached} {reached ▷ +/} {reached ▷ ⌈/}")
+}
