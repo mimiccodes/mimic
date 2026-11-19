@@ -3812,7 +3812,7 @@ mim_val *mim_trail(mim_val *xs, mim_val *f) {
         return xs;
     }
     int64_t n = xs->len;
-    if (n == 0) return alloc(MIM_I64, 1, 0);
+    if (n == 0) return alloc(xs->dtype == MIM_F64 ? MIM_F64 : MIM_I64, 1, 0);
     mim_val *fast = num_scan(xs, f, 1);
     if (fast) return fast;
     trail_ctx c = {xs, f, n, n, NULL, NULL};
