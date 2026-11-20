@@ -32,7 +32,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, Functi
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use inkwell::basic_block::BasicBlock;
 use mimic_check::types::{self, El, Key, Spec, Ty, id};
-use mimic_check::{FnKind, ModId, Program, Resolved, TypeId};
+use mimic_check::{FnId, FnKind, ModId, Program, Resolved, TypeId};
 use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod forkjoin;
+mod ir;
 mod owned;
 mod fuse;
 mod gpu;
@@ -1945,7 +1946,28 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Plain | Kind::Seq => {}
         }
         self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
-        let v = self.block(&decl.body)?;
+        // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
+        let (use_ir, print_ir) = ir::wanted();
+        let lowered = if use_ir && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() {
+            mimic_ir::lower::function(self.p, k.0, &spec).filter(|f| match mimic_ir::verify(f) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("mimic: IR check failed, compiling `{path}` without it: {e}");
+                    false
+                }
+            })
+        } else {
+            None
+        };
+        let v = match &lowered {
+            Some(f) => {
+                if print_ir {
+                    eprint!("{f}");
+                }
+                self.ir_body(f)?
+            }
+            None => self.block(&decl.body)?,
+        };
         self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
@@ -4434,6 +4456,79 @@ impl<'ctx> Cg<'ctx, '_> {
         }))
     }
 
+    /// A call of user function `fid` with its arguments already computed,
+    /// from the call at `site` (its syntax node: the callee's
+    /// specialisation and the version to run are keyed by it).
+    pub(crate) fn call_user(&mut self, site: usize, fid: FnId, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
+        let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&site).cloned()) else {
+            // the call's argument types never became known (it cannot be reached)
+            let m = self.cstring("internal error: unreachable call")?;
+            self.call_rt("mim_panic", &[m.into()])?;
+            return Ok(self.null());
+        };
+        let (kind, fork_depth) = match self.fj.kinds.remove(&site) {
+            Some((kd, d)) => (kd, d),
+            None => (self.kind_for(fid), None),
+        };
+        let f = self.request(&k, kind)?;
+        let spec = self.spec(&k)?;
+        let path_s = self.p.fn_path(fid).join("::");
+        let pnames: Vec<String> = match &self.p.fns[fid].kind {
+            FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+            _ => vec![],
+        };
+        let mut argv = Vec::new();
+        let mut conv = Vec::new();
+        let consumed = self.consumed(&k);
+        for (i, v) in vals.into_iter().enumerate() {
+            let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
+            if consumed.get(i).copied().unwrap_or(false) {
+                let c = self.hand_over(c)?; // the callee takes it
+                argv.push(self.basic(c).into());
+                continue;
+            }
+            argv.push(self.basic(c).into());
+            conv.push(c);
+        }
+        if matches!(kind, Kind::Native | Kind::NativeSeq)
+            && let Some(me) = self.lazy_deep.clone()
+        {
+            // too deep: this whole call starts over on the net
+            let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+            let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+            let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
+            let is_deep = self.b.build_int_compare(IntPredicate::UGT, d, limit, "deep").s()?;
+            let fun = self.cur_fn.unwrap();
+            let deep_bb = self.ctx.append_basic_block(fun, "restart_deep");
+            let go = self.ctx.append_basic_block(fun, "call");
+            self.b.build_conditional_branch(is_deep, deep_bb, go).s()?;
+            self.b.position_at_end(deep_bb);
+            let wrap = self.request(&me, Kind::NetWrap)?;
+            let n = fun.count_params() - 1;
+            let own: Vec<BasicMetadataValueEnum> = (0..n).map(|i| fun.get_nth_param(i).unwrap().into()).collect();
+            self.call_rt("mim_deep_enter", &[])?;
+            let r = self.b.build_call(wrap, &own, "").s()?.try_as_basic_value().basic().unwrap();
+            self.call_rt("mim_deep_leave", &[])?;
+            self.b.build_return(Some(&r)).s()?;
+            self.b.position_at_end(go);
+        }
+        if kind.has_depth() {
+            let d1 = match fork_depth {
+                Some(d) => d,
+                None => {
+                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+                    self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?
+                }
+            };
+            argv.push(d1.into());
+        }
+        let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+        for c in conv {
+            self.drop_tmp(c)?;
+        }
+        Ok(self.val_of(r, spec.ret, true))
+    }
+
     pub(crate) fn scalar_unary(&self, op: UnOp, a: V<'ctx>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let a = self.widen(a)?;
@@ -5358,73 +5453,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     return Ok(out);
                 }
-                let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) else {
-                    // the call's argument types never became known (it cannot be reached)
-                    let m = self.cstring("internal error: unreachable call")?;
-                    self.call_rt("mim_panic", &[m.into()])?;
-                    return Ok(self.null());
-                };
-                let (kind, fork_depth) = match self.fj.kinds.remove(&id(e)) {
-                    Some((kd, d)) => (kd, d),
-                    None => (self.kind_for(fid), None),
-                };
-                let f = self.request(&k, kind)?;
-                let spec = self.spec(&k)?;
-                let path_s = self.p.fn_path(fid).join("::");
-                let pnames: Vec<String> = match &self.p.fns[fid].kind {
-                    FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
-                    _ => vec![],
-                };
-                let mut argv = Vec::new();
-                let mut conv = Vec::new();
-                let consumed = self.consumed(&k);
-                for (i, v) in vals.into_iter().enumerate() {
-                    let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
-                    if consumed.get(i).copied().unwrap_or(false) {
-                        let c = self.hand_over(c)?; // the callee takes it
-                        argv.push(self.basic(c).into());
-                        continue;
-                    }
-                    argv.push(self.basic(c).into());
-                    conv.push(c);
-                }
-                if matches!(kind, Kind::Native | Kind::NativeSeq)
-                    && let Some(me) = self.lazy_deep.clone()
-                {
-                    // too deep: this whole call starts over on the net
-                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
-                    let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
-                    let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
-                    let is_deep = self.b.build_int_compare(IntPredicate::UGT, d, limit, "deep").s()?;
-                    let fun = self.cur_fn.unwrap();
-                    let deep_bb = self.ctx.append_basic_block(fun, "restart_deep");
-                    let go = self.ctx.append_basic_block(fun, "call");
-                    self.b.build_conditional_branch(is_deep, deep_bb, go).s()?;
-                    self.b.position_at_end(deep_bb);
-                    let wrap = self.request(&me, Kind::NetWrap)?;
-                    let n = fun.count_params() - 1;
-                    let own: Vec<BasicMetadataValueEnum> = (0..n).map(|i| fun.get_nth_param(i).unwrap().into()).collect();
-                    self.call_rt("mim_deep_enter", &[])?;
-                    let r = self.b.build_call(wrap, &own, "").s()?.try_as_basic_value().basic().unwrap();
-                    self.call_rt("mim_deep_leave", &[])?;
-                    self.b.build_return(Some(&r)).s()?;
-                    self.b.position_at_end(go);
-                }
-                if kind.has_depth() {
-                    let d1 = match fork_depth {
-                        Some(d) => d,
-                        None => {
-                            let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
-                            self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?
-                        }
-                    };
-                    argv.push(d1.into());
-                }
-                let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
-                for c in conv {
-                    self.drop_tmp(c)?;
-                }
-                Ok(self.val_of(r, spec.ret, true))
+                self.call_user(id(e), fid, vals)
             }
             // an element of a list in registers
             ExprKind::Index { base, index } if fixed(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() => {

@@ -1,0 +1,115 @@
+//! LLVM from the Mimic IR (crate mimic-ir), for the functions it covers;
+//! everything else is compiled from the syntax tree as before. The
+//! operators, calls and conversions are this code generator's own, so a
+//! function gives the same results either way.
+//!
+//! `MIMIC_IR=1` sends the functions the IR covers through it (off by
+//! default while it grows); `MIMIC_IR=print` also prints their IR.
+
+use crate::{Cg, OrStr, R, V};
+use inkwell::values::BasicValueEnum;
+use mimic_check::types::Ty;
+use mimic_ir::{Function, Op, Region};
+
+/// Whether `MIMIC_IR` asks for the IR (read once).
+pub(crate) fn wanted() -> (bool, bool) {
+    static MODE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("MIMIC_IR").as_deref() {
+        Ok("print") => (true, true),
+        Ok("1") => (true, false),
+        _ => (false, false),
+    })
+}
+
+fn checker_ty(t: mimic_ir::Ty) -> Ty {
+    match t {
+        mimic_ir::Ty::Unit => Ty::Unit,
+        mimic_ir::Ty::I64 => Ty::I64,
+        mimic_ir::Ty::F64 => Ty::F64,
+        mimic_ir::Ty::Bool => Ty::Bool,
+    }
+}
+
+impl<'ctx> Cg<'ctx, '_> {
+    /// The body of the function being defined, from its IR: the value it
+    /// gives (its parameters are in their slots already).
+    pub(crate) fn ir_body(&mut self, f: &Function) -> R<V<'ctx>> {
+        let mut vals: Vec<Option<V<'ctx>>> = vec![None; f.values as usize];
+        self.ir_region(f, &f.body, &mut vals)
+    }
+
+    fn ir_region(&mut self, f: &Function, r: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
+        let get = |vals: &Vec<Option<V<'ctx>>>, v: mimic_ir::Val| vals[v.0 as usize].ok_or_else(|| format!("internal compiler error: IR value {v} has no LLVM value"));
+        for i in &r.insts {
+            self.dbg_at(i.span);
+            let ty = checker_ty(i.ty);
+            let v = match &i.op {
+                Op::Int(n) => V::I(self.ctx.i64_type().const_int(*n as u64, true)),
+                Op::Float(x) => V::F(self.ctx.f64_type().const_float(*x)),
+                Op::Bool(b) => V::B(self.ctx.bool_type().const_int(*b as u64, false)),
+                Op::Unit => self.null(),
+                Op::Param(n) => {
+                    let name = &f.params[*n as usize].0;
+                    let l = self.scopes[0].iter().find(|l| l.name == *name).ok_or("internal compiler error: IR parameter without a slot")?;
+                    let (slot, lt) = (l.slot, l.ty);
+                    let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+                    self.val_of(bv, lt, false)
+                }
+                Op::Bin(op, a, b) => {
+                    let r = self.scalar_binary(*op, get(vals, *a)?, get(vals, *b)?)?;
+                    self.as_ty(r, ty, "operator result")?
+                }
+                Op::Un(op, a) => {
+                    let r = self.scalar_unary(*op, get(vals, *a)?)?;
+                    self.as_ty(r, ty, "operator result")?
+                }
+                Op::Call { site, callee, args } => {
+                    let a = args.iter().map(|v| get(vals, *v)).collect::<R<Vec<_>>>()?;
+                    let r = self.call_user(*site, *callee, a)?;
+                    self.as_ty(r, ty, "value")?
+                }
+                Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
+            };
+            vals[i.dst.0 as usize] = Some(v);
+        }
+        match r.result {
+            Some(v) => get(vals, v),
+            None => Ok(self.null()),
+        }
+    }
+
+    fn ir_if(&mut self, f: &Function, ty: Ty, cond: V<'ctx>, then: &Region, els: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
+        let bit = self.truth(cond)?;
+        let fun = self.cur_fn.ok_or("internal compiler error: `if` outside a function")?;
+        let then_bb = self.ctx.append_basic_block(fun, "then");
+        let else_bb = self.ctx.append_basic_block(fun, "else");
+        let merge_bb = self.ctx.append_basic_block(fun, "merge");
+        self.b.build_conditional_branch(bit, then_bb, else_bb).s()?;
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for (bb, region) in [(then_bb, then), (else_bb, els)] {
+            self.b.position_at_end(bb);
+            let v = self.ir_region(f, region, vals)?;
+            if !self.terminated() {
+                if ty != Ty::Unit {
+                    let v = self.as_ty(v, ty, "branch value")?;
+                    incoming.push((self.basic(v), self.b.get_insert_block().unwrap()));
+                }
+                self.b.build_unconditional_branch(merge_bb).s()?;
+            }
+        }
+        self.b.position_at_end(merge_bb);
+        if ty == Ty::Unit {
+            return Ok(self.null());
+        }
+        if incoming.is_empty() {
+            self.b.build_unreachable().s()?;
+            self.dead_block();
+            return Ok(self.null());
+        }
+        let phi = self.b.build_phi(incoming[0].0.get_type(), "if").s()?;
+        for (v, b) in &incoming {
+            phi.add_incoming(&[(v, *b)]);
+        }
+        Ok(self.val_of(phi.as_basic_value(), ty, false))
+    }
+}

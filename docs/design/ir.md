@@ -75,6 +75,11 @@ Kernels for Metal today, and for Vulkan, CUDA and ROCm in the stages after 0.4, 
 * **The tests are the gate:** every golden test, the WASI and net fixtures, and every benchmark within ±3% (and faster where the IR's analyses apply), on macOS, Linux and Windows.
 * **At the end of 0.4.1** today's code generator is removed: `fuse.rs`, `forkjoin.rs`, `simd.rs`, `owned.rs` and the codegen in `lib.rs` become passes or emission over the IR.
 
+## Progress
+
+* **Step 1 (0.4.1-dev):** the `mimic-ir` crate: types, values and regions, a printer and a verifier, and lowering for functions of plain numbers and truth values (literals, parameters, `let`, operators, `and`/`or` as `if`, `if`, calls). The code generator emits such a function's body from its IR, with its own operators and calls, so results do not change; anything else, and any function where calls run in parallel, takes the old path. `MIMIC_IR=1` turns it on (off by default for now), `MIMIC_IR=print` also prints each function's IR, and CI runs every fixture through it on Linux.
+* **Next:** records and tuples, `match`, `evolve` and `settle` as loops, lists and the array operations; then inlining, lambdas compiled per use and constants built once, and the IR on by default.
+
 ## Risks
 
 * **Size:** today's code generator is over 10,000 lines; the move is weeks of work. Moving one function at a time keeps value arriving early.

@@ -55,6 +55,14 @@ pub(crate) struct State<'ctx> {
     candidates: HashMap<usize, bool>,
 }
 
+impl State<'_> {
+    /// Nothing in the function being defined runs in parallel by fork and
+    /// join (no fork sites, no calls placed or computed ahead).
+    pub(crate) fn quiet(&self) -> bool {
+        self.sites.is_empty() && self.kinds.is_empty() && self.pre.is_empty() && !matches!(self.mode, Mode::Fork(_))
+    }
+}
+
 /// The version of a callee to run sequentially.
 pub(crate) fn seq_of(k: Kind) -> Kind {
     match k {
