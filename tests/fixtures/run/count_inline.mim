@@ -1,0 +1,22 @@
+module main
+
+// The prelude's count(xs, f) given a lambda is written out as its own body,
+// +/ (xs ¨ f), so the lambda is typed and fused. Same results: with a
+// lambda, with a named function, and in a function with its own `count`.
+
+fn big(x: i64) -> bool { x > 50 }
+
+fn own(xs: [i64]) -> i64 {
+    let count = (ys, f) => 1000 + ≢ ys
+    let g = count
+    g(xs, x => x > 0)
+}
+
+fn main() {
+    let xs = ⍳ 100 ¨ (i => i * 7 % 101)
+    print(count(xs, x => x % 2 == 0))
+    print(count(xs, big))
+    print(count(["a" "b" "a" "c"], s => s == "a"))
+    print(count(⍳ 0 ¨ (i => i), x => x > 1))
+    print(own(xs))
+}

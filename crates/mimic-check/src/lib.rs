@@ -1796,7 +1796,14 @@ pub fn normalize(p: &mut Program) -> Vec<FileDiag> {
             FnKind::User(d) => std::mem::take(&mut d.body),
             FnKind::Extern { .. } => continue,
         };
-        let mut n = Norm { p, module, file, info: &info, diags: &mut diags };
+        // a function binding the name `count` itself calls its own
+        let mut bound: Vec<String> = match &p.fns[fid].kind {
+            FnKind::User(d) => d.params.iter().map(|q| q.name.clone()).collect(),
+            FnKind::Extern { .. } => vec![],
+        };
+        body.bound_names(&mut bound);
+        let inline_count = !bound.iter().any(|n| n == "count");
+        let mut n = Norm { p, module, file, info: &info, diags: &mut diags, inline_count };
         n.block(&mut body);
         if let FnKind::User(d) = &mut p.fns[fid].kind {
             d.body = body;
@@ -1811,6 +1818,8 @@ struct Norm<'a> {
     file: usize,
     info: &'a [ParamInfo],
     diags: &'a mut Vec<FileDiag>,
+    /// `count(xs, x => …)` (the prelude's) may become `+/ (xs ¨ (x => …))`
+    inline_count: bool,
 }
 
 impl Norm<'_> {
@@ -1895,7 +1904,23 @@ impl Norm<'_> {
         let Some(params) = &self.info[f] else { return };
         let named = args.iter().any(|a| matches!(a.kind, ExprKind::Named { .. }));
         if !named && args.len() >= params.len() {
-            return; // already positional (arity errors are reported later)
+            // already positional (arity errors are reported later).
+            // The prelude's `count(xs, f)` with a lambda is its own body,
+            // `+/ (xs ¨ f)`, written out: the lambda is then typed from the
+            // list's elements and fused, not called as a function value for
+            // every element
+            let prelude_count = self.inline_count
+                && args.len() == 2
+                && matches!(&args[1].kind, ExprKind::Lambda { params, .. } if params.len() == 1)
+                && self.p.fns[f].name == "count"
+                && self.p.mods[self.p.fns[f].module].name == "prelude"
+                && self.p.mods[self.p.fns[f].module].package == "std";
+            if prelude_count {
+                let xs = std::mem::take(args);
+                let each = Expr { kind: ExprKind::Prim { prim: Prim::Each, args: xs }, span };
+                e.kind = ExprKind::Prim { prim: Prim::Sum, args: vec![each] };
+            }
+            return;
         }
         let fname = path.join("::");
         let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
