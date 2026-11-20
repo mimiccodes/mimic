@@ -332,8 +332,9 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
     int c_old = size_class(old);
     if (c_old < SIZE_CLASSES && size_class(need) == c_old && !xs->desc) {
         /* the same pooled block has room */
-    } else if (c_old >= SIZE_CLASSES && (xs->desc ? ROOM_OF(xs) : block_usable(xs) - sizeof(mim_val)) >= need) {
-        /* the malloc'd block has room */
+    } else if ((c_old >= SIZE_CLASSES || xs->desc) && (xs->desc ? ROOM_OF(xs) : block_usable(xs) - sizeof(mim_val)) >= need) {
+        /* the malloc'd block has room (a short list grown here earlier has
+         * one too: its room is in desc, though its length is a pool size) */
     } else {
         size_t cap = need * 2 < 4096 ? 4096 : need * 2;
         if (c_old >= SIZE_CLASSES || xs->desc) {
