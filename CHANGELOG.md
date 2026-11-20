@@ -11,6 +11,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **The HTTP client keeps credentials to the server they were meant for.** A redirect from `https` to `http` is refused with an `Err` (the request would go on unencrypted), and a redirect to another server (a different scheme, host or port) leaves `Authorization`, `Cookie` and `Proxy-Authorization` behind; other headers still go along. Before, `http::request` sent them on to wherever it was redirected.
 
 ### Changed
+- **Tuples of numbers stay in registers:** a `settle` or `evolve` over a tuple state (a sequential pass, a hash, a binary search) allocated and freed a tuple on every step; a tuple of numbers and truth values is now kept in registers, as records of numbers are. `crc32` 6.8 s → 0.79 s, `fnv1a` 4.5 s → 0.62 s, `topo` 5.1 s → 0.79 s (one core, macOS).
 - **Small programs build faster:** a one-line program in about 0.45 s instead of 0.6 s on macOS. The linker runs inside `mimic` instead of as a second process (which took ~0.1 s just to start), and the macOS SDK and OS version are read from their files instead of asking `xcrun` and `sw_vers` on every build (~70 ms). `MIMIC_DEBUG_PHASES=1` also times code generation, the runtime and linking.
 
 ### Fixed
