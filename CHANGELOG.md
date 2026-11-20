@@ -2,9 +2,9 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
-## Unreleased
+## 0.4.0 — 2026-11-20
 
-Stage 0.4.0, the measuring stick, so far (0.4.0-preview.2): a benchmark corpus of 54 everyday algorithms (hashing, parsing, graphs, text, interpreters, compression, numbers and simulations), each in Mimic, C and Rust; the machine's limits; and a speed gate that fails CI on a slowdown. The corpus already found bugs and the gaps the rest of stage 0.4 closes.
+Stage 0.4.0, the measuring stick: a benchmark corpus of 130 everyday algorithms (hashing, parsing, graphs, text, interpreters, compression, numbers, simulations, geometry, images, data structures and dynamic programming), each in Mimic, C and Rust and checked against an independent reference; the machine's limits; and a speed gate on Linux, macOS and Windows that fails CI on a slowdown. The corpus found the bugs and slow paths fixed below, and the gaps left for the rest of stage 0.4 (docs/gaps.md). Its algorithms also became standard modules: `hash`, `text`, `graph`, `order`, `parse`, `compress`, and whole numbers in `math`.
 
 ### Changed
 - **The standard library's own records hold raw numbers,** as a program's do: its private helper records (the state of `hash`, `graph`, `compress`, `math::primes` …) kept every number boxed, so their loops ran 2–15× slower than the same code in a program (`math::primes(10000000)`: 5.0 s → 0.35 s; `compress::rle` of 4 MB: 1.2 s → 0.15 s). Public types, which the runtime builds too, keep their layout.
