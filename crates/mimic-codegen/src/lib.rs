@@ -853,6 +853,12 @@ impl<'ctx> Cg<'ctx, '_> {
     /// values or lists of known length (a shaped record; at most 64 numbers in
     /// all). Its field types, in declaration order.
     fn flat(&self, t: Ty) -> Option<Vec<Ty>> {
+        // a tuple of numbers and truth values: in registers too (a `settle`
+        // over (position, crc) keeps its state there, not on the heap)
+        if let Ty::Tup(id) = t {
+            let es = types::tuple_elems(id);
+            return (!es.is_empty() && es.len() <= 64 && es.iter().all(|e| matches!(e, Ty::I64 | Ty::F64 | Ty::Bool))).then_some(es);
+        }
         let Ty::Obj(id) = t else { return None };
         let tid = types::obj_tid(id);
         let mimic_syntax::ast::TypeKind::Record(fs) = &self.p.types[tid].decl.kind else { return None };
@@ -1250,13 +1256,16 @@ impl<'ctx> Cg<'ctx, '_> {
             // a flat record becomes a record on the heap
             V::R(r, t) => {
                 let fs = self.flat(t).ok_or("internal compiler error: not a flat record")?;
-                let Ty::Obj(id) = t else { unreachable!() };
                 let mut vals = Vec::new();
                 for (k, ft) in fs.iter().enumerate() {
                     let x = self.b.build_extract_value(r, k as u32, "").s()?;
                     vals.push(self.val_of(x, *ft, false));
                 }
-                self.construct_in(types::obj_tid(id), None, vals)?
+                match t {
+                    Ty::Obj(id) => self.construct_in(types::obj_tid(id), None, vals)?,
+                    // (a tuple: what `(a, b)` makes on the heap)
+                    _ => self.construct_in(usize::MAX, None, vals)?,
+                }
             }
             // a list in registers becomes a vector on the heap
             V::A(a, el) => {
@@ -1483,6 +1492,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     let x = self.as_ty(self.val_of(x, us[k], false), *ft, what)?;
                     out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
                 }
+            }
+            V::P(p, _) if matches!(t, Ty::Tup(_)) => {
+                // a tuple on the heap: element by element (the runtime checks
+                // that it is a tuple long enough)
+                for (k, ft) in fs.iter().enumerate() {
+                    let x = self.call_rt_ptr("mim_obj_get", &[p.into(), self.ctx.i64_type().const_int(k as u64, false).into()])?;
+                    let x = self.as_ty(x, *ft, what)?;
+                    out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                }
+                self.drop_tmp(v)?;
             }
             V::P(p, _) => {
                 let Ty::Obj(id) = t else { unreachable!() };
@@ -2795,6 +2814,25 @@ impl<'ctx> Cg<'ctx, '_> {
             Stmt::LetTuple { names, value, .. } if self.let_tuple_in_regs(s, names, value)? => {}
             Stmt::LetTuple { names, value, .. } => {
                 let v = self.expr(value)?;
+                if let V::R(r, rt) = v
+                    && let Some(fs) = self.flat(rt)
+                    && fs.len() >= names.len()
+                {
+                    // in registers: each part straight from them
+                    for (i, n) in names.iter().enumerate() {
+                        if n == "_" {
+                            continue;
+                        }
+                        let t = self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn);
+                        let x = self.b.build_extract_value(r, i as u32, n).s()?;
+                        let fv = self.as_ty(self.val_of(x, fs[i], false), t, &format!("`{n}`"))?;
+                        let slot = self.entry_alloca(t, n)?;
+                        self.b.build_store(slot, self.basic(fv)).s()?;
+                        let owned = matches!(fv, V::P(..));
+                        self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves: false });
+                    }
+                    return Ok(());
+                }
                 let b = self.boxed(v)?;
                 for (i, n) in names.iter().enumerate() {
                     if n == "_" {
@@ -5880,6 +5918,17 @@ impl<'ctx> Cg<'ctx, '_> {
                 for x in xs {
                     vals.push(self.expr(x)?);
                 }
+                // numbers and truth values: in registers
+                if let Some(fs) = self.flat(ty)
+                    && fs.len() == vals.len()
+                {
+                    let mut out = self.repr(ty).into_struct_type().get_undef();
+                    for (k, (v, ft)) in vals.into_iter().zip(&fs).enumerate() {
+                        let v = self.as_ty(v, *ft, "tuple element")?;
+                        out = self.b.build_insert_value(out, self.basic(v), k as u32, "").s()?.into_struct_value();
+                    }
+                    return Ok(V::R(out, ty));
+                }
                 self.construct(usize::MAX, None, vals)
             }
             ExprKind::Record { path, fields } => {
@@ -5917,8 +5966,10 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Field { base, name } => {
                 let b = self.expr(base)?;
                 if let V::R(r, rt) = b {
-                    let Ty::Obj(id) = rt else { unreachable!() };
-                    let k = self.p.types[types::obj_tid(id)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                    let k = match rt {
+                        Ty::Obj(id) => self.p.types[types::obj_tid(id)].field_index(name).ok_or_else(|| format!("no field {name}"))?,
+                        _ => name.parse().map_err(|_| "bad tuple index")?,
+                    };
                     let fs = self.flat(rt).unwrap();
                     let x = self.b.build_extract_value(r, k as u32, name).s()?;
                     return self.as_ty(self.val_of(x, fs[k], false), ty, &format!("field `{name}`"));
