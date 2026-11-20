@@ -130,7 +130,7 @@ impl Kind {
 
 /// Write machine code for an optimised module (as `LLVMModuleRef`, with an
 /// `LLVMTargetMachineRef`) in parts, one object per path; how many it wrote.
-pub type SplitFn = fn(*mut std::ffi::c_void, *mut std::ffi::c_void, &[std::path::PathBuf]) -> Result<usize, String>;
+pub type SplitFn = unsafe fn(*mut std::ffi::c_void, *mut std::ffi::c_void, &[std::path::PathBuf]) -> Result<usize, String>;
 
 /// Compile the checked program to a native object file (and optionally
 /// textual LLVM IR and the generated interaction nets). Returns the file
@@ -455,7 +455,9 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
     {
         let stem = obj.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let paths: Vec<std::path::PathBuf> = (0..threads).map(|k| if k == 0 { obj.to_path_buf() } else { obj.with_file_name(format!("{stem}.part{k}.o")) }).collect();
-        let n = split(cg.module.as_mut_ptr() as *mut std::ffi::c_void, tm.as_mut_ptr() as *mut std::ffi::c_void, &paths)?;
+        // SAFETY: the module and target machine are live LLVM objects owned
+        // by this function for the whole call
+        let n = unsafe { split(cg.module.as_mut_ptr() as *mut std::ffi::c_void, tm.as_mut_ptr() as *mut std::ffi::c_void, &paths)? };
         return Ok(paths[..n.max(1)].to_vec());
     }
     match tm.write_to_file(&cg.module, FileType::Object, obj) {
@@ -1102,14 +1104,14 @@ impl<'ctx> Cg<'ctx, '_> {
             b.build_conditional_branch(fits, pop, slow).s()?;
             b.position_at_end(pop);
             let zero = i32t.const_zero();
-            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), zero.into(), c.into()], "").s()? };
+            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero, zero, c], "").s()? };
             let v = b.build_load(self.ptr, slot, "v").s()?.into_pointer_value();
             let some = b.build_is_not_null(v, "").s()?;
             b.build_conditional_branch(some, take, slow).s()?;
             b.position_at_end(take);
             let next = b.build_load(self.ptr, v, "").s()?;
             b.build_store(slot, next).s()?;
-            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), i32t.const_int(1, false).into(), c.into()], "").s()? };
+            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero, i32t.const_int(1, false), c], "").s()? };
             let fl = b.build_load(i32t, lenp, "").s()?.into_int_value();
             b.build_store(lenp, b.build_int_sub(fl, i32t.const_int(1, false), "").s()?).s()?;
             // the header, as alloc writes it
@@ -1203,12 +1205,12 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             // c < 3 is checked before the free-list length is read
             let c_safe = b.build_select(fits, c, i64t.const_zero(), "").s()?.into_int_value();
-            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), i32t.const_int(1, false).into(), c_safe.into()], "").s()? };
+            let lenp = unsafe { b.build_in_bounds_gep(ht, h, &[zero, i32t.const_int(1, false), c_safe], "").s()? };
             let fl = b.build_load(i32t, lenp, "").s()?.into_int_value();
             let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(1 << 18, false), "").s()?; // FREE_LIST_CAP
             b.build_conditional_branch(room, push_bb, slow).s()?;
             b.position_at_end(push_bb);
-            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero.into(), zero.into(), c_safe.into()], "").s()? };
+            let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero, zero, c_safe], "").s()? };
             let head = b.build_load(self.ptr, slot, "").s()?;
             b.build_store(v, head).s()?;
             b.build_store(slot, v).s()?;
@@ -1573,6 +1575,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
+            "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
             "mim_cstr" | "mim_dataptr" | "mim_from_cstr" => ptr.fn_type(&[p], false),
             "mim_check_type" => void.fn_type(&[p, i32t, p], false),
@@ -3710,16 +3713,17 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// Is field `i` of a record (`variant` None) or variant stored as a raw
-    /// number (8 bytes, no box)? Fields declared `i64`, `f64` or `bool` in
-    /// the program's own types are (the standard library's types, which the
-    /// runtime builds too, keep handles; so do generic fields).
+    /// number (8 bytes, no box)? Fields declared `i64`, `f64` or `bool` are,
+    /// in the program's types and the standard library's private ones (its
+    /// public types, which the runtime builds too, keep handles; so do
+    /// generic fields).
     fn raw_field(&self, t: TypeId, variant: Option<usize>, i: usize) -> Option<El> {
         // (a slot is pointer-sized: 64-bit targets only)
         if t == usize::MAX || i >= 64 || self.size.get_bit_width() != 64 {
             return None;
         }
         let td = &self.p.types[t];
-        if self.p.mods[td.module].package == "std" {
+        if self.p.mods[td.module].package == "std" && td.is_pub {
             return None;
         }
         let ty = match variant {
@@ -4482,17 +4486,16 @@ impl<'ctx> Cg<'ctx, '_> {
     /// says how it is stored, so a list of integers (or booleans) going where
     /// a list of floats (or integers) is declared is converted here, once;
     /// a list whose type is not known statically is checked.
-    fn into_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
+    fn convert_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
         let want = match to {
             Ty::Arr(El::F64, _) => Some(1),
             Ty::Arr(El::I64, _) => Some(0),
             _ => None,
         };
-        let differs = match (from, to) {
-            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) => true,
-            (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64, _)) => true,
-            _ => false,
-        };
+        let differs = matches!(
+            (from, to),
+            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) | (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64, _))
+        );
         let v = match (want, differs, v) {
             // a list in registers: convert its elements, then store it
             (Some(w), true, V::A(a, _)) => {
@@ -4683,7 +4686,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// `xs[i]` on a numeric vector known by type: read the element straight
     /// from the array. A value's type says how it is stored (see
-    /// `into_slot`), so one check covers it all: a vector (not a matrix) of
+    /// `convert_slot`), so one check covers it all: a vector (not a matrix) of
     /// that element type, with `i` in bounds. Anything else stops the
     /// program with `mim_index_fail`, which never returns, so code after the
     /// check may assume it held.
@@ -5169,7 +5172,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     let mut vals = Vec::new();
                     for (i, a) in args.iter().enumerate() {
                         let x = self.expr(a)?;
-                        vals.push(self.into_slot(x, self.ty_of(a), ftys[i], "field")?);
+                        vals.push(self.convert_slot(x, self.ty_of(a), ftys[i], "field")?);
                     }
                     return self.construct(t, Some(v), vals);
                 }
@@ -5220,6 +5223,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     && decl.intrinsic
                     && self.p.mods[self.p.fns[fid].module].name == "math"
                     && self.p.mods[self.p.fns[fid].module].package == "std"
+                    && decl.name != "mulmod" && decl.name != "powmod" // whole numbers: the runtime's 128-bit products
                     && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
                 {
                     let name = decl.name.clone();
@@ -5418,16 +5422,14 @@ impl<'ctx> Cg<'ctx, '_> {
             // an element of a list in registers
             ExprKind::Index { base, index } if fixed(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() => {
                 // a local (or parameter): read its stack slot, no copy
-                if let ExprKind::Path(path) = &base.kind {
-                    if let Some((slot, lt)) = (path.len() == 1).then(|| self.lookup(&path[0]).map(|l| (l.slot, l.ty))).flatten() {
-                        if lt == self.ty_of(base) {
+                if let ExprKind::Path(path) = &base.kind
+                    && let Some((slot, lt)) = (path.len() == 1).then(|| self.lookup(&path[0]).map(|l| (l.slot, l.ty))).flatten()
+                        && lt == self.ty_of(base) {
                             let i = self.expr(index)?;
                             let i = self.to_i64(i)?;
                             let r = self.index_slot(slot, lt, i)?;
                             return self.as_ty(r, ty, "element");
                         }
-                    }
-                }
                 // a list field of a shaped record: index the record's vector
                 // in place (its length is known: one check, one load)
                 if let ExprKind::Field { base: rec, name } = &base.kind
@@ -5589,6 +5591,49 @@ impl<'ctx> Cg<'ctx, '_> {
                 let phi = self.b.build_phi(self.ctx.bool_type(), "logic").s()?;
                 phi.add_incoming(&[(&a, pre), (&b, more_end)]);
                 self.as_ty(V::B(phi.as_basic_value().into_int_value()), ty, "operator result")
+            }
+            // the same when a side's type is known only when it runs: the
+            // right side runs unless the left is a single truth value that
+            // decides; otherwise both go to the generic operator (lists:
+            // element by element)
+            ExprKind::Binary { op: op @ (BinOp::And | BinOp::Or), lhs, rhs }
+                if matches!(self.ty_of(lhs), Ty::Bool | Ty::Dyn) && matches!(self.ty_of(rhs), Ty::Bool | Ty::Dyn) =>
+            {
+                let is_or = *op == BinOp::Or;
+                let a = self.expr(lhs)?;
+                let decides = match a {
+                    V::B(b) if is_or => b,
+                    V::B(b) => self.b.build_not(b, "").s()?,
+                    _ => {
+                        let a = self.boxed(a)?;
+                        let d = self.call_rt("mim_decides", &[self.basic(a).into(), self.ctx.i64_type().const_int(is_or as u64, false).into()])?.unwrap().into_int_value();
+                        self.b.build_int_compare(IntPredicate::NE, d, self.ctx.i64_type().const_zero(), "").s()?
+                    }
+                };
+                let f = self.cur_fn.ok_or("internal compiler error: `and` outside a function")?;
+                let short = self.ctx.append_basic_block(f, "logic_short");
+                let more = self.ctx.append_basic_block(f, if is_or { "or_rhs" } else { "and_rhs" });
+                let done = self.ctx.append_basic_block(f, "logic_done");
+                self.b.build_conditional_branch(decides, short, more).s()?;
+                self.b.position_at_end(short);
+                let sv = self.own(self.boxed(V::B(self.ctx.bool_type().const_int(is_or as u64, false)))?)?;
+                self.drop_tmp(a)?;
+                let short_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(more);
+                let b = self.expr(rhs)?;
+                let ab = self.boxed(a)?;
+                let bb = self.boxed(b)?;
+                let r = self.call_rt_ptr("mim_binop", &[self.i32c(*op as i32), self.basic(ab).into(), self.basic(bb).into()])?;
+                self.drop_tmp(ab)?;
+                self.drop_tmp(bb)?;
+                let r = self.own(r)?;
+                let more_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done).s()?;
+                self.b.position_at_end(done);
+                let phi = self.b.build_phi(self.ptr, "logic").s()?;
+                phi.add_incoming(&[(&self.basic(sv), short_end), (&self.basic(r), more_end)]);
+                self.as_ty(V::P(phi.as_basic_value().into_pointer_value(), true), ty, "operator result")
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.expr(lhs)?;
@@ -5818,7 +5863,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 for (n, x, _) in fields {
                     let i = order.iter().position(|o| o == n).ok_or("unknown field")?;
                     let v = self.expr(x)?;
-                    slots[i] = Some(self.into_slot(v, self.ty_of(x), ftys[i], &format!("field `{n}`"))?);
+                    slots[i] = Some(self.convert_slot(v, self.ty_of(x), ftys[i], &format!("field `{n}`"))?);
                 }
                 let vals: Vec<V> = slots.into_iter().map(|s| s.ok_or("missing field")).collect::<Result<_, _>>()?;
                 // a flat record: built in registers
@@ -5892,7 +5937,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 for (n, x, _) in fields {
                     let k = self.p.types[tid].field_index(n).ok_or("unknown field")?;
                     let v = self.expr(x)?;
-                    let v = self.into_slot(v, self.ty_of(x), fs[k], &format!("field `{n}`"))?;
+                    let v = self.convert_slot(v, self.ty_of(x), fs[k], &format!("field `{n}`"))?;
                     r = self.b.build_insert_value(r, self.basic(v), k as u32, "").s()?.into_struct_value();
                 }
                 Ok(V::R(r, ty))
@@ -5975,7 +6020,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         continue;
                     }
                     let (_, ft) = self.record_field(tid, n);
-                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
+                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.convert_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
                     let v = self.own(self.boxed(v)?)?;
                     let old = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
                     self.b.build_store(fp, self.basic(v)).s()?;
@@ -5994,11 +6039,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     let op = *op;
                     let rest = early_rest[k][lvl].clone();
                     let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
+                    let u8_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::U8, 0));
                     let i64t = self.ctx.i64_type();
                     // a list of i64 and raw numbers: the typed versions
                     let typed: Option<(&str, Vec<BasicMetadataValueEnum>)> = match (op, rest.as_slice()) {
                         ("push", [V::I(x)]) if i64_list => Some(("mim_push_i64_own", vec![list.into(), (*x).into()])),
+                        ("push", [V::I(x)]) if u8_list => Some(("mim_push_u8_own", vec![list.into(), (*x).into()])),
                         ("put", [V::I(i), V::I(x)]) if i64_list => Some(("mim_put_i64_own", vec![list.into(), (*i).into(), (*x).into()])),
+                        ("put", [V::I(i), V::I(x)]) if u8_list => Some(("mim_put_u8_own", vec![list.into(), (*i).into(), (*x).into()])),
                         ("concat", [V::A(a, El::I64)]) if i64_list => {
                             let at = a.get_type();
                             let buf = self.entry_alloca_ty(at.into(), "concat_buf")?;
@@ -6050,7 +6098,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         _ => Ty::Dyn,
                     };
                     let v = self.expr(x)?;
-                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.into_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
+                    let v = if matches!(ft, Ty::Arr(El::F64 | El::I64, _)) { self.convert_slot(v, self.ty_of(x), ft, &format!("field `{n}`"))? } else { v };
                     let v = self.boxed(v)?;
                     cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(i as u64, false).into(), self.basic(v).into()])?;
                     self.drop_tmp(v)?;

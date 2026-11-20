@@ -1,0 +1,56 @@
+module main
+
+// heap: a binary min-heap in one list: 1,000,000 numbers (from splitmix64)
+// pushed one after another, then popped one after another, smallest first
+// (heapsort). Sifting up and down are functions that call themselves on the
+// heap's record, each swap two `put`s in place. Prints the first, middle and last popped and a
+// checksum of the order (the sum of each value times its position,
+// wrapping). The reference is bench/heap/ref.py.
+
+// the heap's slots (the first `n` in use) and the values popped so far
+type H = { n: i64, a: [i64], out: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the value at i moves up while it is smaller than its parent
+fn up(h: H, i: i64) -> H {
+    let p = (i - 1) div 2
+    if i == 0 { h } else {
+        let (x, y) = (h.a[i], h.a[p])
+        if y <= x { h } else { up({ h with a: put(put(h.a, p, x), i, y) }, p) }
+    }
+}
+
+// the value at i moves down while a child is smaller
+fn down(h: H, i: i64) -> H {
+    let (l, r, n) = (2 * i + 1, 2 * i + 2, h.n)
+    if l >= n { h } else {
+        let c = if r < n and h.a[r] < h.a[l] { r } else { l }
+        let (x, y) = (h.a[i], h.a[c])
+        if x <= y { h } else { down({ h with a: put(put(h.a, c, x), i, y) }, c) }
+    }
+}
+
+fn insert(h: H) -> H {
+    let n = h.n
+    up({ h with n: n + 1, a: put(h.a, n, mix(n) % 1000000000) }, n)
+}
+
+fn extract(h: H) -> H {
+    let n = h.n - 1
+    let (top, last) = (h.a[0], h.a[n])
+    down({ h with n: n, out: push(h.out, top), a: put(h.a, 0, last) }, 0)
+}
+
+fn main() {
+    let m = 1000000
+    let h = H { n: 0, a: ⍳ m ¨ (_ => 0), out: [] } ▷ evolve(m, insert) ▷ evolve(m, extract)
+    let s = h.out
+    let check = ⍳ m ¨ (i => s[i] * i) ▷ +/
+    print("{s[0]} {s[m div 2]} {s[m - 1]} {check}")
+}

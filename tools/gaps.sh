@@ -98,5 +98,18 @@ check c_global        '    print(c::counter)' "$c"
 check c_stdout        '    c::fflush(c::stdout)' "$c"
 check c_array_field   '    print(c::use_buf(c::Buf { data: [0 0 0 0 0 0 0 0], len: 0 }))' "$c"
 check c_union         '    let n = c::Num { i: 1 }' "$c"
+
+# found by the 0.4.0 corpus (the speed gaps are measured by bench/run.py)
+check fold            '    print(fold([1 2 3 4], (+), 0))'
+check find_from       '    print(find("a,b,c", ",", 2))'
+check paren_compare   '    let (a, b, y) = (1, 2, 0)
+    print((a > y) != (b > y))'
+check continue_or     '    let a = 1
+    let b = a > 0 or
+        a < 0
+    print(b)'
+check tuple_type      '    let v: V = (1, 2)
+    print(v.0)' 'type V = (i64, i64)'
+
 echo
 echo "$missing of $total checks missing (docs/gaps.md)"

@@ -55,11 +55,6 @@ jobs:
           cd editors/syntax && npm ci --no-audit --no-fund
           cd tree-sitter-mimic && npm ci --no-audit --no-fund
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-          cache: false
-
       - name: LLVM (from the llvm workflow)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,6 +71,11 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+      # lints: a new clippy warning fails CI (clippy.toml has the settings)
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
 
       # Windows programs are cross-built here and run by the windows job
       - name: Windows programs (cross-built)

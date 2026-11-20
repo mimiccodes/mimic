@@ -1,0 +1,4 @@
+# Tuples of several values are used on purpose (results of walks over the
+# syntax tree, LSP and C-import tables); naming each would not make them
+# clearer.
+type-complexity-threshold = 1000

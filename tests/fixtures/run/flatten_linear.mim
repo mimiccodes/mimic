@@ -1,0 +1,19 @@
+module main
+
+// flatten: empty lists anywhere, other element types (the fast way for
+// lists of one plain type, the general way for the rest), and many small lists
+// (once quadratic: each list copied the growing result again)
+
+fn main() {
+    print(flatten([[1 2] [] [3] [] [4 5 6]]))
+    print(≢ flatten([[] []]))
+    print(flatten([["a" "b"] ["c"]]))
+    print(flatten([[(1, "x")] [(2, "y") (3, "z")]]))
+    print(flatten([[1.5 2.5] [] [3.25]]))
+    print(flatten([bytes::from([1 2]) bytes::from([255])]))
+    print(flatten([[true false] [true]]))
+    print(flatten([[1 2] [3.5]]))
+    print(flatten([[7 8 9]]))
+    let many = flatten(⍳ 200000 ¨ (i => [i, i % 7]))
+    print("{≢ many} {+/ many}")
+}

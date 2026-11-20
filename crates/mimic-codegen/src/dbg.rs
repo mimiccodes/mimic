@@ -194,6 +194,8 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         if let Some((el, n)) = fixed(t) {
             let (et, bits, align) = self.dbg_type(Ty::of_el(el), file, depth + 1)?;
+            // one subrange: a one-dimensional array (LLVM takes a list of them)
+            #[allow(clippy::single_range_in_vec_init)]
             let arr = d.b.create_array_type(et, bits * n as u64, align, &[0..n as i64]);
             return Some((arr.as_type(), bits * n as u64, align));
         }

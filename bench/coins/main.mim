@@ -1,0 +1,32 @@
+module main
+
+// coins: the number of ways, modulo 1,000,000,007, to make every amount up
+// to 3,000,000 from 30 kinds of coin (k*k + 1 for k below 30), coin by
+// coin: ways[x] += ways[x - c] for x from c up, one `put` in place a step
+// (`evolve` with a named step). Prints the ways for 3,000,000 and the sum
+// of all the ways. The reference is bench/coins/ref.py.
+
+fn p() -> i64 { 1000000007 }
+
+// the coin, the next amount, and the ways so far
+type W = { c: i64, x: i64, ways: [i64] }
+
+fn add(w: W) -> W {
+    let v = (w.ways[w.x] + w.ways[w.x - w.c]) % p()
+    { w with x: w.x + 1, ways: put(w.ways, w.x, v) }
+}
+
+// the next coin: k, and the ways
+type K = { k: i64, ways: [i64] }
+
+fn coin(s: K) -> K {
+    let c = s.k * s.k + 1
+    let w = W { c: c, x: c, ways: s.ways } ▷ evolve(≢ s.ways - c, add)
+    { s with k: s.k + 1, ways: w.ways }
+}
+
+fn main() {
+    let a = 3000000
+    let s = K { k: 0, ways: ⍳ (a + 1) ¨ (x => if x == 0 { 1 } else { 0 }) } ▷ evolve(30, coin)
+    print("{s.ways[a]} {(s.ways ▷ +/) % p()}")
+}

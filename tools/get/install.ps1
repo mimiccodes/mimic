@@ -64,8 +64,18 @@ function Install-Mimic {
         # limits how often it may be asked)
         $feed = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases.atom").Content
         if ($feed -is [byte[]]) { $feed = [System.Text.Encoding]::UTF8.GetString($feed) }
-        $Version = ([regex]::Matches($feed, 'releases/tag/(v[^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match "^v\d+\.\d+\.\d+(-(preview|fix)\.\d+)?$" } | Select-Object -First 1)
-        if (-not $Version) { throw "found no preview or stable release on GitHub" }
+        # (the feed also lists a tag whose release is still being built: the
+        # first one with its files)
+        $candidates = @([regex]::Matches($feed, 'releases/tag/(v[^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match "^v\d+\.\d+\.\d+(-(preview|fix)\.\d+)?$" } | Select-Object -First 5)
+        $Version = $null
+        foreach ($c in $candidates) {
+            try {
+                $null = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$repo/releases/download/$c/SHA256SUMS"
+                $Version = $c
+                break
+            } catch { }
+        }
+        if (-not $Version) { throw "found no preview or stable release with files on GitHub" }
         $latestIs = "the latest preview"
     } elseif (-not $Version -and $Channel -eq "nightly") {
         $text = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases/download/nightly/version.txt").Content

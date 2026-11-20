@@ -998,7 +998,10 @@ impl Walk<'_, '_> {
                     match (decl.name.as_str(), args.as_slice()) {
                         // not known yet (inference has not reached it): wait,
                         // so an early guess does not stick to the result
-                        ("put" | "sort", a) if a.contains(&Ty::Never) => return Ty::Never,
+                        ("put" | "sort" | "concat", a) if a.contains(&Ty::Never) => return Ty::Never,
+                        // concat of two lists of one kind of number: that
+                        // kind of list (the runtime copies them as they are)
+                        ("concat", [Ty::Arr(e1 @ (El::I64 | El::F64 | El::Bool | El::U8), _), Ty::Arr(e2, _)]) if e1 == e2 => return Ty::Arr(*e1, 0),
                         ("put", [a @ Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _), Ty::I64 | Ty::Bool, x])
                             if *x == Ty::of_el(*el) || (*el == El::F64 && *x == Ty::I64) =>
                         {
@@ -1453,6 +1456,15 @@ impl Walk<'_, '_> {
                         (_, r) => r,             // `¨` on a scalar applies f once
                     };
                 }
+                // xs ▷ trail(+) / gather(+) over numbers (+ × max min): the
+                // running results are numbers of the same kind, and the
+                // whole gathered is one (the runtime scans such lists typed)
+                if matches!(prim, Prim::Trail | Prim::Gather)
+                    && let Ty::Arr(el @ (El::I64 | El::F64), _) = a
+                    && matches!(&args[1].kind, ExprKind::OpRef(BinOp::Add | BinOp::Mul | BinOp::Max | BinOp::Min))
+                {
+                    return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { Ty::of_el(el) };
+                }
                 // x ▷ evolve(n, step) / x ▷ settle(step, done): the step
                 // function takes the state; when it gives back the same type,
                 // the state keeps that type throughout (else it is dynamic)
@@ -1518,11 +1530,10 @@ impl Walk<'_, '_> {
                     return Ty::Never;
                 }
                 // ⍳ 5: five numbers, a length the compiler knows
-                if *prim == Prim::Iota && args.len() == 1 {
-                    if let ExprKind::Int(k) = args[0].kind {
+                if *prim == Prim::Iota && args.len() == 1
+                    && let ExprKind::Int(k) = args[0].kind {
                         return Ty::Arr(El::I64, fixed_len(El::I64, k.max(0) as usize));
                     }
-                }
                 prim_ty(*prim, a, b)
             }
             // a lambda as a value: its parameters can be anything

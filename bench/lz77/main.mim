@@ -1,0 +1,64 @@
+module main
+
+// lz77: 512 KiB of generated text (words from a small vocabulary) compressed
+// with greedy LZ77, as the first stage of DEFLATE: a hash table of the
+// last position of each 3-byte prefix, matches of 4 to 255 bytes up to
+// 64 KiB back, otherwise a literal. Then decompressed (copying matches from
+// the output itself) and compared. Prints the literals, the matches, the
+// bytes covered by matches, and 1 when the round trip is exact.
+
+type L = { p: i64, table: [i64], lits: i64, matches: i64, covered: i64, toks: [i64] }
+
+fn vocabulary() -> [str] {
+    ["the" "quick" "brown" "fox" "jumps" "over" "lazy" "dog" "array" "parallel" "mimic" "kernel" "fusion" "vector" "memory" "cache"]
+}
+
+// how far the bytes at `c` and at `p` agree (at most 255, not past the end)
+fn agree(d: [i64], c: i64, p: i64) -> i64 {
+    0 ▷ settle(l => l + 1, l => l == 255 or p + l == ≢ d or d[c + l] != d[p + l])
+}
+
+fn step(s: L, d: [i64]) -> L {
+    let p = s.p
+    if p + 3 <= ≢ d {
+        let h = ((d[p] << 16 | d[p + 1] << 8 | d[p + 2]) * 2654435761 >> 15) & 65535
+        let c = s.table[h] - 1
+        let table = put(s.table, h, p + 1)
+        let l = if c >= 0 and p - c <= 65535 { agree(d, c, p) } else { 0 }
+        if l >= 4 {
+            { s with p: p + l, table: table, matches: s.matches + 1, covered: s.covered + l, toks: push(push(s.toks, l), p - c) }
+        } else {
+            { s with p: p + 1, table: table, lits: s.lits + 1, toks: push(push(s.toks, 0), d[p]) }
+        }
+    } else {
+        { s with p: p + 1, lits: s.lits + 1, toks: push(push(s.toks, 0), d[p]) }
+    }
+}
+
+type X = { k: i64, out: [i64] }
+
+// the output again from the tokens: a literal, or `k` bytes from `x` back
+// (a slice of the output when they do not overlap what they make, else one
+// byte at a time)
+fn expand(toks: [i64]) -> [i64] {
+    let start = X { k: 0, out: [] }
+    let e = start ▷ settle(s => {
+        let (k, x) = (toks[s.k], toks[s.k + 1])
+        let out = if k == 0 { push(s.out, x) }
+            else if x >= k { concat(s.out, s.out ↓ (≢ s.out - x) ↑ k) }
+            else { s.out ▷ evolve(k, o => push(o, o[≢ o - x])) }
+        { s with k: s.k + 2, out: out }
+    }, s => s.k == ≢ toks)
+    e.out
+}
+
+fn main() {
+    let n = 1 << 19
+    let words = vocabulary()
+    let text = join(⍳ (n div 3) ¨ (i => words[(i * 2654435761 >> 13) % 16] + " "), "")
+    let d = bytes::of_text(text) ↑ n ¨ (b => b + 0)
+    let start = L { p: 0, table: ⍳ 65536 ¨ (_ => 0), lits: 0, matches: 0, covered: 0, toks: [] }
+    let e = start ▷ settle(s => step(s, d), s => s.p == n)
+    let same = if +/ (expand(e.toks) != d) == 0 { 1 } else { 0 }
+    print("{e.lits} {e.matches} {e.covered} {same}")
+}

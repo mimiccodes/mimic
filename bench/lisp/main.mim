@@ -1,0 +1,42 @@
+module main
+
+// lisp: 50,000 random s-expressions such as (+ (* 3 4) (max 2 (- 7 9)))
+// (from splitmix64), written as text, one a line, then each line tokenised
+// and evaluated on its own, in parallel, with all arithmetic modulo
+// 1,000,000,007: a recursive evaluator that gives back the value and the
+// next token. Prints the number of tokens, the sum of the values modulo p,
+// and the largest value. The reference is bench/lisp/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn p() -> i64 { 1000000007 }
+fn ops() -> [str] { ["+" "-" "*" "max" "min"] }
+
+fn gen(s: i64, d: i64) -> str {
+    if d == 0 or mix(s) % 3 == 0 { string(mix(s + 1) % 100) }
+    else { "(" + ops()[mix(s + 2) % 5] + " " + gen(mix(s + 3), d - 1) + " " + gen(mix(s + 4), d - 1) + ")" }
+}
+
+// the value of the expression at token i, and the token after it
+fn eval(toks: [str], i: i64) -> (i64, i64) {
+    let t = toks[i]
+    if t != "(" { (to_int(t), i + 1) } else {
+        let op = toks[i + 1]
+        let (a, j) = eval(toks, i + 2)
+        let (b, k) = eval(toks, j)
+        let v = if op == "+" { (a + b) % p() } else if op == "-" { (a - b + p()) % p() } else if op == "*" { a * b % p() } else if op == "max" { a ⌈ b } else { a ⌊ b }
+        (v, k + 1)
+    }
+}
+
+fn main() {
+    let text = join(⍳ 50000 ¨ (k => gen(k, 7)), "\n")
+    let toks = lines(text) ¨ (l => words(replace(replace(l, "(", " ( "), ")", " ) ")))
+    let vals = toks ¨ (t => eval(t, 0).0)
+    print("{toks ¨ (t => ≢ t) ▷ +/} {(vals ▷ +/) % p()} {vals ▷ ⌈/}")
+}

@@ -14,12 +14,13 @@ You need:
 tools/deps.sh                  # once: the sources of the embedded Clang, LLD and musl
 cargo build --release          # → target/release/mimic
 cargo test --release           # unit tests, golden programs, the tutorial's examples
+cargo clippy --workspace --all-targets -- -D warnings   # lints; CI fails on any warning
 tools/gaps.sh                  # the known gaps (docs/gaps.md), each checked against the compiler
 ```
 
 ## Making a change
 
-Work happens on `dev`; `main` holds releases only (see [docs/versions.md](docs/versions.md#how-a-version-is-made)).
+Work happens on `dev`; `main` holds releases only, and CI changes between releases (see [docs/versions.md](docs/versions.md#how-a-version-is-made)). Pull requests merge once their required checks pass; a release reaches users only when the owner approves its tag.
 
 1. Branch from `dev`: `feat/0.4.5-grade` for a step of the plan, `fix/…` for a bug, `docs/…` for writing.
 2. Open a pull request into `dev`. CI builds and tests it on Linux, macOS and Windows; it is merged, squashed into one commit, once CI passes.
@@ -36,6 +37,8 @@ Every change:
 
 Versions, branches, channels and what each release must pass are in [docs/versions.md](docs/versions.md).
 
+**Machines on AWS.** Precise and heavy work (benchmarks on dedicated cores, arm64, later GPUs) can run on an AWS machine started for one job and gone after it: `.github/workflows/aws-runner.yml` (and `aws-smoke.yml` to try it). It reaches AWS without keys (GitHub's OIDC), only from `main` and `dev`, never for pull requests, and may only start and end machines tagged `Project=mimic-runner`; each machine runs one job, powers off when it ends, when setting it up fails, or at its own time limit, and lets nothing in. The workflow's stop step ends the run's machines even when the job failed, was cancelled or lost the machine's id, removes leftover runner registrations, and fails if anything of the run is still running; after every CI, bench and AWS run (and on a schedule, which GitHub may run late or skip) `aws-sweeper.yml` ends any machine past its deadline (its time limit plus 10 minutes, tagged at launch). Every run's results go to the `bench` branch (`bench/record.py`: one file per run, a history per machine, a summary per release), and every machine's cost to a private ledger (`tools/ledger.py`; `ledger-billing.yml` adds what AWS billed, daily).
+
 ## Repository layout
 
 ```
@@ -51,7 +54,7 @@ tools/deps.sh          fetches and builds the native dependencies
 tools/get/             the install scripts behind mimic.codes/install.sh, install.ps1, vscode.sh, vscode.ps1
 tests/fixtures         golden programs (run/*.mim + .out) and expected failures (fail/*.mim)
 tests/nets             interaction-net programs (*.mnet + .out)
-bench/                 benchmarks in Mimic, C, Rust (and Rayon) and Go
+bench/                 benchmarks in Mimic, C and Rust (and Rayon)
 examples/              larger programs: a tour of the language, video transcoding
 docs/                  the reference, the tutorial and the guides (also inside `mimic man`)
 editors/               mimic-syntax and mimic-vscode (submodules)

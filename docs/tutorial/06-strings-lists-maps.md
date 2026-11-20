@@ -138,6 +138,98 @@ Some(2.5)
 Some(2)
 ```
 
+The `parse` module reads common formats: CSV (quoted fields included), URLs, and version numbers by Semantic Versioning.
+
+```mimic run
+module main
+
+fn main() {
+    print(parse::csv("name,age\n\"Lovelace, Ada\",36\n"))
+    let u = parse::url("https://example.com:8443/docs?page=2#top")
+    print("{u.host} {u.port} {u.path} {u.query} {u.fragment}")
+    let a = parse::semver("1.0.0-rc.1") else { return }
+    let b = parse::semver("1.0.0") else { return }
+    print(parse::semver_compare(a, b))        // ¯1: the release candidate comes first
+}
+```
+
+```output
+[["name" "age"] ["Lovelace, Ada" "36"]]
+example.com 8443 /docs page=2 top
+-1
+```
+
+### Text algorithms
+
+The `text` module has the algorithms that come up again and again: how far apart two strings are, every place a part occurs, a phonetic code for names, and wrapping words into lines.
+
+```mimic run
+module main
+
+fn main() {
+    print(text::distance("kitten", "sitting"))       // 3 edits
+    print(text::find_all("abababa", "aba"))           // overlapping ones too
+    print(text::soundex("Robert") == text::soundex("Rupert"))
+    print(text::wrap("the quick brown fox jumps over the lazy dog", 16))
+}
+```
+
+```output
+3
+[0 2 4]
+true
+["the quick brown" "fox jumps over" "the lazy dog"]
+```
+
+### Graphs
+
+The `graph` module works on nodes numbered from 0 and edges given as lists: edge `e` goes from `from[e]` to `to[e]`, with weight `w[e]` where one is needed.
+
+```mimic run
+module main
+
+fn main() {
+    // six nodes; edge e goes from[e] → to[e], with weight w[e]
+    let (from, to, w) = ([0 0 1 2 3], [1 2 3 3 4], [4 1 2 5 1])
+    print(graph::bfs(6, from, to, 0))             // hops from node 0 (¯1: none)
+    print(graph::shortest(6, from, to, w, 0))     // cheapest paths
+    print(graph::components(6, from, to))         // node 5 stands alone
+    print(graph::topo(6, from, to))
+    print(graph::mst(6, from, to, w))             // the edges a spanning forest takes
+}
+```
+
+```output
+[0 1 1 2 3 -1]
+[0 4 1 6 7 -1]
+[0 0 0 0 0 5]
+Some([0 5 1 2 3 4])
+[0 1 2 4]
+```
+
+### Searching sorted lists
+
+`sort` and `sort_index` order a list; the `order` module searches one that is sorted, finds the k-th smallest without sorting everything, and merges two sorted lists.
+
+```mimic run
+module main
+
+fn main() {
+    let xs = [3 9 9 9 20 41]                 // sorted
+    print(order::lower_bound(xs, 9))          // where the 9s start
+    print(order::upper_bound(xs, 9) - order::lower_bound(xs, 9))   // how many 9s
+    print(order::select([40 10 30 20], 1))    // the second smallest
+    print(order::merge([1 4 9], [2 3 10]))
+}
+```
+
+```output
+1
+3
+20
+[1 2 3 4 9 10]
+```
+
 ## Lists
 
 ```mimic run

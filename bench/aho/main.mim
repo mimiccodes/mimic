@@ -1,0 +1,82 @@
+module main
+
+// aho: Aho-Corasick over the same 4 MiB of generated text as kmp, with 45
+// patterns (20 words, 20 two-word phrases, 5 short overlapping pieces):
+// the patterns' trie, its failure links found breadth-first and folded
+// into a full transition table (one row of 256 per state), then one pass
+// that never steps back. The text is cut into 64 pieces scanned in
+// parallel (`¨`); each starts the longest pattern's length early so no
+// match across a cut is lost or counted twice. Prints the matches of all
+// patterns (overlapping ones too) and the positions where at least one
+// ends. The reference (bench/aho/ref.py) uses Python's find.
+
+// building the trie: pattern p, its letter k, the state reached so far
+type T = { p: i64, k: i64, cur: i64, n: i64, go: [i64], out: [i64] }
+// the breadth-first pass: the queue, the failure links, the table
+type Q = { head: i64, tail: i64, queue: [i64], fail: [i64], go: [i64], out: [i64] }
+// scanning: the position, the state, and the counts so far
+type S = { i: i64, s: i64, total: i64, ends: i64 }
+
+fn vocabulary() -> [str] {
+    ["the" "of" "and" "to" "in" "is" "parallel" "array" "kernel" "fusion" "memory" "vector" "mimic" "cache" "thread" "core" "loop" "value" "zebra" "quartz"]
+}
+
+fn piece(words: [str], i: i64) -> str {
+    let w = words[if i % 7 != 0 { (i * 2654435761 >> 13) % 20 } else { (i * 40503 >> 7) % 20 }]
+    w + (if i % 11 == 10 { ". " } else { " " })
+}
+
+fn insert(t: T, pats: [[i64]]) -> T {
+    let pat = pats[t.p]
+    let at = t.cur * 256 + pat[t.k]
+    let fresh = t.go[at] < 0
+    let next = if fresh { t.n } else { t.go[at] }
+    let go = if fresh { put(t.go, at, t.n) } else { t.go }
+    let n = if fresh { t.n + 1 } else { t.n }
+    if t.k == ≢ pat - 1 { { t with p: t.p + 1, k: 0, cur: 0, n: n, go: go, out: put(t.out, next, t.out[next] + 1) } }
+    else { { t with k: t.k + 1, cur: next, n: n, go: go } }
+}
+
+// letter c of state r's row: a child gets its failure link and joins the
+// queue; a missing move becomes the failure state's move
+fn row(q: Q, r: i64, c: i64) -> Q {
+    if c == 256 { q }
+    else {
+        let u = q.go[r * 256 + c]
+        let back = if r == 0 { 0 } else { q.go[q.fail[r] * 256 + c] }
+        if u >= 0 { row({ q with tail: q.tail + 1, queue: put(q.queue, q.tail, u), fail: put(q.fail, u, back) }, r, c + 1) }
+        else { row({ q with go: put(q.go, r * 256 + c, back) }, r, c + 1) }
+    }
+}
+
+fn link(q: Q) -> Q {
+    let r = q.queue[q.head]
+    let out = if r == 0 { q.out } else { put(q.out, r, q.out[r] + q.out[q.fail[r]]) }
+    row({ q with head: q.head + 1, out: out }, r, 0)
+}
+
+fn scan_step(x: S, t: [i64], go: [i64], out: [i64], start: i64) -> S {
+    let s = go[x.s * 256 + t[x.i]]
+    if x.i < start { { x with i: x.i + 1, s: s } }
+    else { { x with i: x.i + 1, s: s, total: x.total + out[s], ends: x.ends + (if out[s] > 0 { 1 } else { 0 }) } }
+}
+
+fn scan(t: [i64], go: [i64], out: [i64], lo: i64, start: i64, hi: i64) -> [i64] {
+    let x = S { i: lo, s: 0, total: 0, ends: 0 } ▷ settle(x => scan_step(x, t, go, out, start), x => x.i == hi)
+    [x.total x.ends]
+}
+
+fn main() {
+    let n = 1 << 22
+    let words = vocabulary()
+    let t = bytes::of_text(join(⍳ (n div 2) ¨ (i => piece(words, i)), "")) ↑ n ¨ (b => b + 0)
+    let names = concat(concat(words, ⍳ 20 ¨ (i => words[i] + " " + words[(i * 7 + 3) % 20])), ["he" "ar" "or" "e t" "ll"])
+    let pats = names ¨ (p => bytes::of_text(p) ¨ (b => b + 0))
+    let size = 1 + +/ (pats ¨ (p => ≢ p))
+    let longest = ⌈/ (pats ¨ (p => ≢ p))
+    let trie = T { p: 0, k: 0, cur: 0, n: 1, go: ⍳ (size * 256) ¨ (_ => -1), out: ⍳ size ¨ (_ => 0) } ▷ settle(s => insert(s, pats), s => s.p == ≢ pats)
+    let q = Q { head: 0, tail: 1, queue: ⍳ size ¨ (_ => 0), fail: ⍳ size ¨ (_ => 0), go: trie.go, out: trie.out } ▷ settle(link, s => s.head == s.tail)
+    let cut = n div 64
+    let parts = ⍳ 64 ¨ (j => scan(t, q.go, q.out, 0 ⌈ (j * cut - longest + 1), j * cut, (j + 1) * cut))
+    print("{+/ (parts ¨ (x => x[0]))} {+/ (parts ¨ (x => x[1]))}")
+}

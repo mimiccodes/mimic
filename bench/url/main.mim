@@ -1,0 +1,48 @@
+module main
+
+// url: 300,000 generated URLs (scheme, user and password, host, port, path,
+// query, fragment) split into their parts as RFC 3986 reads them; prints
+// the sum of the ports, the path segments, the query parameters, the total
+// host length and the sum of the `id` parameters.
+
+fn url(i: i64) -> str {
+    "https://user{i % 10}:pw@host{i % 50}.example.com:{8000 + i % 100}/api/v{i % 3}/items/{i}?id={i}&page={i % 20}&sort=asc#sec{i % 5}"
+}
+
+fn before(s: str, sep: str) -> str {
+    let at = find(s, sep) else { return s }
+    slice(s, 0, at)
+}
+
+fn after(s: str, sep: str) -> str {
+    let at = find(s, sep) else { return "" }
+    slice(s, at + ≢ sep, ≢ s)
+}
+
+fn num(s: str) -> i64 {
+    let n = parse_int(s) else { return 0 }
+    n
+}
+
+// [port, path segments, query parameters, host length, id]
+fn parts(u: str) -> [i64] {
+    let rest = after(u, "://")
+    let authority = before(rest, "/")
+    let host_port = after(authority, "@")
+    let host = before(host_port, ":")
+    let port = num(after(host_port, ":"))
+    let path_query = slice(rest, ≢ authority, ≢ rest)
+    let path = before(before(path_query, "?"), "#")
+    let query = before(after(path_query, "?"), "#")
+    let segments = split(path, "/") ⌿ (split(path, "/") ¨ (s => ≢ s > 0))
+    let params = split(query, "&")
+    let ids = params ⌿ (params ¨ (p => before(p, "=") == "id"))
+    let id = if ≢ ids > 0 { num(after(ids[0], "=")) } else { 0 }
+    [port (≢ segments) (≢ params) (≢ host) id]
+}
+
+fn main() {
+    let n = 300000
+    let all = ⍳ n ¨ (i => parts(url(i)))
+    print(join(⍳ 5 ¨ (k => "{+/ (all ¨ (p => p[k]))}"), " "))
+}

@@ -1,0 +1,55 @@
+module main
+
+// markdown: 400,000 lines of a Markdown subset (headings, list items,
+// blank lines, paragraphs with **bold**, `code` and [links](…), from
+// splitmix64) written as one text and read back: every line on its own, in
+// parallel, its words classified by their first character. Prints the
+// headings at each level, the list items, the bold spans, the links, the
+// code spans and the plain words. Checked against Python's re.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn words() -> [str] { ["array" "kernel" "fusion" "memory" "vector" "thread" "cache" "loop"] }
+
+fn word(k: i64, j: i64) -> str {
+    let w = words()[mix(16 * k + j) % 8]
+    let r = mix(16 * k + j + 8) % 10
+    if r == 0 { "**" + w + "**" } else if r == 1 { "`" + w + "`" } else if r == 2 { "[" + w + "](https://x.example/{k})" } else { w }
+}
+
+fn line(k: i64) -> str {
+    let r = mix(k + 100000000) % 10
+    if r == 0 { repeat("#", 1 + mix(k) % 3) + " " + join(⍳ 3 ¨ (j => words()[mix(k + j) % 8]), " ") }
+    else if r == 1 { "" }
+    else {
+        let body = join(⍳ (2 + mix(k) % 8) ¨ (j => word(k, j)), " ")
+        if r < 4 { "- " + body } else { body }
+    }
+}
+
+// the heading level of a line (0 if none)
+fn level(l: str) -> i64 {
+    if starts_with(l, "### ") { 3 } else if starts_with(l, "## ") { 2 } else if starts_with(l, "# ") { 1 } else { 0 }
+}
+
+// [bold, links, code, plain] in a line, after its marker
+fn kinds(l: str) -> [i64] {
+    let body = if level(l) > 0 or starts_with(l, "- ") { slice(l, find_index(l, " ") + 1, ≢ l) } else { l }
+    let ws = split(body, " ") ⌿ (split(body, " ") ¨ (w => ≢ w > 0))
+    let first = ws ¨ (w => slice(w, 0, 1))
+    [count(first, f => f == "*") count(first, f => f == "[") count(first, f => f == "`") count(first, f => f != "*" and f != "[" and f != "`")]
+}
+
+fn main() {
+    let ls = lines(join(⍳ 400000 ¨ line, "\n"))
+    let lv = ls ¨ level
+    let ks = ls ¨ kinds
+    let heads = [1 2 3] ¨ (n => count(lv, v => v == n))
+    let total = (k: i64) => ks ¨ (x => x[k]) ▷ +/
+    print("{heads[0]} {heads[1]} {heads[2]} {count(ls, l => starts_with(l, "- "))} {total(0)} {total(1)} {total(2)} {total(3)}")
+}

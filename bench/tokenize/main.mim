@@ -1,0 +1,53 @@
+module main
+
+// tokenize: 200,000 lines of generated C-like source scanned into tokens
+// (identifiers, numbers, strings, operators and punctuation), as the first
+// stage of a compiler does; prints how many of each and the total length
+// of the identifiers. Each line is scanned on its own, so `¨` runs them in
+// parallel; within a line, one character after another.
+
+fn line(i: i64) -> str {
+    match i % 3 {
+        0 => "let x{i} = foo(y{i % 97}, {i * 7 % 1000}) + \"s{i % 13}\" * 3;",
+        1 => "if (count_{i % 50} >= {i % 9}) \{ total += weight[{i % 31}]; }",
+        _ => "return bar_{i % 7}(\"a b\", z{i}) - {i % 100} / 2;",
+    }
+}
+
+fn alpha(c: i64) -> bool { c >= 97 and c <= 122 or c >= 65 and c <= 90 or c == 95 }
+fn digit(c: i64) -> bool { c >= 48 and c <= 57 }
+
+// the first position from `p` where `more` fails (or the end)
+fn run(b: [u8], p: i64, more: fn(i64) -> bool) -> i64 {
+    p ▷ settle(q => q + 1, q => q == ≢ b or not more(b[q]))
+}
+
+// [identifiers, numbers, strings, operators, identifier length]
+fn scan(b: [u8]) -> [i64] {
+    let start = (0, 0, 0, 0, 0, 0)
+    let (_, ids, nums, strs, ops, idlen) = start ▷ settle(s => {
+        let c = b[s.0]
+        if c == 32 {
+            (s.0 + 1, s.1, s.2, s.3, s.4, s.5)
+        } else if alpha(c) {
+            let e = run(b, s.0 + 1, x => alpha(x) or digit(x))
+            (e, s.1 + 1, s.2, s.3, s.4, s.5 + e - s.0)
+        } else if digit(c) {
+            (run(b, s.0 + 1, digit), s.1, s.2 + 1, s.3, s.4, s.5)
+        } else if c == 34 {
+            (run(b, s.0 + 1, x => x != 34) + 1, s.1, s.2, s.3 + 1, s.4, s.5)
+        } else if (c == 61 or c == 62 or c == 43) and s.0 + 1 < ≢ b and b[s.0 + 1] == 61 {
+            (s.0 + 2, s.1, s.2, s.3, s.4 + 1, s.5)
+        } else {
+            (s.0 + 1, s.1, s.2, s.3, s.4 + 1, s.5)
+        }
+    }, s => s.0 == ≢ b)
+    [ids nums strs ops idlen]
+}
+
+fn main() {
+    let n = 200000
+    let counts = ⍳ n ¨ (i => scan(bytes::of_text(line(i))))
+    let total = ⍳ 5 ¨ (k => +/ (counts ¨ (c => c[k])))
+    print(join(total ¨ (x => "{x}"), " "))
+}

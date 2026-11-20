@@ -363,6 +363,7 @@ fn property(f: &mut FnDecl) -> Result<Vec<Item>, Diag> {
     }
     let shown: Vec<String> = kinds.iter().map(|(n, ..)| format!("{n} = {{{n}}}")).collect();
     let unpack = if kinds.len() == 1 { format!("let {} = case", names[0]) } else { format!("let ({}) = case", args) };
+    let run_fn = format!("prop_{id}_run");
     let text = format!(
         "module generated\n\n\
 fn {fails_fn}({typed}) -> bool {{\n    let before = expect_failures()\n    {body_fn}({args})\n    expect_failures() != before\n}}\n\n\
@@ -371,7 +372,7 @@ fn {shrink_fn}({typed}, rounds: i64) -> {tuple_ty} {{\n    if rounds == 0 {{ ret
 fn {run_fn}() {{\n    random::seed({seed})\n    expect_quiet(true)\n    let start = expect_failures()\n    let found = {search_fn}(0)\n    match found {{\n        None => {{\n            expect_forgive(start)\n            expect_quiet(false)\n        }},\n        Some(first) => {{\n            let case = {shrink_fn}({first_args}, 200)\n            {unpack}\n            expect_forgive(start)\n            expect_quiet(false)\n            {body_fn}({args})\n            prop_failed(\"{shown}\", {line})\n        }},\n    }}\n}}\n",
         typed = typed.join(", "),
         tuple_args = tuple(&names.iter().map(|x| x.to_string()).collect::<Vec<_>>()),
-        run_fn = format!("prop_{id}_run"),
+        run_fn = run_fn,
         seed = crate::fnv1a(name.as_bytes()) as i64 & 0x7fff_ffff,
         first_args = if kinds.len() == 1 { "first".to_string() } else { (0..kinds.len()).map(|i| format!("first.{i}")).collect::<Vec<_>>().join(", ") },
         shown = shown.join(", "),

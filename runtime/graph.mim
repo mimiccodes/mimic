@@ -1,0 +1,188 @@
+// Graph algorithms on nodes 0 … n - 1 and edges given as lists: edge e
+// goes from `from[e]` to `to[e]` (with weight `w[e]` where one is needed).
+// graph::bfs, graph::components, graph::topo, graph::shortest, graph::mst.
+// The same algorithms the benchmark corpus measures (bench/bfs,
+// bench/components, bench/topo, bench/paths, bench/mst), checked against
+// networkx. (Appended to the prelude.)
+pub module graph {
+    // The number of edges from `start` to every node along directed edges
+    // (breadth-first search); ¯1 where it cannot be reached.
+    pub fn bfs(n: i64, from: [i64], to: [i64], start: i64) -> [i64] {
+        let out = adjacency(n, from)
+        let s0 = Search { head: 0, queue: ⍳ 1 ¨ (_ => start), dist: ⍳ n ¨ (v => if v == start { 0 } else { ¯1 }), at: 0 }
+        (s0 ▷ settle(s => bfs_step(s, out, from, to), s => s.head == ≢ s.queue)).dist
+    }
+
+    // The connected components of the undirected graph the edges make:
+    // each node's label is the smallest node of its component (union-find).
+    pub fn components(n: i64, a: [i64], b: [i64]) -> [i64] {
+        let u = Union { e: 0, parent: ⍳ n } ▷ evolve(≢ a, u => union_edge(u, a, b))
+        let roots = ⍳ n ¨ (v => root(u.parent, v))
+        // the smallest node of each root's component
+        let least = (Least { v: 0, low: ⍳ n } ▷ evolve(n, l => least_step(l, roots))).low
+        roots ¨ (r => least[r])
+    }
+
+    // An order of the nodes in which every edge goes forwards (Kahn's
+    // algorithm: nodes with nothing left before them, first come first
+    // served, from the smallest), or None if the edges make a cycle.
+    pub fn topo(n: i64, from: [i64], to: [i64]) -> Option[[i64]] {
+        let out = adjacency(n, from)
+        let indeg = (Count { i: 0, c: ⍳ n ¨ (_ => 0) } ▷ evolve(≢ to, c => count_step(c, to))).c
+        let ready = ⍳ n ⌿ (indeg ¨ (d => d == 0))
+        let s = Kahn { head: 0, order: ready, indeg: indeg, at: 0 } ▷ settle(k => kahn_step(k, out, from, to), k => k.head == ≢ k.order)
+        if ≢ s.order == n { Some(s.order) } else { None }
+    }
+
+    // The length of the shortest path from `start` to every node along
+    // directed edges of weights w (none negative), by Dijkstra's algorithm
+    // with a binary heap; ¯1 where it cannot be reached.
+    pub fn shortest(n: i64, from: [i64], to: [i64], w: [i64], start: i64) -> [i64] {
+        let out = adjacency(n, from)
+        let d0 = Dij { dist: ⍳ n ¨ (v => if v == start { 0 } else { ¯1 }), done: ⍳ n ¨ (_ => 0), heap: ⍳ 1 ¨ (_ => start), size: 1, key: ⍳ 1 ¨ (_ => 0), at: 0, top: 0, topd: 0, pos: 0 }
+        (d0 ▷ settle(d => dij_step(d, out, from, to, w), d => d.size == 0 and d.at == 0)).dist
+    }
+
+    // A minimum spanning forest of the undirected graph (Kruskal's
+    // algorithm: edges by weight, ties by their place in the lists, with
+    // union-find): the edges taken, by number.
+    pub fn mst(n: i64, a: [i64], b: [i64], w: [i64]) -> [i64] {
+        let order = sort_index(w)
+        let k = Kruskal { i: 0, parent: ⍳ n, size: ⍳ n ¨ (_ => 1), taken: ⍳ 0 } ▷ evolve(≢ order, k => kruskal_step(k, order, a, b))
+        sort(k.taken)
+    }
+
+    // ---- the parts ----
+
+    // The edges leaving each node, as edge numbers: `first[v]` … `first[v + 1]`
+    // in `edges` (edge numbers sorted by their start).
+    type Adj = { first: [i64], edges: [i64] }
+    fn adjacency(n: i64, from: [i64]) -> Adj {
+        let m = ≢ from
+        let edges = sort_index(from)
+        let first = ⍳ (n + 1) ¨ (v => lower(from, edges, v, 0, m))
+        Adj { first: first, edges: edges }
+    }
+    // the first place in `edges` whose edge starts at v or later
+    fn lower(from: [i64], edges: [i64], v: i64, lo: i64, hi: i64) -> i64 {
+        if lo >= hi { lo } else {
+            let mid = (lo + hi) div 2
+            if from[edges[mid]] < v { lower(from, edges, v, mid + 1, hi) } else { lower(from, edges, v, lo, mid) }
+        }
+    }
+
+    // breadth-first search: the queue (from head on), the distances, and the
+    // next of the head node's edges (`at`, counting from its first)
+    type Search = { head: i64, queue: [i64], dist: [i64], at: i64 }
+    fn bfs_step(s: Search, out: Adj, from: [i64], to: [i64]) -> Search {
+        let u = s.queue[s.head]
+        let i = out.first[u] + s.at
+        if i == out.first[u + 1] { { s with head: s.head + 1, at: 0 } } else {
+            let v = to[out.edges[i]]
+            if s.dist[v] >= 0 { { s with at: s.at + 1 } } else {
+                let d = s.dist[u] + 1
+                { s with at: s.at + 1, dist: put(s.dist, v, d), queue: push(s.queue, v) }
+            }
+        }
+    }
+
+    // union-find, the larger root kept
+    type Union = { e: i64, parent: [i64] }
+    fn root(p: [i64], v: i64) -> i64 { v ▷ settle(x => p[x], x => p[x] == x) }
+    fn union_edge(u: Union, a: [i64], b: [i64]) -> Union {
+        let (x, y) = (root(u.parent, a[u.e]), root(u.parent, b[u.e]))
+        if x == y { { u with e: u.e + 1 } } else { { u with e: u.e + 1, parent: put(u.parent, x ⌈ y, x ⌊ y) } }
+    }
+    type Least = { v: i64, low: [i64] }
+    fn least_step(l: Least, roots: [i64]) -> Least {
+        let (v, r) = (l.v, roots[l.v])
+        let cur = l.low[r]
+        { l with v: v + 1, low: put(l.low, r, cur ⌊ v) }
+    }
+
+    type Count = { i: i64, c: [i64] }
+    fn count_step(c: Count, to: [i64]) -> Count {
+        let v = to[c.i]
+        let k = c.c[v]
+        { c with i: c.i + 1, c: put(c.c, v, k + 1) }
+    }
+
+    // Kahn: the order so far (its head the node being emptied), the
+    // remaining in-degrees, and the head's next edge
+    type Kahn = { head: i64, order: [i64], indeg: [i64], at: i64 }
+    fn kahn_step(k: Kahn, out: Adj, from: [i64], to: [i64]) -> Kahn {
+        let u = k.order[k.head]
+        let i = out.first[u] + k.at
+        if i == out.first[u + 1] { { k with head: k.head + 1, at: 0 } } else {
+            let v = to[out.edges[i]]
+            let d = k.indeg[v] - 1
+            if d == 0 { { k with at: k.at + 1, indeg: put(k.indeg, v, d), order: push(k.order, v) } } else { { k with at: k.at + 1, indeg: put(k.indeg, v, d) } }
+        }
+    }
+
+    // Dijkstra: distances, nodes settled, the heap of nodes by their key
+    // (the distance they were pushed with; a node may be in it more than
+    // once, and only its first pop counts), the node being relaxed (`top`,
+    // at distance `topd`) and its next edge (`at`, 0 when none is taken),
+    // and where a sift is (`pos`). Each step hands the state on whole, so
+    // its lists change in place.
+    type Dij = { dist: [i64], done: [i64], heap: [i64], size: i64, key: [i64], at: i64, top: i64, topd: i64, pos: i64 }
+    fn dij_step(d: Dij, out: Adj, from: [i64], to: [i64], w: [i64]) -> Dij {
+        if d.at == 0 { settle_top(sift_down(take_top(d))) } else {
+            let u = d.top
+            let i = out.first[u] + d.at - 1
+            if i == out.first[u + 1] { { d with at: 0 } } else {
+                let (e, nd) = (out.edges[i], d.topd + w[out.edges[i]])
+                let v = to[e]
+                if d.dist[v] >= 0 and d.dist[v] <= nd { { d with at: d.at + 1 } } else { sift_up(append({ d with at: d.at + 1, dist: put(d.dist, v, nd) }, v, nd)) }
+            }
+        }
+    }
+    // the smallest key off the heap (into top and topd), the last entry put
+    // in its place, to sift down from 0
+    fn take_top(d: Dij) -> Dij {
+        let (v, k, last) = (d.heap[0], d.key[0], d.size - 1)
+        let (lv, lk) = (d.heap[last], d.key[last])
+        { d with size: last, heap: put(d.heap, 0, lv), key: put(d.key, 0, lk), top: v, topd: k, pos: 0 }
+    }
+    // the node taken is relaxed next, unless it was done already (a stale entry)
+    fn settle_top(d: Dij) -> Dij {
+        let v = d.top
+        if d.done[v] == 1 or d.topd > d.dist[v] { { d with at: 0 } } else { { d with done: put(d.done, v, 1), at: 1 } }
+    }
+    // v with key k at the end of the heap, to sift up from there
+    fn append(d: Dij, v: i64, k: i64) -> Dij {
+        let i = d.size
+        if i < ≢ d.heap { { d with size: i + 1, pos: i, heap: put(d.heap, i, v), key: put(d.key, i, k) } } else { { d with size: i + 1, pos: i, heap: push(d.heap, v), key: push(d.key, k) } }
+    }
+    fn sift_up(d: Dij) -> Dij {
+        let i = d.pos
+        if i == 0 { d } else {
+            let p = (i - 1) div 2
+            let (ki, kp, vi, vp) = (d.key[i], d.key[p], d.heap[i], d.heap[p])
+            if ki >= kp { d } else { sift_up({ d with pos: p, key: put(put(d.key, i, kp), p, ki), heap: put(put(d.heap, i, vp), p, vi) }) }
+        }
+    }
+    fn sift_down(d: Dij) -> Dij {
+        let i = d.pos
+        let (l, r) = (2 * i + 1, 2 * i + 2)
+        let s1 = if l < d.size and d.key[l] < d.key[i] { l } else { i }
+        let s = if r < d.size and d.key[r] < d.key[s1] { r } else { s1 }
+        if s == i { d } else {
+            let (ki, ks, vi, vs) = (d.key[i], d.key[s], d.heap[i], d.heap[s])
+            sift_down({ d with pos: s, key: put(put(d.key, i, ks), s, ki), heap: put(put(d.heap, i, vs), s, vi) })
+        }
+    }
+
+    // Kruskal: the next edge (in weight order), the forest, and the edges taken
+    type Kruskal = { i: i64, parent: [i64], size: [i64], taken: [i64] }
+    fn kruskal_step(k: Kruskal, order: [i64], a: [i64], b: [i64]) -> Kruskal {
+        let e = order[k.i]
+        let (x0, y0) = (root(k.parent, a[e]), root(k.parent, b[e]))
+        if x0 == y0 { { k with i: k.i + 1 } } else {
+            let (x, y) = if k.size[x0] < k.size[y0] { (y0, x0) } else { (x0, y0) }
+            let grown = k.size[x] + k.size[y]
+            { k with i: k.i + 1, parent: put(k.parent, y, x), size: put(k.size, x, grown), taken: push(k.taken, e) }
+        }
+    }
+}

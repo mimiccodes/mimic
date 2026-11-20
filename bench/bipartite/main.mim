@@ -1,0 +1,73 @@
+module main
+
+// bipartite: a random undirected graph of 300,000 nodes and 200,000 edges
+// (from splitmix64), each component two-coloured by breadth-first search
+// from its smallest node. The edge ends are sorted by node (one number
+// each) so a node finds its neighbours by binary search; the search is one
+// state machine (`settle` with a named step) whose queue grows in place,
+// each helper taking the state whole. Prints the number of components, how
+// many are bipartite, and the size of the largest. The reference is
+// bench/bipartite/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn n() -> i64 { 300000 }
+fn m() -> i64 { 200000 }
+
+// the other end of edge end h (h div 2 is the edge, h % 2 the side)
+fn other(h: i64) -> i64 { mix(2 * (h div 2) + 1 - h % 2) % n() }
+
+fn lower(keys: [i64], k: i64, lo: i64, hi: i64) -> i64 {
+    if lo >= hi { lo } else {
+        let mid = (lo + hi) div 2
+        if keys[mid] < k { lower(keys, k, mid + 1, hi) } else { lower(keys, k, lo, mid) }
+    }
+}
+
+// the next start, the queue and its head, colours, the component being
+// searched (bipartite so far, size) and the totals
+type B = { s: i64, head: i64, queue: [i64], colour: [i64], ok: bool, size: i64, comps: i64, bip: i64, largest: i64 }
+
+// neighbour end j (from the first) of the node at the head, and on
+fn neighbours(b: B, keys: [i64], first: [i64], j: i64) -> B {
+    let u = b.queue[b.head]
+    let i = first[u] + j
+    if i == first[u + 1] { b } else {
+        let v = other(keys[i] & ((1 << 20) - 1))
+        let (cu, cv) = (b.colour[u], b.colour[v])
+        if cv < 0 { neighbours({ b with colour: put(b.colour, v, 1 - cu), queue: push(b.queue, v) }, keys, first, j + 1) }
+        else if cv == cu { neighbours({ b with ok: false }, keys, first, j + 1) }
+        else { neighbours(b, keys, first, j + 1) }
+    }
+}
+
+fn advance(b: B) -> B { { b with head: b.head + 1, size: b.size + 1 } }
+
+// the queue is empty: close the component
+fn close(b: B) -> B { { b with bip: b.bip + (if b.ok and b.size > 0 { 1 } else { 0 }), largest: b.largest ⌈ b.size, size: 0, ok: true } }
+
+// then start the next one, from the next node not coloured yet
+fn begin(b: B) -> B {
+    if b.s == n() { b }
+    else if b.colour[b.s] >= 0 { { b with s: b.s + 1 } }
+    else { { b with s: b.s + 1, comps: b.comps + 1, colour: put(b.colour, b.s, 0), queue: push(b.queue, b.s) } }
+}
+
+// each helper takes the state whole, so its lists change in place
+fn step(b: B, keys: [i64], first: [i64]) -> B {
+    if b.head < ≢ b.queue { advance(neighbours(b, keys, first, 0)) } else { begin(close(b)) }
+}
+
+fn main() {
+    let keys = sort(⍳ (2 * m()) ¨ (h => (mix(h) % n()) << 20 | h))
+    let first = ⍳ (n() + 1) ¨ (v => lower(keys, v << 20, 0, 2 * m()))
+    let b0 = B { s: 0, head: 0, queue: ⍳ 0, colour: ⍳ n() ¨ (_ => ¯1), ok: true, size: 0, comps: 0, bip: 0, largest: 0 }
+    let b = b0 ▷ settle(b => step(b, keys, first), b => b.s == n() and b.head == ≢ b.queue)
+    let last = close(b)
+    print("{last.comps} {last.bip} {last.largest}")
+}

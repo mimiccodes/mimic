@@ -1,0 +1,15 @@
+0 0 0 0 0 0
+1 2 98 1 97 0
+4 2 101 3 450 450
+603 8 992 37 9721 178296
+2000 2672 3312 486 184094 50291955
+100000 39386 2049690 9282 21868885 118463913717
+50 0001047cfd01800280ffffffff3fffffffffff7f8080808080c080808001ffffffffffffffffff018e808080808080808001
+Ok([0 -1 1 63 -64 64 1099511627776 -1099511627776 4611686018427387904 -4611686018427387904 7])
+Err("compress::unvarints: the bytes end inside a number")
+Err("compress::unvarints: a number longer than 10 bytes")
+Err("compress::unrle: an odd number of bytes")
+Err("compress::unrle: a run of length 0")
+Err("compress::unlzw: code 300 at 1 was never made")
+Ok([65 65 65 65 65 65])
+Ok([104 101 108 108 111])

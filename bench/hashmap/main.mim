@@ -1,0 +1,49 @@
+module main
+
+// hashmap: a hash table with open addressing and linear probing, 2,097,152
+// slots of keys and values: 1,000,000 keys (from splitmix64, some repeated:
+// a repeat adds to its value) go in one after another (`evolve`, each `put`
+// in place), then 2,000,000 lookups (half of them keys that went in) run in
+// parallel with `¨`. Prints the sum of the values found, how many lookups
+// found their key, and the slots in use. The reference is
+// bench/hashmap/ref.py.
+
+// the table: keys (0: empty) and values; the next key to insert
+type H = { i: i64, keys: [i64], vals: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn slots() -> i64 { 2097152 }
+
+// the i-th key inserted: 1 to 700,000, so about a third come again
+fn key(i: i64) -> i64 { 1 + mix(i) % 700000 }
+
+// the slot holding k, or the empty one where it would go
+fn find(keys: [i64], k: i64, s: i64) -> i64 {
+    if keys[s] == 0 or keys[s] == k { s } else { find(keys, k, (s + 1) & (slots() - 1)) }
+}
+
+fn insert(h: H) -> H {
+    let k = key(h.i)
+    let s = find(h.keys, k, mix(k * 31) & (slots() - 1))
+    { h with i: h.i + 1, keys: put(h.keys, s, k), vals: put(h.vals, s, h.vals[s] + h.i % 100) }
+}
+
+fn main() {
+    let n = 1000000
+    let empty = ⍳ slots() ¨ (_ => 0)
+    let h = H { i: 0, keys: empty, vals: empty } ▷ evolve(n, insert)
+    // lookups: keys 1 … 1,400,000, half of them never inserted
+    let got = ⍳ (2 * n) ¨ (q => {
+        let k = 1 + q % 1400000
+        let s = find(h.keys, k, mix(k * 31) & (slots() - 1))
+        if h.keys[s] == k { h.vals[s] } else { -1 }
+    })
+    let found = got ⌿ (got >= 0)
+    print("{+/ found} {≢ found} {+/ (h.keys > 0)}")
+}

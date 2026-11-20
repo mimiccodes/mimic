@@ -1,0 +1,52 @@
+module main
+
+// sieve: the primes below 100,000,000 by a segmented sieve of
+// Eratosthenes: the numbers are cut into segments of 262,144, and each
+// segment crosses out the multiples of every prime up to the square root
+// of its end. Segments are independent, so `¨` sieves them in parallel.
+// Prints how many primes there are and the largest. The reference is
+// bench/sieve/ref.py.
+
+// crossing out: the prime's index, the prime, its next multiple, the flags
+type S = { i: i64, p: i64, m: i64, f: [u8] }
+
+// the first multiple of p to cross out in a segment starting at lo
+fn first(p: i64, lo: i64) -> i64 {
+    let up = (lo + p - 1) div p * p
+    if p * p > up { p * p } else { up }
+}
+
+fn cross(s: S, lo: i64) -> S {
+    { s with m: s.m + s.p, f: put(s.f, s.m - lo, 0) }
+}
+
+fn next(s: S, ps: [i64], lo: i64) -> S {
+    let p = ps[s.i + 1]
+    { s with i: s.i + 1, p: p, m: first(p, lo) }
+}
+
+fn small(k: i64, d: i64) -> bool {
+    if d * d > k { true } else if k % d == 0 { false } else { small(k, d + 1) }
+}
+
+// [primes in the segment, the largest or -1]
+fn segment(g: i64, ps: [i64], n: i64, size: i64) -> [i64] {
+    let lo = g * size
+    let hi = if lo + size < n { lo + size } else { n }
+    let s = S { i: 0, p: ps[0], m: first(ps[0], lo), f: bytes::from(⍳ (hi - lo) ¨ (_ => 1)) } ▷ settle(s => if s.m >= hi { next(s, ps, lo) } else { cross(s, lo) }, s => s.p * s.p >= hi)
+    let f = s.f
+    let low = if lo == 0 { 2 } else { 0 }
+    let top = ⍳ (hi - lo) ¨ (j => if f[j] == 1 and lo + j >= 2 { lo + j } else { -1 }) ▷ ⌈/
+    [(+/ f) - low top]
+}
+
+fn main() {
+    let n = 100000000
+    let size = 262144
+    let base = range(2, 10001)
+    let ps = push(base ⌿ (base ¨ (k => small(k, 2))), 3037000499)
+    let parts = ⍳ ((n + size - 1) div size) ¨ (g => segment(g, ps, n, size))
+    let count = +/ (parts ¨ (r => r[0]))
+    let largest = ⌈/ (parts ¨ (r => r[1]))
+    print("{count} {largest}")
+}

@@ -76,6 +76,12 @@ pub struct Profile {
     pub coverage: bool,
 }
 
+/// `MIMIC_DEBUG_DISABLE=optimizer` (a comma-separated list): turn a part of
+/// the compiler off, for testing (the speed gate's own check).
+pub fn debug_disabled(what: &str) -> bool {
+    std::env::var("MIMIC_DEBUG_DISABLE").is_ok_and(|v| v.split(',').any(|x| x.trim() == what))
+}
+
 impl Profile {
     pub fn for_input(input: &Input, release: bool) -> Profile {
         let cfg = match input {
@@ -83,7 +89,10 @@ impl Profile {
             Input::File(_) => mimic_project::BuildConfig::default(),
         };
         let p = if release { cfg.release } else { cfg.debug };
-        Profile { release, net: true, opt: p.opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false, coverage: false }
+        // a real slowdown on purpose, to show the speed gate catches one
+        // (bench/run.py --gate); part of the build's cache key like any opt
+        let opt = if debug_disabled("optimizer") { 0 } else { p.opt };
+        Profile { release, net: true, opt, leak_check: p.leak_check, cpu: None, emit_header: false, strict_math: false, fast_math: false, tests: false, shared: false, frame_pointers: false, coverage: false }
     }
     pub fn name(&self) -> &'static str {
         if self.coverage {
@@ -227,6 +236,12 @@ pub extern \"mimic\" {
 // A broken `requires` or `ensures` (debug builds and tests): stops the
 // program with what was promised. Pure, like a bounds check, so functions
 // with contracts still run in parallel.
+// flatten's fast way (see runtime/mimic_std.c): private to the prelude
+extern \"mimic\" pure {
+    fn flat_plain(xss: any) -> bool
+    fn concat_plain(xss: any) -> [any]
+}
+
 pub extern \"mimic\" pure {
     fn contract_failed(message: str)
 }
@@ -272,9 +287,21 @@ pub fn count(xs, f) { +/ (xs ¨ f) }
 // A map from each `f(x)` to the elements with that value, in order.
 pub fn group_by(xs, f) { group(xs ¨ f, xs) }
 
-// One list from a list of lists.
+// One list from a list of lists. Linear: each element is placed once, in
+// parallel (each list's start from a running sum of the lengths, and each
+// position's list by replicating the list numbers), where joining the lists
+// two at a time copied the growing result again for every list.
 pub fn flatten(xss) {
-    if (≢ xss) == 0 { [] } else { xss ▷ gather(concat) }
+    let m = ≢ xss
+    if m == 0 { [] } else if flat_plain(xss) { concat_plain(xss) } else {
+        let lens = xss ¨ (x => ≢ x)
+        let ends = lens ▷ trail(+)
+        let owner = ⍳ m ⌿ lens
+        ⍳ ends[m - 1] ¨ (k => {
+            let o = owner[k]
+            xss[o][k - ends[o] + lens[o]]
+        })
+    }
 }
 
 // The element with the smallest (largest) `f(x)`, or `None` for no elements.
@@ -674,7 +701,7 @@ pub module http {
     }
 }
 
-", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/ui.mim"));
+", include_str!("../../../runtime/math.mim"), include_str!("../../../runtime/hash.mim"), include_str!("../../../runtime/text.mim"), include_str!("../../../runtime/graph.mim"), include_str!("../../../runtime/order.mim"), include_str!("../../../runtime/parse.mim"), include_str!("../../../runtime/compress.mim"), include_str!("../../../runtime/ui.mim"));
 
 pub fn prelude_file() -> SourceFile {
     let key = PathBuf::from("<prelude>");
@@ -860,7 +887,7 @@ fn expect_with_text(items: &mut [mimic_syntax::ast::Item], src: &str) {
                         }
                         kind => ("expect_true", vec![Expr { kind, span: arg.span }, lit(ExprKind::Str(text)), line]),
                     };
-                    *callee = Box::new(lit(ExprKind::Path(vec![name.into()])));
+                    **callee = lit(ExprKind::Path(vec![name.into()]));
                     *args = new_args;
                 });
             }
@@ -1104,29 +1131,59 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
         return Ok(obj);
     }
     // each runtime version gets its own directory: mimic_rt.c #includes mimic_net.c
-    let src_dir = dir.join(format!("src-{key:016x}"));
-    fs::create_dir_all(&src_dir).map_err(|e| e.to_string())?;
-    // written atomically: other mimic processes may compile from here at the
-    // same time (the header lives beside the sources, one copy per version)
+    let src_dir = runtime_sources(&dir, key)?;
     let src = src_dir.join("mimic_rt.c");
-    mimic_toolchain::jobs::write_atomic(&src, RUNTIME_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_net.c"), RUNTIME_NET_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_std.c"), RUNTIME_STD_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_sched.c"), RUNTIME_SCHED_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_io.c"), RUNTIME_IO_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_ui.c"), RUNTIME_UI_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_socket.c"), RUNTIME_SOCKET_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_json.c"), RUNTIME_JSON_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_window.c"), RUNTIME_WINDOW_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_gpu.c"), RUNTIME_GPU_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("wepoll.c"), RUNTIME_WEPOLL_C.as_bytes())?;
-    mimic_toolchain::jobs::write_atomic(&src_dir.join("mimic_rt.h"), RUNTIME_H.as_bytes())?;
-    let tmp = obj.with_extension(format!("o.tmp{}", std::process::id()));
+    let tmp = mimic_toolchain::jobs::temp_beside(&obj);
     let mut c = toolchain::cc(tc, target);
     c.args(&flags).arg(&src).arg("-o").arg(&tmp);
     run_tool(c, "compiling the mimic runtime")?;
     fs::rename(&tmp, &obj).map_err(|e| e.to_string())?;
     Ok(obj)
+}
+
+/// The runtime's sources for one version, written once. A finished
+/// directory is never written again: replacing a file other builds are
+/// compiling from frees its inode, the next file written can get the same
+/// number, and the C compiler, which knows files by inode, then takes one
+/// file for another (`redefinition of 'MIM_UI_JS'`: mimic_json.c read as
+/// mimic_ui.c). So the files go into a private directory, which is moved
+/// into place whole; a build that finds the shared one complete uses it,
+/// and one that cannot move its own there (another build was first, or the
+/// shared one lost files to a cleaner) compiles from its own.
+fn runtime_sources(dir: &Path, key: u64) -> Result<PathBuf, String> {
+    const MARKER: &str = ".complete";
+    let shared = dir.join(format!("sources-{key:016x}"));
+    if mimic_toolchain::jobs::intact(&shared, MARKER) {
+        return Ok(shared);
+    }
+    let own = mimic_toolchain::jobs::temp_beside(&shared);
+    fs::create_dir_all(&own).map_err(|e| format!("cannot create {}: {e}", own.display()))?;
+    for (name, text) in [
+        ("mimic_rt.c", RUNTIME_C),
+        ("mimic_net.c", RUNTIME_NET_C),
+        ("mimic_std.c", RUNTIME_STD_C),
+        ("mimic_sched.c", RUNTIME_SCHED_C),
+        ("mimic_io.c", RUNTIME_IO_C),
+        ("mimic_ui.c", RUNTIME_UI_C),
+        ("mimic_socket.c", RUNTIME_SOCKET_C),
+        ("mimic_json.c", RUNTIME_JSON_C),
+        ("mimic_window.c", RUNTIME_WINDOW_C),
+        ("mimic_gpu.c", RUNTIME_GPU_C),
+        ("wepoll.c", RUNTIME_WEPOLL_C),
+        ("mimic_rt.h", RUNTIME_H),
+    ] {
+        let path = own.join(name);
+        fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    mimic_toolchain::jobs::seal(&own, MARKER)?;
+    if fs::rename(&own, &shared).is_ok() {
+        return Ok(shared);
+    }
+    if mimic_toolchain::jobs::intact(&shared, MARKER) {
+        let _ = fs::remove_dir_all(&own);
+        return Ok(shared);
+    }
+    Ok(own)
 }
 
 pub struct Artifact {

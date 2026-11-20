@@ -1,0 +1,30 @@
+module main
+
+// shuffle: the numbers 0 … 9,999,999 shuffled by Fisher-Yates, i from the
+// top down to 1 swapping place i with place mix(i) mod (i + 1)
+// (splitmix64). One pass (`evolve` with a named step, two `put`s in place
+// a swap). Prints the first and the last number and a checksum that weighs
+// every number by its place. The reference is bench/shuffle/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the next place to fill (from the top), and the numbers
+type S = { i: i64, a: [i64] }
+
+fn swap(s: S) -> S {
+    let i = s.i
+    let j = mix(i) % (i + 1)
+    let (x, y) = (s.a[i], s.a[j])
+    { s with i: i - 1, a: put(put(s.a, i, y), j, x) }
+}
+
+fn main() {
+    let n = 10000000
+    let a = (S { i: n - 1, a: ⍳ n } ▷ evolve(n - 1, swap)).a
+    print("{a[0]} {a[n - 1]} {⍳ n ¨ (i => a[i] * (i % 251 + 1)) ▷ +/}")
+}

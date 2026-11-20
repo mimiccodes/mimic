@@ -1,0 +1,30 @@
+module main
+
+// fibmod: F(n) modulo 1,000,000,007 for 500,000 values n below 10^18
+// (from splitmix64), by fast doubling over the bits of n from the top: a
+// function that calls itself with F(m) and F(m + 1). The values are done
+// in parallel. Prints the sum of the results modulo the prime, and their
+// exclusive or. The reference is bench/fibmod/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn p() -> i64 { 1000000007 }
+
+// F(n) from bit `bit` down, with a = F(m), b = F(m + 1) for the bits above
+fn fib(n: i64, bit: i64, a: i64, b: i64) -> i64 {
+    if bit < 0 { a } else {
+        let c = a * ((2 * b - a + p()) % p()) % p()
+        let d = (a * a + b * b) % p()
+        if n >>> bit & 1 == 1 { fib(n, bit - 1, d, (c + d) % p()) } else { fib(n, bit - 1, c, d) }
+    }
+}
+
+fn main() {
+    let fs = ⍳ 500000 ¨ (k => fib(mix(k) % 1000000000000000000, 60, 0, 1))
+    print("{(fs ▷ +/) % p()} {fs ▷ gather(^)}")
+}

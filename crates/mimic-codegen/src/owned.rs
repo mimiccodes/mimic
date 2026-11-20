@@ -170,6 +170,25 @@ fn last_use(e: &Expr, is_name: &dyn Fn(&Expr) -> bool) -> Option<usize> {
     }
 }
 
+/// Whether every one of `sites` is parameter `i` (`name`) handed unchanged
+/// to the same place of a call to the function itself: a record only passed
+/// along, as `nearest(c, x, j + 1)` passes `c`. Nothing then updates it, so
+/// the function borrows it; consuming it would retain and release it on every
+/// call from outside (from every element of a `¨`, all threads on one count).
+fn passed_through(fname: &str, i: usize, name: &str, body: &Block, sites: &[usize]) -> bool {
+    let mut through = Vec::new();
+    body.walk(&mut |x| {
+        if let ExprKind::Call { callee, args } = &x.kind
+            && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == fname)
+            && let Some(a) = args.get(i)
+            && matches!(&a.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)
+        {
+            through.push(id(a));
+        }
+    });
+    sites.iter().all(|s| through.contains(s))
+}
+
 /// Every expression of a block's statements and tail, as roots to walk.
 pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
     for s in stmts {
@@ -233,7 +252,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 Some(s) => vec![s],
                 // a state machine's step: `{ s with … }` in every branch
                 // that changes it, each the function's result there
-                None => tail_with_sites(&prm.name, &d.body).unwrap_or_default(),
+                None => tail_with_sites(&prm.name, &d.body).filter(|s| !passed_through(&d.name, i, &prm.name, &d.body, s)).unwrap_or_default(),
             };
         }
         out

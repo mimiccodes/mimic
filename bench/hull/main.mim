@@ -1,0 +1,70 @@
+module main
+
+// hull: the convex hull of 2,000,000 points with integer coordinates in a
+// disc of radius 10^6 (from splitmix64), by Andrew's monotone chain. The
+// points are sorted as one number each (x, then y); each chain is a stack
+// (a list and its length in a record, `put` in place) built in one pass
+// (`evolve` with a named step), popping while the last turn is not to the
+// left. Prints the number of hull points, twice the hull's area, and the
+// sum of the hull's x coordinates. The reference is bench/hull/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn r() -> i64 { 1000000 }
+fn side() -> i64 { 2 * r() + 1 }
+
+// point k as one number that sorts by x, then y
+fn point(k: i64) -> i64 {
+    let x = mix(2 * k) % side() - r()
+    let y = mix(2 * k + 1) % side() - r()
+    let (u, v) = if x * x + y * y <= r() * r() { (x, y) } else { (x div 2, y div 2) }
+    (u + r()) * side() + v + r()
+}
+
+fn px(p: i64) -> i64 { p div side() - r() }
+fn py(p: i64) -> i64 { p % side() - r() }
+
+// the turn o → a → b: positive to the left
+fn cross(o: i64, a: i64, b: i64) -> i64 {
+    (px(a) - px(o)) * (py(b) - py(o)) - (py(a) - py(o)) * (px(b) - px(o))
+}
+
+// a chain: the points so far (len of them) and the next point's place
+type Chain = { i: i64, len: i64, pts: [i64] }
+
+// drop the last point while it does not turn left towards the next one
+fn pop(c: Chain, ps: [i64]) -> Chain {
+    let p = ps[c.i]
+    if c.len >= 2 and cross(c.pts[c.len - 2], c.pts[c.len - 1], p) <= 0 { pop({ c with len: c.len - 1 }, ps) } else { c }
+}
+
+// the next point onto the chain
+fn push_next(c: Chain, ps: [i64]) -> Chain {
+    let p = ps[c.i]
+    { c with i: c.i + 1, len: c.len + 1, pts: put(c.pts, c.len, p) }
+}
+
+// each step hands the chain on whole (pop, then push_next), so its list is
+// changed in place
+fn add(c: Chain, ps: [i64]) -> Chain { push_next(pop(c, ps), ps) }
+
+fn chain(ps: [i64]) -> [i64] {
+    let c = Chain { i: 0, len: 0, pts: ⍳ (≢ ps) ¨ (_ => 0) } ▷ evolve(≢ ps, c => add(c, ps))
+    c.pts ↑ (c.len - 1)
+}
+
+fn main() {
+    let ps = sort(⍳ 2000000 ¨ point)
+    let hull = concat(chain(ps), chain(⌽ ps))
+    let m = ≢ hull
+    let area2 = ⍳ m ¨ (i => {
+        let (a, b) = (hull[i], hull[(i + 1) % m])
+        px(a) * py(b) - px(b) * py(a)
+    }) ▷ +/
+    print("{m} {area2} {hull ¨ px ▷ +/}")
+}

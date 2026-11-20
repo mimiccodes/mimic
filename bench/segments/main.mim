@@ -1,0 +1,58 @@
+module main
+
+// segments: 8,000 short segments on a 100,000 × 100,000 grid (from
+// splitmix64), every pair tested for meeting by orientations (collinear
+// touching counts). Segment i counts its meetings with the segments after
+// it by a function that calls itself; the segments are counted in
+// parallel. Prints the number of pairs that meet, and the sum of i + j
+// over them. The reference is bench/segments/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+type Segs = { ax: [i64], ay: [i64], bx: [i64], by: [i64] }
+
+// which side of p → q the point r is on: 1, ¯1, or 0 on the line
+fn orient(px: i64, py: i64, qx: i64, qy: i64, rx: i64, ry: i64) -> i64 {
+    let c = (qx - px) * (ry - py) - (qy - py) * (rx - px)
+    if c > 0 { 1 } else if c < 0 { ¯1 } else { 0 }
+}
+
+// r within the box of p and q (for a point on the line through them)
+fn on(px: i64, py: i64, qx: i64, qy: i64, rx: i64, ry: i64) -> bool {
+    (px ⌊ qx) <= rx and rx <= (px ⌈ qx) and (py ⌊ qy) <= ry and ry <= (py ⌈ qy)
+}
+
+fn meet(s: Segs, i: i64, j: i64) -> bool {
+    let (aix, aiy, bix, biy) = (s.ax[i], s.ay[i], s.bx[i], s.by[i])
+    let (ajx, ajy, bjx, bjy) = (s.ax[j], s.ay[j], s.bx[j], s.by[j])
+    let o1 = orient(aix, aiy, bix, biy, ajx, ajy)
+    let o2 = orient(aix, aiy, bix, biy, bjx, bjy)
+    let o3 = orient(ajx, ajy, bjx, bjy, aix, aiy)
+    let o4 = orient(ajx, ajy, bjx, bjy, bix, biy)
+    ((o1 != o2 and o3 != o4) or
+        (o1 == 0 and on(aix, aiy, bix, biy, ajx, ajy)) or
+        (o2 == 0 and on(aix, aiy, bix, biy, bjx, bjy)) or
+        (o3 == 0 and on(ajx, ajy, bjx, bjy, aix, aiy)) or
+        (o4 == 0 and on(ajx, ajy, bjx, bjy, bix, biy)))
+}
+
+// segment i against j … n - 1: (meetings, sum of i + j over them)
+fn count(s: Segs, i: i64, j: i64, c: i64, t: i64) -> (i64, i64) {
+    if j == ≢ s.ax { (c, t) }
+    else if meet(s, i, j) { count(s, i, j + 1, c + 1, t + i + j) }
+    else { count(s, i, j + 1, c, t) }
+}
+
+fn main() {
+    let n = 8000
+    let ax = ⍳ n ¨ (k => mix(4 * k) % 100000)
+    let ay = ⍳ n ¨ (k => mix(4 * k + 1) % 100000)
+    let s = Segs { ax: ax, ay: ay, bx: ⍳ n ¨ (k => ax[k] + mix(4 * k + 2) % 4001 - 2000), by: ⍳ n ¨ (k => ay[k] + mix(4 * k + 3) % 4001 - 2000) }
+    let per = ⍳ n ¨ (i => count(s, i, i + 1, 0, 0))
+    print("{per ¨ (p => p.0) ▷ +/} {per ¨ (p => p.1) ▷ +/}")
+}

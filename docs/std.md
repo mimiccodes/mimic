@@ -125,6 +125,16 @@ math::atan2(1.0, 1.0) * 4.0        // π
 
 All take and return `f64` (integers are converted). On numbers the compiler knows, each is one machine instruction or one call to the system's math library, so it costs what it does in C and runs inside parallel array kernels. Any function of a standard module can be passed as a value: `xs ¨ math::sqrt`.
 
+On whole numbers (`i64` in, `i64` or `bool` out):
+
+| Function | Result |
+|---|---|
+| `math::gcd(a, b)`, `math::lcm(a, b)` | greatest common divisor and least common multiple, never negative (`gcd(0, 0)` and an `lcm` with 0 are 0) |
+| `math::powmod(b, e, m)`, `math::mulmod(a, b, m)` | b to the power e, and a × b, modulo m (m > 0, e ≥ 0), exact for any numbers an `i64` holds (products in 128 bits); the result is in 0 … m − 1 |
+| `math::is_prime(n)` | whether n is prime: Miller-Rabin with the bases 2 … 37, which decide every `i64` exactly |
+| `math::primes(n)` | the primes below n, in order (a sieve of Eratosthenes) |
+| `math::totient(n)` | Euler's φ: how many of 1 … n share no factor with n (n ≥ 1) |
+
 ## Standard modules
 
 Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name.
@@ -201,6 +211,71 @@ How channels behave:
 | `bytes::base64(b)`, `bytes::from_base64(s)` | standard base64 ↔ bytes; `from_base64` returns a `Result` |
 
 `fs::read_bytes`/`fs::write_bytes` and `tcp::send_bytes`/`tcp::receive_bytes` read and write bytes. A `[u8]` parameter accepts only bytes; passing a list of `i64` is a compile error.
+
+### `text`: text algorithms (pure)
+
+| Function | Result |
+|---|---|
+| `text::distance(a, b)` | The Levenshtein distance: the fewest insertions, deletions and substitutions of characters (UTF-8 characters count as one) that turn `a` into `b` |
+| `text::find_all(s, part)` | `[i64]`: every byte position where `part` occurs (the positions `find` and `slice` use), overlapping ones included, by Knuth-Morris-Pratt; `[]` for an empty `part` |
+| `text::soundex(name)` | The American Soundex code: `"R163"` for both `"Robert"` and `"Rupert"`; letters other than A-Z are skipped |
+| `text::wrap(s, width)` | `[str]`: the words of `s` in lines of at most `width` characters, filled greedily (a longer word gets a line of its own), as Python's `textwrap.wrap` does with `break_long_words=False` |
+
+### `compress`: compression and compact encodings (pure)
+
+| Function | Result |
+|---|---|
+| `compress::rle(b)`, `compress::unrle(b)` | Run-length encoding: each run as two bytes, its length (1 … 255; longer runs take several pairs) and the byte. `unrle` returns a `Result`: `Err` for an odd length or a zero length |
+| `compress::lzw(b)`, `compress::unlzw(codes)` | LZW with 12-bit codes (0 … 255 the bytes, new strings 256 … 4,095, then the dictionary stays): the codes as `[i64]`. `unlzw` returns a `Result`: `Err` for a code it could not have made |
+| `compress::varints(xs)`, `compress::unvarints(b)` | Numbers as zigzag LEB128: each the difference from the one before, zigzag-mapped, 7 bits a byte, so small steps take one byte. `unvarints` returns a `Result`: `Err` when the bytes end inside a number or one runs past 10 bytes |
+
+### `graph`: graph algorithms (pure)
+
+Nodes are numbered `0` … `n - 1`; edge `e` goes from `from[e]` to `to[e]`, with weight `w[e]` where one is needed. Each function is checked against networkx.
+
+| Function | Result |
+|---|---|
+| `graph::bfs(n, from, to, start)` | `[i64]`: the number of edges from `start` to each node along directed edges (breadth-first search); `¯1` where it cannot be reached |
+| `graph::shortest(n, from, to, w, start)` | `[i64]`: the length of the shortest path from `start` to each node along directed edges of weights `w` (none negative), by Dijkstra's algorithm with a binary heap; `¯1` where it cannot be reached |
+| `graph::components(n, a, b)` | `[i64]`: the connected components of the undirected graph, each node labelled with the smallest node of its component (union-find) |
+| `graph::topo(n, from, to)` | `Option[[i64]]`: an order in which every edge goes forwards (Kahn's algorithm, first come first served from the smallest node), or `None` if the edges make a cycle |
+| `graph::mst(n, a, b, w)` | `[i64]`: the edges of a minimum spanning forest of the undirected graph, by number (Kruskal's algorithm; equal weights by their place in the lists) |
+
+### `order`: searching sorted lists (pure)
+
+| Function | Result |
+|---|---|
+| `order::lower_bound(xs, x)`, `order::upper_bound(xs, x)` | In the sorted list `xs`, the first place whose value is not below `x`, and the first whose value is above it (binary search); their difference counts the `x`s |
+| `order::select(xs, k)` | The `k`-th smallest value (from 0), as `sort(xs)[k]` without sorting all of it (quickselect) |
+| `order::merge(a, b)` | Two sorted lists as one sorted list (equal values from `a` first) |
+| `order::is_sorted(xs)` | Whether `xs` never goes down |
+
+The module is called `order` because `sort` is the global function.
+
+### `parse`: common text formats (pure)
+
+| Function | Result |
+|---|---|
+| `parse::csv(text)` | `[[str]]`: the rows of a CSV text as Python's `csv` reads it (RFC 4180): fields apart by commas, rows by `\n` or `\r\n`, a field in double quotes may hold commas, newlines and doubled quotes; a blank line is a row of no fields |
+| `parse::url(s)` | A `parse::Url` record `{ scheme, user, password, host, port, path, query, fragment }`, as Python's `urllib.parse.urlsplit` reads it: absent parts are `""`, an absent port `¯1`, the scheme and host in lower case, an IPv6 host without its brackets |
+| `parse::semver(s)` | `Option[parse::Version]`: `{ major, minor, patch, pre, build }` by Semantic Versioning 2.0.0, or `None` |
+| `parse::semver_compare(a, b)` | `¯1`, `0` or `1` by Semantic Versioning precedence (a pre-release before its release; build metadata ignored) |
+
+### `hash`: checksums and hashes (pure)
+
+Each function is the standard algorithm on `[u8]`, checked against the usual references (Python's `zlib`, `hashlib`, `xxhash` and `mmh3`, and the published test vectors), and is the same code the benchmark corpus measures. None of them is for passwords or signatures; `md5` and `sha1` are broken for security and are here for old formats.
+
+| Function | Result |
+|---|---|
+| `hash::crc32(b)`, `hash::crc64(b)` | CRC-32 (as zlib and PNG compute it), CRC-64/XZ |
+| `hash::adler32(b)` | Adler-32 (as zlib computes it) |
+| `hash::fnv1a32(b)`, `hash::fnv1a64(b)` | FNV-1a |
+| `hash::murmur3(b, seed = 0)` | MurmurHash3 x86_32 |
+| `hash::xxhash32(b, seed = 0)`, `hash::xxhash64(b, seed = 0)` | xxHash |
+| `hash::siphash(b, k0, k1)` | SipHash-2-4 with a 128-bit key, for hash tables facing chosen keys |
+| `hash::md5(b)`, `hash::sha1(b)`, `hash::sha256(b)` | the digest as bytes (16, 20 and 32 of them): `bytes::hex(hash::sha256(b))` |
+
+The 32-bit results are from 0 to 2^32 - 1; the 64-bit ones use every bit, so as an `i64` they may be negative. To hash text, hash its bytes: `hash::crc32(bytes::of_text(s))`.
 
 ### `path`: paths as text (pure)
 

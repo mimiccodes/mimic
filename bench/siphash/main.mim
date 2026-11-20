@@ -1,0 +1,54 @@
+module main
+
+// siphash: SipHash-2-4 (key bytes 0-15) of 2,000,000 messages of 16 bytes
+// (two 64-bit words from splitmix64 each), as a hash table hashes its keys.
+// The rounds are a function that calls itself with the four state words;
+// the messages are hashed in parallel. Prints the exclusive or of the
+// hashes and their sum modulo 1,000,000,007. The reference is
+// bench/siphash/ref.py (checked against the SipHash paper's test vector).
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn rotl(x: i64, r: i64) -> i64 { x << r | x >>> (64 - r) }
+
+// n SipRounds on the state words
+fn rounds(n: i64, v0: i64, v1: i64, v2: i64, v3: i64) -> (i64, i64, i64, i64) {
+    if n == 0 { (v0, v1, v2, v3) } else {
+        let a0 = v0 + v1
+        let a1 = rotl(v1, 13) ^ a0
+        let b2 = v2 + v3
+        let b3 = rotl(v3, 16) ^ b2
+        let c0 = rotl(a0, 32) + b3
+        let c3 = rotl(b3, 21) ^ c0
+        let d2 = b2 + a1
+        let d1 = rotl(a1, 17) ^ d2
+        rounds(n - 1, c0, d1, rotl(d2, 32), c3)
+    }
+}
+
+// two words of message, 16 bytes in all, then the length block; each goes
+// into v3, two rounds, then into v0
+fn siphash(k0: i64, k1: i64, m0: i64, m1: i64) -> i64 {
+    let (a0, a1, a2, a3) = rounds(2, k0 ^ 0x736F6D6570736575, k1 ^ 0x646F72616E646F6D, k0 ^ 0x6C7967656E657261, k1 ^ 0x7465646279746573 ^ m0)
+    let (b0, b1, b2, b3) = rounds(2, a0 ^ m0, a1, a2, a3 ^ m1)
+    let last = 16 << 56
+    let (c0, c1, c2, c3) = rounds(2, b0 ^ m1, b1, b2, b3 ^ last)
+    let (f0, f1, f2, f3) = rounds(4, c0 ^ last, c1, c2 ^ 0xFF, c3)
+    f0 ^ f1 ^ f2 ^ f3
+}
+
+// a 64-bit word, read as unsigned, modulo m
+fn umod(w: i64, m: i64) -> i64 { ((w >>> 1) % m * 2 + (w & 1)) % m }
+
+fn main() {
+    let (k0, k1) = (0x0706050403020100, 0x0F0E0D0C0B0A0908)
+    let hs = ⍳ 2000000 ¨ (j => siphash(k0, k1, mix(2 * j), mix(2 * j + 1)))
+    let x = hs ▷ gather(^)
+    let s = (hs ¨ (h => umod(h, 1000000007)) ▷ +/) % 1000000007
+    print("{bytes::hex(bytes::from(⍳ 8 ¨ (i => x >>> (56 - i * 8) & 255)))} {s}")
+}

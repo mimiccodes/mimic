@@ -1,0 +1,33 @@
+module main
+
+// partitions: the partition numbers p(n) modulo 1,000,000,007 for n up to
+// 200,000, by Euler's pentagonal number recurrence. Each p(n) is a sum
+// over the pentagonal numbers below n (a function that calls itself) of
+// the values before it, so the list grows one value a step (`evolve` with
+// a named step, `push` in place). Prints p(200,000) and the sum of all p(n)
+// modulo the prime. The reference is bench/partitions/ref.py.
+
+fn q() -> i64 { 1000000007 }
+
+// the terms for k on, of p(m), given p(0 … m - 1)
+fn terms(ps: [i64], m: i64, k: i64, s: i64) -> i64 {
+    let g1 = k * (3 * k - 1) div 2
+    if g1 > m { s } else {
+        let g2 = k * (3 * k + 1) div 2
+        let t = ps[m - g1] + (if g2 <= m { ps[m - g2] } else { 0 })
+        terms(ps, m, k + 1, if k % 2 == 1 { s + t } else { s - t })
+    }
+}
+
+type Ps = { ps: [i64] }
+
+fn grow(s: Ps) -> Ps {
+    let v = terms(s.ps, ≢ s.ps, 1, 0) % q()
+    { s with ps: push(s.ps, (v + q()) % q()) }
+}
+
+fn main() {
+    let n = 200000
+    let ps = (Ps { ps: [1] } ▷ evolve(n, grow)).ps
+    print("{ps[n]} {(ps ▷ +/) % q()}")
+}

@@ -1,0 +1,38 @@
+module main
+
+// csv: 400,000 rows of generated CSV (id, name, score, city; a city with a
+// comma is quoted, as RFC 4180 says), parsed back: the sum of the scores,
+// the total length of the city names, and how many fields were quoted.
+
+fn row(i: i64) -> str {
+    let city = if i % 7 == 0 { "\"Springfield, IL\"" } else if i % 3 == 0 { "Paris" } else { "Rome" }
+    "{i},user{i % 1000},{i * 7919 % 1000},{city}"
+}
+
+// the fields of one line: commas split them, except inside quotes
+fn fields(line: str) -> [str] {
+    match find(line, "\"") {
+        None => split(line, ","),
+        Some(q) => {
+            let before = split(slice(line, 0, q - 1), ",")
+            let rest = slice(line, q + 1, ≢ line)
+            let close = find(rest, "\"") else { return push(before, rest) }
+            push(before, slice(rest, 0, close))
+        },
+    }
+}
+
+fn num(s: str) -> i64 {
+    let n = parse_int(s) else { return 0 }
+    n
+}
+
+fn main() {
+    let n = 400000
+    let text = join(⍳ n ¨ row, "\n")
+    let rows = lines(text) ¨ fields
+    let score = +/ (rows ¨ (f => num(f[2])))
+    let city = +/ (rows ¨ (f => ≢ f[3]))
+    let quoted = +/ (rows ¨ (f => if find(f[3], ",") == None { 0 } else { 1 }))
+    print("{score} {city} {quoted}")
+}

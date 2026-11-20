@@ -1,0 +1,56 @@
+module main
+
+// ini: an INI file of 100,000 sections ([server.s] with host, port,
+// timeout, enabled and name, in varying order, comments and blank lines
+// between), read back. Every line is looked at on its own, in parallel:
+// which section it is in is the running count (`trail(+)`) of the section
+// headers up to it. Prints the number of sections, the number of keys, the
+// sum of the ports, how many sections are enabled, the total length of the
+// names, and the sum of each port times its section's place in the file.
+// The reference is bench/ini/ref.py (Python's configparser).
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn section(s: i64) -> str {
+    let vals = [
+        "host = h{mix(s) % 1000}.example.com"
+        "port = {1024 + mix(s + 1) % 60000}"
+        "timeout = {mix(s + 2) % 120}"
+        "enabled = {if mix(s + 3) % 3 != 0 { "true" } else { "false" }}"
+        "name = {repeat("x", 1 + mix(s + 4) % 20)}"
+    ]
+    let r = mix(s + 5) % 5
+    let head = if s % 7 == 0 { "; section {s}\n" } else if s % 11 == 0 { "# next\n" } else { "" }
+    head + "[server.{s}]\n" + join(⍳ 5 ¨ (k => vals[(k + r) % 5]), "\n") + "\n"
+}
+
+fn is_header(l: str) -> bool { starts_with(trim(l), "[") }
+
+fn is_key(l: str) -> bool {
+    let t = trim(l)
+    ≢ t > 0 and not starts_with(t, ";") and not starts_with(t, "#") and not starts_with(t, "[") and contains(t, "=")
+}
+
+// a `key = value` line, and the place of its section
+type Entry = { key: str, value: str, place: i64 }
+
+fn entry(l: str, place: i64) -> Entry {
+    let at = find_index(l, "=")
+    Entry { key: trim(slice(l, 0, at)), value: trim(slice(l, at + 1, ≢ l)), place: place }
+}
+
+fn main() {
+    let text = join(⍳ 100000 ¨ section, "\n")
+    let ls = lines(text)
+    let place = ls ¨ (l => if is_header(l) { 1 } else { 0 }) ▷ trail(+)
+    let es = ⍳ (≢ ls) ⌿ (ls ¨ is_key) ¨ (i => entry(ls[i], place[i]))
+    let ports = es ⌿ (es ¨ (e => e.key == "port")) ¨ (e => (to_int(e.value), e.place))
+    let enabled = es ¨ (e => if e.key == "enabled" and e.value == "true" { 1 } else { 0 }) ▷ +/
+    let names = es ¨ (e => if e.key == "name" { ≢ e.value } else { 0 }) ▷ +/
+    print("{place[≢ ls - 1]} {≢ es} {ports ¨ (p => p.0) ▷ +/} {enabled} {names} {ports ¨ (p => p.0 * p.1) ▷ +/}")
+}

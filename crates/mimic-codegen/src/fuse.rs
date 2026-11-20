@@ -106,7 +106,18 @@ fn array_work_in(walk: impl FnOnce(&mut dyn FnMut(&Expr))) -> bool {
     walk(&mut |x| match &x.kind {
         ExprKind::Prim { prim: Prim::Iota | Prim::Range, .. } if small(x) => {}
         ExprKind::Prim { prim: Prim::Each, args } if small(&args[0]) || matches!(&args[0].kind, ExprKind::Prim { prim: Prim::Each, args: a2 } if small(&a2[0])) => {}
-        ExprKind::Prim { prim, .. } if matches!(prim, Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul) => found = true,
+        ExprKind::Prim { prim: Prim::Each | Prim::Iota | Prim::Range | Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle | Prim::MatMul, .. } => found = true,
+        _ => {}
+    });
+    found
+}
+
+/// Does `e` call a function (by a call, or `xs ¨ f` with `f` by name)?
+fn calls(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| match &x.kind {
+        ExprKind::Call { .. } => found = true,
+        ExprKind::Prim { prim: Prim::Each, args } if matches!(args.get(1).map(|a| &a.kind), Some(ExprKind::Path(_))) => found = true,
         _ => {}
     });
     found
@@ -1456,6 +1467,9 @@ impl<'ctx> Cg<'ctx, '_> {
     /// `xs ⌿ mask` with numbers on the left, truth values on the right, and
     /// at least one side an expression to fuse: counted, then filled, from
     /// one evaluation of each side's parts (no mask or values list built).
+    /// Not when a side calls a function: the fused loop evaluates each side
+    /// twice (count, then fill) on one core, so a mask like `ns ¨ prime`
+    /// took 12 times as long as building it once with `¨`, in parallel.
     pub(crate) fn keep_list_fusible(&self, e: &Expr) -> bool {
         let ExprKind::Prim { prim: Prim::Keep, args } = &e.kind else { return false };
         args.len() == 2
@@ -1463,6 +1477,7 @@ impl<'ctx> Cg<'ctx, '_> {
             && num_el(self.ty_of(&args[1])) == Some(El::Bool)
             && (self.is_fae(&args[0]) || self.is_fae(&args[1]))
             && num_el(self.ty_of(e)).is_some()
+            && !args.iter().any(calls)
     }
 
     pub(crate) fn fused_keep_list(&mut self, e: &Expr) -> R<V<'ctx>> {

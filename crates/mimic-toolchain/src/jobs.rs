@@ -94,9 +94,20 @@ pub fn files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     v
 }
 
+/// A temporary name beside `path` that no other write uses: unique per
+/// process and per call, since threads of one process may write the same
+/// file at once (two parts of a build preparing the runtime), and a
+/// temporary file shared by them interleaved their bytes.
+pub fn temp_beside(path: &Path) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ext = path.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default();
+    path.with_extension(format!("{ext}tmp{}-{n}", std::process::id()))
+}
+
 /// Write `path` atomically (temp file + rename).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let tmp = temp_beside(path);
     std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }

@@ -1,0 +1,56 @@
+module main
+
+// bfs: breadth-first distances from node 0 in a random graph of 200,000
+// nodes and 1,000,000 directed edges (both ends from splitmix64 of the
+// edge number), with a queue over adjacency lists (CSR), as C and Rust do:
+// a `settle` over the queue, with named step functions so the queue and
+// the distances change in place. Prints the nodes reached, the sum of
+// their distances and the largest. The reference is bench/bfs/ref.py.
+
+type B = { head: i64, tail: i64, queue: [i64], dist: [i64] }
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+// the first position in the sorted list `xs` holding `v` or more
+fn lower(xs: [i64], v: i64) -> i64 {
+    ((0, ≢ xs) ▷ settle(s => {
+        let mid = (s.0 + s.1) div 2
+        if xs[mid] < v { (mid + 1, s.1) } else { (s.0, mid) }
+    }, s => s.0 >= s.1)).0
+}
+
+// the edges of `u` at positions k … end: each node not yet reached gets a
+// distance and goes into the queue
+fn visit(b: B, adj: [i64], u: i64, k: i64, end: i64) -> B {
+    if k == end { b }
+    else {
+        let v = adj[k]
+        if b.dist[v] < 0 {
+            visit({ b with tail: b.tail + 1, queue: put(b.queue, b.tail, v), dist: put(b.dist, v, b.dist[u] + 1) }, adj, u, k + 1, end)
+        } else { visit(b, adj, u, k + 1, end) }
+    }
+}
+
+fn step(b: B, adj: [i64], start: [i64]) -> B {
+    let u = b.queue[b.head]
+    visit({ b with head: b.head + 1 }, adj, u, start[u], start[u + 1])
+}
+
+fn main() {
+    let (n, m) = (200000, 1000000)
+    let src = ⍳ m ¨ (e => mix(2 * e + 1) % n)
+    let dst = ⍳ m ¨ (e => mix(2 * e + 2) % n)
+    let order = sort_index(src)
+    let adj = order ¨ (e => dst[e])
+    let sorted = order ¨ (e => src[e])
+    let start = ⍳ (n + 1) ¨ (v => lower(sorted, v))
+    let begin = B { head: 0, tail: 1, queue: ⍳ n ¨ (_ => 0), dist: ⍳ n ¨ (v => if v == 0 { 0 } else { -1 }) }
+    let b = begin ▷ settle(s => step(s, adj, start), s => s.head == s.tail)
+    let reached = b.dist ⌿ (b.dist >= 0)
+    print("{≢ reached} {+/ reached} {⌈/ reached}")
+}

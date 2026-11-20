@@ -1,0 +1,25 @@
+module main
+
+// rule110: the elementary cellular automaton Rule 110 on a ring of 500,000
+// cells (start from splitmix64) for 1,000 generations, the cells as bytes.
+// Each generation is one map over the cells, in parallel. Prints the
+// number of live cells at the end and the sum of their positions. The
+// reference is bench/rule110/ref.py.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn generation(c: [u8]) -> [u8] {
+    let n = ≢ c
+    bytes::from(⍳ n ¨ (i => 110 >>> (c[(i + n - 1) % n] * 4 + c[i] * 2 + c[(i + 1) % n]) & 1))
+}
+
+fn main() {
+    let n = 500000
+    let c = bytes::from(⍳ n ¨ (i => if mix(i) % 3 == 0 { 1 } else { 0 })) ▷ evolve(1000, generation)
+    print("{c ▷ +/} {⍳ n ¨ (i => c[i] * i) ▷ +/}")
+}

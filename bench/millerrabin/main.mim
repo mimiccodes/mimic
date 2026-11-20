@@ -1,0 +1,44 @@
+module main
+
+// millerrabin: how many of the 3,000,000 odd numbers just below 2^31 are
+// prime, by the deterministic Miller-Rabin test with bases 2, 3, 5 and 7
+// (exact below 3,215,031,751; products stay below 2^62), and their sum.
+// The numbers are tested in parallel. The reference is
+// bench/millerrabin/ref.py.
+
+// b to the power e, modulo m
+fn power(b: i64, e: i64, m: i64) -> i64 {
+    if e == 0 { 1 } else {
+        let h = power(b, e div 2, m)
+        let h2 = h * h % m
+        if e % 2 == 1 { h2 * b % m } else { h2 }
+    }
+}
+
+// x squared up to s - 1 times: does it reach n - 1?
+fn reaches(x: i64, s: i64, n: i64) -> bool {
+    if s == 0 { false } else {
+        let y = x * x % n
+        if y == n - 1 { true } else { reaches(y, s - 1, n) }
+    }
+}
+
+// n - 1 = d × 2^s with d odd
+fn odd_part(d: i64, s: i64) -> (i64, i64) { if d % 2 == 0 { odd_part(d div 2, s + 1) } else { (d, s) } }
+
+fn witness_ok(a: i64, n: i64, d: i64, s: i64) -> bool {
+    let x = power(a, d, n)
+    x == 1 or x == n - 1 or reaches(x, s - 1, n)
+}
+
+fn prime(n: i64) -> bool {
+    let (d, s) = odd_part(n - 1, 0)
+    witness_ok(2, n, d, s) and witness_ok(3, n, d, s) and witness_ok(5, n, d, s) and witness_ok(7, n, d, s)
+}
+
+fn main() {
+    let top = (1 << 31) - 1
+    let ns = ⍳ 3000000 ¨ (k => top - 2 * k)
+    let ps = ns ⌿ (ns ¨ prime)
+    print("{≢ ps} {ps ▷ +/}")
+}

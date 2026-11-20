@@ -1,0 +1,22 @@
+module main
+
+// push onto a list still in use copies it, keeping its kind: numbers,
+// floats and truth values in one copy, text and lists of lists the
+// general way; the list pushed onto is unchanged. (A step that keeps the
+// list in a local while it pushes was 7 times slower than C for this.)
+type Cs = { cs: [i64] }
+
+fn next(s: Cs) -> Cs {
+    let (cs, n) = (s.cs, ≢ s.cs - 1)
+    let c = ⍳ (n + 1) ¨ (i => cs[i] * cs[n - i]) ▷ +/
+    { s with cs: push(s.cs, c) }
+}
+
+fn main() {
+    let a = [1 2 3]
+    let b = push(a, 4)
+    let f = [1.5 2.5]
+    print("{a} {b} {push(f, 3.5)} {push(f, 7)} {push([true false], true)}")
+    print("{push(["x" "y"], "z")} {push([[1] [2]], [3])} {push(bytes::from([1 2]), 3)}")
+    print((Cs { cs: [1] } ▷ evolve(12, next)).cs)
+}

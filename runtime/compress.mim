@@ -1,0 +1,161 @@
+// Compression and compact encodings of bytes and numbers:
+// compress::rle / unrle, compress::lzw / unlzw, compress::varints /
+// unvarints. The same algorithms the benchmark corpus measures (bench/rle,
+// bench/lzw, bench/varint). Each decoder checks its input and returns
+// `Err` for one it did not make. (Appended to the prelude.)
+pub module compress {
+    // Run-length encoding: each run of one byte as two bytes, its length
+    // (1 … 255; a longer run takes several pairs) and the byte.
+    pub fn rle(data: [u8]) -> [u8] {
+        let n = ≢ data
+        if n == 0 { bytes::from([]) } else {
+            let r = Run { i: 1, count: 1, out: bytes::from([]) } ▷ evolve(n - 1, r => rle_step(r, data))
+            push(push(r.out, r.count), data[n - 1])
+        }
+    }
+
+    // The bytes `rle` encoded: Err for an odd length or a zero count.
+    pub fn unrle(data: [u8]) -> Result[[u8], str] {
+        let pairs = ≢ data div 2
+        if ≢ data % 2 == 1 { Err("compress::unrle: an odd number of bytes") }
+        else if any(⍳ pairs ¨ (p => data[2 * p] == 0)) { Err("compress::unrle: a run of length 0") }
+        else { Ok((Unrun { p: 0, out: bytes::from([]), b: 0, left: 0 } ▷ evolve(pairs, u => unrle_pair(u, data))).out) }
+    }
+
+    // LZW with 12-bit codes: 0 … 255 are the bytes, new strings get 256,
+    // 257, … up to 4,095, then the dictionary stays as it is. The codes,
+    // one number each.
+    pub fn lzw(data: [u8]) -> [i64] {
+        if ≢ data == 0 { ⍳ 0 } else {
+            let start = Lz { i: 1, w: data[0], next: 256, child: ⍳ (4096 * 256) ¨ (_ => ¯1), codes: ⍳ 0 }
+            let e = start ▷ evolve(≢ data - 1, s => lzw_step(s, data))
+            push(e.codes, e.w)
+        }
+    }
+
+    // The bytes the codes of `lzw` stand for: Err for a code it could not
+    // have made.
+    pub fn unlzw(codes: [i64]) -> Result[[u8], str] {
+        if ≢ codes == 0 { Ok(bytes::from([])) } else {
+            let byte = ⍳ 4096 ¨ (c => if c < 256 { c } else { 0 })
+            let d0 = Un { i: 0, next: 256, prev: ¯1, ok: true, prefix: ⍳ 4096 ¨ (_ => ¯1), last: byte, first: byte, len: ⍳ 4096 ¨ (_ => 1), out: bytes::from([]), wk: ¯1, wat: 0, left: 0 }
+            let d = d0 ▷ settle(s => unlzw_step(s, codes), s => s.i == ≢ codes or not s.ok)
+            if d.ok { Ok(d.out) } else { Err("compress::unlzw: code {codes[d.i]} at {d.i} was never made") }
+        }
+    }
+
+    // Numbers as zigzag LEB128 varints: each the difference from the one
+    // before (the first from 0), zigzag-mapped (0, ¯1, 1, ¯2 … as 0, 1, 2,
+    // 3 …) and written 7 bits a byte, low bits first, the high bit set on
+    // every byte but the last. Small steps take one byte.
+    pub fn varints(xs: [i64]) -> [u8] {
+        (Var { i: 0, out: bytes::from([]) } ▷ evolve(≢ xs, v => varint_step(v, xs))).out
+    }
+
+    // The numbers `varints` encoded: Err when the bytes end inside a
+    // number, or a number runs past 10 bytes.
+    pub fn unvarints(data: [u8]) -> Result[[i64], str] {
+        let d = Unvar { p: 0, z: 0, shift: 0, prev: 0, out: ⍳ 0 } ▷ evolve(≢ data, s => unvarint_step(s, data))
+        if d.shift > 0 { Err("compress::unvarints: the bytes end inside a number") }
+        else if d.shift < 0 { Err("compress::unvarints: a number longer than 10 bytes") }
+        else { Ok(d.out) }
+    }
+
+    // ---- the parts ----
+
+    // run-length: the next byte, the current run's length, the pairs so far
+    type Run = { i: i64, count: i64, out: [u8] }
+    fn rle_step(r: Run, d: [u8]) -> Run {
+        if d[r.i] == d[r.i - 1] and r.count < 255 { { r with i: r.i + 1, count: r.count + 1 } }
+        else { rle_flush(r, d) }
+    }
+    // (it reads the byte itself: a second argument reading r would leave r
+    // only borrowed, and the output copied)
+    fn rle_flush(r: Run, d: [u8]) -> Run {
+        let b = d[r.i - 1]
+        { r with i: r.i + 1, count: 1, out: push(push(r.out, r.count), b) }
+    }
+
+    // un-run-length: the next pair, the output, and the run being written
+    // (its byte, and how many are left); each step hands the state on
+    // whole (load the pair, then fill), so the output grows in place
+    type Unrun = { p: i64, out: [u8], b: i64, left: i64 }
+    fn unrle_pair(u: Unrun, d: [u8]) -> Unrun { unrle_fill(unrle_load(u, d)) }
+    fn unrle_load(u: Unrun, d: [u8]) -> Unrun { { u with p: u.p + 1, left: d[2 * u.p], b: d[2 * u.p + 1] } }
+    // (at most 255 deep)
+    fn unrle_fill(u: Unrun) -> Unrun { if u.left == 0 { u } else { unrle_fill({ u with out: push(u.out, u.b), left: u.left - 1 }) } }
+
+    // LZW: the next byte, the string so far (its code), the next new code,
+    // the dictionary (child[code × 256 + byte]) and the codes out
+    type Lz = { i: i64, w: i64, next: i64, child: [i64], codes: [i64] }
+    fn lzw_step(e: Lz, data: [u8]) -> Lz {
+        let ch = data[e.i]
+        let k = e.child[e.w * 256 + ch]
+        if k >= 0 { { e with i: e.i + 1, w: k } }
+        else if e.next < 4096 { { e with i: e.i + 1, w: ch, next: e.next + 1, codes: push(e.codes, e.w), child: put(e.child, e.w * 256 + ch, e.next) } }
+        else { { e with i: e.i + 1, w: ch, codes: push(e.codes, e.w) } }
+    }
+
+    // unLZW: the next code, the next new one, the last code, each code's
+    // prefix, last and first byte and length, and the output; each step
+    // hands the state on whole (learn, then emit)
+    type Un = { i: i64, next: i64, prev: i64, ok: bool, prefix: [i64], last: [i64], first: [i64], len: [i64], out: [u8], wk: i64, wat: i64, left: i64 }
+    fn unlzw_step(d: Un, codes: [i64]) -> Un { lzw_write(lzw_room(lzw_prep(lzw_learn(lzw_check(d, codes), codes), codes))) }
+    fn lzw_check(d: Un, codes: [i64]) -> Un {
+        let c = codes[d.i]
+        if c < 0 or c > d.next or (c == d.next and d.prev < 0) or (c == d.next and d.next >= 4096) { { d with ok: false } } else { d }
+    }
+    fn lzw_learn(d: Un, codes: [i64]) -> Un {
+        let c = codes[d.i]
+        if not d.ok or d.prev < 0 or d.next >= 4096 { d } else {
+            let b = if c < d.next { d.first[c] } else { d.first[d.prev] }
+            let (f, l) = (d.first[d.prev], d.len[d.prev] + 1)
+            { d with next: d.next + 1, prefix: put(d.prefix, d.next, d.prev), last: put(d.last, d.next, b), first: put(d.first, d.next, f), len: put(d.len, d.next, l) }
+        }
+    }
+    // the code's string: room made at the end of the output, then the
+    // bytes written from the last back along the prefixes (each at most
+    // 3,841 long, so the recursions stay shallow)
+    fn lzw_prep(d: Un, codes: [i64]) -> Un {
+        if not d.ok { d } else {
+            let c = codes[d.i]
+            let l = d.len[c]
+            { d with i: d.i + 1, prev: c, wk: c, wat: ≢ d.out + l - 1, left: l }
+        }
+    }
+    fn lzw_room(d: Un) -> Un { if d.left == 0 { d } else { lzw_room({ d with out: push(d.out, 0), left: d.left - 1 }) } }
+    fn lzw_write(d: Un) -> Un {
+        if d.wk < 0 { d } else {
+            let (k, at) = (d.wk, d.wat)
+            let (b, p) = (d.last[k], d.prefix[k])
+            lzw_write({ d with out: put(d.out, at, b), wk: p, wat: at - 1 })
+        }
+    }
+
+    // varints: the next number, the bytes so far
+    type Var = { i: i64, out: [u8] }
+    fn varint_step(v: Var, xs: [i64]) -> Var {
+        let d = xs[v.i] - (if v.i == 0 { 0 } else { xs[v.i - 1] })
+        varint_bytes({ v with i: v.i + 1 }, (d << 1) ^ (d >> 63))
+    }
+    fn varint_bytes(v: Var, z: i64) -> Var {
+        if z >>> 7 == 0 { { v with out: push(v.out, z) } }
+        else { varint_bytes({ v with out: push(v.out, z & 127 | 128) }, z >>> 7) }
+    }
+    // unvarints: the next byte, the number so far and its shift (¯1: too
+    // long), the last value, the values so far
+    type Unvar = { p: i64, z: i64, shift: i64, prev: i64, out: [i64] }
+    fn unvarint_step(s: Unvar, data: [u8]) -> Unvar {
+        let b = data[s.p]
+        if s.shift < 0 { { s with p: s.p + 1 } }
+        else if s.shift >= 70 { { s with p: s.p + 1, shift: ¯1 } }
+        else {
+            let z = s.z | (b & 127) << s.shift
+            if b >= 128 { { s with p: s.p + 1, z: z, shift: s.shift + 7 } }
+            else {
+                let v = s.prev + ((z >>> 1) ^ (0 - (z & 1)))
+                { s with p: s.p + 1, z: 0, shift: 0, prev: v, out: push(s.out, v) }
+            }
+        }
+    }
+}

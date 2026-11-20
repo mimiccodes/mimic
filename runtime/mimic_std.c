@@ -365,6 +365,13 @@ mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
         memcpy((char *)xs->data + (size_t)n * elsize(xs->dtype), x->data, elsize(xs->dtype));
         return xs;
     }
+    /* an integer that is a byte onto bytes: stays bytes, in place */
+    if (own_plain(xs) && xs->dtype == MIM_U8 && x && x->rank == 0 && (x->dtype == MIM_I64 || x->dtype == MIM_I32) && geti(x, 0) >= 0 && geti(x, 0) <= 255) {
+        int64_t n = xs->len, b = geti(x, 0);
+        xs = grow_owned(xs, n + 1);
+        ((uint8_t *)xs->data)[n] = (uint8_t)b;
+        return xs;
+    }
     mim_val *r = mim_std_push(xs, x);
     mim_release(xs);
     return r;
@@ -399,6 +406,21 @@ mim_val *mim_push_i64_own(mim_val *xs, int64_t v) {
     return r;
 }
 
+/* push(xs, v) on a list of bytes held once, with a raw number: no boxing;
+ * anything else (shared, not a byte) goes the general way */
+mim_val *mim_push_u8_own(mim_val *xs, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_U8 && v >= 0 && v <= 255) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + 1);
+        ((uint8_t *)xs->data)[n] = (uint8_t)v;
+        return xs;
+    }
+    mim_val *x = mim_int(v);
+    mim_val *r = mim_std_push_own(xs, x);
+    mim_release(x);
+    return r;
+}
+
 mim_val *mim_concat_i64_own(mim_val *xs, const int64_t *ys, int64_t m) {
     if (own_plain(xs) && xs->dtype == MIM_I64) {
         int64_t n = xs->len;
@@ -425,6 +447,36 @@ mim_val *mim_put_i64_own(mim_val *xs, int64_t i, int64_t v) {
     return r;
 }
 
+/* put(xs, i, v) on a list of bytes held once, with raw numbers: no boxing;
+ * anything else (shared, out of range, not a byte) goes the general way,
+ * which copies, converts or stops with the same message */
+mim_val *mim_put_u8_own(mim_val *xs, int64_t i, int64_t v) {
+    if (own_plain(xs) && xs->dtype == MIM_U8 && i >= 0 && i < xs->len && v >= 0 && v <= 255) {
+        ((uint8_t *)xs->data)[i] = (uint8_t)v;
+        return xs;
+    }
+    mim_val *k = mim_int(i), *x = mim_int(v);
+    mim_val *r = mim_std_put_own(xs, k, x);
+    mim_release(k);
+    mim_release(x);
+    return r;
+}
+
+/* put(xs, i, v) off the fast path, xs owned. Held once but the value's
+ * type differs (an integer into bytes, a float into integers): the indexed
+ * store converts it exactly as the copying path does, in place when it can.
+ * (Out of line, so the fast path stays small enough to inline.) */
+static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_val *k, mim_val *v) {
+    if (own_plain(xs) && v != xs) {
+        mim_val *slot = xs;
+        mim_set_index(&slot, k, v);
+        return slot;
+    }
+    mim_val *r = mim_std_put(xs, k, v);
+    mim_release(xs);
+    return r;
+}
+
 /* put(xs, i, v) on a list, xs owned */
 mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
     if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
@@ -434,9 +486,7 @@ mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
             return xs;
         }
     }
-    mim_val *r = mim_std_put(xs, k, v);
-    mim_release(xs);
-    return r;
+    return put_own_slow(xs, k, v);
 }
 
 mim_val *mim_std_push(mim_val *xs, mim_val *x) {
@@ -450,12 +500,49 @@ mim_val *mim_std_push(mim_val *xs, mim_val *x) {
         return r;
     }
     int64_t n = xs->len;
+    /* a plain list and a value of its kind: one copy of the elements (the
+     * general way below boxes every element, then unboxes them again) */
+    if (x && x != xs && x->rank == 0 && x->dtype == xs->dtype && !IS_HANDLES(xs) && xs->dtype != MIM_CHAR) {
+        size_t es = elsize(xs->dtype);
+        mim_val *r = alloc(xs->dtype, 1, n + 1);
+        memcpy(r->data, xs->data, (size_t)n * es);
+        memcpy((char *)r->data + (size_t)n * es, x->data, es);
+        return r;
+    }
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) tmp[i] = scalar_at(xs, i);
     mim_retain(x);
     tmp[n] = x;
     mim_val *r = list_take(n + 1, tmp);
     free(tmp);
+    return r;
+}
+
+/* flatten's fast way: a list of lists that all hold one plain element type
+ * (numbers, bytes, booleans; not strings, records or lists) */
+mim_val *mim_std_flat_plain(mim_val *xss) {
+    if (!xss || xss->rank != 1 || xss->dtype != MIM_BOXED || xss->len == 0) return mim_bool(0);
+    mim_val **xs = (mim_val **)xss->data;
+    int dt = xs[0]->dtype;
+    if (IS_HANDLES(xs[0]) || is_str(xs[0])) return mim_bool(0);
+    for (int64_t i = 0; i < xss->len; i++)
+        if (xs[i]->rank != 1 || xs[i]->dtype != dt) return mim_bool(0);
+    return mim_bool(1);
+}
+
+/* the lists flat_plain accepted, joined: one allocation, one copy each */
+mim_val *mim_std_concat_plain(mim_val *xss) {
+    mim_val **xs = (mim_val **)xss->data;
+    int dt = xs[0]->dtype;
+    size_t es = elsize(dt);
+    int64_t n = 0;
+    for (int64_t i = 0; i < xss->len; i++) n += xs[i]->len;
+    mim_val *r = alloc(dt, 1, n);
+    char *at = (char *)r->data;
+    for (int64_t i = 0; i < xss->len; i++) {
+        memcpy(at, xs[i]->data, (size_t)xs[i]->len * es);
+        at += (size_t)xs[i]->len * es;
+    }
     return r;
 }
 
@@ -1029,6 +1116,58 @@ MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
 
+/* math::mulmod(a, b, m): a × b modulo m for any m > 0 an i64 holds, the
+ * result in 0 … m - 1 (a 128-bit product where the target has one, else
+ * doubling) */
+mim_val *mim_std_math_mulmod(mim_val *a, mim_val *b, mim_val *m) {
+    int64_t x = mim_as_i64(a), y = mim_as_i64(b), n = mim_as_i64(m);
+    if (n <= 0) mim_panic("math::mulmod: the modulus must be positive");
+    x %= n;
+    y %= n;
+    if (x < 0) x += n;
+    if (y < 0) y += n;
+#if defined(__SIZEOF_INT128__)
+    return mim_int((int64_t)((unsigned __int128)(uint64_t)x * (uint64_t)y % (uint64_t)n));
+#else
+    uint64_t r = 0, p = (uint64_t)x, q = (uint64_t)y, u = (uint64_t)n;
+    while (q) {
+        if (q & 1) r = r >= u - p ? r - (u - p) : r + p;
+        p = p >= u - p ? p - (u - p) : p + p;
+        q >>= 1;
+    }
+    return mim_int((int64_t)r);
+#endif
+}
+
+/* math::powmod(b, e, m): b to the power e modulo m (m > 0, e ≥ 0), by
+ * squaring with 128-bit products */
+static uint64_t mulmod_u(uint64_t a, uint64_t b, uint64_t m) {
+#if defined(__SIZEOF_INT128__)
+    return (uint64_t)((unsigned __int128)a * b % m);
+#else
+    uint64_t r = 0;
+    while (b) {
+        if (b & 1) r = r >= m - a ? r - (m - a) : r + a;
+        a = a >= m - a ? a - (m - a) : a + a;
+        b >>= 1;
+    }
+    return r;
+#endif
+}
+
+mim_val *mim_std_math_powmod(mim_val *b, mim_val *e, mim_val *m) {
+    int64_t x = mim_as_i64(b), k = mim_as_i64(e), n = mim_as_i64(m);
+    if (n <= 0 || k < 0) mim_panic("math::powmod: the modulus must be positive and the power not negative");
+    x %= n;
+    if (x < 0) x += n;
+    uint64_t r = 1 % (uint64_t)n, p = (uint64_t)x;
+    for (uint64_t q = (uint64_t)k; q; q >>= 1) {
+        if (q & 1) r = mulmod_u(r, p, (uint64_t)n);
+        p = mulmod_u(p, p, (uint64_t)n);
+    }
+    return mim_int((int64_t)r);
+}
+
 mim_val *mim_std_math_to_int(mim_val *a) {
     double x = math_arg(a, "to_int");
     if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) mim_panic("math::to_int: the number is NaN or too large for an i64");
@@ -1433,6 +1572,50 @@ mim_val *mim_std_sort_index(mim_val *keys) {
     need(keys, "sort_by");
     if (keys->rank != 1) mim_panic("sort_by: the keys must form a list");
     int64_t n = keys->len;
+    /* integers (or bytes): the same stable merge sort on the raw keys, with
+     * no boxing (the general way below boxes each key and compares pairs
+     * through cmp_vals, 2,000,000 keys in seconds) */
+    if (keys->dtype == MIM_I64 || keys->dtype == MIM_U8 || keys->dtype == MIM_I32) {
+        /* (key, index) pairs side by side, so the merges read memory in
+         * order instead of reaching each key through its index */
+        typedef struct { int64_t k, i; } kv_pair;
+        kv_pair *a = (kv_pair *)malloc(sizeof(kv_pair) * (size_t)(n + 1)), *b = (kv_pair *)malloc(sizeof(kv_pair) * (size_t)(n + 1));
+        for (int64_t i = 0; i < n; i++) {
+            a[i].k = geti(keys, i);
+            a[i].i = i;
+        }
+        /* runs of 16 by insertion first (stable), then merges */
+        for (int64_t lo = 0; lo < n; lo += 16) {
+            int64_t hi = lo + 16 < n ? lo + 16 : n;
+            for (int64_t i = lo + 1; i < hi; i++) {
+                kv_pair x = a[i];
+                int64_t j = i;
+                while (j > lo && a[j - 1].k > x.k) {
+                    a[j] = a[j - 1];
+                    j--;
+                }
+                a[j] = x;
+            }
+        }
+        for (int64_t w = 16; w < n; w *= 2) {
+            for (int64_t lo = 0; lo < n; lo += 2 * w) {
+                int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
+                int64_t i = lo, j = mid, o = lo;
+                while (i < mid && j < hi) b[o++] = a[j].k < a[i].k ? a[j++] : a[i++];
+                while (i < mid) b[o++] = a[i++];
+                while (j < hi) b[o++] = a[j++];
+            }
+            kv_pair *t = a;
+            a = b;
+            b = t;
+        }
+        mim_val *r = alloc(MIM_I64, 1, n);
+        int64_t *out = (int64_t *)r->data;
+        for (int64_t i = 0; i < n; i++) out[i] = a[i].i;
+        free(a);
+        free(b);
+        return r;
+    }
     mim_val **k = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(n + 1));
     int64_t *idx = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1)), *out = (int64_t *)malloc(sizeof(int64_t) * (size_t)(n + 1));
     for (int64_t i = 0; i < n; i++) {

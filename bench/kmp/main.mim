@@ -1,0 +1,53 @@
+module main
+
+// kmp: every occurrence, overlapping ones too, of 8 patterns in 4 MiB of
+// generated text, by Knuth-Morris-Pratt: each pattern's failure table,
+// then one pass over the text that never steps back. Patterns are
+// independent, so `¨` searches for them in parallel. Prints each
+// pattern's count. The reference (bench/kmp/ref.py) uses Python's find.
+
+type F = { i: i64, k: i64, fail: [i64] }
+type S = { i: i64, k: i64, count: i64 }
+
+fn vocabulary() -> [str] {
+    ["the" "of" "and" "to" "in" "is" "parallel" "array" "kernel" "fusion" "memory" "vector" "mimic" "cache" "thread" "core" "loop" "value" "zebra" "quartz"]
+}
+
+fn piece(words: [str], i: i64) -> str {
+    let w = words[if i % 7 != 0 { (i * 2654435761 >> 13) % 20 } else { (i * 40503 >> 7) % 20 }]
+    w + (if i % 11 == 10 { ". " } else { " " })
+}
+
+// fall back along the failure table until `c` can follow `k` matched letters
+fn back(p: [i64], fail: [i64], k: i64, c: i64) -> i64 {
+    k ▷ settle(k => fail[k - 1], k => k == 0 or p[k] == c)
+}
+
+// the failure table: for each prefix, its longest proper border
+fn table_step(f: F, p: [i64]) -> F {
+    let k = back(p, f.fail, f.k, p[f.i])
+    let k2 = if p[k] == p[f.i] { k + 1 } else { k }
+    { f with i: f.i + 1, k: k2, fail: put(f.fail, f.i, k2) }
+}
+
+fn search_step(s: S, t: [i64], p: [i64], fail: [i64]) -> S {
+    let k = back(p, fail, s.k, t[s.i])
+    let k2 = if p[k] == t[s.i] { k + 1 } else { k }
+    if k2 == ≢ p { { s with i: s.i + 1, k: fail[k2 - 1], count: s.count + 1 } }
+    else { { s with i: s.i + 1, k: k2 } }
+}
+
+fn count(t: [i64], pattern: str) -> i64 {
+    let p = bytes::of_text(pattern) ¨ (b => b + 0)
+    let f = F { i: 1, k: 0, fail: ⍳ ≢ p ¨ (_ => 0) } ▷ settle(s => table_step(s, p), s => s.i == ≢ p)
+    let s = S { i: 0, k: 0, count: 0 } ▷ settle(s => search_step(s, t, p, f.fail), s => s.i == ≢ t)
+    s.count
+}
+
+fn main() {
+    let n = 1 << 22
+    let words = vocabulary()
+    let t = bytes::of_text(join(⍳ (n div 2) ¨ (i => piece(words, i)), "")) ↑ n ¨ (b => b + 0)
+    let patterns = ["the" "parallel array" "core loop" "a" "zebra quartz" "e the" "mimic" "of the of"]
+    print(join(patterns ¨ (p => "{count(t, p)}"), " "))
+}
