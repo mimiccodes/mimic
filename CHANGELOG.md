@@ -12,6 +12,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Changed
 - **A list of literals is built once:** `["M" "CM" "D" …]` or `[1 2 3 …]` in a function was built again on every call; it is now built the first time and shared after (a change to it copies, as to any list held twice). `roman` 2.1× faster (3.2 s → 1.5 s of CPU).
+- **A lambda kept in a `let` and only called is a function:** `let at = (x, y) => table[…]`, then `at(a, b)`, called the lambda as a function value, every argument boxed; it now becomes a hidden function taking what it captures as arguments, specialised like any function. 8 million calls in a map: 5.8 s → 0.03 s. A lambda used as a value, or one that assigns, returns or sees a variable that changes later, stays as it was.
 - **Tuples of numbers stay in registers:** a `settle` or `evolve` over a tuple state (a sequential pass, a hash, a binary search) allocated and freed a tuple on every step; a tuple of numbers and truth values is now kept in registers, as records of numbers are. `crc32` 6.8 s → 0.79 s, `fnv1a` 4.5 s → 0.62 s, `topo` 5.1 s → 0.79 s (one core, macOS).
 - **Small programs build faster:** a one-line program in about 0.45 s instead of 0.6 s on macOS. The linker runs inside `mimic` instead of as a second process (which took ~0.1 s just to start), and the macOS SDK and OS version are read from their files instead of asking `xcrun` and `sw_vers` on every build (~70 ms). `MIMIC_DEBUG_PHASES=1` also times code generation, the runtime and linking.
 
