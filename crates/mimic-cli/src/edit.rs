@@ -1998,19 +1998,20 @@ mod tests {
     #[test]
     fn repl_pane() {
         // (what lines evaluate to is the golden test repl_session: the same
-        // Session; a unit test cannot link programs, so here every answer is
-        // an error, and the pane is what is tested)
+        // Session; whether a unit test can link programs depends on the
+        // system, so an expression is typed, which answers either way: its
+        // value, or the error. The pane is what is tested)
         let f = temp("repl", "module main\n\nfn main() {\n    print(⍳ 4 ▷ +/)\n}\n");
         let mut ed = Editor::open(Some(&f)).unwrap();
         ed.key(key(KeyCode::F(4)));
-        typing(&mut ed, "let xs = \\i 5");
-        assert_eq!(ed.prompt.as_ref().unwrap().input, "let xs = ⍳ 5", "glyph input in the prompt");
+        typing(&mut ed, "\\i 5");
+        assert_eq!(ed.prompt.as_ref().unwrap().input, "⍳ 5", "glyph input in the prompt");
         ed.key(key(KeyCode::Enter));
         assert_eq!(ed.pane, Pane::Repl);
         assert!(ed.repl_job.is_some(), "evaluated on another thread");
         settle(&mut ed);
         let log = |ed: &Editor| ed.pane_lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>();
-        assert_eq!(log(&ed)[0], "› let xs = ⍳ 5");
+        assert_eq!(log(&ed)[0], "› ⍳ 5");
         assert!(log(&ed).len() >= 2, "an answer: {:?}", log(&ed));
         // Ctrl-E: the line under the cursor
         ed.docs[0].cursor = (3, 0);
