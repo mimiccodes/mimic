@@ -17,6 +17,7 @@ They live in a few standard **modules**, used by path from any file, with no imp
 | `fs` | files and directories | `fs::read`, `fs::write`, `fs::list_dir`, `fs::remove` |
 | `bytes` | binary data | `bytes::from`, `bytes::hex`, `bytes::base64`, `bytes::to_text` |
 | `hash` | checksums and hashes of bytes | `hash::crc32`, `hash::xxhash64`, `hash::sha256` |
+| `compress` | compression and compact encodings | `compress::rle`, `compress::lzw`, `compress::varints` |
 | `path` | paths as text | `path::join`, `path::file_name`, `path::extension` |
 | `io` | standard input and error | `io::read_line`, `io::read_input`, `io::eprint` |
 | `os` | the program and other programs | `os::args`, `os::env`, `os::run`, `os::exit` |
@@ -146,6 +147,32 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
 The 64-bit hashes use all 64 bits, so as an `i64` about half of them are negative.
+
+### Compression
+
+The `compress` module packs bytes and numbers: run-length encoding (`rle`) for data with long runs, LZW (`lzw`) for text with repeats, and varints (`varints`) for lists of numbers that change by small steps. Each decoder returns a `Result`, and `Err` for bytes it did not make.
+
+```mimic run
+module main
+
+fn main() {
+    let data = bytes::of_text("aaaaaaaabbbbcc")
+    let packed = compress::rle(data)
+    print(bytes::hex(packed))                        // (8, a) (4, b) (2, c)
+    print(compress::unrle(packed))
+    print(≢ compress::lzw(bytes::of_text(repeat("to be or not to be ", 50))))
+    print(bytes::hex(compress::varints([1000 1001 1003 999])))
+    print(compress::unvarints(compress::varints([1000 1001 1003 999])))
+}
+```
+
+```output
+086104620263
+Ok([97 97 97 97 97 97 97 97 98 98 98 98 99 99])
+164
+d00f020407
+Ok([1000 1001 1003 999])
+```
 
 ## Directories
 

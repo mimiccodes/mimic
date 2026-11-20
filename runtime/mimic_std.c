@@ -1116,6 +1116,58 @@ MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
 
+/* math::mulmod(a, b, m): a × b modulo m for any m > 0 an i64 holds, the
+ * result in 0 … m - 1 (a 128-bit product where the target has one, else
+ * doubling) */
+mim_val *mim_std_math_mulmod(mim_val *a, mim_val *b, mim_val *m) {
+    int64_t x = mim_as_i64(a), y = mim_as_i64(b), n = mim_as_i64(m);
+    if (n <= 0) mim_panic("math::mulmod: the modulus must be positive");
+    x %= n;
+    y %= n;
+    if (x < 0) x += n;
+    if (y < 0) y += n;
+#if defined(__SIZEOF_INT128__)
+    return mim_int((int64_t)((unsigned __int128)(uint64_t)x * (uint64_t)y % (uint64_t)n));
+#else
+    uint64_t r = 0, p = (uint64_t)x, q = (uint64_t)y, u = (uint64_t)n;
+    while (q) {
+        if (q & 1) r = r >= u - p ? r - (u - p) : r + p;
+        p = p >= u - p ? p - (u - p) : p + p;
+        q >>= 1;
+    }
+    return mim_int((int64_t)r);
+#endif
+}
+
+/* math::powmod(b, e, m): b to the power e modulo m (m > 0, e ≥ 0), by
+ * squaring with 128-bit products */
+static uint64_t mulmod_u(uint64_t a, uint64_t b, uint64_t m) {
+#if defined(__SIZEOF_INT128__)
+    return (uint64_t)((unsigned __int128)a * b % m);
+#else
+    uint64_t r = 0;
+    while (b) {
+        if (b & 1) r = r >= m - a ? r - (m - a) : r + a;
+        a = a >= m - a ? a - (m - a) : a + a;
+        b >>= 1;
+    }
+    return r;
+#endif
+}
+
+mim_val *mim_std_math_powmod(mim_val *b, mim_val *e, mim_val *m) {
+    int64_t x = mim_as_i64(b), k = mim_as_i64(e), n = mim_as_i64(m);
+    if (n <= 0 || k < 0) mim_panic("math::powmod: the modulus must be positive and the power not negative");
+    x %= n;
+    if (x < 0) x += n;
+    uint64_t r = 1 % (uint64_t)n, p = (uint64_t)x;
+    for (uint64_t q = (uint64_t)k; q; q >>= 1) {
+        if (q & 1) r = mulmod_u(r, p, (uint64_t)n);
+        p = mulmod_u(p, p, (uint64_t)n);
+    }
+    return mim_int((int64_t)r);
+}
+
 mim_val *mim_std_math_to_int(mim_val *a) {
     double x = math_arg(a, "to_int");
     if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) mim_panic("math::to_int: the number is NaN or too large for an i64");
