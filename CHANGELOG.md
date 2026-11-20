@@ -11,6 +11,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **Small programs build faster:** a one-line program in about 0.45 s instead of 0.6 s on macOS. The linker runs inside `mimic` instead of as a second process (which took ~0.1 s just to start), and the macOS SDK and OS version are read from their files instead of asking `xcrun` and `sw_vers` on every build (~70 ms). `MIMIC_DEBUG_PHASES=1` also times code generation, the runtime and linking.
 
 ### Fixed
+- **`push` onto a short list no longer reallocates every time:** a list that had grown past its first block kept asking `realloc` for more room on each `push`, though it had plenty. `levenshtein` (rows built a number at a time) runs 2.5× faster on macOS, more on Windows.
 - **A redirect to `//host/path` goes to that host** with the request's scheme; it was taken as a path on the same server. A `Location` too long to follow is an `Err` instead of a cut-short URL.
 - **Debug builds update records in place, as optimised ones do:** `{ s with f: put(s.f, …) }` copied the whole list on every step in a debug build (functions never took over their parameters there). A debug sieve of 200,000 took over ten minutes; now 1.8 s.
 - **A program with only small maps no longer opens Metal on macOS:** the GPU was asked before the map's size was checked, and asking opens Metal (~0.13 s). A program over 1,000 numbers ran in 0.14 s; now 0.01 s. Large maps go to the GPU as before.
