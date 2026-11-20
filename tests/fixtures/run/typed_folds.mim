@@ -1,0 +1,20 @@
+module main
+
+// gather and trail with a lambda over numbers that gives back the same kind:
+// a typed loop, left to right (an empty trail is empty); a lambda giving
+// another type keeps the general path.
+fn main() {
+    let p = 1000003
+    let xs = ⍳ 10 ¨ (i => i * 3 + 1)
+    print(xs ▷ gather((a, b) => (a * 31 + b) % p))
+    print(xs ▷ trail((a, b) => (a * 31 + b) % p))
+    print(xs ▷ gather((a, b) => a - b))
+    print(xs ▷ trail((a, b) => a ⌈ b))
+    let fs = ⍳ 5 ¨ (i => i * 0.5 + 1.0)
+    print(fs ▷ gather((a, b) => a * b + 0.25))
+    print(fs ▷ trail((a, b) => a + b))
+    let none = ⍳ 0 ¨ (i => i)
+    print(none ▷ trail((a, b) => a + b))
+    // gives another type: the old path
+    print(xs ▷ gather((a, b) => a + b * 0.5))
+}

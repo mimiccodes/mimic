@@ -1757,7 +1757,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// The elements of a vector just allocated: a new vector keeps them
     /// right after its header (alloc in mimic_rt.c), so this is an address,
     /// not a load, and LLVM sees they belong to the new vector alone.
-    fn data_of(&mut self, v: V<'ctx>) -> R<BasicValueEnum<'ctx>> {
+    pub(crate) fn data_of(&mut self, v: V<'ctx>) -> R<BasicValueEnum<'ctx>> {
         let vt = self.val_ty();
         let p = self.basic(v).into_pointer_value();
         Ok(unsafe { self.b.build_in_bounds_gep(vt, p, &[self.ctx.i32_type().const_int(1, false)], "data").s()? }.into())
@@ -1789,7 +1789,7 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Length and data of a vector a kernel reads: straight from its header
     /// when it is a vector of `el`; anything else is reported by the runtime.
-    fn vec_header(&mut self, v: V<'ctx>, el: El) -> R<(IntValue<'ctx>, BasicValueEnum<'ctx>)> {
+    pub(crate) fn vec_header(&mut self, v: V<'ctx>, el: El) -> R<(IntValue<'ctx>, BasicValueEnum<'ctx>)> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);

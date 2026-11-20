@@ -1465,6 +1465,21 @@ impl Walk<'_, '_> {
                 {
                     return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { Ty::of_el(el) };
                 }
+                // xs ▷ trail((a, b) => …) / gather(…) over numbers, with a
+                // lambda that gives back the same kind of number: typed as
+                // (number, number) → number, so its body compiles typed
+                // (code generation folds it in a loop, nothing boxed)
+                if matches!(prim, Prim::Trail | Prim::Gather)
+                    && let Ty::Arr(el @ (El::I64 | El::F64), _) = a
+                    && matches!(&args[1].kind, ExprKind::Lambda { params, .. } if params.len() == 2)
+                {
+                    let t = Ty::of_el(el);
+                    if self.lambda(&args[1], vec![t, t]) == t {
+                        // (the lambda itself: a function value)
+                        self.out.exprs.insert(id(&args[1]), Ty::Dyn);
+                        return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { t };
+                    }
+                }
                 // x ▷ evolve(n, step) / x ▷ settle(step, done): the step
                 // function takes the state; when it gives back the same type,
                 // the state keeps that type throughout (else it is dynamic)
