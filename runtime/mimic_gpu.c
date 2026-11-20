@@ -78,12 +78,29 @@ static int gpu_ready(void) {
  * GPU takes only much work (about a second of one core), then, once it is
  * running, a quarter of that. */
 static int32_t g_gpu_used = 0;
+/* MIMIC_GPU, read once: -1 unset, 0 never, 1 always */
+static int32_t gpu_mode(void) {
+    static int32_t mode = -2;
+    int32_t m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m == -2) {
+        const char *e = getenv("MIMIC_GPU");
+        m = e ? (e[0] == '0' ? 0 : 1) : -1;
+        __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
+    }
+    return m;
+}
+/* The size is checked before Metal is opened: opening it costs ~0.13 s,
+ * which a program whose maps are all small would pay for nothing. */
 int32_t mim_gpu_wants(int64_t n, int64_t cost) {
-    if (n >= ((int64_t)1 << 32) || !gpu_ready()) return 0; /* (thread indices are 32-bit) */
-    if (g_gpu.mode == 1) return n > 0;
-    if (g_gpu.mode == 0) return 0;
-    double work = (double)n * (double)cost;
-    if (n < (1 << 20) || work < (__atomic_load_n(&g_gpu_used, __ATOMIC_RELAXED) ? 1e9 : 4e9)) return 0;
+    if (n >= ((int64_t)1 << 32)) return 0; /* (thread indices are 32-bit) */
+    int32_t mode = gpu_mode();
+    if (mode == 0) return 0;
+    if (mode != 1) {
+        double work = (double)n * (double)cost;
+        if (n < (1 << 20) || work < (__atomic_load_n(&g_gpu_used, __ATOMIC_RELAXED) ? 1e9 : 4e9)) return 0;
+    }
+    if (!gpu_ready()) return 0;
+    if (mode == 1) return n > 0;
     __atomic_store_n(&g_gpu_used, 1, __ATOMIC_RELAXED);
     return 1;
 }
