@@ -85,14 +85,14 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 
 ## Found by the 0.4.0 corpus
 
-Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust) that is awkward to write in Mimic, or slow, is a gap here, with the step of stage 0.4 that closes it. Times are on one core, as a ratio to C.
+Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust) that is awkward to write in Mimic, or slow, is a gap here, with the step of stage 0.4 that closes it. Times are on one core, as a ratio to C; where a line says 0.4.0, the ratio is the geometric mean over Linux x86-64, macOS arm64 and Windows x86-64 as released.
 
 | Gap | Today | Version |
 |---|---|---|
 | A fold over a list with a function (`fold(xs, f, start)`), as Rust, Python (`reduce`) and others have; `/` takes only an operator | `settle` over a tuple of (position, state) | 0.4.5 |
-| A sequential pass over an array as fast as C's loop: `crc32` 21×, `adler32` 28×, `fnv1a` 57×, `murmur3` 21×, `xxhash32` 13× (`settle` over a tuple) | the tuple is boxed each step and the array read with checks | 0.4.3 (loops and values in registers), 0.4.4 (checks proven away) |
-| Small fixed arrays as working state: `sha256` 170× (a new 8-word array every round, the message schedule grown one `push` at a time) | each step allocates | 0.4.2 (changed in place), 0.4.3 (unboxed) |
-| A pass over the characters of a string as fast as C's: `tokenize` 25× (a `settle` over positions, one byte at a time) | as above | 0.4.3, 0.4.4 |
+| A sequential pass over an array as fast as C's loop: `crc32` 32×, `adler32` 31×, `fnv1a` 45×, `murmur3` 21×, `xxhash32` 15×, `siphash` 27× in 0.4.0 (`settle` over a tuple; `adler32` written as a function that calls itself runs 4.6 s → 0.6 s, `crc64` written so is 1.2×) | the tuple is boxed each step and the array read with checks | 0.4.3 (loops and values in registers), 0.4.4 (checks proven away) |
+| Small fixed arrays as working state: `sha256` 82× in 0.4.0 (170× before) (a new 8-word array every round, the message schedule grown one `push` at a time) | each step allocates | 0.4.2 (changed in place), 0.4.3 (unboxed) |
+| A pass over the characters of a string as fast as C's: `tokenize` 26× in 0.4.0 (a `settle` over positions, one byte at a time) | as above | 0.4.3, 0.4.4 |
 | `find(s, part)` from a position, so a parser can walk a long text without slicing it; `http_parse` splits the stream into lines first | `slice` then `find` (a copy) | 0.4.12 |
 | `"x" * 3` is `[360]` (the character's code times 3), not `"xxx"`; nothing warns | `repeat("x", 3)`; it should be a compile error that names `repeat` | 0.4.5 |
 | A parameter named like a built-in word (`keep`, `len`) loses to the word with a confusing message (`keep takes 2 arguments`); `let len = …` says clearly that it is built in Also a `let count = (v) => …` in `main`: calls to `count(0)` go to the prelude's `count(xs, f)` ("missing argument f"); a function named `take` is called as the built-in and stops with "take/drop count must be an integer scalar" at run time; a parameter `len` is read as `≢` | rename it | 0.4.5 |
@@ -123,11 +123,13 @@ Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust)
 | `{ s with f: put(s.f, …) }` (and `push`) changing the list in place in a debug build, as in an optimised one: without the inline heap the step copies the whole list, so a sieve of 1,000,000 takes about a minute in debug and 0.03 s optimised | `--release` for loops over large lists | 0.4.1 |
 | `let x = f() else { panic(…) }`: the `else` block must end with `return`, though `panic` never returns | `match f() { Some(v) => v, None => panic(…) }` | 0.4.5 |
 | Updates in place through helper functions and branches: `topo` took 118 s with `next: if d == 0 { push(k.next, w) } else { k.next }` inside `{ k with … }` and 7 s with the two cases written as two updates; union-find with path halving took 540 s (a `find` that changes the links copies them: the caller's record still holds them) and 1.1 s without | write each case as its own `{ … with … }`; `components` uses union-find without path compression | 0.4.2 (ownership by analysis) |
-| A growing list held by a `settle` state as fast as a vector: `lz77`'s decoder is 476× C. `push(o, o[i])` in `evolve` and `concat(out, …)` copy the whole list (it is still held by the state), and pushing bytes goes through the generic array paths | copy a match as a slice (`concat` of `↓`/`↑`) where it can; the copies remain | 0.4.2 (changed in place: the state is not used again), 0.4.3 |
-| Many small lists as fast as a flat array: `rle` 66× C builds a two-element list per run | `flatten` is linear now (it was quadratic, found by `rle`) | 0.4.3 (unboxed), 0.4.8 (data layout) |
-| An interpreter's loop as fast as C's: `brainf` 27×, `vm` 54×, `regex` 31× (a `settle` over a state record, one instruction or character a step) | named step functions keep the record in place; each step still goes through the record | 0.4.3 (loops and values in registers) |
+| A growing list held by a `settle` state as fast as a vector: `lz77`'s decoder is 1,200× C in 0.4.0 (626× on macOS, 2,560× on Linux). `push(o, o[i])` in `evolve` and `concat(out, …)` copy the whole list (it is still held by the state), and pushing bytes goes through the generic array paths | copy a match as a slice (`concat` of `↓`/`↑`) where it can; the copies remain | 0.4.2 (changed in place: the state is not used again), 0.4.3 |
+| Many small lists as fast as a flat array: `rle` 18× C in 0.4.0 (66× before) builds a two-element list per run | `flatten` is linear now (it was quadratic, found by `rle`) | 0.4.3 (unboxed), 0.4.8 (data layout) |
+| An interpreter's loop as fast as C's: `brainf` 23×, `vm` 66×, `regex` 38× in 0.4.0 (a `settle` over a state record, one instruction or character a step) | named step functions keep the record in place; each step still goes through the record | 0.4.3 (loops and values in registers) |
 | `xs ↓ -1`: after a glyph, `-` is read as subtraction, so a negative number needs `¯1` | write `¯1` | 0.4.5 |
 | `sort_index` (the order that sorts a list, as `⍋` will) is in the prelude but not in docs/std.md | it works; `bwt` uses it | 0.4.5 (`⍋`) |
+| The rest of 0.4.0's benchmarks over 10× C, not yet traced to a cause: `topo` 47×, `bfs` 28×, `diff` 19×, `pagerank` 18×, `chacha20` 17×, `utf8` 15×, `huffman` 14×, `roman` 13×, `qoi` 13×, `levenshtein` 13× (5× on Linux, 25× on Windows), `markdown` 11× | none yet | each profiled and given its own line here in 0.4.1 |
+| A benchmark's time moving with where its code lands in memory: `crc32` built by 0.3.18 and by 0.4.0 compiles to the same program and calls the same unchanged runtime functions, yet measured 6–9% slower on some Windows machines (a larger runtime moves the code), against a 5% tolerance | measure again on other machines | 0.4.1 (the runtime's functions aligned) |
 | Bytes as `[u8]` in fused code: the corpus builds its data as `[i64]`, 8 bytes per byte | `[u8]` exists; `⍳ n ¨ …` makes `[i64]` | 0.4.7 (bits, bytes and small vectors) |
 
 ## Not gaps: other names, or left out on purpose
