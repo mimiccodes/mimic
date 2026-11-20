@@ -131,7 +131,149 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         i += 1;
     }
     items.extend(lifted.into_iter().map(Item::Fn));
+    // `let f = (a, b) => …` called only as `f(x, y)`: a hidden function too
+    let mut hidden = Vec::new();
+    for item in items.iter_mut() {
+        if let Item::Fn(f) = item {
+            lift_let_lambdas(f, &mut counter, &mut hidden);
+        }
+    }
+    items.extend(hidden.into_iter().map(Item::Fn));
     Ok(())
+}
+
+/// `let f = (a, b) => body` that the rest of its block only calls, `f(x, y)`,
+/// becomes a hidden function of the module, `body`'s outer variables passed
+/// as extra arguments (as `arms` does): each call is then a direct call of a
+/// function specialised on its argument types, not a call of a function
+/// value with every argument boxed (`integral` called such a helper 32
+/// million times: 24 s, 0.6 s as a named function). Only when that changes
+/// nothing: `f` is never used as a value, neither `f` nor what the lambda
+/// uses is bound again after it in the block, and nothing it uses is ever
+/// reassigned (a lambda sees a variable's value when it is made).
+fn lift_let_lambdas(f: &mut FnDecl, counter: &mut usize, out: &mut Vec<FnDecl>) {
+    let mut locals: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+    f.body.bound_names(&mut locals);
+    let mut changing = Vec::new();
+    mutated_names(&f.body, &mut changing);
+    let owner = f.name.clone();
+    let type_params = f.type_params.clone();
+    let mut each = |b: &mut Block| lift_in_block(b, &owner, &type_params, &locals, &changing, counter, out);
+    f.body.walk_mut(&mut |e| match &mut e.kind {
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } => each(b),
+        _ => {}
+    });
+    each(&mut f.body);
+}
+
+/// Names declared `let mut` or assigned anywhere in the block.
+fn mutated_names(b: &Block, out: &mut Vec<String>) {
+    let mut blocks = vec![b];
+    while let Some(b) = blocks.pop() {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { name, mutable: true, .. } | Stmt::Assign { name, .. } => out.push(name.clone()),
+                Stmt::LetElse { els, .. } => blocks.push(els),
+                _ => {}
+            }
+        }
+        b.walk(&mut |e| {
+            if let ExprKind::Block(inner) | ExprKind::Unsafe(inner) | ExprKind::If { then: inner, .. } = &e.kind {
+                for s in &inner.stmts {
+                    if let Stmt::Let { name, mutable: true, .. } | Stmt::Assign { name, .. } = s {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn lift_in_block(b: &mut Block, owner: &str, type_params: &[String], locals: &[String], changing: &[String], counter: &mut usize, out: &mut Vec<FnDecl>) {
+    let mut i = 0;
+    while i < b.stmts.len() {
+        let Stmt::Let { name, mutable: false, ty: None, value, span } = &b.stmts[i] else {
+            i += 1;
+            continue;
+        };
+        let ExprKind::Lambda { params, body } = &value.kind else {
+            i += 1;
+            continue;
+        };
+        let (name, params, body, span) = (name.clone(), params.clone(), (**body).clone(), *span);
+        let body_block = Block { stmts: vec![], tail: Some(Box::new(body.clone())), span };
+        // what the lambda uses from outside: its captured variables
+        let mut inside = params.clone();
+        body_block.bound_names(&mut inside);
+        let mut caps: Vec<String> = Vec::new();
+        body.walk(&mut |x| {
+            if let ExprKind::Path(p) = &x.kind
+                && p.len() == 1
+                && locals.contains(&p[0])
+                && !inside.contains(&p[0])
+                && !caps.contains(&p[0])
+            {
+                caps.push(p[0].clone());
+            }
+        });
+        // the rest of the block: only calls of `name`, nothing bound again
+        let rest = Block { stmts: b.stmts[i + 1..].to_vec(), tail: b.tail.clone(), span: b.span };
+        let mut again = Vec::new();
+        rest.bound_names(&mut again);
+        let (mut uses, mut calls) = (0usize, 0usize);
+        rest.walk(&mut |x| match &x.kind {
+            ExprKind::Path(p) if p.len() == 1 && p[0] == name => uses += 1,
+            ExprKind::Call { callee, args } if matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) && args.len() == params.len() => calls += 1,
+            _ => {}
+        });
+        // an assignment or a `return` inside the lambda: left alone, so its
+        // own diagnostics (a captured variable assigned, …) stay as they are
+        let mut plain = true;
+        body_block.walk(&mut |x| {
+            if let ExprKind::Block(inner) | ExprKind::Unsafe(inner) | ExprKind::If { then: inner, .. } = &x.kind
+                && inner.stmts.iter().any(|s| matches!(s, Stmt::Assign { .. } | Stmt::Return(..)))
+            {
+                plain = false;
+            }
+        });
+        let liftable = plain
+            && calls > 0
+            && uses == calls
+            && !again.contains(&name)
+            && !changing.contains(&name)
+            && caps.iter().all(|c| !again.contains(c) && !changing.contains(c));
+        if !liftable {
+            i += 1;
+            continue;
+        }
+        *counter += 1;
+        let hidden = format!("lambda_{owner}_{counter}");
+        let path = |n: &str, span: Span| Expr { kind: ExprKind::Path(vec![n.to_string()]), span };
+        let mut rewrite = |x: &mut Expr| {
+            if let ExprKind::Call { callee, args } = &mut x.kind
+                && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)
+            {
+                callee.kind = ExprKind::Path(vec![hidden.clone()]);
+                for c in &caps {
+                    args.push(path(c, x.span));
+                }
+            }
+        };
+        let mut tail = b.tail.take();
+        let mut later: Vec<Stmt> = b.stmts.drain(i + 1..).collect();
+        {
+            let mut tmp = Block { stmts: std::mem::take(&mut later), tail: tail.take(), span: b.span };
+            tmp.walk_mut(&mut rewrite);
+            later = tmp.stmts;
+            tail = tmp.tail;
+        }
+        b.stmts.remove(i);
+        b.stmts.extend(later);
+        b.tail = tail;
+        let mut fparams: Vec<Param> = params.iter().map(|n| Param { name: n.clone(), ty: None, default: None, span }).collect();
+        fparams.extend(caps.iter().map(|c| Param { name: c.clone(), ty: None, default: None, span }));
+        out.push(FnDecl { name: hidden, type_params: type_params.to_vec(), is_pub: false, params: fparams, ret: None, body: body_block, export_c: false, requires: vec![], ensures: vec![], span });
+    }
 }
 
 fn lift_fn(f: &mut FnDecl, counter: &mut usize, out: &mut Vec<FnDecl>) -> Result<(), Diag> {

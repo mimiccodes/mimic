@@ -1,0 +1,30 @@
+module main
+
+// A lambda kept in a `let` and only called becomes a hidden function
+// (desugar.rs): a direct, typed call, not a call of a function value. One
+// used as a value, or seeing a variable that changes later, stays a lambda.
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+
+fn main() {
+    // the hot case: a helper kept in a `let`, called inside a map
+    let table = ⍳ 1000 ¨ (i => i * i)
+    let at = (x, y) => table[(x * 7 + y) % 1000]
+    let n = 40000
+    let total = ⍳ n ¨ (q => at(q % 31, q % 17) - at(q % 13, 3))
+    print(+/ total)
+    // used as a value too: stays a lambda
+    let twice = x => x * 2
+    print(apply(twice, 21) + twice(1))
+    // what it captures changes later: stays a lambda (it sees the old value)
+    let mut k = 10
+    let addk = x => x + k
+    k = 100
+    print(addk(1))
+    // in a nested block, called twice
+    let r = {
+        let sq = v => v * v + 1
+        sq(3) + sq(4)
+    }
+    print(r)
+}
