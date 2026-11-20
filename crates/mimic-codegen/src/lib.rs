@@ -356,6 +356,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         contract: !settings.strict_math,
         fast: settings.fast_math,
         exit_fid: None,
+        building_literal: false,
         body_exit: None,
         lazy_deep: None,
         cur_kind: Kind::Plain,
@@ -618,6 +619,8 @@ struct Cg<'ctx, 'p> {
     /// ten million records one by one only to exit costs more than making
     /// them; the system takes the memory back at once.
     exit_fid: Option<mimic_check::FnId>,
+    /// Building a list of literals for its cache (the cached path is off).
+    building_literal: bool,
     /// The scope depth of that function's body while it is compiled.
     body_exit: Option<usize>,
     /// In a native function of plain numbers: its key (the depth is checked
@@ -1633,6 +1636,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_get" => ptr.fn_type(&[p, i64t], false),
             "mim_obj_get_named" => ptr.fn_type(&[p, p], false),
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_lit_list" => ptr.fn_type(&[p, p], false),
             "mim_obj_unique" => ptr.fn_type(&[p], false),
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
@@ -5198,6 +5202,48 @@ impl<'ctx> Cg<'ctx, '_> {
                 let v = self.call_rt_ptr("mim_lit_str", &[self.gaddr(g).into(), p.into(), i64t.const_int(s.len() as u64, false).into()])?;
                 let V::P(x, _) = v else { unreachable!() };
                 Ok(V::P(x, false))
+            }
+            // a list of literals (a table of names, of constants): built the
+            // first time, then the same immortal list every time after (a
+            // change to it copies, as to any list held more than once)
+            ExprKind::Array(xs)
+                if xs.len() >= 2
+                    && !self.building_literal
+                    && fixed(ty).is_none()
+                    && self.cur_fn.is_some()
+                    && xs.iter().all(|x| matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_))) =>
+            {
+                let g = self.module.add_global(self.ptr, None, "litlist");
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&self.ptr.const_null());
+                let slot = self.gaddr(g);
+                let cached = self.b.build_load(self.ptr, slot, "lit").s()?;
+                inkwell::values::BasicValue::as_instruction_value(&cached)
+                    .unwrap()
+                    .set_atomic_ordering(inkwell::AtomicOrdering::Acquire)
+                    .map_err(|e| e.to_string())?;
+                let cached = cached.into_pointer_value();
+                let f = self.cur_fn.unwrap();
+                let pre = self.b.get_insert_block().unwrap();
+                let build_bb = self.ctx.append_basic_block(f, "lit_build");
+                let done_bb = self.ctx.append_basic_block(f, "lit_done");
+                let have = self.b.build_is_not_null(cached, "").s()?;
+                self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+                self.b.position_at_end(build_bb);
+                self.building_literal = true;
+                let built = self.expr_raw(e);
+                self.building_literal = false;
+                let built = self.boxed(built?)?;
+                let built = self.own(built)?;
+                let published = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])?;
+                let V::P(published, _) = published else { unreachable!() };
+                let build_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done_bb).s()?;
+                self.b.position_at_end(done_bb);
+                let phi = self.b.build_phi(self.ptr, "list").s()?;
+                phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+                let v = V::P(phi.as_basic_value().into_pointer_value(), false);
+                self.as_ty(v, ty, "list")
             }
             ExprKind::Array(xs) if fixed(ty).is_some() => {
                 let (el, _) = fixed(ty).unwrap();

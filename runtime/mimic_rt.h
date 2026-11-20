@@ -71,6 +71,7 @@ mim_val *mim_array_lit(int64_t n, mim_val **elems);
 mim_val *mim_lit_int(mim_val **slot, int64_t x);
 mim_val *mim_lit_float(mim_val **slot, double x);
 mim_val *mim_lit_str(mim_val **slot, const char *s, int64_t len);
+mim_val *mim_lit_list(mim_val **slot, mim_val *v);
 
 /* operators: opcodes match mimic_syntax::ast::{BinOp, UnOp} */
 mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b);
