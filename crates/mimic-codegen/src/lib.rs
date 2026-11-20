@@ -3713,16 +3713,17 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// Is field `i` of a record (`variant` None) or variant stored as a raw
-    /// number (8 bytes, no box)? Fields declared `i64`, `f64` or `bool` in
-    /// the program's own types are (the standard library's types, which the
-    /// runtime builds too, keep handles; so do generic fields).
+    /// number (8 bytes, no box)? Fields declared `i64`, `f64` or `bool` are,
+    /// in the program's types and the standard library's private ones (its
+    /// public types, which the runtime builds too, keep handles; so do
+    /// generic fields).
     fn raw_field(&self, t: TypeId, variant: Option<usize>, i: usize) -> Option<El> {
         // (a slot is pointer-sized: 64-bit targets only)
         if t == usize::MAX || i >= 64 || self.size.get_bit_width() != 64 {
             return None;
         }
         let td = &self.p.types[t];
-        if self.p.mods[td.module].package == "std" {
+        if self.p.mods[td.module].package == "std" && td.is_pub {
             return None;
         }
         let ty = match variant {
@@ -5222,6 +5223,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     && decl.intrinsic
                     && self.p.mods[self.p.fns[fid].module].name == "math"
                     && self.p.mods[self.p.fns[fid].module].package == "std"
+                    && decl.name != "mulmod" && decl.name != "powmod" // whole numbers: the runtime's 128-bit products
                     && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
                 {
                     let name = decl.name.clone();

@@ -1,0 +1,17 @@
+module main
+
+// math on whole numbers: gcd, lcm, powmod, mulmod, is_prime, primes and
+// totient against Python's math and pow and sympy (isprime, primerange,
+// totient), with strong pseudoprimes to several bases and numbers near 2^62.
+fn main() {
+    let pairs = [(12, 18) (¯12, 18) (0, 0) (0, 7) (17, 5) (1 << 40, (1 << 20) * 3)]
+    print(join(pairs ¨ (p => "{math::gcd(p.0, p.1)}/{math::lcm(p.0, p.1)}"), " "))
+    let pw = [(2, 10, 1000) (3, 0, 7) (¯2, 3, 5) (123456789, 987654321, (1 << 61) - 1) ((1 << 62) - 1, (1 << 62) - 3, (1 << 62) - 57) (5, 7, 1)]
+    print(join(pw ¨ (t => string(math::powmod(t.0, t.1, t.2))), " "))
+    let nums = [0 1 2 3 4 17 561 1105 3215031751 2047 1373653 25326001 3825123056546413051 ((1 << 61) - 1) ((1 << 62) - 57) ((1 << 62) - 55) 999999999989 (1000000007 * 998244353) ((1 << 31) - 1) 4294967291]
+    print(join(nums ¨ (n => if math::is_prime(n) { "1" } else { "0" }), " "))
+    let ps = math::primes(100000)
+    print("{≢ ps} {ps ▷ +/} {ps[≢ ps - 1]} {math::primes(50)}")
+    print(join([1 2 9 10 36 97 1000000 (1 << 40) 999999999989 600851475143] ¨ (n => string(math::totient(n))), " "))
+    print("{math::mulmod(¯7, 3, 5)} {math::mulmod((1 << 62) + 5, (1 << 62) + 7, (1 << 62) + 11)}")
+}

@@ -125,6 +125,16 @@ math::atan2(1.0, 1.0) * 4.0        // π
 
 All take and return `f64` (integers are converted). On numbers the compiler knows, each is one machine instruction or one call to the system's math library, so it costs what it does in C and runs inside parallel array kernels. Any function of a standard module can be passed as a value: `xs ¨ math::sqrt`.
 
+On whole numbers (`i64` in, `i64` or `bool` out):
+
+| Function | Result |
+|---|---|
+| `math::gcd(a, b)`, `math::lcm(a, b)` | greatest common divisor and least common multiple, never negative (`gcd(0, 0)` and an `lcm` with 0 are 0) |
+| `math::powmod(b, e, m)`, `math::mulmod(a, b, m)` | b to the power e, and a × b, modulo m (m > 0, e ≥ 0), exact for any numbers an `i64` holds (products in 128 bits); the result is in 0 … m − 1 |
+| `math::is_prime(n)` | whether n is prime: Miller-Rabin with the bases 2 … 37, which decide every `i64` exactly |
+| `math::primes(n)` | the primes below n, in order (a sieve of Eratosthenes) |
+| `math::totient(n)` | Euler's φ: how many of 1 … n share no factor with n (n ≥ 1) |
+
 ## Standard modules
 
 Everything with effects lives in a module, used by path from any file with no import: `fs::read(p)`, `time::now()`. `use fs::read` brings in a short name.
@@ -210,6 +220,14 @@ How channels behave:
 | `text::find_all(s, part)` | `[i64]`: every byte position where `part` occurs (the positions `find` and `slice` use), overlapping ones included, by Knuth-Morris-Pratt; `[]` for an empty `part` |
 | `text::soundex(name)` | The American Soundex code: `"R163"` for both `"Robert"` and `"Rupert"`; letters other than A-Z are skipped |
 | `text::wrap(s, width)` | `[str]`: the words of `s` in lines of at most `width` characters, filled greedily (a longer word gets a line of its own), as Python's `textwrap.wrap` does with `break_long_words=False` |
+
+### `compress`: compression and compact encodings (pure)
+
+| Function | Result |
+|---|---|
+| `compress::rle(b)`, `compress::unrle(b)` | Run-length encoding: each run as two bytes, its length (1 … 255; longer runs take several pairs) and the byte. `unrle` returns a `Result`: `Err` for an odd length or a zero length |
+| `compress::lzw(b)`, `compress::unlzw(codes)` | LZW with 12-bit codes (0 … 255 the bytes, new strings 256 … 4,095, then the dictionary stays): the codes as `[i64]`. `unlzw` returns a `Result`: `Err` for a code it could not have made |
+| `compress::varints(xs)`, `compress::unvarints(b)` | Numbers as zigzag LEB128: each the difference from the one before, zigzag-mapped, 7 bits a byte, so small steps take one byte. `unvarints` returns a `Result`: `Err` when the bytes end inside a number or one runs past 10 bytes |
 
 ### `graph`: graph algorithms (pure)
 

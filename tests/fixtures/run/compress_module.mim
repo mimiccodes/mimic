@@ -1,0 +1,37 @@
+module main
+
+// compress: rle, lzw and varints against reference implementations in
+// Python, every round trip, and each decoder's errors.
+
+fn mix(v: i64) -> i64 {
+    let x1 = (v + 1) * 0x9E3779B97F4A7C15
+    let x2 = (x1 ^ x1 >>> 30) * 0xBF58476D1CE4E5B9
+    let x3 = (x2 ^ x2 >>> 27) * 0x94D049BB133111EB
+    (x3 ^ x3 >>> 31) >>> 1
+}
+
+fn same(a: [u8], b: [u8]) -> bool { ≢ a == ≢ b and all(⍳ (≢ a) ¨ (i => a[i] == b[i])) }
+
+fn main() {
+    let inputs = [bytes::from([]) bytes::of_text("a") bytes::of_text("aaaa") bytes::of_text(repeat("a", 600) + "bbb") bytes::from(⍳ 2000 ¨ (i => mix(i) % 3)) bytes::from(⍳ 100000 ¨ (i => 97 + mix(i div 4 + mix(i div 64) % 3) % 5))]
+    let lines = inputs ¨ (d => {
+        let r = compress::rle(d)
+        let c = compress::lzw(d)
+        let back_r = compress::unrle(r) else { return "unrle failed" }
+        let back_c = compress::unlzw(c) else { return "unlzw failed" }
+        let ok = same(back_r, d) and same(back_c, d)
+        "{≢ d} {≢ r} {r ▷ +/} {≢ c} {c ▷ +/} {⍳ (≢ c) ¨ (i => i * c[i]) ▷ +/}" + (if ok { "" } else { " ROUNDTRIP-FAILED" })
+    })
+    print(join(lines, "\n"))
+    let xs = [0 ¯1 1 63 ¯64 64 (1 << 40) (0 - (1 << 40)) (1 << 62) (0 - (1 << 62)) 7]
+    let v = compress::varints(xs)
+    print("{≢ v} {bytes::hex(v)}")
+    print(compress::unvarints(compress::varints(xs)))
+    print(compress::unvarints(bytes::from([128])))
+    print(compress::unvarints(bytes::from(⍳ 11 ¨ (_ => 255))))
+    print(compress::unrle(bytes::from([3 65 1])))
+    print(compress::unrle(bytes::from([0 65])))
+    print(compress::unlzw([65 300]))
+    print(compress::unlzw([65 256 257]))
+    print(compress::unrle(compress::rle(bytes::of_text("hello"))))
+}

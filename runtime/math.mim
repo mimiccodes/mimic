@@ -1,7 +1,10 @@
 
-// Mathematics on floats: math::sqrt(2.0), math::sin(x), math::pi(). On
-// numbers the compiler knows, these are single machine instructions or libm
-// calls, so they fuse into array kernels. (Appended to the prelude.)
+// Mathematics: on floats, math::sqrt(2.0), math::sin(x), math::pi() (on
+// numbers the compiler knows, single machine instructions or libm calls,
+// which fuse into array kernels); on whole numbers, math::gcd, math::powmod,
+// math::is_prime, math::primes, math::totient (the algorithms of
+// bench/millerrabin, bench/coprime, bench/sieve and bench/totient).
+// (Appended to the prelude.)
 pub module math {
     pub extern "mimic" {
         fn sqrt(x: f64) -> f64
@@ -24,6 +27,12 @@ pub module math {
         // the integer part, towards zero: math::to_int(¯2.7) is -2 (a NaN,
         // or a number no i64 holds, stops the program)
         fn to_int(x: f64) -> i64
+        // a × b modulo m (m > 0), exactly for any numbers an i64 holds (the
+        // product is taken in 128 bits): the result in 0 … m - 1
+        fn mulmod(a: i64, b: i64, m: i64) -> i64
+        // b to the power e modulo m (m > 0, e ≥ 0), exactly for any m an
+        // i64 holds (by squaring, with 128-bit products)
+        fn powmod(b: i64, e: i64, m: i64) -> i64
     }
 
     // π
@@ -31,4 +40,73 @@ pub module math {
 
     // e, the base of natural logarithms
     pub fn e() -> f64 { 2.718281828459045 }
+
+    // ---- whole numbers ----
+
+    // The greatest common divisor (never negative; gcd(0, 0) is 0).
+    pub fn gcd(a: i64, b: i64) -> i64 { gcd_of(∣ a, ∣ b) }
+
+    // The least common multiple (never negative; 0 if either is 0).
+    pub fn lcm(a: i64, b: i64) -> i64 { if a == 0 or b == 0 { 0 } else { ∣ a div gcd(a, b) * ∣ b } }
+
+    // Whether n is prime: Miller-Rabin with the bases 2, 3, 5, … 37, which
+    // decide every number an i64 holds exactly.
+    pub fn is_prime(n: i64) -> bool {
+        let bases = [2 3 5 7 11 13 17 19 23 29 31 37]
+        if n < 2 { false } else if any(bases ¨ (p => n == p)) { true } else if any(bases ¨ (p => n % p == 0)) { false } else {
+            let (d, s) = (Odd { d: n - 1, s: 0 } ▷ settle(o => { o with d: o.d div 2, s: o.s + 1 }, o => o.d % 2 == 1)) ▷ (o => (o.d, o.s))
+            all(bases ¨ (a => witness_passes(a, n, d, s)))
+        }
+    }
+
+    // The primes below n, in order (a sieve of Eratosthenes).
+    pub fn primes(n: i64) -> [i64] {
+        if n <= 2 { ⍳ 0 } else {
+            let f = (Sieve { p: 2, m: 4, f: bytes::from(⍳ n ¨ (k => if k < 2 { 0 } else { 1 })) } ▷ settle(s => sieve_step(s, n), s => s.p * s.p >= n and s.m >= n)).f
+            ⍳ n ⌿ (f ¨ (x => x == 1))
+        }
+    }
+
+    // Euler's totient: how many of 1 … n share no factor with n (n ≥ 1).
+    pub fn totient(n: i64) -> i64 {
+        if n < 1 { panic("math::totient: n must be at least 1") }
+        let t = Tot { n: n, d: 2, r: n } ▷ settle(totient_step, t => t.d * t.d > t.n)
+        if t.n > 1 { t.r - t.r div t.n } else { t.r }
+    }
+
+    // ---- the parts ----
+
+    fn gcd_of(a: i64, b: i64) -> i64 { if b == 0 { a } else { gcd_of(b, a % b) } }
+
+    type Odd = { d: i64, s: i64 }
+    // a^d, squared up to s - 1 times, reaches 1 first or n - 1 on the way
+    fn witness_passes(a: i64, n: i64, d: i64, s: i64) -> bool {
+        let x = powmod(a, d, n)
+        x == 1 or x == n - 1 or squares_reach(x, n, s - 1)
+    }
+    fn squares_reach(x: i64, n: i64, k: i64) -> bool {
+        if k == 0 { false } else {
+            let y = mulmod(x, x, n)
+            if y == n - 1 { true } else if y == 1 { false } else { squares_reach(y, n, k - 1) }
+        }
+    }
+
+    // the sieve: the prime being crossed out, its next multiple, the flags
+    type Sieve = { p: i64, m: i64, f: [u8] }
+    fn sieve_step(s: Sieve, n: i64) -> Sieve {
+        if s.m < n { { s with m: s.m + s.p, f: put(s.f, s.m, 0) } }
+        else {
+            let p = s.p + 1
+            { s with p: p, m: if p * p < n and s.f[p] == 1 { p * p } else { n } }
+        }
+    }
+
+    // the totient by trial division: what is left of n, the next divisor,
+    // the result so far
+    type Tot = { n: i64, d: i64, r: i64 }
+    fn totient_step(t: Tot) -> Tot {
+        if t.n % t.d == 0 { { t with n: (Strip { n: t.n, d: t.d } ▷ settle(x => { x with n: x.n div x.d }, x => x.n % x.d != 0)).n, d: t.d + 1, r: t.r - t.r div t.d } }
+        else { { t with d: t.d + 1 } }
+    }
+    type Strip = { n: i64, d: i64 }
 }
