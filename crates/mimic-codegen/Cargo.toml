@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 mimic-syntax.workspace = true
 mimic-check.workspace = true
+mimic-ir.workspace = true
 inkwell.workspace = true
 mimic-net.workspace = true

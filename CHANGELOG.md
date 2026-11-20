@@ -4,6 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Added
+- **The first step of the Mimic IR** (docs/design/ir.md): functions of plain numbers and truth values can be compiled through a typed intermediate representation, with the same results. Off by default while it grows: `MIMIC_IR=1` turns it on, `MIMIC_IR=print` shows each function's IR.
+
 ### Security
 - **The HTTP client keeps credentials to the server they were meant for.** A redirect from `https` to `http` is refused with an `Err` (the request would go on unencrypted), and a redirect to another server (a different scheme, host or port) leaves `Authorization`, `Cookie` and `Proxy-Authorization` behind; other headers still go along. Before, `http::request` sent them on to wherever it was redirected.
 
@@ -12,6 +15,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Fixed
 - **`push` onto a short list no longer reallocates every time:** a list that had grown past its first block kept asking `realloc` for more room on each `push`, though it had plenty. `levenshtein` (rows built a number at a time) runs 2.5× faster on macOS, more on Windows.
+- **`MIMIC_IR` and `MIMIC_DEBUG_DISABLE` are part of the build cache's key:** a program built with one of them could be reused by a build without it (and the other way round).
 - **A redirect to `//host/path` goes to that host** with the request's scheme; it was taken as a path on the same server. A `Location` too long to follow is an `Err` instead of a cut-short URL.
 - **Debug builds update records in place, as optimised ones do:** `{ s with f: put(s.f, …) }` copied the whole list on every step in a debug build (functions never took over their parameters there). A debug sieve of 200,000 took over ten minutes; now 1.8 s.
 - **A program with only small maps no longer opens Metal on macOS:** the GPU was asked before the map's size was checked, and asking opens Metal (~0.13 s). A program over 1,000 numbers ran in 0.14 s; now 0.01 s. Large maps go to the GPU as before.

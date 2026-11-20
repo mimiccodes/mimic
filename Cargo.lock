@@ -1021,7 +1021,16 @@ version = "0.4.1-dev"
 dependencies = [
  "inkwell",
  "mimic-check",
+ "mimic-ir",
  "mimic-net",
+ "mimic-syntax",
+]
+
+[[package]]
+name = "mimic-ir"
+version = "0.4.1-dev"
+dependencies = [
+ "mimic-check",
  "mimic-syntax",
 ]
 
