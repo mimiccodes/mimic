@@ -1,0 +1,7 @@
+200 None None None None
+200 None None None None
+200 None None None Some("yes")
+200 Some("Bearer secret") Some("id=1") Some("Basic x") Some("yes")
+200 None None None Some("yes")
+Ok(5)
+Ok(3)

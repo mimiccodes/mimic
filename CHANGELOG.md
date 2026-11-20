@@ -2,6 +2,14 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
+## Unreleased
+
+### Security
+- **The HTTP client keeps credentials to the server they were meant for.** A redirect from `https` to `http` is refused with an `Err` (the request would go on unencrypted), and a redirect to another server (a different scheme, host or port) leaves `Authorization`, `Cookie` and `Proxy-Authorization` behind; other headers still go along. Before, `http::request` sent them on to wherever it was redirected.
+
+### Fixed
+- **A redirect to `//host/path` goes to that host** with the request's scheme; it was taken as a path on the same server. A `Location` too long to follow is an `Err` instead of a cut-short URL.
+
 ## 0.4.0 — 2026-11-20
 
 Stage 0.4.0, the measuring stick: a benchmark corpus of 130 everyday algorithms (hashing, parsing, graphs, text, interpreters, compression, numbers, simulations, geometry, images, data structures and dynamic programming), each in Mimic, C and Rust and checked against an independent reference; the machine's limits; and a speed gate on Linux, macOS and Windows that fails CI on a slowdown. The corpus found the bugs and slow paths fixed below, and the gaps left for the rest of stage 0.4 (docs/gaps.md). Its algorithms also became standard modules: `hash`, `text`, `graph`, `order`, `parse`, `compress`, and whole numbers in `math`.

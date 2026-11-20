@@ -1,0 +1,57 @@
+module main
+
+// The HTTP client follows redirects, but a redirect to another server (a
+// different scheme, host or port) does not take the credentials along:
+// Authorization, Cookie and Proxy-Authorization stay behind, other headers
+// go on. A redirect on the same server keeps them all. (A redirect from
+// https to http is refused.) (WASI has no sockets: see http_redirect.wasi.out.)
+
+fn port() -> i64 { 20000 + os::pid() % 6000 }    // below the ports the OS hands out (32768+)
+
+fn moved(to: str) -> http::Response { http::Response { status: 302, headers: ["location": to], body: "" } }
+
+// what the request carried
+fn seen(req: http::Request) -> http::Response {
+    http::ok("{get(req.headers, "authorization")} {get(req.headers, "cookie")} {get(req.headers, "proxy-authorization")} {get(req.headers, "x-keep")}")
+}
+
+fn first(req: http::Request) -> http::Response {
+    match req.path {
+        "/other" => moved("http://127.0.0.1:{port() + 1}/seen"),      // another port: another server
+        "/here" => moved("/seen"),                                     // a path on this server
+        "/scheme" => moved("//127.0.0.1:{port() + 1}/seen"),           // no scheme: this request's
+        "/seen" => seen(req),
+        _ => http::not_found(),
+    }
+}
+
+fn a(n: i64) -> Result[i64, str] { http::serve_requests(port(), first, n) }
+fn b(n: i64) -> Result[i64, str] { http::serve_requests(port() + 1, seen, n) }
+
+fn up(url: str, tries: i64) -> Result[http::Response, str] {
+    match http::fetch(url) {
+        Ok(r) => Ok(r),
+        Err(e) => if tries <= 1 { Err(e) } else { time::sleep(20ms); up(url, tries - 1) },
+    }
+}
+
+fn body(r: Result[http::Response, str]) -> str {
+    match r {
+        Ok(x) => "{x.status} {x.body}",
+        Err(e) => "Err {e}",
+    }
+}
+
+fn main() {
+    let sa = a(5)
+    let sb = b(3)
+    let base = "http://127.0.0.1:{port()}"
+    print(body(up(base + "/seen", 250)))
+    print(body(up("http://127.0.0.1:{port() + 1}/", 250)))
+    let creds = ["authorization": "Bearer secret", "cookie": "id=1", "proxy-authorization": "Basic x", "x-keep": "yes"]
+    print(body(http::request("GET", base + "/other", creds, "")))
+    print(body(http::request("GET", base + "/here", creds, "")))
+    print(body(http::request("GET", base + "/scheme", creds, "")))
+    print(sa)
+    print(sb)
+}

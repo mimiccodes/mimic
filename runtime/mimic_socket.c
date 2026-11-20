@@ -2532,7 +2532,33 @@ mim_val *mim_std_http_request(mim_val *method, mim_val *url, mim_val *headers, m
     return http_do(io_path(method, "request"), io_path(url, "request"), headers, body, 0);
 }
 
-/* one request; redirects (301 302 303 307 308) are followed, up to 10 */
+/* the headers without the ones that prove who is asking (Authorization,
+ * Cookie, Proxy-Authorization): what a redirect to another server keeps */
+static mim_val *without_credentials(mim_val *headers) {
+    if (!headers || headers->dtype != MIM_MAP) return mim_map_lit(0, NULL, NULL);
+    mim_val **h = (mim_val **)headers->data;
+    int64_t count = ((const int64_t *)(const void *)headers->desc)[0], n = 0;
+    mim_val **keys = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(count + 1));
+    mim_val **vals = (mim_val **)malloc(sizeof(mim_val *) * (size_t)(count + 1));
+    for (int64_t i = 0; i < count; i++) {
+        mim_val *k = h[2 * i];
+        if (k->dtype == MIM_CHAR) {
+            const char *s = (const char *)k->data;
+            int64_t len = k->len;
+            if ((len == 13 && ieq(s, "authorization", 13)) || (len == 6 && ieq(s, "cookie", 6)) || (len == 19 && ieq(s, "proxy-authorization", 19))) continue;
+        }
+        keys[n] = k;
+        vals[n] = h[2 * i + 1];
+        n++;
+    }
+    mim_val *m = mim_map_lit(n, keys, vals);
+    free(keys);
+    free(vals);
+    return m;
+}
+
+/* one request; redirects (301 302 303 307 308) are followed, up to 10: not
+ * from https to http, and to another server without the credentials */
 static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val *body, int hops) {
     int secure = strncmp(u, "https://", 8) == 0;
     if (!secure && strncmp(u, "http://", 7) != 0) return err_of("request: the URL must start with http:// or https://");
@@ -2626,17 +2652,33 @@ static mim_val *http_do(const char *m, const char *u, mim_val *headers, mim_val 
                 return err_of("too many redirects");
             }
             mim_val *loc = ((mim_val **)hm->data)[2 * at + 1];
-            /* an absolute URL, or a path on the same server */
+            /* an absolute URL, one without its scheme (//host/path: this
+             * request's scheme), or a path on the same server */
             char next[2048];
             const char *l = (const char *)loc->data;
-            if (strncmp(l, "http://", 7) == 0 || strncmp(l, "https://", 8) == 0) snprintf(next, sizeof next, "%s", l);
-            else snprintf(next, sizeof next, "%s%.*s%s%s", secure ? "https://" : "http://", (int)hl, hp, l[0] == '/' ? "" : "/", l);
-            /* 303 (and the old habit for 301/302 after POST): the next request is a GET */
-            int keep = status == 307 || status == 308;
-            const char *nm = keep ? m : (strcmp(m, "HEAD") == 0 ? "HEAD" : "GET");
-            mim_val *empty = mim_str("", 0);
-            mim_val *r = http_do(nm, next, headers, keep ? body : empty, hops + 1);
-            mim_release(empty);
+            int ll = loc->dtype == MIM_CHAR ? (int)loc->len : 0, n;
+            if (ll >= 7 && (ieq(l, "http://", 7) || (ll >= 8 && ieq(l, "https://", 8)))) n = snprintf(next, sizeof next, "%.*s", ll, l);
+            else if (ll >= 2 && l[0] == '/' && l[1] == '/') n = snprintf(next, sizeof next, "%s%.*s", secure ? "https:" : "http:", ll, l);
+            else n = snprintf(next, sizeof next, "%s%.*s%s%.*s", secure ? "https://" : "http://", (int)hl, hp, ll > 0 && l[0] == '/' ? "" : "/", ll, l);
+            mim_val *r;
+            if (n < 0 || (size_t)n >= sizeof next) r = err_of("request: a redirect to a URL too long to follow");
+            /* never from https to http: what follows would travel unencrypted */
+            else if (secure && !ieq(next, "https://", 8)) r = err_of("request: refused a redirect from https to http");
+            else {
+                /* 303 (and the old habit for 301/302 after POST): the next request is a GET */
+                int keep = status == 307 || status == 308;
+                const char *nm = keep ? m : (strcmp(m, "HEAD") == 0 ? "HEAD" : "GET");
+                /* to another server (scheme, host or port): the credentials stay behind */
+                size_t pre = secure ? 8 : 7;
+                const char *nh = next + (ieq(next, "https://", 8) ? 8 : 7), *ns = strchr(nh, '/');
+                size_t nl = ns ? (size_t)(ns - nh) : strlen(nh);
+                int same = (size_t)(nh - next) == pre && nl == hl && ieq(nh, hp, hl);
+                mim_val *hs = same ? headers : without_credentials(headers);
+                mim_val *empty = mim_str("", 0);
+                r = http_do(nm, next, hs, keep ? body : empty, hops + 1);
+                mim_release(empty);
+                if (hs != headers) mim_release(hs);
+            }
             mim_release(hm);
             mim_release(bodyv);
             return r;

@@ -37,7 +37,7 @@ print(summary(news) + summary(weather))     // both were downloading at once
 http::request("POST", "http://api.example/notes", ["content-type": "text/plain"], "remember the milk")
 ```
 
-`https://` addresses work too. Mimic uses your operating system's own TLS, so certificates are checked against the certificates your system trusts. A site with an expired or self-signed certificate gives an `Err` instead of a response. Redirects are followed automatically:
+`https://` addresses work too. Mimic uses your operating system's own TLS, so certificates are checked against the certificates your system trusts. A site with an expired or self-signed certificate gives an `Err` instead of a response. Redirects are followed automatically, but never from `https` back to `http`, and your `Authorization` and `Cookie` headers are not passed on to a different server:
 
 ```mimic
 let r = http::fetch("http://github.com/") else { return }   // redirected to https://github.com/
