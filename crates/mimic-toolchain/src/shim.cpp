@@ -45,6 +45,20 @@ extern "C" int mimic_lld_main(int argc, const char **argv) {
     return r.retCode;
 }
 
+// LLD for a build inside this process (no second process to start): what it
+// prints is kept and handed back in *msg (malloc'd, or NULL), not printed.
+extern "C" int mimic_lld_link(int argc, const char **argv, char **msg) {
+    std::vector<const char *> args(argv, argv + argc);
+    std::string out, err;
+    llvm::raw_string_ostream o(out), e(err);
+    lld::Result r = lld::lldMain(args, o, e, LLD_ALL_DRIVERS);
+    o.flush();
+    e.flush();
+    std::string all = out + err;
+    *msg = all.empty() ? nullptr : strdup(all.c_str());
+    return r.retCode;
+}
+
 int clang_main(int argc, char **argv, const llvm::ToolContext &);
 
 // `mimic cc …`: the clang driver. When it needs to re-execute itself (it
