@@ -5,6 +5,11 @@ extern "C" int mimic_lld_main(int, const char **) {
     std::fprintf(stderr, "error: this mimic was built without the embedded linker (run tools/deps.sh and rebuild)\n");
     return 1;
 }
+extern "C" int mimic_lld_link(int, const char **, char **msg) {
+    *msg = nullptr;
+    std::fprintf(stderr, "error: this mimic was built without the embedded linker (run tools/deps.sh and rebuild)\n");
+    return 1;
+}
 extern "C" int mimic_clang_main(int, char **, const char *) {
     std::fprintf(stderr, "error: this mimic was built without the embedded C compiler (run tools/deps.sh and rebuild)\n");
     return 1;

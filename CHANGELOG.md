@@ -7,6 +7,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ### Security
 - **The HTTP client keeps credentials to the server they were meant for.** A redirect from `https` to `http` is refused with an `Err` (the request would go on unencrypted), and a redirect to another server (a different scheme, host or port) leaves `Authorization`, `Cookie` and `Proxy-Authorization` behind; other headers still go along. Before, `http::request` sent them on to wherever it was redirected.
 
+### Changed
+- **Small programs build faster:** a one-line program in about 0.45 s instead of 0.6 s on macOS. The linker runs inside `mimic` instead of as a second process (which took ~0.1 s just to start), and the macOS SDK and OS version are read from their files instead of asking `xcrun` and `sw_vers` on every build (~70 ms). `MIMIC_DEBUG_PHASES=1` also times code generation, the runtime and linking.
+
 ### Fixed
 - **A redirect to `//host/path` goes to that host** with the request's scheme; it was taken as a path on the same server. A `Location` too long to follow is an `Err` instead of a cut-short URL.
 
