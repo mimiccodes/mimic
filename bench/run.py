@@ -81,8 +81,8 @@ def mimic_exe() -> str:
     return str(built) if built.exists() else "mimic"
 
 
-def run(cmd, **kw):
-    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+def run(cmd, timeout=None, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
     if r.returncode != 0:
         raise RuntimeError(f"{' '.join(map(str, cmd))} failed:\n{r.stdout}{r.stderr}")
     return r
@@ -123,16 +123,23 @@ def platform_id() -> str:
     return f"{system}-{arch}"
 
 
-def time_runs(exe: Path, env: dict, runs: int, expected: str) -> float:
-    """Best wall-clock time in seconds, after one warm-up that also checks the output."""
-    warm = run([str(exe)], env={**os.environ, **env})
+def time_runs(exe: Path, env: dict, runs: int, expected: str, limit: float | None = None) -> float:
+    """Best wall-clock time in seconds, after one warm-up that also checks
+    the output; infinite when a run takes longer than `limit` seconds."""
+    try:
+        warm = run([str(exe)], env={**os.environ, **env}, timeout=limit)
+    except subprocess.TimeoutExpired:
+        return float("inf")
     got = warm.stdout.strip()
     if got != expected:
         raise RuntimeError(f"{exe.name}: printed {got!r}, expected {expected!r}")
     best = float("inf")
     for _ in range(runs):
         t0 = time.perf_counter()
-        run([str(exe)], env={**os.environ, **env})
+        try:
+            run([str(exe)], env={**os.environ, **env}, timeout=limit)
+        except subprocess.TimeoutExpired:
+            continue
         best = min(best, time.perf_counter() - t0)
     return best
 
@@ -154,15 +161,19 @@ def wait_port(port: int, proc, seconds: float = 10.0) -> None:
     raise RuntimeError("the server did not start listening")
 
 
-def time_server(exe: Path, load: Path, env: dict, runs: int, expected: str) -> float:
-    """Best load-generator time against a running server (a warm-up first)."""
+def time_server(exe: Path, load: Path, env: dict, runs: int, expected: str, limit: float | None = None) -> float:
+    """Best load-generator time against a running server (a warm-up
+    first); infinite when a load takes longer than `limit` seconds."""
     proc = subprocess.Popen([str(exe)], env={**os.environ, **env}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_port(LOAD["port"], proc)
         args = [str(load), str(LOAD["port"]), str(LOAD["conns"]), str(LOAD["requests"]), str(LOAD["depth"]), expected]
         best = float("inf")
         for i in range(runs + 1):
-            t = float(run(args).stdout.strip())
+            try:
+                t = float(run(args, timeout=limit).stdout.strip())
+            except subprocess.TimeoutExpired:
+                return float("inf")
             if i:
                 best = min(best, t)
         return best
@@ -385,6 +396,12 @@ LOWEST, HIGHEST, DEFAULT = 0.05, 0.25, 0.10
 # the gate times a benchmark until each side has run this long (seconds),
 # in at most MOST_RUNS runs
 SPAN, MOST_RUNS = 1.0, 30
+# the old side's runs stop after OLD_TIMES times the new side's time (at
+# least OLD_CAP seconds): a release pull request measures against main,
+# whose compiler can be hundreds of times slower on a newer benchmark, and
+# such a benchmark cannot fail the gate. Neither can one whose old side is
+# FAR times slower, so it is not timed further.
+OLD_CAP, OLD_TIMES, FAR = 5.0, 10, 2.0
 
 
 def tolerance(name: str, key: str) -> tuple[float, bool]:
@@ -423,7 +440,9 @@ def build_with(compiler: Path, src: Path, env: dict, side: str) -> Path:
 
 def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
     """One benchmark built with both compilers and timed in turns:
-    {"mimic": (old, new), "mimic-all": (old, new)} in seconds (best of)."""
+    {"mimic": (old, new), "mimic-all": (old, new)} in seconds (best of; the
+    old side infinite past its limit), or None when the old compiler
+    cannot build it."""
     expected = (b / "expected.txt").read_text(encoding="utf-8").strip()
     load = None
     if (b / "load").is_dir():
@@ -431,16 +450,22 @@ def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
         if not load.exists():
             run(["rustc", "-C", "opt-level=3", "--edition", "2024", str(b / "load" / "main.rs"), "-o", str(load)])
     src = b / "main.mim"
-    exes = (build_with(old, src, {}, "old"), build_with(new, src, {"MIMIC_DEBUG_DISABLE": "optimizer"} if inject else {}, "new"))
-    once = (lambda exe, env: time_server(exe, load, env, 1, expected)) if load else (lambda exe, env: time_runs(exe, env, 1, expected))
+    try:
+        before = build_with(old, src, {}, "old")
+    except RuntimeError:
+        return None
+    exes = (before, build_with(new, src, {"MIMIC_DEBUG_DISABLE": "optimizer"} if inject else {}, "new"))
+    once = (lambda exe, env, limit=None: time_server(exe, load, env, 1, expected, limit)) if load else (lambda exe, env, limit=None: time_runs(exe, env, 1, expected, limit))
     out = {}
     for key, env in (("mimic", {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}), ("mimic-all", {})):
         best = [float("inf"), float("inf")]
         done, want = 0, runs
         while done < want:
-            for side in (0, 1):
-                best[side] = min(best[side], once(exes[side], env))
+            best[1] = min(best[1], once(exes[1], env))
+            best[0] = min(best[0], once(exes[0], env, max(OLD_CAP, OLD_TIMES * best[1])))
             done += 1
+            if best[0] > FAR * best[1]:
+                break
             if done == runs:
                 # a short benchmark is timed until each side has run for
                 # SPAN seconds: the best of 3 runs of 50 ms still moved 20%
@@ -465,6 +490,9 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
             continue
         print(f"  {b.name}", flush=True)
         got = pair(b, old, new, runs, inject)
+        if got is None:
+            lines.append(f"| {b.name} | | | | | | new: the old compiler cannot build it |")
+            continue
         for key, (t_old, t_new) in got.items():
             where = "1 core" if key == "mimic" else "all cores"
             tol, gated = tolerance(b.name, key)
@@ -485,6 +513,10 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
                 verdict = "faster"
                 faster.append(f"{b.name} ({where})")
             limit = f"{tol * 100:.0f}%" if gated else "not gated"
+            if t_old == float("inf"):
+                cap = max(OLD_CAP, OLD_TIMES * t_new)
+                lines.append(f"| {b.name} | {where} | over {cap:.0f} s | {t_new:.3f} s | over {cap / t_new:.0f}× faster | {limit} | {verdict} |")
+                continue
             lines.append(f"| {b.name} | {where} | {t_old:.3f} s | {t_new:.3f} s | {(change - 1) * 100:+.0f}% | {limit} | {verdict} |")
     # A benchmark slower here is measured 3 times more once every other has
     # run, minutes later: it fails only if slower in 2 of those 3 too. The
