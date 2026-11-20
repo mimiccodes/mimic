@@ -12,6 +12,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Fixed
 - **A redirect to `//host/path` goes to that host** with the request's scheme; it was taken as a path on the same server. A `Location` too long to follow is an `Err` instead of a cut-short URL.
+- **Debug builds update records in place, as optimised ones do:** `{ s with f: put(s.f, …) }` copied the whole list on every step in a debug build (functions never took over their parameters there). A debug sieve of 200,000 took over ten minutes; now 1.8 s.
 - **A program with only small maps no longer opens Metal on macOS:** the GPU was asked before the map's size was checked, and asking opens Metal (~0.13 s). A program over 1,000 numbers ran in 0.14 s; now 0.01 s. Large maps go to the GPU as before.
 
 ## 0.4.0 — 2026-11-20

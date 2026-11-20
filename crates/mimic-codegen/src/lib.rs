@@ -1025,6 +1025,13 @@ impl<'ctx> Cg<'ctx, '_> {
         self.cur_fn.is_some() && self.opt_level >= 2 && !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
     }
 
+    /// Whether a record held once is updated in place by `with` (its lists
+    /// taken out and changed, not copied): every build, debug included (it
+    /// needs only atomic loads, which eBPF lacks), unlike the inline heap.
+    fn in_place_ok(&self) -> bool {
+        self.cur_fn.is_some() && !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
+    }
+
     fn heap(&self) -> R<Option<PointerValue<'ctx>>> {
         let Some(f) = self.cur_fn else { return Ok(None) };
         if !self.heap_ok() {
@@ -2918,7 +2925,7 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         // a record on the heap is handed to the step, which may change it
         // in place (it holds the only reference); anything else is lent
-        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.in_place_ok();
         let (f, _, _) = self.lambda_fn_owning(step, &caps, own_state)?;
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
@@ -2993,7 +3000,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let dcaps = self.captures(dp, db);
         let sv = load_caps(self, &scaps)?;
         let dv = load_caps(self, &dcaps)?;
-        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.in_place_ok();
         let (sf, _, _) = self.lambda_fn_owning(step, &scaps, own_state)?;
         let (df, _, _) = self.lambda_fn_with(done, &dcaps)?;
         let fun = self.cur_fn.unwrap();
@@ -5945,7 +5952,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // a record on the heap: updated in place when nothing else holds
             // it (else copied once), its fields written directly
             ExprKind::With { base, fields }
-                if matches!(self.ty_of(base), Ty::Obj(_)) && self.heap_ok() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) =>
+                if matches!(self.ty_of(base), Ty::Obj(_)) && self.in_place_ok() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) =>
             {
                 let Ty::Obj(t) = self.ty_of(base) else { unreachable!() };
                 let tid = types::obj_tid(t);
