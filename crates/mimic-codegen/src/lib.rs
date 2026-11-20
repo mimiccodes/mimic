@@ -3101,6 +3101,116 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(self.val_of(xp.as_basic_value(), st, true))
     }
 
+    /// `xs ▷ gather(f)` (`trail`: every running value, a new list) with `f`
+    /// a typed lambda over the list's numbers, left to right as the
+    /// runtime's fold_range: an empty list stops the program (`gather`, as
+    /// the runtime does) or gives an empty list (`trail`).
+    fn typed_fold(&mut self, trail: bool, xs: &Expr, f: &Expr, el: El) -> R<V<'ctx>> {
+        let ExprKind::Lambda { params, body } = &f.kind else { return Err("internal compiler error: fold".into()) };
+        let i64t = self.ctx.i64_type();
+        let t = Ty::of_el(el);
+        let et = self.repr(t);
+        let list = self.expr(xs)?;
+        let list = self.as_ty(list, Ty::Arr(el, 0), "fold list")?;
+        let list = self.own(list)?;
+        let (n, data) = self.vec_header(list, el)?;
+        let data = data.into_pointer_value();
+        let caps = self.captures(params, body);
+        let mut capv = Vec::new();
+        for (name, ct) in &caps {
+            let l = self.lookup(name).ok_or("internal error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+            capv.push(self.as_ty(self.val_of(bv, lt, false), *ct, name)?);
+        }
+        let (lf, _, _) = self.lambda_fn_with(f, &caps)?;
+        let fun = self.cur_fn.unwrap();
+        let empty_bb = self.ctx.append_basic_block(fun, "fold_empty");
+        let start_bb = self.ctx.append_basic_block(fun, "fold_start");
+        let is_empty = self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(is_empty, empty_bb, start_bb).s()?;
+        // an empty list
+        self.b.position_at_end(empty_bb);
+        let empty_end;
+        let empty_v = if trail {
+            let v = self.alloc_vec(if el == El::F64 { 1 } else { 0 }, i64t.const_zero())?;
+            // (what the loop would have released at its end)
+            for c in &capv {
+                self.drop_tmp(*c)?;
+            }
+            self.drop_tmp(list)?;
+            empty_end = self.b.get_insert_block().unwrap();
+            Some(v)
+        } else {
+            let m = self.cstring("gather of an empty array: there is no first value to start from")?;
+            self.call_rt("mim_panic", &[m.into()])?;
+            self.b.build_unreachable().s()?;
+            empty_end = empty_bb;
+            None
+        };
+        let done_bb = self.ctx.append_basic_block(fun, "fold_done");
+        if empty_v.is_some() {
+            self.b.build_unconditional_branch(done_bb).s()?;
+        }
+        // the first value, then each next one folded in
+        self.b.position_at_end(start_bb);
+        let x0 = self.b.build_load(et, data, "x0").s()?;
+        let out = if trail {
+            let o = self.alloc_vec(if el == El::F64 { 1 } else { 0 }, n)?;
+            let od = self.data_of(o)?.into_pointer_value();
+            self.b.build_store(od, x0).s()?;
+            Some((o, od))
+        } else {
+            None
+        };
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "fold");
+        let step_bb = self.ctx.append_basic_block(fun, "fold_step");
+        let end_bb = self.ctx.append_basic_block(fun, "fold_end");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let ip = self.b.build_phi(i64t, "i").s()?;
+        let accp = self.b.build_phi(et, "acc").s()?;
+        let i = ip.as_basic_value().into_int_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, n, "").s()?;
+        self.b.build_conditional_branch(more, step_bb, end_bb).s()?;
+        self.b.position_at_end(step_bb);
+        let xp = unsafe { self.b.build_in_bounds_gep(et, data, &[i], "").s()? };
+        let x = self.b.build_load(et, xp, "x").s()?;
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![accp.as_basic_value().into(), x.into()];
+        argv.extend(capv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let next = self.b.build_call(lf, &argv, "").s()?.try_as_basic_value().basic().ok_or("fold: the lambda gives nothing")?;
+        if let Some((_, od)) = out {
+            let op = unsafe { self.b.build_in_bounds_gep(et, od, &[i], "").s()? };
+            self.b.build_store(op, next).s()?;
+        }
+        let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(head).s()?;
+        ip.add_incoming(&[(&i64t.const_int(1, false), pre), (&i1, latch)]);
+        accp.add_incoming(&[(&x0, pre), (&next, latch)]);
+        self.b.position_at_end(end_bb);
+        for v in capv {
+            self.drop_tmp(v)?;
+        }
+        self.drop_tmp(list)?;
+        let full = match out {
+            Some((o, _)) => o,
+            None => self.val_of(accp.as_basic_value(), t, false),
+        };
+        let full_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done_bb).s()?;
+        self.b.position_at_end(done_bb);
+        match empty_v {
+            Some(ev) => {
+                let phi = self.b.build_phi(self.ptr, "trail").s()?;
+                phi.add_incoming(&[(&self.basic(ev), empty_end), (&self.basic(full), full_end)]);
+                Ok(V::P(phi.as_basic_value().into_pointer_value(), true))
+            }
+            None => Ok(full),
+        }
+    }
+
     /// The outer variables a lambda's body uses: captured by value.
     fn captures(&self, params: &[String], body: &Expr) -> Vec<(String, Ty)> {
         let mut seen: Vec<(String, Ty)> = Vec::new();
@@ -5792,6 +5902,18 @@ impl<'ctx> Cg<'ctx, '_> {
             {
                 let r = self.settle_loop(&args[0], &args[1], &args[2], st)?;
                 self.as_ty(r, ty, "settle result")
+            }
+            // xs ▷ gather((a, b) => …) / trail(…) over a list of numbers, the
+            // lambda typed (number, number) → number: a loop here, left to
+            // right, calling the lambda as a typed function (nothing boxed)
+            ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail), args }
+                if let ExprKind::Lambda { params, .. } = &args[1].kind
+                    && params.len() == 2
+                    && let Ty::Arr(el @ (El::I64 | El::F64), 0) = self.ty_of(&args[0])
+                    && self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1]))).is_some_and(|(pts, rt)| *pts == [Ty::of_el(el), Ty::of_el(el)] && *rt == Ty::of_el(el)) =>
+            {
+                let r = self.typed_fold(*prim == Prim::Trail, &args[0], &args[1], el)?;
+                self.as_ty(r, ty, "fold result")
             }
             // loop words: runtime loops over function values
             ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
