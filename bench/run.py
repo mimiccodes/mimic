@@ -441,8 +441,8 @@ def build_with(compiler: Path, src: Path, env: dict, side: str) -> Path:
 def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
     """One benchmark built with both compilers and timed in turns:
     {"mimic": (old, new), "mimic-all": (old, new)} in seconds (best of; the
-    old side infinite past its limit), or None when the old compiler
-    cannot build it."""
+    old side infinite past its limit), or the reason there is nothing to
+    compare: the old compiler cannot build it, or its build fails."""
     expected = (b / "expected.txt").read_text(encoding="utf-8").strip()
     load = None
     if (b / "load").is_dir():
@@ -453,7 +453,7 @@ def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
     try:
         before = build_with(old, src, {}, "old")
     except RuntimeError:
-        return None
+        return "new: the old compiler cannot build it"
     exes = (before, build_with(new, src, {"MIMIC_DEBUG_DISABLE": "optimizer"} if inject else {}, "new"))
     once = (lambda exe, env, limit=None: time_server(exe, load, env, 1, expected, limit)) if load else (lambda exe, env, limit=None: time_runs(exe, env, 1, expected, limit))
     out = {}
@@ -462,7 +462,12 @@ def pair(b: Path, old: Path, new: Path, runs: int, inject: bool) -> dict:
         done, want = 0, runs
         while done < want:
             best[1] = min(best[1], once(exes[1], env))
-            best[0] = min(best[0], once(exes[0], env, max(OLD_CAP, OLD_TIMES * best[1])))
+            try:
+                best[0] = min(best[0], once(exes[0], env, max(OLD_CAP, OLD_TIMES * best[1])))
+            except RuntimeError:
+                # it crashed or printed something else: a bug the new
+                # compiler fixed, not a time to compare
+                return "the old build fails (a bug since fixed)"
             done += 1
             if best[0] > FAR * best[1]:
                 break
@@ -490,8 +495,8 @@ def gate(benches, old: Path, runs: int, inject: bool) -> int:
             continue
         print(f"  {b.name}", flush=True)
         got = pair(b, old, new, runs, inject)
-        if got is None:
-            lines.append(f"| {b.name} | | | | | | new: the old compiler cannot build it |")
+        if isinstance(got, str):
+            lines.append(f"| {b.name} | | | | | | {got} |")
             continue
         for key, (t_old, t_new) in got.items():
             where = "1 core" if key == "mimic" else "all cores"
