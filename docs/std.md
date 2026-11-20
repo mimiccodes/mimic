@@ -437,6 +437,7 @@ http::serve(8080, handle)                                     // runs until the 
 
 How the client and server behave:
 * **Requests overlap.** `let a = http::fetch(u1)` and `let b = http::fetch(u2)` are in flight at the same time (implicit futures).
+* **Redirects are followed** (301, 302, 303, 307, 308; up to 10), with two limits: never from `https` to `http` (an `Err`), and to another server (another scheme, host or port) without `Authorization`, `Cookie` and `Proxy-Authorization`.
 * **The server runs a pure or overlapping handler in parallel**, one task per connection on the event loop (see [the event loop](#the-event-loop)). A handler that prints or writes files takes turns: one request at a time. Requests are still read side by side, so an idle client never holds up the others.
 * **The server keeps connections open** (HTTP/1.1 keep-alive): a client sends request after request on one connection, and pipelined requests are answered in order, their answers sent together. A connection closes when the client asks (`Connection: close`, or HTTP/1.0), after a chunked request body, or after 30 seconds without a request. `serve_requests` and `serve_tls_requests` answer one request per connection, so their count is exact.
 * **The client sends one request per connection** (`Connection: close`). Bodies use `Content-Length`; chunked responses are decoded.
