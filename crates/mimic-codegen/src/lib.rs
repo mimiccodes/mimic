@@ -859,8 +859,20 @@ impl<'ctx> Cg<'ctx, '_> {
         // a tuple of numbers and truth values: in registers too (a `settle`
         // over (position, crc) keeps its state there, not on the heap)
         if let Ty::Tup(id) = t {
+            // (numbers, truth values and short lists of known length, as a
+            // flat record holds: a round counter and its 8 working words)
             let es = types::tuple_elems(id);
-            return (!es.is_empty() && es.len() <= 64 && es.iter().all(|e| matches!(e, Ty::I64 | Ty::F64 | Ty::Bool))).then_some(es);
+            let mut n = 0;
+            for e in &es {
+                match e {
+                    Ty::I64 | Ty::F64 | Ty::Bool => n += 1,
+                    _ => match fixed(*e) {
+                        Some((_, k)) => n += k as usize,
+                        None => return None,
+                    },
+                }
+            }
+            return (!es.is_empty() && n <= 64).then_some(es);
         }
         let Ty::Obj(id) = t else { return None };
         let tid = types::obj_tid(id);
@@ -3036,7 +3048,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let p0 = *pts.first()?;
         // x may be the same record with list lengths known (`[x]`): the
         // step's type is the state's, and x converts to it
-        let same = p0 == t || matches!((p0, t), (Ty::Obj(a), Ty::Obj(b)) if types::obj_tid(a) == types::obj_tid(b));
+        // (and a list of known length becomes the step's list of any length)
+        let same = p0 == t
+            || matches!((p0, t), (Ty::Obj(a), Ty::Obj(b)) if types::obj_tid(a) == types::obj_tid(b))
+            || matches!((p0, t), (Ty::Arr(a, 0), Ty::Arr(b, _)) if a == b);
         (same && rt == p0).then_some(p0)
     }
 

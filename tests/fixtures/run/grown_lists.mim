@@ -1,0 +1,28 @@
+module main
+
+// Lists grown in a loop stay typed: push of a number onto a list of numbers,
+// a loop whose list state changes length (16 words grown to 64, as SHA-256's
+// message schedule), a helper's result used before inference knows it, and
+// a tuple holding a short list of known length kept in registers.
+
+fn rotr(x: i64, n: i64) -> i64 { (x >>> n | x << (32 - n)) & 0xFFFFFFFF }
+
+fn step(v: [i64]) -> [i64] { [v[1], v[2], v[0] + v[1]] }
+
+fn main() {
+    let first = ⍳ 16 ¨ (j => j * 2654435761 % 4294967296)
+    let w = first ▷ evolve(48, w => {
+        let j = ≢ w
+        let a = w[j - 15]
+        let s0 = rotr(a, 7) ^ rotr(a, 18) ^ a >>> 3
+        push(w, (w[j - 16] + s0 + w[j - 7]) & 0xFFFFFFFF)
+    })
+    print(≢ w)
+    print(+/ w)
+    let (i, v) = (0, [1 2 3]) ▷ settle(s => (s.0 + 1, step(s.1)), s => s.0 == 10)
+    print((i, v))
+    let t = (5, [1.5 2.5])
+    print(t == (5, [1.5 2.5]))
+    print(⍳ 3 ¨ (k => (k, [k k * 2])))
+    print(⍳ 4 ¨ (k => k) ▷ evolve(5, w => push(w, w[≢ w - 1] + w[≢ w - 2])))
+}
