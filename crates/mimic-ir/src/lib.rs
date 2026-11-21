@@ -14,6 +14,7 @@
 //! comparisons, `and`/`or`, `if` and calls.
 
 pub mod lower;
+pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
 use std::fmt::{self, Write as _};

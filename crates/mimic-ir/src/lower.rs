@@ -46,7 +46,8 @@ pub fn function(p: &Program, fid: FnId, spec: &Spec) -> Option<Function> {
         return None;
     }
     body.result = Some(r);
-    let f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
+    let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
+    crate::sink::function(&mut f);
     Some(f)
 }
 
