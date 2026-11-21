@@ -27,6 +27,7 @@ fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
+        mimic_ir::Ty::Agg(t) => t,
     }
 }
 
@@ -69,6 +70,47 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.as_ty(r, ty, "value")?
                 }
                 Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
+                // a value kept in registers: a short list, or a tuple or
+                // record as a struct of its parts
+                Op::Make(xs) => {
+                    let parts = mimic_ir::parts(self.p, ty).ok_or("internal compiler error: IR value in registers")?;
+                    let mut ps = Vec::new();
+                    for (x, pt) in xs.iter().zip(&parts) {
+                        ps.push(self.as_ty(get(vals, *x)?, *pt, "part")?);
+                    }
+                    match mimic_ir::short_list(ty) {
+                        Some((el, _)) => self.fixed_from(el, &ps)?,
+                        None => {
+                            let mut out = self.repr(ty).into_struct_type().get_undef();
+                            for (k, v) in ps.into_iter().enumerate() {
+                                out = self.b.build_insert_value(out, self.basic(v), k as u32, "").s()?.into_struct_value();
+                            }
+                            V::R(out, ty)
+                        }
+                    }
+                }
+                Op::Get(v, k) => {
+                    let base = get(vals, *v)?;
+                    match base {
+                        V::A(a, el) => self.elem_at(a, el, *k)?,
+                        V::R(rv, rt) => {
+                            let parts = mimic_ir::parts(self.p, rt).ok_or("internal compiler error: IR value in registers")?;
+                            let x = self.b.build_extract_value(rv, *k, "").s()?;
+                            self.val_of(x, parts[*k as usize], false)
+                        }
+                        _ => return Err("internal compiler error: IR part of a value not in registers".into()),
+                    }
+                }
+                Op::Set(v, k, x) => {
+                    let base = get(vals, *v)?;
+                    let parts = mimic_ir::parts(self.p, ty).ok_or("internal compiler error: IR value in registers")?;
+                    let nx = self.as_ty(get(vals, *x)?, parts[*k as usize], "part")?;
+                    match base {
+                        V::A(a, el) => V::A(self.b.build_insert_value(a, self.basic(nx), *k, "").s()?.into_array_value(), el),
+                        V::R(rv, rt) => V::R(self.b.build_insert_value(rv, self.basic(nx), *k, "").s()?.into_struct_value(), rt),
+                        _ => return Err("internal compiler error: IR part of a value not in registers".into()),
+                    }
+                }
             };
             vals[i.dst.0 as usize] = Some(v);
         }

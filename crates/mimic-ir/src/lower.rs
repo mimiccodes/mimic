@@ -21,8 +21,8 @@ struct Lower<'a> {
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
 pub fn function(p: &Program, fid: FnId, spec: &Spec) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
-    let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(*t)?))).collect::<Option<_>>()?;
-    let ret = Ty::of(spec.ret)?;
+    let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
+    let ret = Ty::of(p, spec.ret)?;
     if !calls_apart(&decl.body) {
         return None;
     }
@@ -83,6 +83,11 @@ fn calls_in_stmts(b: &Block) -> usize {
     n
 }
 
+/// A single number or truth value (not a value with parts).
+fn scalar(t: Ty) -> bool {
+    matches!(t, Ty::I64 | Ty::F64 | Ty::Bool)
+}
+
 impl Lower<'_> {
     fn emit(&mut self, r: &mut Region, ty: Ty, op: Op, span: mimic_syntax::Span) -> Val {
         let dst = Val(self.next);
@@ -94,7 +99,7 @@ impl Lower<'_> {
 
     /// The IR type of an expression, from the checker.
     fn ty(&self, e: &Expr) -> Option<Ty> {
-        Ty::of(*self.spec.exprs.get(&id(e))?)
+        Ty::of(self.p, *self.spec.exprs.get(&id(e))?)
     }
 
     fn block(&mut self, r: &mut Region, b: &Block) -> Option<Val> {
@@ -105,13 +110,34 @@ impl Lower<'_> {
                     let v = self.expr(r, value)?;
                     let vt = self.ty(value)?;
                     // a declared type that converts the value: not covered yet
-                    if ty.is_some() && self.spec.lets.get(&id(s)).and_then(|t| Ty::of(*t)) != Some(vt) {
+                    if ty.is_some() && self.spec.lets.get(&id(s)).and_then(|t| Ty::of(self.p, *t)) != Some(vt) {
                         return None;
                     }
                     self.env.push((name.clone(), v, vt));
                 }
                 Stmt::Expr(e) => {
                     self.expr(r, e)?;
+                }
+                // `let (a, b) = t` of a tuple kept in registers: its parts
+                Stmt::LetTuple { names, value, .. } => {
+                    let v = self.expr(r, value)?;
+                    let Ty::Agg(t) = self.types[v.0 as usize] else { return None };
+                    let ps = crate::parts(self.p, t)?;
+                    if names.len() > ps.len() {
+                        return None;
+                    }
+                    for (k, n) in names.iter().enumerate() {
+                        if n == "_" {
+                            continue;
+                        }
+                        let pt = Ty::of(self.p, ps[k])?;
+                        // the name's own type is the part's (no conversion yet)
+                        if self.spec.tuple_lets.get(&(id(s), k)).and_then(|t| Ty::of(self.p, *t)) != Some(pt) {
+                            return None;
+                        }
+                        let x = self.emit(r, pt, Op::Get(v, k as u32), value.span);
+                        self.env.push((n.clone(), x, pt));
+                    }
                 }
                 _ => return None,
             }
@@ -150,15 +176,20 @@ impl Lower<'_> {
                 let (then, els) = if *op == BinOp::And { (more, decided) } else { (decided, more) };
                 Some(self.emit(r, Ty::Bool, Op::If { cond: a, then, els }, e.span))
             }
+            // (operators on single values only: on lists they go element by
+            // element, which the IR does not cover yet)
             ExprKind::Binary { op, lhs, rhs } => {
-                self.ty(lhs)?;
-                self.ty(rhs)?;
+                if !scalar(ty) || !scalar(self.ty(lhs)?) || !scalar(self.ty(rhs)?) {
+                    return None;
+                }
                 let a = self.expr(r, lhs)?;
                 let b = self.expr(r, rhs)?;
                 Some(self.emit(r, ty, Op::Bin(*op, a, b), e.span))
             }
             ExprKind::Unary { op, expr } => {
-                self.ty(expr)?;
+                if !scalar(ty) || !scalar(self.ty(expr)?) {
+                    return None;
+                }
                 let a = self.expr(r, expr)?;
                 Some(self.emit(r, ty, Op::Un(*op, a), e.span))
             }
@@ -199,6 +230,89 @@ impl Lower<'_> {
                 t.result = Some(tv);
                 f.result = Some(fv);
                 Some(self.emit(r, ty, Op::If { cond: c, then: t, els: f }, e.span))
+            }
+            // a value kept in registers, from its parts
+            ExprKind::Tuple(xs) | ExprKind::Array(xs) if matches!(ty, Ty::Agg(_)) => {
+                let Ty::Agg(t) = ty else { unreachable!() };
+                let ps = crate::parts(self.p, t)?;
+                if ps.len() != xs.len() {
+                    return None;
+                }
+                let mut vals = Vec::new();
+                for (x, pt) in xs.iter().zip(&ps) {
+                    // each part already of its place's type (no conversion yet)
+                    if self.ty(x)? != Ty::of(self.p, *pt)? {
+                        return None;
+                    }
+                    vals.push(self.expr(r, x)?);
+                }
+                Some(self.emit(r, ty, Op::Make(vals), e.span))
+            }
+            ExprKind::Record { fields, .. } if matches!(ty, Ty::Agg(_)) => {
+                let Ty::Agg(t @ mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = mimic_check::types::obj_tid(id);
+                let ps = crate::parts(self.p, t)?;
+                if fields.len() != ps.len() {
+                    return None;
+                }
+                // written in any order, kept in declaration order (each
+                // evaluated where it is written)
+                let mut slots: Vec<Option<Val>> = vec![None; ps.len()];
+                for (name, x, _) in fields {
+                    let k = self.p.types[tid].field_index(name)?;
+                    if slots[k].is_some() || self.ty(x)? != Ty::of(self.p, ps[k])? {
+                        return None;
+                    }
+                    slots[k] = Some(self.expr(r, x)?);
+                }
+                let vals = slots.into_iter().collect::<Option<Vec<_>>>()?;
+                Some(self.emit(r, ty, Op::Make(vals), e.span))
+            }
+            ExprKind::Field { base, name } => {
+                let Ty::Agg(bt) = self.ty(base)? else { return None };
+                let k = match bt {
+                    mimic_check::types::Ty::Tup(_) => name.parse().ok()?,
+                    mimic_check::types::Ty::Obj(id) => self.p.types[mimic_check::types::obj_tid(id)].field_index(name)?,
+                    _ => return None,
+                };
+                let ps = crate::parts(self.p, bt)?;
+                if Ty::of(self.p, *ps.get(k)?)? != ty {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::Get(b, k as u32), e.span))
+            }
+            // an element of a short list at a constant index
+            ExprKind::Index { base, index } => {
+                let Ty::Agg(bt) = self.ty(base)? else { return None };
+                let (_, n) = crate::short_list(bt)?;
+                let ExprKind::Int(k) = index.kind else { return None };
+                if k < 0 || k >= n as i64 {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::Get(b, k as u32), e.span))
+            }
+            // (the base a variable: reading it has no effects, so the new
+            // values can be computed first, in the order written)
+            ExprKind::With { base, fields } if matches!(ty, Ty::Agg(_)) && matches!(base.kind, ExprKind::Path(_)) && self.ty(base)? == ty => {
+                let Ty::Agg(t @ mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = mimic_check::types::obj_tid(id);
+                let ps = crate::parts(self.p, t)?;
+                // the new values first (they may read the base), then the base
+                let mut news = Vec::new();
+                for (name, x, _) in fields {
+                    let k = self.p.types[tid].field_index(name)?;
+                    if self.ty(x)? != Ty::of(self.p, ps[k])? {
+                        return None;
+                    }
+                    news.push((k, self.expr(r, x)?));
+                }
+                let mut cur = self.expr(r, base)?;
+                for (k, x) in news {
+                    cur = self.emit(r, ty, Op::Set(cur, k as u32, x), e.span);
+                }
+                Some(cur)
             }
             _ => None,
         }

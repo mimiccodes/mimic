@@ -1,0 +1,27 @@
+module main
+
+// Values kept in registers (records and tuples of numbers, short lists):
+// made, read, changed with `with`, taken apart, chosen by `if`, passed and
+// returned. The same output with MIMIC_IR=1 (the IR covers these functions)
+// as without.
+type P = { x: f64, y: f64 }
+type Box = { lo: P, hi: P, n: i64 }
+type V3 = { v: [i64], k: i64 }
+fn add(a: P, b: P) -> P { P { x: a.x + b.x, y: a.y + b.y } }
+fn scale(p: P, s: f64) -> P { { p with x: p.x * s, y: p.y * s } }
+fn swap(t: (i64, f64)) -> (f64, i64) { let (a, b) = t
+ (b, a) }
+fn pick(c: bool, a: (i64, i64), b: (i64, i64)) -> (i64, i64) { if c { a } else { b } }
+fn rot(v: [i64]) -> [i64] { [v[1], v[2], v[0]] }
+fn bump(r: V3) -> V3 { { r with k: r.k + r.v[0] } }
+fn area(b: Box) -> f64 { (b.hi.x - b.lo.x) * (b.hi.y - b.lo.y) }
+fn main() {
+    print(add(P { x: 1.5, y: 2.0 }, P { y: 0.25, x: 3.0 }))
+    print(scale(P { x: 1.0, y: -2.0 }, 3.0))
+    print(swap((7, 2.5)))
+    print(pick(true, (1, 2), (3, 4)))
+    print(pick(false, (1, 2), (3, 4)))
+    print(rot([1 2 3]))
+    print(bump(V3 { v: [5 6 7], k: 1 }))
+    print(area(Box { lo: P { x: 0.0, y: 0.0 }, hi: P { x: 2.0, y: 3.0 }, n: 1 }))
+}

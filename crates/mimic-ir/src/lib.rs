@@ -25,29 +25,73 @@ pub enum Ty {
     I64,
     F64,
     Bool,
+    /// A value kept in registers: a list of 1 … 16 numbers or truth values,
+    /// or a tuple or record of numbers, truth values and such lists (at
+    /// most 64 numbers). The checker's type says which.
+    Agg(mimic_check::types::Ty),
 }
 
 impl Ty {
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> String {
         match self {
-            Ty::Unit => "unit",
-            Ty::I64 => "i64",
-            Ty::F64 => "f64",
-            Ty::Bool => "bool",
+            Ty::Unit => "unit".into(),
+            Ty::I64 => "i64".into(),
+            Ty::F64 => "f64".into(),
+            Ty::Bool => "bool".into(),
+            Ty::Agg(t) => format!("regs {t}"),
         }
     }
 
-    /// The IR type of a checker type, when the IR covers it.
-    pub fn of(t: mimic_check::types::Ty) -> Option<Ty> {
+    /// The IR type of a checker type, when the IR covers it (the program,
+    /// for a record's fields).
+    pub fn of(p: &mimic_check::Program, t: mimic_check::types::Ty) -> Option<Ty> {
         use mimic_check::types::Ty as C;
         Some(match t {
             C::Unit => Ty::Unit,
             C::I64 => Ty::I64,
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
+            _ if parts(p, t).is_some() => Ty::Agg(t),
             _ => return None,
         })
     }
+}
+
+/// A short list's element type and length (1 … 16 numbers or truth values).
+pub fn short_list(t: mimic_check::types::Ty) -> Option<(mimic_check::types::El, u32)> {
+    use mimic_check::types::{El, Ty as C};
+    match t {
+        C::Arr(el @ (El::I64 | El::F64 | El::Bool), n) if n > 0 => Some((el, n as u32)),
+        _ => None,
+    }
+}
+
+/// The parts of a value kept in registers, in order: a short list's
+/// elements, a tuple's, a record's fields as declared. The same rule as the
+/// code generator's: numbers, truth values and short lists, 64 numbers at
+/// most. None for anything else.
+pub fn parts(p: &mimic_check::Program, t: mimic_check::types::Ty) -> Option<Vec<mimic_check::types::Ty>> {
+    use mimic_check::types::{self as ct, Ty as C};
+    if let Some((el, n)) = short_list(t) {
+        return Some(vec![C::of_el(el); n as usize]);
+    }
+    let ps: Vec<C> = match t {
+        C::Tup(id) => ct::tuple_elems(id),
+        C::Obj(id) => {
+            let tid = ct::obj_tid(id);
+            let mimic_syntax::ast::TypeKind::Record(fs) = &p.types[tid].decl.kind else { return None };
+            fs.iter().map(|(_, ft, _)| ct::field_type(p, tid, t, ft)).collect()
+        }
+        _ => return None,
+    };
+    let mut n = 0usize;
+    for x in &ps {
+        match x {
+            C::I64 | C::F64 | C::Bool => n += 1,
+            _ => n += short_list(*x)?.1 as usize,
+        }
+    }
+    (!ps.is_empty() && n <= 64).then_some(ps)
 }
 
 /// A value: the result of one instruction (or a function parameter).
@@ -77,6 +121,13 @@ pub enum Op {
     Call { site: usize, callee: mimic_check::FnId, args: Vec<Val> },
     /// `if cond { then } else { els }`: the value the branch taken yields.
     If { cond: Val, then: Region, els: Region },
+    /// A value kept in registers made of its parts (a tuple's elements, a
+    /// short list's, a record's fields in declaration order).
+    Make(Vec<Val>),
+    /// Part `k` of a value kept in registers.
+    Get(Val, u32),
+    /// The value with part `k` replaced (`{ r with f: x }`).
+    Set(Val, u32, Val),
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +199,16 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                 let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
                 let _ = writeln!(out, "call fn#{callee}({}): {}", a.join(", "), i.ty.name());
             }
+            Op::Make(xs) => {
+                let a: Vec<String> = xs.iter().map(|v| v.to_string()).collect();
+                let _ = writeln!(out, "make({}): {}", a.join(", "), i.ty.name());
+            }
+            Op::Get(v, k) => {
+                let _ = writeln!(out, "{v}.{k}: {}", i.ty.name());
+            }
+            Op::Set(v, k, x) => {
+                let _ = writeln!(out, "{v} with .{k} = {x}: {}", i.ty.name());
+            }
             Op::If { cond, then, els } => {
                 let _ = writeln!(out, "if {cond}: {} {{", i.ty.name());
                 region(out, then, depth + 1);
@@ -205,10 +266,21 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Un(_, a) => {
                 ty(*a, types)?;
             }
-            Op::Call { args, .. } => {
+            Op::Call { args, .. } | Op::Make(args) => {
                 for a in args {
                     ty(*a, types)?;
                 }
+            }
+            Op::Get(v, _) => {
+                if !matches!(ty(*v, types)?, Ty::Agg(_)) {
+                    return Err(format!("{}: {v} has no parts", f.name));
+                }
+            }
+            Op::Set(v, _, x) => {
+                if !matches!(ty(*v, types)?, Ty::Agg(_)) {
+                    return Err(format!("{}: {v} has no parts", f.name));
+                }
+                ty(*x, types)?;
             }
             Op::If { cond, then, els } => {
                 if ty(*cond, types)? != Ty::Bool {
