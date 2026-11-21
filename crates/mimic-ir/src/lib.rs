@@ -140,6 +140,12 @@ pub enum Op {
     /// Element `i` of a list whose elements are of kind `el` (an index out
     /// of range stops the program).
     Index(Val, Val, mimic_check::types::El),
+    /// An expression the IR does not cover yet (a map, a reduction, a call
+    /// of the runtime, …), compiled by the code generator's old path where
+    /// it stands: `uses` are the variables it reads, given as these IR
+    /// values. A bridge while the IR grows; each kind becomes an operation
+    /// of its own. (The syntax node lives as long as the compile.)
+    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -178,7 +184,7 @@ pub struct Function {
 /// Whether the instruction makes a list it owns: a call giving a list, or
 /// an `if` yielding one (both branches then yield owned lists).
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. })
+    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -233,6 +239,10 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             }
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
+            }
+            Op::Embed { uses, .. } => {
+                let a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+                let _ = writeln!(out, "embed({}): {}", a.join(", "), i.ty.name());
             }
             Op::Index(v, k, _) => {
                 let _ = writeln!(out, "{v}[{k}]: {}", i.ty.name());
@@ -317,6 +327,13 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Call { args, .. } | Op::Make(args) => {
                 for a in args {
                     ty(*a, types)?;
+                }
+            }
+            Op::Embed { uses, .. } => {
+                for (_, a, t) in uses {
+                    if ty(*a, types)? != *t {
+                        return Err(format!("{}: an embedded expression reads {a} as another type", f.name));
+                    }
                 }
             }
             Op::Len(v) => {

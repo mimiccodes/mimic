@@ -15,6 +15,10 @@ struct Lower<'a> {
     next: u32,
     /// The type of every value so far, by number.
     types: Vec<Ty>,
+    /// Every name the function binds anywhere (parameters, lets, lambda
+    /// and pattern names): one of them read by an embedded expression must
+    /// have an IR value.
+    local_names: Vec<String>,
     /// Variables in scope, innermost last.
     env: Vec<(String, Val, Ty)>,
 }
@@ -27,7 +31,9 @@ pub fn function(p: &Program, fid: FnId, spec: &Spec) -> Option<Function> {
     if !calls_apart(&decl.body) {
         return None;
     }
-    let mut l = Lower { p, module: p.fns[fid].module, spec, next: 0, types: Vec::new(), env: Vec::new() };
+    let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
+    decl.body.bound_names(&mut local_names);
+    let mut l = Lower { p, module: p.fns[fid].module, spec, next: 0, types: Vec::new(), local_names, env: Vec::new() };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
         let v = l.emit(&mut body, *t, Op::Param(i as u32), decl.span);
@@ -368,7 +374,61 @@ impl Lower<'_> {
         Some(v)
     }
 
+    /// `e` in the IR: its own operations where the IR covers it, else (a
+    /// map, a reduction, a call of the runtime …) embedded whole, compiled
+    /// by the old path where it stands. What a failed lowering emitted is
+    /// taken back first, so nothing runs twice.
     fn expr(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let (mark, env_mark) = (r.insts.len(), self.env.len());
+        if let Some(v) = self.lower(r, e) {
+            return Some(v);
+        }
+        r.insts.truncate(mark);
+        self.env.truncate(env_mark);
+        self.embed(r, e)
+    }
+
+    /// `e` kept whole for the old path, reading these variables.
+    fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let ty = self.ty(e)?;
+        // (a lambda on its own is a function value: not an IR type anyway)
+        if matches!(e.kind, ExprKind::Lambda { .. }) {
+            return None;
+        }
+        // the variables it reads: the IR's values for them (names it binds
+        // itself are its own)
+        let mut inside = Vec::new();
+        Block { stmts: vec![], tail: Some(Box::new(e.clone())), span: e.span }.bound_names(&mut inside);
+        let mut uses: Vec<(String, Val, Ty)> = Vec::new();
+        let mut unknown = false;
+        e.walk(&mut |x| {
+            if let ExprKind::Path(p) = &x.kind
+                && p.len() == 1
+                && !inside.contains(&p[0])
+                && !uses.iter().any(|(n, ..)| *n == p[0])
+            {
+                match self.env.iter().rev().find(|(n, ..)| *n == p[0]) {
+                    Some((n, v, t)) => uses.push((n.clone(), *v, *t)),
+                    // a name the function binds but the IR has no value
+                    // for: cannot be read from here
+                    None if self.local_names.contains(&p[0]) => unknown = true,
+                    None => {}
+                }
+            }
+            // an assignment inside changes a variable the IR holds as a value
+            if let ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } = &x.kind
+                && b.stmts.iter().any(|s| matches!(s, Stmt::Assign { .. }))
+            {
+                unknown = true;
+            }
+        });
+        if unknown {
+            return None;
+        }
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses }, e.span))
+    }
+
+    fn lower(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         let ty = self.ty(e)?;
         match &e.kind {
             ExprKind::Int(n) if ty == Ty::I64 => Some(self.emit(r, ty, Op::Int(*n), e.span)),
