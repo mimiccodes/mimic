@@ -3,8 +3,10 @@
 //! operators, calls and conversions are this code generator's own, so a
 //! function gives the same results either way.
 //!
-//! `MIMIC_IR=1` sends the functions the IR covers through it (off by
-//! default while it grows); `MIMIC_IR=print` also prints their IR.
+//! Every function the IR covers goes through it (what it does not cover
+//! yet is embedded: compiled by the old path where it stands);
+//! `MIMIC_IR=0` turns it off (the old path for everything), and
+//! `MIMIC_IR=print` also prints each function's IR.
 
 use crate::{Cg, OrStr, R, V};
 use inkwell::values::BasicValueEnum;
@@ -16,9 +18,20 @@ pub(crate) fn wanted() -> (bool, bool) {
     static MODE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("MIMIC_IR").as_deref() {
         Ok("print") => (true, true),
-        Ok("1") => (true, false),
-        _ => (false, false),
+        Ok("0") => (false, false),
+        _ => (true, false),
     })
+}
+
+/// A region that only yields a truth value written in the program.
+fn const_bool(r: &Region) -> Option<bool> {
+    match (r.insts.as_slice(), r.result) {
+        ([i], Some(v)) if i.dst == v => match i.op {
+            Op::Bool(b) => Some(b),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn checker_ty(t: mimic_ir::Ty) -> Ty {
@@ -242,6 +255,38 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn ir_if(&mut self, f: &Function, ty: Ty, cond: V<'ctx>, then: &Region, els: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
+        // `a and b` / `a or b` (one branch the truth value the left side
+        // decides): as the old path makes it, a branch past the right side
+        // and a phi, not two arms; LLVM then keeps the branch and sinks
+        // what only the right side needs into it (pip computed its edge
+        // test on every step once the two arms became selects)
+        if ty == Ty::Bool
+            && let Some((decided, more)) = match (const_bool(then), const_bool(els)) {
+                (None, Some(false)) => Some((false, then)),
+                (Some(true), None) => Some((true, els)),
+                _ => None,
+            }
+        {
+            let a = self.truth(cond)?;
+            let fun = self.cur_fn.ok_or("internal compiler error: `and` outside a function")?;
+            let pre = self.b.get_insert_block().unwrap();
+            let more_bb = self.ctx.append_basic_block(fun, if decided { "or_rhs" } else { "and_rhs" });
+            let done = self.ctx.append_basic_block(fun, "logic_done");
+            if decided {
+                self.b.build_conditional_branch(a, done, more_bb).s()?;
+            } else {
+                self.b.build_conditional_branch(a, more_bb, done).s()?;
+            }
+            self.b.position_at_end(more_bb);
+            let b = self.ir_region(f, more, vals)?;
+            let b = self.truth(b)?;
+            let more_end = self.b.get_insert_block().unwrap();
+            self.b.build_unconditional_branch(done).s()?;
+            self.b.position_at_end(done);
+            let phi = self.b.build_phi(self.ctx.bool_type(), "logic").s()?;
+            phi.add_incoming(&[(&a, pre), (&b, more_end)]);
+            return Ok(V::B(phi.as_basic_value().into_int_value()));
+        }
         let bit = self.truth(cond)?;
         let fun = self.cur_fn.ok_or("internal compiler error: `if` outside a function")?;
         let then_bb = self.ctx.append_basic_block(fun, "then");
