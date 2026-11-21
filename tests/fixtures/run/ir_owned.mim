@@ -1,0 +1,30 @@
+module main
+
+// Lists the IR owns: a call giving a list hands it over; it is released at
+// the end of the region that made it unless that region yields it (debug
+// builds check that nothing is left at exit). The same output with
+// MIMIC_IR=1 as without.
+fn make(n: i64) -> [i64] { ⍳ n ¨ (i => i * i) }
+fn pass(xs: [i64]) -> [i64] { xs }
+fn first_sq(n: i64) -> i64 { make(n)[1] }
+fn sum_sq(n: i64) -> i64 { let xs = make(n)
+ ((0, 0) ▷ evolve(≢ xs, s => (s.0 + 1, s.1 + xs[s.0]))).1 }
+fn again(n: i64) -> [i64] { make(n) }
+fn choose(c: bool, xs: [i64]) -> [i64] { if c { make(3) } else { xs } }
+fn unused(n: i64) -> i64 { let xs = make(n)
+ n * 2 }
+fn twice(n: i64) -> i64 { let a = make(n)
+ let b = pass(a)
+ a[n - 1] + b[0] }
+fn loop_calls(n: i64) -> i64 { (0 ▷ evolve(n, s => s + make(5)[s % 5])) }
+fn main() {
+    let ys = [7 8 9]
+    print(first_sq(5))
+    print(sum_sq(10))
+    print(again(4))
+    print(choose(true, ys))
+    print(choose(false, ys))
+    print(unused(6))
+    print(twice(4))
+    print(loop_calls(1000))
+}

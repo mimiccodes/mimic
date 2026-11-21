@@ -134,6 +134,14 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             vals[i.dst.0 as usize] = Some(v);
         }
+        // the lists this region owns, released now; the one it yields
+        // moves out
+        for i in &r.insts {
+            if mimic_ir::owns(i) && Some(i.dst) != r.result {
+                let v = get(vals, i.dst)?;
+                self.drop_tmp(v)?;
+            }
+        }
         match r.result {
             Some(v) => get(vals, v),
             None => Ok(self.null()),
@@ -211,6 +219,9 @@ impl<'ctx> Cg<'ctx, '_> {
             if !self.terminated() {
                 if ty != Ty::Unit {
                     let v = self.as_ty(v, ty, "branch value")?;
+                    // a list: owned from either branch (one passed in is
+                    // retained), so the if's list is owned
+                    let v = if matches!(v, V::P(..)) { self.own(v)? } else { v };
                     incoming.push((self.basic(v), self.b.get_insert_block().unwrap()));
                 }
                 self.b.build_unconditional_branch(merge_bb).s()?;
@@ -229,6 +240,7 @@ impl<'ctx> Cg<'ctx, '_> {
         for (v, b) in &incoming {
             phi.add_incoming(&[(v, *b)]);
         }
-        Ok(self.val_of(phi.as_basic_value(), ty, false))
+        let owned = matches!(ty, Ty::Arr(..)) && !matches!(self.val_of(phi.as_basic_value(), ty, false), V::A(..));
+        Ok(self.val_of(phi.as_basic_value(), ty, owned))
     }
 }
