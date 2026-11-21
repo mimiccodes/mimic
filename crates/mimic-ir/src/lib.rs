@@ -29,6 +29,10 @@ pub enum Ty {
     /// or a tuple or record of numbers, truth values and such lists (at
     /// most 64 numbers). The checker's type says which.
     Agg(mimic_check::types::Ty),
+    /// A list on the heap (of i64, f64 or bytes), only read here: a
+    /// parameter, or one passed along (the IR does not make or free lists
+    /// yet).
+    List(mimic_check::types::Ty),
 }
 
 impl Ty {
@@ -39,6 +43,7 @@ impl Ty {
             Ty::F64 => "f64".into(),
             Ty::Bool => "bool".into(),
             Ty::Agg(t) => format!("regs {t}"),
+            Ty::List(t) => format!("list {t}"),
         }
     }
 
@@ -52,6 +57,7 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8, 0) => Ty::List(t),
             _ => return None,
         })
     }
@@ -128,6 +134,11 @@ pub enum Op {
     Get(Val, u32),
     /// The value with part `k` replaced (`{ r with f: x }`).
     Set(Val, u32, Val),
+    /// The length of a list.
+    Len(Val),
+    /// Element `i` of a list whose elements are of kind `el` (an index out
+    /// of range stops the program).
+    Index(Val, Val, mimic_check::types::El),
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -213,6 +224,12 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Get(v, k) => {
                 let _ = writeln!(out, "{v}.{k}: {}", i.ty.name());
             }
+            Op::Len(v) => {
+                let _ = writeln!(out, "len {v}: {}", i.ty.name());
+            }
+            Op::Index(v, k, _) => {
+                let _ = writeln!(out, "{v}[{k}]: {}", i.ty.name());
+            }
             Op::Set(v, k, x) => {
                 let _ = writeln!(out, "{v} with .{k} = {x}: {}", i.ty.name());
             }
@@ -293,6 +310,16 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Call { args, .. } | Op::Make(args) => {
                 for a in args {
                     ty(*a, types)?;
+                }
+            }
+            Op::Len(v) => {
+                if !matches!(ty(*v, types)?, Ty::List(_)) {
+                    return Err(format!("{}: {v} is not a list", f.name));
+                }
+            }
+            Op::Index(v, k, _) => {
+                if !matches!(ty(*v, types)?, Ty::List(_)) || ty(*k, types)? != Ty::I64 {
+                    return Err(format!("{}: {v}[{k}] is not a list indexed by an i64", f.name));
                 }
             }
             Op::Get(v, _) => {

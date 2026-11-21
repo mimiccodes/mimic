@@ -1,0 +1,25 @@
+module main
+
+// Lists read in the IR: list parameters, their length and their elements
+// (a binary search as a settle over a tuple, sums, a search, bytes). The
+// same output with MIMIC_IR=1 as without.
+fn lower(xs: [i64], v: i64) -> i64 {
+    ((0, ≢ xs) ▷ settle(s => {
+        let mid = (s.0 + s.1) div 2
+        if xs[mid] < v { (mid + 1, s.1) } else { (s.0, mid) }
+    }, s => s.0 >= s.1)).0
+}
+fn total(xs: [i64]) -> i64 { ((0, 0) ▷ evolve(≢ xs, s => (s.0 + 1, s.1 + xs[s.0]))).1 }
+fn mean(xs: [f64]) -> f64 { ((0, 0.0) ▷ evolve(≢ xs, s => (s.0 + 1, s.1 + xs[s.0]))).1 / ≢ xs }
+fn first_big(xs: [i64], k: i64) -> i64 { (0 ▷ settle(i => i + 1, i => i == ≢ xs or xs[i] > k)) }
+fn byte_sum(bs: [u8]) -> i64 { (0, 0) ▷ evolve(≢ bs, s => (s.0 + 1, s.1 + bs[s.0])) ▷ (s => s.1) }
+fn at(xs: [i64], i: i64) -> i64 { xs[i] }
+fn main() {
+    let xs = ⍳ 1000 ¨ (i => i * 3)
+    print((lower(xs, 0), lower(xs, 1500), lower(xs, 2997), lower(xs, 5000)))
+    print(total(xs))
+    print(mean(⍳ 4 ¨ (i => i * 1.5)))
+    print(first_big(xs, 100))
+    print(byte_sum(bytes::from([1 2 250])))
+    print(at(xs, 999))
+}

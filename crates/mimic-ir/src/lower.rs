@@ -411,7 +411,31 @@ impl Lower<'_> {
                 let a = self.expr(r, expr)?;
                 Some(self.emit(r, ty, Op::Un(*op, a), e.span))
             }
+            // ≢ xs of a list
+            ExprKind::Prim { prim: Prim::Len, args } if args.len() == 1 && ty == Ty::I64 && matches!(self.ty(&args[0])?, Ty::List(_)) => {
+                let v = self.expr(r, &args[0])?;
+                Some(self.emit(r, ty, Op::Len(v), e.span))
+            }
+            // xs[i] of a list: a number of its kind
+            ExprKind::Index { base, index } if matches!(self.ty(base)?, Ty::List(_)) => {
+                let Ty::List(mimic_check::types::Ty::Arr(el, _)) = self.ty(base)? else { return None };
+                let want = match el {
+                    mimic_check::types::El::F64 => Ty::F64,
+                    _ => Ty::I64,
+                };
+                if ty != want || self.ty(index)? != Ty::I64 {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                let i = self.expr(r, index)?;
+                Some(self.emit(r, ty, Op::Index(b, i, el), e.span))
+            }
             ExprKind::Call { callee, args } => {
+                // (a call giving a list would hand one over to be freed:
+                // not covered yet)
+                if matches!(ty, Ty::List(_)) {
+                    return None;
+                }
                 let ExprKind::Path(path) = &callee.kind else { return None };
                 // a variable holding a function: not covered yet
                 if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
