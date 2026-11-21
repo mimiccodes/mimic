@@ -27,7 +27,7 @@ fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) => t,
     }
 }
 
@@ -92,6 +92,22 @@ impl<'ctx> Cg<'ctx, '_> {
                             V::R(out, ty)
                         }
                     }
+                }
+                // a list's length, from its header (a list passed in: never
+                // owned here, so nothing to release)
+                Op::Len(v) => {
+                    let b = self.boxed(get(vals, *v)?)?;
+                    let p = self.basic(b).into_pointer_value();
+                    let i64t = self.ctx.i64_type();
+                    let n = self.b.build_load(i64t, self.b.build_struct_gep(self.val_ty(), p, 3, "").s()?, "len").s()?.into_int_value();
+                    V::I(n)
+                }
+                // an element, as the code generator reads a typed list (its
+                // kind checked, one bounds check)
+                Op::Index(v, k, el) => {
+                    let b = self.boxed(get(vals, *v)?)?;
+                    let i = self.to_i64(get(vals, *k)?)?;
+                    self.index_fast(b, i, *el, ty)?
                 }
                 Op::Get(v, k) => {
                     let base = get(vals, *v)?;
