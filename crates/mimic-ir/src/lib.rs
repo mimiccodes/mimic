@@ -31,6 +31,7 @@ pub trait Hints {
         lazies: &[(String, *const mimic_syntax::ast::Expr)],
     ) -> bool;
 }
+pub mod fuse;
 pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
@@ -158,9 +159,14 @@ pub enum Op {
     /// Element `i` of a list whose elements are of kind `el` (an index out
     /// of range stops the program).
     Index(Val, Val, mimic_check::types::El),
-    /// `+/ ×/ ⌈/ ⌊/` of a list of numbers of kind `el` (`⌈/` and `⌊/` of
-    /// an empty list stop the program, as the runtime's reductions do).
-    Reduce(mimic_syntax::glyphs::Prim, Val, mimic_check::types::El),
+    /// `+/ ×/ ⌈/ ⌊/` of the elements `tree` computes, of kind `el`, in one
+    /// loop (no list in between). Of a list alone (a [`Tree::Leaf`]), `⌈/`
+    /// and `⌊/` of an empty one stop the program, as the runtime's
+    /// reductions do; of a computation they give the identity, as the old
+    /// path's fused reductions do.
+    Reduce(mimic_syntax::glyphs::Prim, Tree, mimic_check::types::El),
+    /// The list of the elements `tree` computes, in one loop (owned).
+    Map(Tree),
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -177,6 +183,58 @@ pub enum Op {
     /// stops the program); with `done` (settle) it runs until `done`,
     /// asked before each step, yields true. The loop gives the last state.
     Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region },
+}
+
+/// A computation over lists done one element at a time: every list in it
+/// is read at the same index (all of one length, or the program stops),
+/// and no list is built in between. The fused engine compiles it (SIMD,
+/// split over the cores when large).
+#[derive(Clone, Debug)]
+pub enum Tree {
+    /// Element `i` of a list the IR holds, of kind `el`.
+    Leaf(Val, mimic_check::types::El),
+    /// A number the IR holds, the same for every element.
+    Scalar(Val),
+    /// A number written in the program.
+    Int(i64),
+    Float(f64),
+    /// `⍳ n`: the index itself (`n` the length).
+    Iota(Val),
+    Bin(BinOp, Box<Tree>, Box<Tree>),
+    Un(UnOp, Box<Tree>),
+}
+
+impl Tree {
+    /// The IR values it reads.
+    pub fn vals(&self, out: &mut Vec<Val>) {
+        match self {
+            Tree::Leaf(v, _) | Tree::Scalar(v) | Tree::Iota(v) => out.push(*v),
+            Tree::Int(_) | Tree::Float(_) => {}
+            Tree::Bin(_, a, b) => {
+                a.vals(out);
+                b.vals(out);
+            }
+            Tree::Un(_, a) => a.vals(out),
+        }
+    }
+
+    pub fn reads(&self, v: Val) -> bool {
+        let mut out = Vec::new();
+        self.vals(&mut out);
+        out.contains(&v)
+    }
+
+    fn show(&self) -> String {
+        match self {
+            Tree::Leaf(v, _) => format!("{v}[i]"),
+            Tree::Scalar(v) => v.to_string(),
+            Tree::Int(n) => n.to_string(),
+            Tree::Float(x) => format!("{x:?}"),
+            Tree::Iota(n) => format!("⍳{n}"),
+            Tree::Bin(op, a, b) => format!("({} {} {})", a.show(), op.symbol(), b.show()),
+            Tree::Un(op, a) => format!("{op:?}({})", a.show()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +266,7 @@ pub struct Function {
 /// Whether the instruction makes a list it owns: a call giving a list, or
 /// an `if` yielding one (both branches then yield owned lists).
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. })
+    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_))
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -264,8 +322,11 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
             }
-            Op::Reduce(p, v, _) => {
-                let _ = writeln!(out, "reduce {p:?} {v}: {}", i.ty.name());
+            Op::Reduce(p, t, _) => {
+                let _ = writeln!(out, "reduce {p:?} {}: {}", t.show(), i.ty.name());
+            }
+            Op::Map(t) => {
+                let _ = writeln!(out, "map {}: {}", t.show(), i.ty.name());
             }
             Op::Embed { uses, lazies, .. } => {
                 let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
@@ -314,6 +375,24 @@ fn region(out: &mut String, r: &Region, depth: usize) {
 /// Checks that every value is defined once, before it is used, in a region
 /// that encloses the use, and that operands have the types the operations
 /// need. Run after lowering (and later after every pass).
+/// A tree's leaves are lists, its scalars numbers, and `⍳`'s length an i64.
+fn tree_ok(f: &Function, t: &Tree, types: &[Option<Ty>], scope: &[Val]) -> Result<(), String> {
+    let ty = |v: Val| {
+        if !scope.contains(&v) {
+            return Err(format!("{}: {v} is used where it is not defined", f.name));
+        }
+        types.get(v.0 as usize).copied().flatten().ok_or_else(|| format!("{}: {v} has no type", f.name))
+    };
+    match t {
+        Tree::Leaf(v, _) if !matches!(ty(*v)?, Ty::List(_)) => Err(format!("{}: {v} read element-wise is not a list", f.name)),
+        Tree::Scalar(v) if !matches!(ty(*v)?, Ty::I64 | Ty::F64) => Err(format!("{}: {v} is not a number", f.name)),
+        Tree::Iota(v) if ty(*v)? != Ty::I64 => Err(format!("{}: ⍳ of {v}, not an i64", f.name)),
+        Tree::Bin(_, a, b) => tree_ok(f, a, types, scope).and(tree_ok(f, b, types, scope)),
+        Tree::Un(_, a) => tree_ok(f, a, types, scope),
+        _ => Ok(()),
+    }
+}
+
 pub fn verify(f: &Function) -> Result<(), String> {
     let mut types: Vec<Option<Ty>> = vec![None; f.values as usize];
     let mut scope: Vec<Val> = Vec::new();
@@ -369,11 +448,18 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: {v} is not a list", f.name));
                 }
             }
-            Op::Reduce(_, v, el) => {
+            Op::Reduce(_, t, el) => {
                 let want = if *el == mimic_check::types::El::F64 { Ty::F64 } else { Ty::I64 };
-                if !matches!(ty(*v, types)?, Ty::List(_)) || i.ty != want {
-                    return Err(format!("{}: the reduction of {v} is not of a list's numbers", f.name));
+                if i.ty != want {
+                    return Err(format!("{}: a reduction of {el:?} giving {}", f.name, i.ty.name()));
                 }
+                tree_ok(f, t, types, scope)?;
+            }
+            Op::Map(t) => {
+                if !matches!(i.ty, Ty::List(_)) {
+                    return Err(format!("{}: a map giving {}", f.name, i.ty.name()));
+                }
+                tree_ok(f, t, types, scope)?;
             }
             Op::Index(v, k, _) => {
                 if !matches!(ty(*v, types)?, Ty::List(_)) || ty(*k, types)? != Ty::I64 {

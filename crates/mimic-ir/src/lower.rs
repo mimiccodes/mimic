@@ -2,7 +2,7 @@
 //! specialisation at a time. Anything outside what the IR covers yet gives
 //! `None`: the function then takes today's code generator.
 
-use crate::{Function, Inst, Op, Region, Ty, Val};
+use crate::{Function, Inst, Op, Region, Tree, Ty, Val};
 use mimic_check::types::{Spec, id};
 use mimic_check::{FnId, FnKind, Program, Resolved};
 use mimic_syntax::ast::{Arm, BinOp, Block, Expr, ExprKind, Pattern, Stmt, UnOp};
@@ -16,6 +16,7 @@ const LAZY: u32 = u32::MAX / 2;
 /// it reads (indices into `Lower::lazies`).
 struct Lazy {
     name: String,
+    ty: Ty,
     expr: *const Expr,
     uses: Vec<(String, Val, Ty)>,
     deps: Vec<usize>,
@@ -62,6 +63,7 @@ pub fn function(p: &Program, fid: FnId, spec: &Spec, hints: &mut dyn crate::Hint
     }
     body.result = Some(r);
     let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
+    crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
     Some(f)
 }
@@ -445,10 +447,59 @@ impl Lower<'_> {
             return false;
         }
         let k = self.lazies.len() as u32;
-        self.lazies.push(Lazy { name: name.to_string(), expr: value as *const Expr, uses, deps });
         let t = self.ty(value).unwrap_or(Ty::Unit);
+        self.lazies.push(Lazy { name: name.to_string(), ty: t, expr: value as *const Expr, uses, deps });
         self.env.push((name.to_string(), Val(LAZY + k), t));
         true
+    }
+
+    /// `e`, an operand of an element-by-element computation: a number (the
+    /// same for every element), or a list, computed element by element
+    /// where it is `⍳`, an operator or a list the IR holds.
+    fn tree(&mut self, r: &mut Region, e: &Expr) -> Option<Tree> {
+        let ty = self.ty(e)?;
+        if matches!(ty, Ty::I64 | Ty::F64) {
+            return Some(match &e.kind {
+                // (written in the program: a constant inside the loop)
+                ExprKind::Int(n) if ty == Ty::I64 => Tree::Int(*n),
+                ExprKind::Float(x) if ty == Ty::F64 => Tree::Float(*x),
+                _ => Tree::Scalar(self.expr(r, e)?),
+            });
+        }
+        if !elementwise_list(ty) {
+            return None;
+        }
+        let Ty::List(mimic_check::types::Ty::Arr(el, _)) = ty else { return None };
+        match &e.kind {
+            ExprKind::Prim { prim: Prim::Iota, args } if args.len() == 1 && el == mimic_check::types::El::I64 && self.ty(&args[0])? == Ty::I64 => {
+                Some(Tree::Iota(self.expr(r, &args[0])?))
+            }
+            ExprKind::Binary { op, lhs, rhs } if !matches!(op, BinOp::And | BinOp::Or) => {
+                let a = self.tree(r, lhs)?;
+                let b = self.tree(r, rhs)?;
+                Some(Tree::Bin(*op, Box::new(a), Box::new(b)))
+            }
+            ExprKind::Unary { op, expr } => Some(Tree::Un(*op, Box::new(self.tree(r, expr)?))),
+            // a lazy let: its computation here (read with the variables
+            // as they were where it was bound), as the old path does where
+            // it fuses one
+            ExprKind::Path(p) if p.len() == 1 && self.env.iter().rev().find(|(n, ..)| *n == p[0]).is_some_and(|(_, v, _)| v.0 >= LAZY) => {
+                let k = self.env.iter().rev().find(|(n, ..)| *n == p[0]).map(|(_, v, _)| (v.0 - LAZY) as usize)?;
+                let z = &self.lazies[k];
+                let (expr, uses, deps) = (z.expr, z.uses.clone(), z.deps.clone());
+                let mark = self.env.len();
+                self.env.extend(uses);
+                for d in deps {
+                    let t = self.lazies[d].ty;
+                    self.env.push((self.lazies[d].name.clone(), Val(LAZY + d as u32), t));
+                }
+                // SAFETY: the syntax tree outlives the lowering
+                let t = self.tree(r, unsafe { &*expr });
+                self.env.truncate(mark);
+                t
+            }
+            _ => Some(Tree::Leaf(self.direct(r, e)?, el)),
+        }
     }
 
     /// `e` in the IR's own operations, never embedded (what a failed
@@ -555,8 +606,16 @@ impl Lower<'_> {
                 let (then, els) = if *op == BinOp::And { (more, decided) } else { (decided, more) };
                 Some(self.emit(r, Ty::Bool, Op::If { cond: a, then, els }, e.span))
             }
-            // (operators on single values only: on lists they go element by
-            // element, which the IR does not cover yet)
+            // a list computed element by element (`⍳ n % k × 2`, `xs + ys`,
+            // `-xs`): one map, the whole expression one loop
+            ExprKind::Prim { prim: Prim::Iota, .. } | ExprKind::Binary { .. } | ExprKind::Unary { .. } if elementwise_list(ty) => {
+                let t = self.tree(r, e)?;
+                if matches!(t, Tree::Leaf(..)) {
+                    return None;
+                }
+                Some(self.emit(r, ty, Op::Map(t), e.span))
+            }
+            // (operators on single values: on lists, above)
             ExprKind::Binary { op, lhs, rhs } => {
                 if !scalar(ty) || !scalar(self.ty(lhs)?) || !scalar(self.ty(rhs)?) {
                     return None;
@@ -578,16 +637,17 @@ impl Lower<'_> {
                 let v = self.direct(r, &args[0])?;
                 Some(self.emit(r, ty, Op::Len(v), e.span))
             }
-            // +/ ×/ ⌈/ ⌊/ of a list of numbers the IR holds (of an array
-            // expression: embedded whole, fused by the old path)
+            // +/ ×/ ⌈/ ⌊/ of a list of numbers the IR holds or computes
+            // element by element: one loop (of anything else, such as a
+            // map with a function: embedded whole, fused by the old path)
             ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum), args } if args.len() == 1 => {
                 let Ty::List(mimic_check::types::Ty::Arr(el @ (mimic_check::types::El::I64 | mimic_check::types::El::F64), _)) = self.ty(&args[0])? else { return None };
                 let want = if el == mimic_check::types::El::F64 { Ty::F64 } else { Ty::I64 };
                 if ty != want {
                     return None;
                 }
-                let v = self.direct(r, &args[0])?;
-                Some(self.emit(r, ty, Op::Reduce(*p, v, el), e.span))
+                let t = self.tree(r, &args[0])?;
+                Some(self.emit(r, ty, Op::Reduce(*p, t, el), e.span))
             }
             // xs[i] of a list: a number of its kind
             ExprKind::Index { base, index } if matches!(self.ty(base)?, Ty::List(_)) => {
@@ -768,4 +828,10 @@ impl Lower<'_> {
             _ => None,
         }
     }
+}
+
+/// A list of i64 or f64 on the heap: what a computation element by element
+/// makes (`⍳ n`, `xs × 2`).
+fn elementwise_list(t: Ty) -> bool {
+    matches!(t, Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64, 0)))
 }

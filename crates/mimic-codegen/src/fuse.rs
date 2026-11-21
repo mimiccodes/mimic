@@ -1068,13 +1068,20 @@ impl<'ctx> Cg<'ctx, '_> {
         let el = num_el(self.ty_of(e)).ok_or("internal compiler error: fused_map on a non-numeric array")?;
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
+        let fixed = super::fixed(self.ty_of(e)).map(|(_, len)| len);
+        self.map_root(root, plan, el, fixed)
+    }
+
+    /// The list of the elements `root` computes (of a length the program
+    /// states: on the stack, in registers).
+    fn map_root(&mut self, root: Node, plan: Plan<'ctx>, el: El, fixed: Option<u32>) -> R<V<'ctx>> {
         let n = self.plan_len(&plan)?;
         // elements that may each be much work: timed, then shared out
         if heavy(&root) {
             let mode = Mode::Map(el);
             let k = self.emit_kernel(&root, &plan, mode)?;
-            let out = match super::fixed(self.ty_of(e)) {
-                Some((_, len)) => {
+            let out = match fixed {
+                Some(len) => {
                     let at = self.el_ty(el).array_type(len);
                     let buf = self.entry_alloca_ty(at.into(), "fixed")?;
                     let ctx = self.pack_ctx(&plan, &[buf.into(), self.ctx.i64_type().const_zero().into()])?;
@@ -1096,7 +1103,7 @@ impl<'ctx> Cg<'ctx, '_> {
             return Ok(out);
         }
         // a result of known length: written to the stack, kept in registers
-        if let Some((_, len)) = super::fixed(self.ty_of(e)) {
+        if let Some(len) = fixed {
             let at = self.el_ty(el).array_type(len);
             let buf = self.entry_alloca_ty(at.into(), "fixed")?;
             let mode = Mode::Map(el);
@@ -1119,6 +1126,53 @@ impl<'ctx> Cg<'ctx, '_> {
         })?;
         self.release_plan(&plan)?;
         Ok(out)
+    }
+
+    /// An IR tree (mimic-ir's element-by-element computation) as the
+    /// engine's computation: the values it reads from `val`, lists lent.
+    fn ir_node(&mut self, t: &mimic_ir::Tree, val: &dyn Fn(mimic_ir::Val) -> R<V<'ctx>>, plan: &mut Plan<'ctx>) -> R<Node> {
+        use mimic_ir::Tree as T;
+        Ok(match t {
+            T::Leaf(v, el) => {
+                let x = match val(*v)? {
+                    V::P(p, true) => V::P(p, false),
+                    x => x,
+                };
+                self.leaf(x, *el, plan)?
+            }
+            T::Scalar(v) => {
+                let x = val(*v)?;
+                let ty = match x {
+                    V::F(_) => Ty::F64,
+                    _ => Ty::I64,
+                };
+                plan.slots.push(self.basic(x));
+                Node::Scalar(plan.slots.len() - 1, ty)
+            }
+            T::Int(n) => Node::ConstI(*n),
+            T::Float(x) => Node::ConstF(*x),
+            T::Iota(v) => {
+                let n = val(*v)?;
+                let n = self.to_i64(n)?;
+                plan.lens.push(n);
+                Node::Index
+            }
+            T::Bin(op, a, b) => {
+                let a = self.ir_node(a, val, plan)?;
+                let b = self.ir_node(b, val, plan)?;
+                Node::Bin(*op, Box::new(a), Box::new(b))
+            }
+            T::Un(op, a) => Node::Un(*op, Box::new(self.ir_node(a, val, plan)?)),
+        })
+    }
+
+    /// The IR's map: the list of the elements `t` computes, in one loop.
+    pub(crate) fn map_tree(&mut self, t: &mimic_ir::Tree, val: &dyn Fn(mimic_ir::Val) -> R<V<'ctx>>, el: El, span: mimic_syntax::Span) -> R<V<'ctx>> {
+        self.fused_at.set(Some(span));
+        self.note(span, "fused", "the whole chain of array operations is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
+        let mut plan = Plan::default();
+        let root = self.ir_node(t, val, &mut plan)?;
+        self.map_root(root, plan, el, None)
     }
 
     /// A fusible list of a length the program states (`⍳ 9 ¨ f`): its
@@ -1591,14 +1645,19 @@ impl<'ctx> Cg<'ctx, '_> {
         self.fused_reduce_root(prim, root, plan, float)
     }
 
-    /// `+/ ×/ ⌈/ ⌊/` of a list of numbers (a lent one: not released here),
-    /// as the fused reduction of a single leaf: SIMD, split over the cores
-    /// when large. `⌈/` and `⌊/` of an empty list stop the program, as the
-    /// runtime's reductions do.
-    pub(crate) fn reduce_list(&mut self, prim: Prim, list: V<'ctx>, el: El) -> R<V<'ctx>> {
+    /// The IR's reduction: `+/ ×/ ⌈/ ⌊/` of the elements `t` computes, in
+    /// one loop (SIMD, split over the cores when large). Of a list alone,
+    /// `⌈/` and `⌊/` of an empty one stop the program, as the runtime's
+    /// reductions do; of a computation they give the identity, as fused
+    /// reductions always have.
+    pub(crate) fn reduce_tree(&mut self, prim: Prim, t: &mimic_ir::Tree, val: &dyn Fn(mimic_ir::Val) -> R<V<'ctx>>, el: El, span: mimic_syntax::Span) -> R<V<'ctx>> {
         let mut plan = Plan::default();
-        let root = self.leaf(list, el, &mut plan)?;
-        if matches!(prim, Prim::Maximum | Prim::Minimum) {
+        let root = self.ir_node(t, val, &mut plan)?;
+        if !matches!(t, mimic_ir::Tree::Leaf(..)) {
+            self.fused_at.set(Some(span));
+            self.note(span, "fused", "the operations and the reduction are one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
+        }
+        if matches!(t, mimic_ir::Tree::Leaf(..)) && matches!(prim, Prim::Maximum | Prim::Minimum) {
             let n = self.plan_len(&plan)?;
             let empty = self.b.build_int_compare(IntPredicate::EQ, n, self.ctx.i64_type().const_zero(), "empty").s()?;
             self.panic_if(empty, "maximum/minimum of an empty array")?;
