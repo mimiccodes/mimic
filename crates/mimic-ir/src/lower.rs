@@ -431,11 +431,6 @@ impl Lower<'_> {
                 Some(self.emit(r, ty, Op::Index(b, i, el), e.span))
             }
             ExprKind::Call { callee, args } => {
-                // (a call giving a list would hand one over to be freed:
-                // not covered yet)
-                if matches!(ty, Ty::List(_)) {
-                    return None;
-                }
                 let ExprKind::Path(path) = &callee.kind else { return None };
                 // a variable holding a function: not covered yet
                 if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
@@ -478,7 +473,9 @@ impl Lower<'_> {
             ExprKind::Prim { prim: prim @ (Prim::Evolve | Prim::Settle), args } if args.len() == 3 => {
                 let evolve = *prim == Prim::Evolve;
                 let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
-                if self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                // (a list as the state: each step's list would have to free
+                // the last one; not covered yet)
+                if matches!(ty, Ty::List(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
                     return None;
                 }
                 let init = self.expr(r, &args[0])?;

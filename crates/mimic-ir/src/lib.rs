@@ -29,9 +29,10 @@ pub enum Ty {
     /// or a tuple or record of numbers, truth values and such lists (at
     /// most 64 numbers). The checker's type says which.
     Agg(mimic_check::types::Ty),
-    /// A list on the heap (of i64, f64 or bytes), only read here: a
-    /// parameter, or one passed along (the IR does not make or free lists
-    /// yet).
+    /// A list on the heap (of i64, f64 or bytes): one passed in is
+    /// borrowed; one a call gives (or an `if` choosing lists) is owned, and
+    /// released at the end of the region that made it unless that region
+    /// yields it ([`owns`]).
     List(mimic_check::types::Ty),
 }
 
@@ -172,6 +173,12 @@ pub struct Function {
     pub body: Region,
     /// How many values the function defines (parameters included).
     pub values: u32,
+}
+
+/// Whether the instruction makes a list it owns: a call giving a list, or
+/// an `if` yielding one (both branches then yield owned lists).
+pub fn owns(i: &Inst) -> bool {
+    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
