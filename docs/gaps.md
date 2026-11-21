@@ -83,6 +83,12 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 | CI checks that native Windows builds use AVX2/AVX-512, as the Linux job does | ✅ (CI counts them; benchmarks run on Windows) | 0.2.9 |
 | Windows as fast as Linux: parallel `fib` and `prefix_sum` slower than one core, `mandelbrot` without SIMD across elements, `sum_of_squares` 2.5× C (BENCHMARK.md) | ✅ (native CPU, real naps, bigger scan chunks) | 0.2.9 |
 
+## Build time
+
+| Gap | Today | Version |
+|---|---|---|
+| The prelude is parsed, resolved and checked again for every build, and the runtime linked from its parts: a one-line program takes about 0.35 s to build (warm, macOS arm64, release): front end 70 ms (prelude parse 25, resolve 15 to 20, check 17 to 21), code generation 100 ms (purity and net plans 25, emitting 14, LLVM passes 42, object 19), link 80 ms | Planned for 0.4.1, moved: saving the parsed prelude needs the whole syntax tree serializable, for 15 to 20% of a build; limiting the purity analysis to reachable functions risks code the generator calls implicitly being taken as impure (slower) for 20 ms | 0.4.9 |
+
 ## Found by the 0.4.0 corpus
 
 Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust) that is awkward to write in Mimic, or slow, is a gap here, with the step of stage 0.4 that closes it. Times are on one core, as a ratio to C; where a line says 0.4.0, the ratio is the geometric mean over Linux x86-64, macOS arm64 and Windows x86-64 as released.
