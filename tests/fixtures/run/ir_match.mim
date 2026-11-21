@@ -1,0 +1,22 @@
+module main
+
+// match on numbers, truth values and values kept in registers: literals,
+// alternatives, ranges, negative numbers, floats, tuple and record
+// patterns, `as` (in the IR); guards and lists take the old path. The same
+// output with MIMIC_IR=1 as without.
+type P = { x: i64, y: i64 }
+fn name(n: i64) -> i64 { match n { 0 => 100, 1 | 2 => 200, 3 ‥ 10 => 300, ¯1 => 400, _ => 500 } }
+fn sign(x: f64) -> i64 { match x { 0.0 => 0, v => if v < 0.0 { ¯1 } else { 1 } } }
+fn both(t: (bool, bool)) -> i64 { match t { (true, true) => 3, (true, _) => 2, (_, true) => 1, _ => 0 } }
+fn quad(p: P) -> i64 { match p { P { x: 0, y: 0 } => 0, P { x: 0, .. } => 1, P { y: 0, .. } => 2, P { x, y } => x * 10 + y } }
+fn swap(t: (i64, i64)) -> (i64, i64) { match t { (a, b) as whole => if a > b { (b, a) } else { whole } } }
+fn guarded(n: i64) -> i64 { match n { k if k > 5 => 1, _ => 0 } }
+fn listy(xs: [i64]) -> i64 { match xs { [] => 0, [a, ..] => a } }
+fn main() {
+    print(⍳ 13 ¨ (i => name(i - 1)))
+    print((sign(0.0), sign(-2.5), sign(3.0)))
+    print((both((true, true)), both((true, false)), both((false, true)), both((false, false))))
+    print((quad(P { x: 0, y: 0 }), quad(P { x: 0, y: 7 }), quad(P { x: 4, y: 0 }), quad(P { x: 2, y: 3 })))
+    print((swap((5, 2)), swap((1, 9))))
+    print((guarded(7), guarded(3), listy([4 5]), listy([])))
+}

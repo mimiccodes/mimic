@@ -5,7 +5,7 @@
 use crate::{Function, Inst, Op, Region, Ty, Val};
 use mimic_check::types::{Spec, id};
 use mimic_check::{FnId, FnKind, Program, Resolved};
-use mimic_syntax::ast::{BinOp, Block, Expr, ExprKind, Stmt};
+use mimic_syntax::ast::{Arm, BinOp, Block, Expr, ExprKind, Pattern, Stmt, UnOp};
 use mimic_syntax::glyphs::Prim;
 
 struct Lower<'a> {
@@ -95,6 +95,198 @@ impl Lower<'_> {
             Some((pts, rt)) => pts.len() == 1 && Ty::of(self.p, pts[0]) == Some(param) && Ty::of(self.p, *rt) == Some(ret),
             None => false,
         }
+    }
+
+    /// The arms from the first on, matched against `v` (of type `vt`); the
+    /// match gives `ty`.
+    fn arms(&mut self, r: &mut Region, v: Val, vt: Ty, arms: &[Arm], ty: Ty, e: &Expr) -> Option<Val> {
+        let arm = &arms[0];
+        let test = self.test(r, v, vt, &arm.pat)?;
+        let mark = self.env.len();
+        let out = match test {
+            // always matches: this arm, whatever follows
+            None => {
+                self.bind(r, v, vt, &arm.pat)?;
+                let x = self.expr(r, &arm.body);
+                self.env.truncate(mark);
+                x?
+            }
+            Some(c) => {
+                if arms.len() == 1 {
+                    return None; // (nothing to fall back to)
+                }
+                let mut then = Region::default();
+                self.bind(&mut then, v, vt, &arm.pat)?;
+                let tv = self.expr(&mut then, &arm.body);
+                self.env.truncate(mark);
+                let tv = tv?;
+                let mut els = Region::default();
+                let ev = self.arms(&mut els, v, vt, &arms[1..], ty, e)?;
+                if ty != Ty::Unit && (self.types[tv.0 as usize] != ty || self.types[ev.0 as usize] != ty) {
+                    return None;
+                }
+                then.result = Some(tv);
+                els.result = Some(ev);
+                self.emit(r, ty, Op::If { cond: c, then, els }, e.span)
+            }
+        };
+        Some(out)
+    }
+
+    /// Whether `v` matches `pat`: None when it always does, else a truth
+    /// value computed here (no effects: parts and comparisons only).
+    fn test(&mut self, r: &mut Region, v: Val, vt: Ty, pat: &Pattern) -> Option<Option<Val>> {
+        let span = mimic_syntax::Span::default();
+        Some(match pat {
+            Pattern::Wild(_) | Pattern::Bind(..) => None,
+            Pattern::As(inner, ..) => self.test(r, v, vt, inner)?,
+            Pattern::Lit(x) => {
+                let k = self.literal(r, x, vt)?;
+                Some(self.emit(r, Ty::Bool, Op::Bin(BinOp::Eq, v, k), span))
+            }
+            Pattern::Range { lo, hi, .. } => {
+                if !matches!(vt, Ty::I64 | Ty::F64) {
+                    return None;
+                }
+                let a = self.literal(r, lo, vt)?;
+                let b = self.literal(r, hi, vt)?;
+                let x = self.emit(r, Ty::Bool, Op::Bin(BinOp::Le, a, v), span);
+                let y = self.emit(r, Ty::Bool, Op::Bin(BinOp::Lt, v, b), span);
+                Some(self.emit(r, Ty::Bool, Op::Bin(BinOp::And, x, y), span))
+            }
+            Pattern::Or(alts, _) => {
+                let mut names = Vec::new();
+                pat.bound_names(&mut names);
+                if !names.is_empty() {
+                    return None;
+                }
+                let mut acc: Option<Val> = None;
+                for a in alts {
+                    let Some(t) = self.test(r, v, vt, a)? else { return Some(None) };
+                    acc = Some(match acc {
+                        None => t,
+                        Some(c) => self.emit(r, Ty::Bool, Op::Bin(BinOp::Or, c, t), span),
+                    });
+                }
+                acc
+            }
+            Pattern::Tuple(ps, _) => {
+                let Ty::Agg(t @ mimic_check::types::Ty::Tup(_)) = vt else { return None };
+                let parts = crate::parts(self.p, t)?;
+                if parts.len() != ps.len() {
+                    return None;
+                }
+                self.all_parts(r, v, &parts, ps.iter().enumerate().collect())?
+            }
+            Pattern::Record { path, fields, .. } => {
+                let Ty::Agg(t @ mimic_check::types::Ty::Obj(id)) = vt else { return None };
+                let tid = mimic_check::types::obj_tid(id);
+                // the pattern names this very record type
+                if self.p.lookup(self.module, path) != Some(Resolved::Type(tid)) {
+                    return None;
+                }
+                let parts = crate::parts(self.p, t)?;
+                let mut which = Vec::new();
+                for (name, sub) in fields {
+                    which.push((self.p.types[tid].field_index(name)?, sub));
+                }
+                self.all_parts(r, v, &parts, which)?
+            }
+            _ => return None,
+        })
+    }
+
+    /// The parts `which` (index, pattern) of `v` all match: None if they
+    /// always do.
+    fn all_parts(&mut self, r: &mut Region, v: Val, parts: &[mimic_check::types::Ty], which: Vec<(usize, &Pattern)>) -> Option<Option<Val>> {
+        let span = mimic_syntax::Span::default();
+        let mut acc: Option<Val> = None;
+        for (k, sub) in which {
+            let pt = Ty::of(self.p, *parts.get(k)?)?;
+            // (a part read only when its pattern tests something)
+            let mut probe = Region::default();
+            let tmp = Val(self.next);
+            if self.test(&mut probe, tmp, pt, sub)?.is_none() && probe.insts.is_empty() {
+                continue;
+            }
+            let x = self.emit(r, pt, Op::Get(v, k as u32), span);
+            if let Some(t) = self.test(r, x, pt, sub)? {
+                acc = Some(match acc {
+                    None => t,
+                    Some(c) => self.emit(r, Ty::Bool, Op::Bin(BinOp::And, c, t), span),
+                });
+            }
+        }
+        Some(acc)
+    }
+
+    /// Bind the names in `pat` (matched by `v`) for the arm's body: each to
+    /// its part, of the type the checker gave the name.
+    fn bind(&mut self, r: &mut Region, v: Val, vt: Ty, pat: &Pattern) -> Option<()> {
+        let span = mimic_syntax::Span::default();
+        match pat {
+            Pattern::Wild(_) | Pattern::Lit(_) | Pattern::Range { .. } | Pattern::Or(..) => {}
+            Pattern::Bind(name, _) => {
+                if self.spec.binds.get(&id(pat)).and_then(|t| Ty::of(self.p, *t)) != Some(vt) {
+                    return None;
+                }
+                self.env.push((name.clone(), v, vt));
+            }
+            Pattern::As(inner, name, _) => {
+                self.bind(r, v, vt, inner)?;
+                self.env.push((name.clone(), v, vt));
+            }
+            Pattern::Tuple(ps, _) => {
+                let Ty::Agg(t) = vt else { return None };
+                let parts = crate::parts(self.p, t)?;
+                for (k, sub) in ps.iter().enumerate() {
+                    let mut names = Vec::new();
+                    sub.bound_names(&mut names);
+                    if names.is_empty() {
+                        continue;
+                    }
+                    let pt = Ty::of(self.p, *parts.get(k)?)?;
+                    let x = self.emit(r, pt, Op::Get(v, k as u32), span);
+                    self.bind(r, x, pt, sub)?;
+                }
+            }
+            Pattern::Record { fields, .. } => {
+                let Ty::Agg(t @ mimic_check::types::Ty::Obj(id)) = vt else { return None };
+                let tid = mimic_check::types::obj_tid(id);
+                let parts = crate::parts(self.p, t)?;
+                for (name, sub) in fields {
+                    let mut names = Vec::new();
+                    sub.bound_names(&mut names);
+                    if names.is_empty() {
+                        continue;
+                    }
+                    let k = self.p.types[tid].field_index(name)?;
+                    let pt = Ty::of(self.p, *parts.get(k)?)?;
+                    let x = self.emit(r, pt, Op::Get(v, k as u32), span);
+                    self.bind(r, x, pt, sub)?;
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// A literal of a pattern (a number, maybe negated, or a truth value)
+    /// as a value of type `t`.
+    fn literal(&mut self, r: &mut Region, x: &Expr, t: Ty) -> Option<Val> {
+        let span = x.span;
+        let (neg, inner) = match &x.kind {
+            ExprKind::Unary { op: UnOp::Neg, expr } => (true, &**expr),
+            _ => (false, x),
+        };
+        let op = match (&inner.kind, t) {
+            (ExprKind::Int(n), Ty::I64) => Op::Int(if neg { n.checked_neg()? } else { *n }),
+            (ExprKind::Int(n), Ty::F64) => Op::Float(if neg { -(*n as f64) } else { *n as f64 }),
+            (ExprKind::Float(f), Ty::F64) => Op::Float(if neg { -f } else { *f }),
+            (ExprKind::Bool(b), Ty::Bool) if !neg => Op::Bool(*b),
+            _ => return None,
+        };
+        Some(self.emit(r, t, op, span))
     }
 
     /// A one-parameter lambda's body as a region, its parameter bound to `v`.
@@ -284,6 +476,17 @@ impl Lower<'_> {
                 };
                 let step = self.lambda_region(step, var, ty)?;
                 Some(self.emit(r, ty, Op::Loop { init, var, count, done, step }, e.span))
+            }
+            // match on a number, a truth value or a value kept in registers:
+            // each arm's test, then the arm (its names bound) or the next;
+            // the last arm must always match (no guards yet)
+            ExprKind::Match { scrut, arms } if !arms.is_empty() => {
+                let st = self.ty(scrut)?;
+                if !matches!(st, Ty::I64 | Ty::F64 | Ty::Bool | Ty::Agg(_)) || arms.iter().any(|a| a.guard.is_some()) {
+                    return None;
+                }
+                let v = self.expr(r, scrut)?;
+                self.arms(r, v, st, arms, ty, e)
             }
             // a value kept in registers, from its parts
             ExprKind::Tuple(xs) | ExprKind::Array(xs) if matches!(ty, Ty::Agg(_)) => {
