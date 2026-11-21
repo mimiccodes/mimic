@@ -4,6 +4,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+Step 0.4.1, the Mimic IR, so far (0.4.1-preview.1): its first part (functions of plain numbers through a typed intermediate representation, off by default), a security fix for the HTTP client's redirects, and the slowest benchmarks of 0.4.0 traced and most of them made several times faster without a change to the programs: tuples of numbers and short lists stay in registers, lists grown in a loop and lists from `flatten` stay typed, `let` lambdas and `count`'s lambda are compiled as functions, `gather`/`trail` with a lambda are typed loops, and debug builds change lists in place. `fnv1a`, `crc32`, `adler32`, `pagerank`, `topo` and `siphash` 7–25× faster, `sha256` 13×, `diff` 7×, `utf8` 5.6×; no benchmark slower on Linux, macOS or Windows.
+
 ### Added
 - **The first step of the Mimic IR** (docs/design/ir.md): functions of plain numbers and truth values can be compiled through a typed intermediate representation, with the same results. Off by default while it grows: `MIMIC_IR=1` turns it on, `MIMIC_IR=print` shows each function's IR.
 
