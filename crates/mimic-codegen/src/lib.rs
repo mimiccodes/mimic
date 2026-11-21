@@ -4919,6 +4919,83 @@ impl<'ctx> Cg<'ctx, '_> {
         self.select_elem(arr, el, i)
     }
 
+    /// `put(xs, i, x)` on a list of i64 (a record's field, taken out to
+    /// change): held once, of i64, one dimension and `i` in range, the
+    /// number is stored in place here; anything else is mim_put_i64_own's
+    /// (which copies, converts or stops with the message, as before).
+    fn put_i64_inline(&mut self, list: PointerValue<'ctx>, i: IntValue<'ctx>, x: IntValue<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc)
+            .unwrap()
+            .set_atomic_ordering(inkwell::AtomicOrdering::Acquire)
+            .map_err(|e| e.to_string())?;
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?.into_int_value();
+        let once = self.b.build_int_compare(IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let ints = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
+        let flat = self.b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        let inside = self.b.build_int_compare(IntPredicate::ULT, i, len, "").s()?;
+        let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, inside, "").s()?, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let here = self.ctx.append_basic_block(f, "put_here");
+        let slow = self.ctx.append_basic_block(f, "put_slow");
+        let done = self.ctx.append_basic_block(f, "put_done");
+        self.b.build_conditional_branch(ok, here, slow).s()?;
+        self.b.position_at_end(here);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
+        let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
+        self.b.build_store(at, x).s()?;
+        let here_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow);
+        let rf = self.module.get_function("mim_put_i64_own").unwrap_or_else(|| {
+            self.module.add_function("mim_put_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(Linkage::External))
+        });
+        let r = self.b.build_call(rf, &[list.into(), i.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "list").s()?;
+        phi.add_incoming(&[(&list, here_end), (&r, slow_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
+    /// `put(xs, i, x)` on a list in registers: the same list with element
+    /// `i` replaced (a constant index: one insert; else one select per
+    /// element, which folds once `i` is known); an index out of bounds
+    /// stops the program as indexing does.
+    fn put_fixed(&mut self, arr: inkwell::values::ArrayValue<'ctx>, el: El, i: IntValue<'ctx>, x: V<'ctx>) -> R<V<'ctx>> {
+        let n = arr.get_type().len();
+        let i64t = self.ctx.i64_type();
+        let xv = self.basic(x);
+        if let Some(k) = i.get_zero_extended_constant().filter(|k| *k < n as u64) {
+            let r = self.b.build_insert_value(arr, xv, k as u32, "").s()?.into_array_value();
+            return Ok(V::A(r, el));
+        }
+        let ok = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(n as u64, false), "").s()?;
+        let f = self.cur_fn.unwrap();
+        let good = self.ctx.append_basic_block(f, "put_ok");
+        let bad = self.ctx.append_basic_block(f, "put_bad");
+        self.b.build_conditional_branch(ok, good, bad).s()?;
+        self.b.position_at_end(bad);
+        let bx = self.boxed(V::A(arr, el))?;
+        self.call_rt("mim_index_fail", &[self.basic(bx).into(), i.into()])?;
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(good);
+        let mut out = arr;
+        for k in 0..n {
+            let is_k = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_int(k as u64, false), "").s()?;
+            let old = self.b.build_extract_value(arr, k, "").s()?;
+            let v = self.b.build_select(is_k, xv, old, "").s()?;
+            out = self.b.build_insert_value(out, v, k, "").s()?.into_array_value();
+        }
+        Ok(V::A(out, el))
+    }
+
     /// Element `i` (in bounds) of a list in registers, chosen with compares
     /// and selects: no memory, and it folds to one register once `i` is
     /// known (after inlining and unrolling).
@@ -5497,6 +5574,39 @@ impl<'ctx> Cg<'ctx, '_> {
                     let r = self.call_rt_ptr("mim_std_sort", &[self.basic(b).into()])?;
                     self.drop_tmp(b)?;
                     return self.as_ty(r, ty, "sort");
+                }
+                // put on a list kept in registers (a 16-word state, a 3×3
+                // block): the element replaced in registers, the index checked
+                // as any index is; no list on the heap, nothing boxed. Only a
+                // value of the list's own kind (a float into a list of
+                // integers turns it into floats: the runtime's way)
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "put"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 3
+                    && let Some((el @ (El::I64 | El::F64 | El::Bool), _)) = fixed(self.ty_of(&args[0]))
+                    && self.ty_of(&args[1]) == Ty::I64
+                    && self.ty_of(&args[2]) == Ty::of_el(el)
+                {
+                    let xs = self.expr(&args[0])?;
+                    let xs = self.as_ty(xs, self.ty_of(&args[0]), "put")?;
+                    let k = self.expr(&args[1])?;
+                    let k = self.to_i64(k)?;
+                    let x = self.expr(&args[2])?;
+                    let x = self.as_ty(x, Ty::of_el(el), "put")?;
+                    if let V::A(arr, _) = xs {
+                        let r = self.put_fixed(arr, el, k, x)?;
+                        return self.as_ty(r, ty, "put");
+                    }
+                    let b = self.boxed(xs)?;
+                    let kb = self.boxed(V::I(k))?;
+                    let xb = self.boxed(x)?;
+                    let r = self.call_rt_ptr("mim_std_put", &[self.basic(b).into(), self.basic(kb).into(), self.basic(xb).into()])?;
+                    self.drop_tmp(b)?;
+                    self.drop_tmp(kb)?;
+                    self.drop_tmp(xb)?;
+                    return self.as_ty(r, ty, "put");
                 }
                 // bytes::from over a fused integer expression: written
                 // straight into bytes, in one pass
@@ -6296,6 +6406,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
                     let u8_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::U8, 0));
                     let i64t = self.ctx.i64_type();
+                    // put into a list of i64 held here once: stored in place
+                    // right here (the runtime only when it is shared, of
+                    // another kind or the index is out of range)
+                    if op == "put"
+                        && i64_list
+                        && let [V::I(i), V::I(x)] = rest.as_slice()
+                    {
+                        list = self.put_i64_inline(list, *i, *x)?;
+                        continue;
+                    }
                     // a list of i64 and raw numbers: the typed versions
                     let typed: Option<(&str, Vec<BasicMetadataValueEnum>)> = match (op, rest.as_slice()) {
                         ("push", [V::I(x)]) if i64_list => Some(("mim_push_i64_own", vec![list.into(), (*x).into()])),
