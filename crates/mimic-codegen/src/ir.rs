@@ -34,6 +34,22 @@ fn const_bool(r: &Region) -> Option<bool> {
     }
 }
 
+/// What the IR's lowering asks: the old path's own answers, in a scope
+/// holding the IR's variables (read only for their types and mutability).
+impl mimic_ir::Hints for Cg<'_, '_> {
+    fn lazy(&mut self, name: &str, value: &mimic_syntax::ast::Expr, rest: &[mimic_syntax::ast::Stmt], tail: Option<&mimic_syntax::ast::Expr>, scope: &[(String, mimic_ir::Ty)], lazies: &[(String, *const mimic_syntax::ast::Expr)]) -> bool {
+        let null = self.ptr.const_null();
+        let locals = scope.iter().map(|(n, t)| crate::Local { name: n.clone(), slot: null, ty: checker_ty(*t), owned: false, mutable: false, moves: false }).collect();
+        self.scopes.push(locals);
+        let mark = self.lazies.len();
+        self.lazies.extend(lazies.iter().cloned());
+        let lazy = self.lazy_candidate(name, value, rest, tail);
+        self.lazies.truncate(mark);
+        self.scopes.pop();
+        lazy
+    }
+}
+
 fn checker_ty(t: mimic_ir::Ty) -> Ty {
     match t {
         mimic_ir::Ty::Unit => Ty::Unit,
@@ -121,7 +137,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 // an expression the IR does not cover yet: the old path
                 // compiles it here, its variables the IR's values (lent: in
                 // slots of their own, never released from there)
-                Op::Embed { expr, uses } => {
+                Op::Embed { expr, uses, lazies } => {
                     let mut locals = Vec::new();
                     for (name, v, t) in uses {
                         let ct = checker_ty(*t);
@@ -131,9 +147,13 @@ impl<'ctx> Cg<'ctx, '_> {
                         locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
                     }
                     self.scopes.push(locals);
+                    // the lazy lets it reads: fused where it reads them
+                    let lazy_mark = self.lazies.len();
+                    self.lazies.extend(lazies.iter().cloned());
                     // SAFETY: the syntax tree outlives the compile
                     let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let out = self.expr(e);
+                    self.lazies.truncate(lazy_mark);
                     self.scopes.pop();
                     let out = out?;
                     // (it may have ended the block: a return, a panic)

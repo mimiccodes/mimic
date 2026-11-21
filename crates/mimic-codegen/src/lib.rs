@@ -1990,9 +1990,8 @@ impl<'ctx> Cg<'ctx, '_> {
             && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq)
             && self.fj.quiet()
             && only.as_ref().is_none_or(|o| path.contains(o.as_str()))
-            && !self.fuses_lets(&decl.body)
         {
-            mimic_ir::lower::function(self.p, k.0, &spec).filter(|f| match mimic_ir::verify(f) {
+            mimic_ir::lower::function(self.p, k.0, &spec, self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
                 Err(e) => {
                     eprintln!("mimic: IR check failed, compiling `{path}` without it: {e}");
@@ -3232,31 +3231,6 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             None => Ok(full),
         }
-    }
-
-    /// Whether a `let` in `body` (or a block inside it) holds a list used
-    /// only inside later array expressions, which the old path fuses into
-    /// those uses and never builds (`let xs = ⍳ n % k` then `xs × xs ▷ +/`).
-    /// The IR does not fuse yet, so such a function keeps the old path.
-    fn fuses_lets(&mut self, body: &mimic_syntax::ast::Block) -> bool {
-        let mut blocks: Vec<*const mimic_syntax::ast::Block> = vec![body as *const _];
-        body.walk(&mut |e| {
-            if let ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } = &e.kind {
-                blocks.push(b as *const _);
-            }
-        });
-        for b in blocks {
-            // SAFETY: the syntax tree outlives the compile
-            let b: &mimic_syntax::ast::Block = unsafe { &*b };
-            for (i, st) in b.stmts.iter().enumerate() {
-                if let Stmt::Let { name, mutable: false, ty: None, value, .. } = st
-                    && self.lazy_candidate(name, value, &b.stmts[i + 1..], b.tail.as_deref())
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// The outer variables a lambda's body uses: captured by value.

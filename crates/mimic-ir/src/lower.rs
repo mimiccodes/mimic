@@ -8,8 +8,23 @@ use mimic_check::{FnId, FnKind, Program, Resolved};
 use mimic_syntax::ast::{Arm, BinOp, Block, Expr, ExprKind, Pattern, Stmt, UnOp};
 use mimic_syntax::glyphs::Prim;
 
+/// The first value number a lazy `let` stands for in `env` (lower ones are
+/// values): `LAZY + k` is `Lower::lazies[k]`.
+const LAZY: u32 = u32::MAX / 2;
+
+/// A lazy `let`: its expression, the variables it reads, and the lazy lets
+/// it reads (indices into `Lower::lazies`).
+struct Lazy {
+    name: String,
+    expr: *const Expr,
+    uses: Vec<(String, Val, Ty)>,
+    deps: Vec<usize>,
+}
+
 struct Lower<'a> {
     p: &'a Program,
+    hints: &'a mut dyn crate::Hints,
+    lazies: Vec<Lazy>,
     module: mimic_check::ModId,
     spec: &'a Spec,
     next: u32,
@@ -24,7 +39,7 @@ struct Lower<'a> {
 }
 
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
-pub fn function(p: &Program, fid: FnId, spec: &Spec) -> Option<Function> {
+pub fn function(p: &Program, fid: FnId, spec: &Spec, hints: &mut dyn crate::Hints) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
     let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
     let ret = Ty::of(p, spec.ret)?;
@@ -33,7 +48,7 @@ pub fn function(p: &Program, fid: FnId, spec: &Spec) -> Option<Function> {
     }
     let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
     decl.body.bound_names(&mut local_names);
-    let mut l = Lower { p, module: p.fns[fid].module, spec, next: 0, types: Vec::new(), local_names, env: Vec::new() };
+    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec, next: 0, types: Vec::new(), local_names, env: Vec::new() };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
         let v = l.emit(&mut body, *t, Op::Param(i as u32), decl.span);
@@ -329,8 +344,11 @@ impl Lower<'_> {
 
     fn block(&mut self, r: &mut Region, b: &Block) -> Option<Val> {
         let mark = self.env.len();
-        for s in &b.stmts {
+        for (i, s) in b.stmts.iter().enumerate() {
             match s {
+                // a list used only inside array expressions: never built,
+                // fused where it is read (by the embedded expressions)
+                Stmt::Let { name, mutable: false, ty: None, value, .. } if self.lazy(name, value, &b.stmts[i + 1..], b.tail.as_deref()) => {}
                 Stmt::Let { name, mutable: false, ty, value, .. } => {
                     let v = self.expr(r, value)?;
                     let vt = self.ty(value)?;
@@ -389,6 +407,50 @@ impl Lower<'_> {
         self.embed(r, e)
     }
 
+    /// Whether `let name = value` is lazy (see [`crate::Hints::lazy`]); if
+    /// so it is recorded, in scope from here.
+    fn lazy(&mut self, name: &str, value: &Expr, rest: &[Stmt], tail: Option<&Expr>) -> bool {
+        let scope: Vec<(String, Ty)> = self.env.iter().filter(|(_, v, _)| v.0 < LAZY).map(|(n, _, t)| (n.clone(), *t)).collect();
+        let lazies: Vec<(String, *const Expr)> =
+            self.env.iter().filter(|(_, v, _)| v.0 >= LAZY).map(|(n, v, _)| (n.clone(), self.lazies[(v.0 - LAZY) as usize].expr)).collect();
+        if !self.hints.lazy(name, value, rest, tail, &scope, &lazies) {
+            return false;
+        }
+        // what it reads, as the variables are now
+        let mut uses: Vec<(String, Val, Ty)> = Vec::new();
+        let mut deps = Vec::new();
+        let mut ok = true;
+        value.walk(&mut |x| {
+            if let ExprKind::Path(p) = &x.kind
+                && p.len() == 1
+            {
+                match self.env.iter().rev().find(|(n, ..)| *n == p[0]) {
+                    Some((_, v, _)) if v.0 >= LAZY => deps.push((v.0 - LAZY) as usize),
+                    Some((n, v, t)) => {
+                        if !uses.iter().any(|(u, ..)| u == n) {
+                            uses.push((n.clone(), *v, *t));
+                        }
+                    }
+                    None if self.local_names.contains(&p[0]) => ok = false,
+                    None => {}
+                }
+            }
+            // (a lambda's own parameters are not read from outside: the
+            // old path declines a lazy let holding one anyway)
+            if matches!(x.kind, ExprKind::Lambda { .. }) {
+                ok = false;
+            }
+        });
+        if !ok {
+            return false;
+        }
+        let k = self.lazies.len() as u32;
+        self.lazies.push(Lazy { name: name.to_string(), expr: value as *const Expr, uses, deps });
+        let t = self.ty(value).unwrap_or(Ty::Unit);
+        self.env.push((name.to_string(), Val(LAZY + k), t));
+        true
+    }
+
     /// `e` kept whole for the old path, reading these variables.
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         let ty = self.ty(e)?;
@@ -401,6 +463,7 @@ impl Lower<'_> {
         let mut inside = Vec::new();
         Block { stmts: vec![], tail: Some(Box::new(e.clone())), span: e.span }.bound_names(&mut inside);
         let mut uses: Vec<(String, Val, Ty)> = Vec::new();
+        let mut lazy_ks: Vec<usize> = Vec::new();
         let mut unknown = false;
         e.walk(&mut |x| {
             if let ExprKind::Path(p) = &x.kind
@@ -409,6 +472,7 @@ impl Lower<'_> {
                 && !uses.iter().any(|(n, ..)| *n == p[0])
             {
                 match self.env.iter().rev().find(|(n, ..)| *n == p[0]) {
+                    Some((_, v, _)) if v.0 >= LAZY => lazy_ks.push((v.0 - LAZY) as usize),
                     Some((n, v, t)) => uses.push((n.clone(), *v, *t)),
                     // a name the function binds but the IR has no value
                     // for: cannot be read from here
@@ -426,7 +490,30 @@ impl Lower<'_> {
         if unknown {
             return None;
         }
-        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses }, e.span))
+        // the lazy lets it reads, and those they read (in the order they
+        // were bound), with the variables they read
+        let mut all: Vec<usize> = Vec::new();
+        while let Some(k) = lazy_ks.pop() {
+            if !all.contains(&k) {
+                all.push(k);
+                lazy_ks.extend(self.lazies[k].deps.iter().copied());
+            }
+        }
+        all.sort_unstable();
+        let mut lazies = Vec::new();
+        for k in all {
+            let z = &self.lazies[k];
+            for (n, v, t) in &z.uses {
+                match uses.iter().find(|(u, ..)| u == n) {
+                    // the same name for another value (rebound since): not here
+                    Some((_, w, _)) if w != v => return None,
+                    Some(_) => {}
+                    None => uses.push((n.clone(), *v, *t)),
+                }
+            }
+            lazies.push((z.name.clone(), z.expr));
+        }
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
     }
 
     fn lower(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
@@ -437,7 +524,8 @@ impl Lower<'_> {
             ExprKind::Bool(b) if ty == Ty::Bool => Some(self.emit(r, ty, Op::Bool(*b), e.span)),
             ExprKind::Path(path) if path.len() == 1 => {
                 let (_, v, t) = self.env.iter().rev().find(|(n, ..)| *n == path[0])?.clone();
-                (t == ty).then_some(v)
+                // (a lazy let has no value: what reads it is embedded)
+                (t == ty && v.0 < LAZY).then_some(v)
             }
             ExprKind::Block(b) => self.block(r, b),
             ExprKind::Binary { op: op @ (BinOp::And | BinOp::Or), lhs, rhs } => {
