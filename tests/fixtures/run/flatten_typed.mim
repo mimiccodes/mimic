@@ -1,0 +1,18 @@
+module main
+
+// flatten(xs ¨ (x => …)) whose lambda gives a list of numbers is typed as
+// that list of numbers; flatten of anything else as before. Same values.
+fn pair(i: i64) -> [i64] { [i i * 10] }
+fn main() {
+    let a = flatten(⍳ 5 ¨ (i => ⍳ i ¨ (k => k + i)))
+    print(a)
+    print(+/ a)
+    let b = flatten(⍳ 4 ¨ (i => [i * 0.5 1.5]))
+    print(b)
+    let c = flatten(⍳ 0 ¨ (i => [i]))
+    print(≢ c)
+    let d = flatten(⍳ 3 ¨ pair)
+    print(d)
+    let e = flatten(⍳ 3 ¨ (i => [i i i]))
+    print(e[4] + ≢ e)
+}

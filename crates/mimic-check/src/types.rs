@@ -1052,6 +1052,22 @@ impl Walk<'_, '_> {
         r
     }
 
+    /// `flatten(xs ¨ (x => …))` with the prelude's `flatten`, the lambda's
+    /// result (already typed) a list of i64 or f64: that element type.
+    fn flatten_of_numbers(&self, f: FnId, args: &[Expr]) -> Option<El> {
+        let p = self.inf.p;
+        let m = &p.mods[p.fns[f].module];
+        if p.fns[f].name != "flatten" || m.name != "prelude" || m.package != "std" || args.len() != 1 {
+            return None;
+        }
+        let ExprKind::Prim { prim: Prim::Each, args: each } = &args[0].kind else { return None };
+        let lam = each.get(1).filter(|x| matches!(x.kind, ExprKind::Lambda { .. }))?;
+        match self.out.lambdas.get(&id(lam))?.1 {
+            Ty::Arr(el @ (El::I64 | El::F64), _) => Some(el),
+            _ => None,
+        }
+    }
+
     /// `f` used as a value: its dynamic specialisation must exist.
     fn fn_value(&mut self, f: FnId) {
         if !self.inf.p.fns[f].is_extern() {
@@ -1169,7 +1185,17 @@ impl Walk<'_, '_> {
                                 };
                             }
                             self.check_args_at_call(e, path, f, args, &mut argt);
-                            self.call_user(id(e), f, argt)
+                            let r = self.call_user(id(e), f, argt);
+                            // the prelude's `flatten(xs ¨ (x => …))` whose lambda gives a
+                            // list of numbers: a list of those numbers (the result is
+                            // checked and made typed once, here; everything after it
+                            // then runs typed instead of on values of unknown type)
+                            if let Some(el) = self.flatten_of_numbers(f, args)
+                                && matches!(r, Ty::Dyn | Ty::Arr(El::Dyn, _))
+                            {
+                                return Ty::Arr(el, 0);
+                            }
+                            r
                         }
                         Ok(Resolved::Variant(t, v)) => {
                             let p = self.inf.p;
