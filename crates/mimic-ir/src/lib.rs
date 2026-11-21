@@ -128,6 +128,13 @@ pub enum Op {
     Get(Val, u32),
     /// The value with part `k` replaced (`{ r with f: x }`).
     Set(Val, u32, Val),
+    /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
+    /// s => …)`): `var` is the state, defined by the loop and seen by its
+    /// regions; it starts as `init`; `step` yields the next state. With
+    /// `count` (evolve) the step runs that many times (a negative count
+    /// stops the program); with `done` (settle) it runs until `done`,
+    /// asked before each step, yields true. The loop gives the last state.
+    Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region },
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +216,23 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Set(v, k, x) => {
                 let _ = writeln!(out, "{v} with .{k} = {x}: {}", i.ty.name());
             }
+            Op::Loop { init, var, count, done, step } => {
+                match count {
+                    Some(n) => {
+                        let _ = writeln!(out, "loop {var} = {init}, {n} times: {} {{", i.ty.name());
+                    }
+                    None => {
+                        let _ = writeln!(out, "loop {var} = {init}: {} {{", i.ty.name());
+                    }
+                }
+                if let Some(d) = done {
+                    let _ = writeln!(out, "{pad}  until:");
+                    region(out, d, depth + 1);
+                }
+                let _ = writeln!(out, "{pad}  step:");
+                region(out, step, depth + 1);
+                let _ = writeln!(out, "{pad}}}");
+            }
             Op::If { cond, then, els } => {
                 let _ = writeln!(out, "if {cond}: {} {{", i.ty.name());
                 region(out, then, depth + 1);
@@ -281,6 +305,37 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: {v} has no parts", f.name));
                 }
                 ty(*x, types)?;
+            }
+            Op::Loop { init, var, count, done, step } => {
+                let st = ty(*init, types)?;
+                if st != i.ty {
+                    return Err(format!("{}: the loop {} starts as another type", f.name, i.dst));
+                }
+                if let Some(n) = count
+                    && ty(*n, types)? != Ty::I64
+                {
+                    return Err(format!("{}: the loop {} counts with a value that is not an i64", f.name, i.dst));
+                }
+                // the state: defined by the loop, seen inside it
+                let vd = var.0 as usize;
+                if vd >= types.len() || types[vd].is_some() {
+                    return Err(format!("{}: the loop's state {var} is defined twice", f.name));
+                }
+                types[vd] = Some(st);
+                scope.push(*var);
+                if let Some(d) = done {
+                    verify_region(f, d, types, scope)?;
+                    let v = d.result.ok_or_else(|| format!("{}: the loop's until yields nothing", f.name))?;
+                    if types[v.0 as usize] != Some(Ty::Bool) {
+                        return Err(format!("{}: the loop's until is not a truth value", f.name));
+                    }
+                }
+                verify_region(f, step, types, scope)?;
+                let v = step.result.ok_or_else(|| format!("{}: the loop's step yields nothing", f.name))?;
+                if types[v.0 as usize] != Some(st) {
+                    return Err(format!("{}: the loop's step yields another type", f.name));
+                }
+                scope.retain(|x| x != var);
             }
             Op::If { cond, then, els } => {
                 if ty(*cond, types)? != Ty::Bool {
