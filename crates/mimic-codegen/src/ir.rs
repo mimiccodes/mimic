@@ -70,6 +70,10 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.as_ty(r, ty, "value")?
                 }
                 Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
+                Op::Loop { init, var, count, done, step } => {
+                    let (init, count) = (get(vals, *init)?, count.map(|c| get(vals, c)).transpose()?);
+                    self.ir_loop(f, ty, init, *var, count, done.as_ref(), step, vals)?
+                }
                 // a value kept in registers: a short list, or a tuple or
                 // record as a struct of its parts
                 Op::Make(xs) => {
@@ -118,6 +122,63 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(v) => get(vals, v),
             None => Ok(self.null()),
         }
+    }
+
+    /// A loop over a state (evolve, settle): the state a phi of its type;
+    /// `done`, when there is one, asked before each step, as the runtime
+    /// asks it; a count below zero stops the program, as evolve does.
+    #[allow(clippy::too_many_arguments)]
+    fn ir_loop(&mut self, f: &Function, ty: Ty, init: V<'ctx>, var: mimic_ir::Val, count: Option<V<'ctx>>, done: Option<&Region>, step: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let x0 = self.as_ty(init, ty, "loop state")?;
+        let n = match count {
+            Some(c) => {
+                let n = self.to_i64(c)?;
+                let neg = self.b.build_int_compare(inkwell::IntPredicate::SLT, n, i64t.const_zero(), "").s()?;
+                self.panic_if(neg, "evolve: the number of steps cannot be negative")?;
+                Some(n)
+            }
+            None => None,
+        };
+        let fun = self.cur_fn.ok_or("internal compiler error: a loop outside a function")?;
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "loop");
+        let body = self.ctx.append_basic_block(fun, "loop_step");
+        let out = self.ctx.append_basic_block(fun, "loop_done");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let xp = self.b.build_phi(self.repr(ty), "state").s()?;
+        let ip = match n {
+            Some(_) => Some(self.b.build_phi(i64t, "i").s()?),
+            None => None,
+        };
+        let cur = self.val_of(xp.as_basic_value(), ty, false);
+        vals[var.0 as usize] = Some(cur);
+        let stop = match (n, done) {
+            (Some(n), _) => {
+                let i = ip.unwrap().as_basic_value().into_int_value();
+                self.b.build_int_compare(inkwell::IntPredicate::SGE, i, n, "").s()?
+            }
+            (None, Some(d)) => {
+                let v = self.ir_region(f, d, vals)?;
+                self.truth(v)?
+            }
+            (None, None) => return Err("internal compiler error: a loop with no end".into()),
+        };
+        self.b.build_conditional_branch(stop, out, body).s()?;
+        self.b.position_at_end(body);
+        let next = self.ir_region(f, step, vals)?;
+        let next = self.as_ty(next, ty, "loop state")?;
+        let latch = self.b.get_insert_block().unwrap();
+        if let Some(ip) = ip {
+            let i = ip.as_basic_value().into_int_value();
+            let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+            ip.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        }
+        self.b.build_unconditional_branch(head).s()?;
+        xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
+        self.b.position_at_end(out);
+        Ok(cur)
     }
 
     fn ir_if(&mut self, f: &Function, ty: Ty, cond: V<'ctx>, then: &Region, els: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {

@@ -6,6 +6,7 @@ use crate::{Function, Inst, Op, Region, Ty, Val};
 use mimic_check::types::{Spec, id};
 use mimic_check::{FnId, FnKind, Program, Resolved};
 use mimic_syntax::ast::{BinOp, Block, Expr, ExprKind, Stmt};
+use mimic_syntax::glyphs::Prim;
 
 struct Lower<'a> {
     p: &'a Program,
@@ -81,6 +82,31 @@ fn calls_in_stmts(b: &Block) -> usize {
         n += 1;
     }
     n
+}
+
+impl Lower<'_> {
+    /// Whether `e` is a one-parameter lambda the checker typed `param → ret`.
+    fn lambda_is(&self, e: &Expr, param: Ty, ret: Ty) -> bool {
+        let ExprKind::Lambda { params, .. } = &e.kind else { return false };
+        if params.len() != 1 {
+            return false;
+        }
+        match self.spec.lambdas.get(&id(e)) {
+            Some((pts, rt)) => pts.len() == 1 && Ty::of(self.p, pts[0]) == Some(param) && Ty::of(self.p, *rt) == Some(ret),
+            None => false,
+        }
+    }
+
+    /// A one-parameter lambda's body as a region, its parameter bound to `v`.
+    fn lambda_region(&mut self, e: &Expr, v: Val, t: Ty) -> Option<Region> {
+        let ExprKind::Lambda { params, body } = &e.kind else { return None };
+        let mut reg = Region::default();
+        self.env.push((params[0].clone(), v, t));
+        let out = self.expr(&mut reg, body);
+        self.env.pop();
+        reg.result = Some(out?);
+        Some(reg)
+    }
 }
 
 /// A single number or truth value (not a value with parts).
@@ -230,6 +256,34 @@ impl Lower<'_> {
                 t.result = Some(tv);
                 f.result = Some(fv);
                 Some(self.emit(r, ty, Op::If { cond: c, then: t, els: f }, e.span))
+            }
+            // x ▷ evolve(n, s => …), x ▷ settle(s => …, s => …): a loop whose
+            // state keeps x's type (the step's lambda typed state → state)
+            ExprKind::Prim { prim: prim @ (Prim::Evolve | Prim::Settle), args } if args.len() == 3 => {
+                let evolve = *prim == Prim::Evolve;
+                let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
+                if self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                    return None;
+                }
+                let init = self.expr(r, &args[0])?;
+                let count = if evolve {
+                    if self.ty(&args[1])? != Ty::I64 {
+                        return None;
+                    }
+                    Some(self.expr(r, &args[1])?)
+                } else {
+                    None
+                };
+                // the state: a value the loop defines, seen by its regions
+                let var = Val(self.next);
+                self.next += 1;
+                self.types.push(ty);
+                let done = match done {
+                    Some(d) => Some(self.lambda_region(d, var, ty)?),
+                    None => None,
+                };
+                let step = self.lambda_region(step, var, ty)?;
+                Some(self.emit(r, ty, Op::Loop { init, var, count, done, step }, e.span))
             }
             // a value kept in registers, from its parts
             ExprKind::Tuple(xs) | ExprKind::Array(xs) if matches!(ty, Ty::Agg(_)) => {

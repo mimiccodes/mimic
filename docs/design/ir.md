@@ -79,7 +79,8 @@ Kernels for Metal today, and for Vulkan, CUDA and ROCm in the stages after 0.4, 
 
 * **Step 1 (0.4.1-dev):** the `mimic-ir` crate: types, values and regions, a printer and a verifier, and lowering for functions of plain numbers and truth values (literals, parameters, `let`, operators, `and`/`or` as `if`, `if`, calls). The code generator emits such a function's body from its IR, with its own operators and calls, so results do not change; anything else, and any function where calls run in parallel, takes the old path. `MIMIC_IR=1` turns it on (off by default for now), `MIMIC_IR=print` also prints each function's IR, and CI runs every fixture through it on Linux.
 * **Step 2:** values kept in registers: short lists (1 … 16 numbers or truth values) and tuples and records of numbers, truth values and such lists (64 numbers at most, the code generator's rule). They are made (`(a, b)`, `[x y z]`, `R { … }`), read (`.field`, `.0`, `xs[2]`), changed (`{ r with … }` of a variable) and taken apart (`let (a, b) = …`), and passed to and returned from functions. Operators stay on single values: on lists they work element by element, which comes with the array operations.
-* **Next:** `match`, `evolve` and `settle` as loops, lists and the array operations; then inlining, lambdas compiled per use and constants built once, and the IR on by default.
+* **Step 3:** `evolve` and `settle` as loops: one structured operation with the state as a value the loop defines (a number or a value kept in registers), the step's and `done`'s lambdas as its regions (what they use from outside is simply in scope), `done` asked before each step and a negative count stopping the program, as before. Loops nest.
+* **Next:** `match`, lists and the array operations; then inlining, lambdas compiled per use and constants built once, and the IR on by default.
 
 ## Risks
 

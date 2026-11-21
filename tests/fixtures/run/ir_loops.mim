@@ -1,0 +1,22 @@
+module main
+
+// evolve and settle over numbers and values kept in registers (tuples,
+// records), nested, with a step count of zero: loops in the IR, the same
+// output with MIMIC_IR=1 as without.
+type Acc = { sum: i64, sq: i64, n: i64 }
+fn tri(n: i64) -> i64 { 0 ▷ evolve(n, s => s + 1) }
+fn fib(n: i64) -> i64 { ((0, 1) ▷ evolve(n, s => (s.1, s.0 + s.1))).0 }
+fn collatz(x: i64) -> i64 { ((x, 0) ▷ settle(s => (if s.0 % 2 == 0 { s.0 div 2 } else { 3 * s.0 + 1 }, s.1 + 1), s => s.0 == 1)).1 }
+fn stats(n: i64) -> Acc { Acc { sum: 0, sq: 0, n: 0 } ▷ evolve(n, a => { a with sum: a.sum + a.n, sq: a.sq + a.n * a.n, n: a.n + 1 }) }
+fn grid(n: i64) -> i64 { ((0, 0) ▷ evolve(n, s => (s.0 + 1, s.1 + (0 ▷ evolve(s.0, t => t + s.0))))).1 }
+fn halves(x: f64) -> f64 { x ▷ settle(v => v / 2.0, v => v < 1.0) }
+fn none(n: i64) -> i64 { 5 ▷ evolve(n, s => s * 2) }
+fn main() {
+    print(tri(10))
+    print(fib(50))
+    print(collatz(27))
+    print(stats(10))
+    print(grid(6))
+    print(halves(100.0))
+    print(none(0))
+}
