@@ -14,6 +14,23 @@
 //! comparisons, `and`/`or`, `if` and calls.
 
 pub mod lower;
+
+/// What lowering asks the code generator.
+pub trait Hints {
+    /// Whether `let name = value` (followed by `rest` and `tail`) is a list
+    /// used only inside array expressions, which the old path fuses into
+    /// those uses rather than build. `scope`: the variables in scope with
+    /// their types; `lazies`: the lazy lets in scope.
+    fn lazy(
+        &mut self,
+        name: &str,
+        value: &mimic_syntax::ast::Expr,
+        rest: &[mimic_syntax::ast::Stmt],
+        tail: Option<&mimic_syntax::ast::Expr>,
+        scope: &[(String, Ty)],
+        lazies: &[(String, *const mimic_syntax::ast::Expr)],
+    ) -> bool;
+}
 pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
@@ -146,7 +163,10 @@ pub enum Op {
     /// it stands: `uses` are the variables it reads, given as these IR
     /// values. A bridge while the IR grows; each kind becomes an operation
     /// of its own. (The syntax node lives as long as the compile.)
-    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)> },
+    /// `lazies`: `let`s of lists used only inside array expressions, never
+    /// built: the old path fuses each into where it is read (in order:
+    /// one may read an earlier one).
+    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -241,8 +261,9 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
             }
-            Op::Embed { uses, .. } => {
-                let a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+            Op::Embed { uses, lazies, .. } => {
+                let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+                a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
                 let _ = writeln!(out, "embed({}): {}", a.join(", "), i.ty.name());
             }
             Op::Index(v, k, _) => {
