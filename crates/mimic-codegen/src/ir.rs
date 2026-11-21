@@ -3,8 +3,10 @@
 //! operators, calls and conversions are this code generator's own, so a
 //! function gives the same results either way.
 //!
-//! `MIMIC_IR=1` sends the functions the IR covers through it (off by
-//! default while it grows); `MIMIC_IR=print` also prints their IR.
+//! Every function the IR covers goes through it (what it does not cover
+//! yet is embedded: compiled by the old path where it stands);
+//! `MIMIC_IR=0` turns it off (the old path for everything), and
+//! `MIMIC_IR=print` also prints each function's IR.
 
 use crate::{Cg, OrStr, R, V};
 use inkwell::values::BasicValueEnum;
@@ -16,8 +18,8 @@ pub(crate) fn wanted() -> (bool, bool) {
     static MODE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("MIMIC_IR").as_deref() {
         Ok("print") => (true, true),
-        Ok("1") => (true, false),
-        _ => (false, false),
+        Ok("0") => (false, false),
+        _ => (true, false),
     })
 }
 
