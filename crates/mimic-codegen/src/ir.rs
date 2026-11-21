@@ -65,7 +65,19 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.as_ty(r, ty, "operator result")?
                 }
                 Op::Call { site, callee, args } => {
-                    let a = args.iter().map(|v| get(vals, *v)).collect::<R<Vec<_>>>()?;
+                    // a list the IR owns is lent to the call: a callee that
+                    // takes its parameter over gets its own reference (the
+                    // call retains a lent value it hands over), and the IR
+                    // still releases its own at the region's end
+                    let a = args
+                        .iter()
+                        .map(|v| {
+                            get(vals, *v).map(|x| match x {
+                                V::P(p, true) => V::P(p, false),
+                                x => x,
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
                     let r = self.call_user(*site, *callee, a)?;
                     self.as_ty(r, ty, "value")?
                 }
@@ -92,6 +104,30 @@ impl<'ctx> Cg<'ctx, '_> {
                             V::R(out, ty)
                         }
                     }
+                }
+                // an expression the IR does not cover yet: the old path
+                // compiles it here, its variables the IR's values (lent: in
+                // slots of their own, never released from there)
+                Op::Embed { expr, uses } => {
+                    let mut locals = Vec::new();
+                    for (name, v, t) in uses {
+                        let ct = checker_ty(*t);
+                        let val = get(vals, *v)?;
+                        let slot = self.entry_alloca(ct, name)?;
+                        self.b.build_store(slot, self.basic(val)).s()?;
+                        locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
+                    }
+                    self.scopes.push(locals);
+                    // SAFETY: the syntax tree outlives the compile
+                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
+                    let out = self.expr(e);
+                    self.scopes.pop();
+                    let out = out?;
+                    // (it may have ended the block: a return, a panic)
+                    if self.terminated() {
+                        self.dead_block();
+                    }
+                    self.as_ty(out, ty, "value")?
                 }
                 // a list's length, from its header (a list passed in: never
                 // owned here, so nothing to release)

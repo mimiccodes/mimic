@@ -1983,7 +1983,10 @@ impl<'ctx> Cg<'ctx, '_> {
         self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
         // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
         let (use_ir, print_ir) = ir::wanted();
-        let lowered = if use_ir && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() {
+        // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
+        // which function an IR difference comes from)
+        let only = std::env::var("MIMIC_IR_ONLY").ok();
+        let lowered = if use_ir && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
             mimic_ir::lower::function(self.p, k.0, &spec).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
                 Err(e) => {

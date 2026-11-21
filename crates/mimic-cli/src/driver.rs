@@ -1791,7 +1791,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
         text.push_str(&format!("{:?}{:?}", pr.manifest.ffi_link, pr.manifest.ffi_search));
     }
     // switches that change the code made (the IR, parts turned off for tests)
-    for v in ["MIMIC_IR", "MIMIC_DEBUG_DISABLE"] {
+    for v in ["MIMIC_IR", "MIMIC_IR_ONLY", "MIMIC_DEBUG_DISABLE"] {
         text.push_str(&format!("|{v}={}", std::env::var(v).unwrap_or_default()));
     }
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
