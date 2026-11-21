@@ -753,6 +753,15 @@ impl Infer<'_> {
                     Ok(t) => ret = t,
                     Err(m) => w.err(Diag::new(&C::TYPE_MISMATCH, format!("return value of `{path}`: {m}"), d.span)),
                 }
+                // `-> [i64]` (or `[f64]`) whose body gives a list of unknown
+                // type (`if … { [] } else { [x] }`): the declared list, the
+                // value made typed (checked) once as it is returned, so a
+                // caller's `flatten`, indexing and arithmetic on it run typed
+                if let Ty::Arr(El::Dyn, _) = ret
+                    && let Some(Ty::Arr(el @ (El::I64 | El::F64), _)) = ann_env(p, module, rt, &env)
+                {
+                    ret = Ty::Arr(el, 0);
+                }
             }
             w.out.ret = ret;
             let out = std::mem::take(&mut w.out);
