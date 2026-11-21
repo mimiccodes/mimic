@@ -4964,38 +4964,6 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(phi.as_basic_value().into_pointer_value())
     }
 
-    /// `put(xs, i, x)` on a list in registers: the same list with element
-    /// `i` replaced (a constant index: one insert; else one select per
-    /// element, which folds once `i` is known); an index out of bounds
-    /// stops the program as indexing does.
-    fn put_fixed(&mut self, arr: inkwell::values::ArrayValue<'ctx>, el: El, i: IntValue<'ctx>, x: V<'ctx>) -> R<V<'ctx>> {
-        let n = arr.get_type().len();
-        let i64t = self.ctx.i64_type();
-        let xv = self.basic(x);
-        if let Some(k) = i.get_zero_extended_constant().filter(|k| *k < n as u64) {
-            let r = self.b.build_insert_value(arr, xv, k as u32, "").s()?.into_array_value();
-            return Ok(V::A(r, el));
-        }
-        let ok = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(n as u64, false), "").s()?;
-        let f = self.cur_fn.unwrap();
-        let good = self.ctx.append_basic_block(f, "put_ok");
-        let bad = self.ctx.append_basic_block(f, "put_bad");
-        self.b.build_conditional_branch(ok, good, bad).s()?;
-        self.b.position_at_end(bad);
-        let bx = self.boxed(V::A(arr, el))?;
-        self.call_rt("mim_index_fail", &[self.basic(bx).into(), i.into()])?;
-        self.b.build_unreachable().s()?;
-        self.b.position_at_end(good);
-        let mut out = arr;
-        for k in 0..n {
-            let is_k = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_int(k as u64, false), "").s()?;
-            let old = self.b.build_extract_value(arr, k, "").s()?;
-            let v = self.b.build_select(is_k, xv, old, "").s()?;
-            out = self.b.build_insert_value(out, v, k, "").s()?.into_array_value();
-        }
-        Ok(V::A(out, el))
-    }
-
     /// Element `i` (in bounds) of a list in registers, chosen with compares
     /// and selects: no memory, and it folds to one register once `i` is
     /// known (after inlining and unrolling).
@@ -5574,39 +5542,6 @@ impl<'ctx> Cg<'ctx, '_> {
                     let r = self.call_rt_ptr("mim_std_sort", &[self.basic(b).into()])?;
                     self.drop_tmp(b)?;
                     return self.as_ty(r, ty, "sort");
-                }
-                // put on a list kept in registers (a 16-word state, a 3×3
-                // block): the element replaced in registers, the index checked
-                // as any index is; no list on the heap, nothing boxed. Only a
-                // value of the list's own kind (a float into a list of
-                // integers turns it into floats: the runtime's way)
-                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
-                    && decl.intrinsic
-                    && decl.name == "put"
-                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
-                    && args.len() == 3
-                    && let Some((el @ (El::I64 | El::F64 | El::Bool), _)) = fixed(self.ty_of(&args[0]))
-                    && self.ty_of(&args[1]) == Ty::I64
-                    && self.ty_of(&args[2]) == Ty::of_el(el)
-                {
-                    let xs = self.expr(&args[0])?;
-                    let xs = self.as_ty(xs, self.ty_of(&args[0]), "put")?;
-                    let k = self.expr(&args[1])?;
-                    let k = self.to_i64(k)?;
-                    let x = self.expr(&args[2])?;
-                    let x = self.as_ty(x, Ty::of_el(el), "put")?;
-                    if let V::A(arr, _) = xs {
-                        let r = self.put_fixed(arr, el, k, x)?;
-                        return self.as_ty(r, ty, "put");
-                    }
-                    let b = self.boxed(xs)?;
-                    let kb = self.boxed(V::I(k))?;
-                    let xb = self.boxed(x)?;
-                    let r = self.call_rt_ptr("mim_std_put", &[self.basic(b).into(), self.basic(kb).into(), self.basic(xb).into()])?;
-                    self.drop_tmp(b)?;
-                    self.drop_tmp(kb)?;
-                    self.drop_tmp(xb)?;
-                    return self.as_ty(r, ty, "put");
                 }
                 // bytes::from over a fused integer expression: written
                 // straight into bytes, in one pass

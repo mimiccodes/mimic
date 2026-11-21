@@ -1,9 +1,9 @@
 module main
 
-// put on a list kept in registers (its length known, 16 or fewer) changes it
-// there, with a constant or a computed index; put into a list of i64 held
-// once in a record stores in place. A float into a list of integers still
-// takes the general way (the list becomes floats).
+// put into a list of i64 held once in a record stores in place (the runtime
+// only when it is shared or the index is out of range); put on short lists,
+// with constant and computed indexes, and a float into a list of integers
+// (the list becomes floats) as before.
 
 type S = { v: [i64] }
 
