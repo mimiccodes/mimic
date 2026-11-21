@@ -1591,6 +1591,21 @@ impl<'ctx> Cg<'ctx, '_> {
         self.fused_reduce_root(prim, root, plan, float)
     }
 
+    /// `+/ ×/ ⌈/ ⌊/` of a list of numbers (a lent one: not released here),
+    /// as the fused reduction of a single leaf: SIMD, split over the cores
+    /// when large. `⌈/` and `⌊/` of an empty list stop the program, as the
+    /// runtime's reductions do.
+    pub(crate) fn reduce_list(&mut self, prim: Prim, list: V<'ctx>, el: El) -> R<V<'ctx>> {
+        let mut plan = Plan::default();
+        let root = self.leaf(list, el, &mut plan)?;
+        if matches!(prim, Prim::Maximum | Prim::Minimum) {
+            let n = self.plan_len(&plan)?;
+            let empty = self.b.build_int_compare(IntPredicate::EQ, n, self.ctx.i64_type().const_zero(), "empty").s()?;
+            self.panic_if(empty, "maximum/minimum of an empty array")?;
+        }
+        self.fused_reduce_root(prim, root, plan, el == El::F64)
+    }
+
     fn fused_reduce_root(&mut self, prim: Prim, root: Node, plan: Plan<'ctx>, float: bool) -> R<V<'ctx>> {
         let n = self.plan_len(&plan)?;
         if prim == Prim::Len {

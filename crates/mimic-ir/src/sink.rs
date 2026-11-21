@@ -61,7 +61,8 @@ fn movable(op: &Op) -> bool {
         Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Un(..) | Op::Make(_) | Op::Get(..) | Op::Set(..) | Op::Len(_) => true,
         // a division by zero stops the program: it must stay where it is
         Op::Bin(op, ..) => !matches!(op, BinOp::Div | BinOp::Mod | BinOp::IntDiv),
-        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Embed { .. } | Op::Loop { .. } => false,
+        // (a reduction is work: it stays where the program does it)
+        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Embed { .. } | Op::Loop { .. } => false,
     }
 }
 
@@ -101,7 +102,7 @@ fn reads(op: &Op, v: Val) -> bool {
     match op {
         Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => false,
         Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => *a == v || *b == v,
-        Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) => *a == v,
+        Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Reduce(_, a, _) => *a == v,
         Op::Call { args, .. } => args.contains(&v),
         Op::Make(xs) => xs.contains(&v),
         Op::Embed { uses, .. } => uses.iter().any(|(_, u, _)| *u == v),

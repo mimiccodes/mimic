@@ -451,6 +451,18 @@ impl Lower<'_> {
         true
     }
 
+    /// `e` in the IR's own operations, never embedded (what a failed
+    /// lowering emitted taken back).
+    fn direct(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let (mark, env_mark) = (r.insts.len(), self.env.len());
+        let v = self.lower(r, e);
+        if v.is_none() {
+            r.insts.truncate(mark);
+            self.env.truncate(env_mark);
+        }
+        v
+    }
+
     /// `e` kept whole for the old path, reading these variables.
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         let ty = self.ty(e)?;
@@ -560,10 +572,22 @@ impl Lower<'_> {
                 let a = self.expr(r, expr)?;
                 Some(self.emit(r, ty, Op::Un(*op, a), e.span))
             }
-            // ≢ xs of a list
+            // ≢ xs of a list (an array expression the old path computes
+            // fused, without building it: embedded whole)
             ExprKind::Prim { prim: Prim::Len, args } if args.len() == 1 && ty == Ty::I64 && matches!(self.ty(&args[0])?, Ty::List(_)) => {
-                let v = self.expr(r, &args[0])?;
+                let v = self.direct(r, &args[0])?;
                 Some(self.emit(r, ty, Op::Len(v), e.span))
+            }
+            // +/ ×/ ⌈/ ⌊/ of a list of numbers the IR holds (of an array
+            // expression: embedded whole, fused by the old path)
+            ExprKind::Prim { prim: p @ (Prim::Sum | Prim::Product | Prim::Maximum | Prim::Minimum), args } if args.len() == 1 => {
+                let Ty::List(mimic_check::types::Ty::Arr(el @ (mimic_check::types::El::I64 | mimic_check::types::El::F64), _)) = self.ty(&args[0])? else { return None };
+                let want = if el == mimic_check::types::El::F64 { Ty::F64 } else { Ty::I64 };
+                if ty != want {
+                    return None;
+                }
+                let v = self.direct(r, &args[0])?;
+                Some(self.emit(r, ty, Op::Reduce(*p, v, el), e.span))
             }
             // xs[i] of a list: a number of its kind
             ExprKind::Index { base, index } if matches!(self.ty(base)?, Ty::List(_)) => {

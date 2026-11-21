@@ -171,6 +171,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     let n = self.b.build_load(i64t, self.b.build_struct_gep(self.val_ty(), p, 3, "").s()?, "len").s()?.into_int_value();
                     V::I(n)
                 }
+                // a reduction: the fused engine's kernel over the one list
+                // (lent to it)
+                Op::Reduce(p, v, el) => {
+                    let x = match get(vals, *v)? {
+                        V::P(p, true) => V::P(p, false),
+                        x => x,
+                    };
+                    let out = self.reduce_list(*p, x, *el)?;
+                    self.as_ty(out, ty, "reduction")?
+                }
                 // an element, as the code generator reads a typed list (its
                 // kind checked, one bounds check)
                 Op::Index(v, k, el) => {

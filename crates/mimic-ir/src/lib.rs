@@ -158,6 +158,9 @@ pub enum Op {
     /// Element `i` of a list whose elements are of kind `el` (an index out
     /// of range stops the program).
     Index(Val, Val, mimic_check::types::El),
+    /// `+/ ×/ ⌈/ ⌊/` of a list of numbers of kind `el` (`⌈/` and `⌊/` of
+    /// an empty list stop the program, as the runtime's reductions do).
+    Reduce(mimic_syntax::glyphs::Prim, Val, mimic_check::types::El),
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -261,6 +264,9 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
             }
+            Op::Reduce(p, v, _) => {
+                let _ = writeln!(out, "reduce {p:?} {v}: {}", i.ty.name());
+            }
             Op::Embed { uses, lazies, .. } => {
                 let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
                 a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
@@ -361,6 +367,12 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Len(v) => {
                 if !matches!(ty(*v, types)?, Ty::List(_)) {
                     return Err(format!("{}: {v} is not a list", f.name));
+                }
+            }
+            Op::Reduce(_, v, el) => {
+                let want = if *el == mimic_check::types::El::F64 { Ty::F64 } else { Ty::I64 };
+                if !matches!(ty(*v, types)?, Ty::List(_)) || i.ty != want {
+                    return Err(format!("{}: the reduction of {v} is not of a list's numbers", f.name));
                 }
             }
             Op::Index(v, k, _) => {
