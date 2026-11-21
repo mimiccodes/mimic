@@ -173,13 +173,18 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 // a reduction: the fused engine's kernel over the one list
                 // (lent to it)
-                Op::Reduce(p, v, el) => {
-                    let x = match get(vals, *v)? {
-                        V::P(p, true) => V::P(p, false),
-                        x => x,
+                Op::Reduce(p, t, el) => {
+                    let out = {
+                        let vals: &Vec<Option<V<'ctx>>> = vals;
+                        self.reduce_tree(*p, t, &|v| get(vals, v), *el, i.span)?
                     };
-                    let out = self.reduce_list(*p, x, *el)?;
                     self.as_ty(out, ty, "reduction")?
+                }
+                // a list computed element by element: one loop (owned)
+                Op::Map(t) => {
+                    let Ty::Arr(el, _) = ty else { return Err("internal compiler error: an IR map that is not a list".into()) };
+                    let vals: &Vec<Option<V<'ctx>>> = vals;
+                    self.map_tree(t, &|v| get(vals, v), el, i.span)?
                 }
                 // an element, as the code generator reads a typed list (its
                 // kind checked, one bounds check)
