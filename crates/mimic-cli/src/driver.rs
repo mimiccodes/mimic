@@ -1088,6 +1088,12 @@ impl Phases {
 pub use crate::toolchain::run_tool;
 use crate::toolchain::{self, LinkJob, Toolchain};
 
+/// Whether `MIMIC_COUNT_RC=1` asks for a build that counts reference-count
+/// operations (the runtime counts them; the code calls it for every one).
+pub fn counting_rc() -> bool {
+    std::env::var("MIMIC_COUNT_RC").is_ok_and(|v| v == "1")
+}
+
 /// Compile (and cache) the C runtime for a target.
 pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Option<&str>, frame_pointers: bool) -> Result<PathBuf, String> {
     let portable = cpu == Some("portable");
@@ -1115,6 +1121,11 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
             flags.push(if x86 { format!("-march={cpu}") } else { format!("-mcpu={cpu}") });
         }
         _ => {}
+    }
+    // MIMIC_COUNT_RC=1: a runtime that counts its reference-count operations
+    // (docs/design/ownership.md)
+    if counting_rc() {
+        flags.push("-DMIM_COUNT_RC=1".into());
     }
     // static Linux: TLS from the bundled Mbed TLS (OpenSSL cannot be loaded)
     if let Some(tls) = toolchain::static_tls(tc) {
@@ -1791,7 +1802,7 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
         text.push_str(&format!("{:?}{:?}", pr.manifest.ffi_link, pr.manifest.ffi_search));
     }
     // switches that change the code made (the IR, parts turned off for tests)
-    for v in ["MIMIC_IR", "MIMIC_IR_ONLY", "MIMIC_DEBUG_DISABLE"] {
+    for v in ["MIMIC_IR", "MIMIC_IR_ONLY", "MIMIC_DEBUG_DISABLE", "MIMIC_COUNT_RC"] {
         text.push_str(&format!("|{v}={}", std::env::var(v).unwrap_or_default()));
     }
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());

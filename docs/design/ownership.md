@@ -72,3 +72,15 @@ nothing else holds it. No annotation: the language does not change.
 **Done when:** the steps of `qoi` and `paths` copy nothing, and the
 reference-count operations of the corpus are at least halved (counted
 with `MIMIC_COUNT_RC=1`).
+
+## Measured
+
+`python3 tools/rc-count.py --mimic target/release/mimic` builds every
+benchmark with `MIMIC_COUNT_RC=1` and counts its reference-count operations
+(retains and releases; the three server benchmarks, which need their load
+generator, left out), one core, each output checked.
+
+**Before (0.4.1, macOS arm64):** 937,280,880 operations over 127 benchmarks
+(176,852,980 retains, 760,427,900 releases; 221,252,487 values freed). The
+most: vm 87.2 M, soundex 63.6 M, brainf 63.0 M, markdown 57.1 M, url 54.9 M, semver 53.8 M, roman 40.5 M, sudoku 38.9 M. `qoi` 31.6 M, `paths` 6.0 M. 52 benchmarks make fewer
+than a thousand (their numbers stay in registers or in fused loops).
