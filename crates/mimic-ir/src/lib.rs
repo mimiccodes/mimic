@@ -37,6 +37,10 @@ pub trait Hints {
 
     /// The types of a user function's specialisation (for inlining it).
     fn spec(&mut self, key: &mimic_check::types::Key) -> Option<std::rc::Rc<mimic_check::types::Spec>>;
+
+    /// Which parameters of a user function's specialisation it takes over
+    /// (its callers hand over a reference).
+    fn takes(&mut self, key: &mimic_check::types::Key) -> Vec<bool>;
 }
 pub mod fuse;
 pub mod own;
@@ -152,13 +156,21 @@ pub enum Op {
     Unit,
     /// The function's parameter number `n`.
     Param(u32),
+    /// The function's parameter number `n`, which it takes over: the caller
+    /// handed over a reference, owned here (released after its last use, or
+    /// moved on).
+    Take(u32),
     /// An operator on two values, both always evaluated (`and`/`or` become
     /// an [`Op::If`]).
     Bin(BinOp, Val, Val),
     Un(UnOp, Val),
     /// A call of a user function. `site` is the call's syntax node (what
     /// the code generator keys the callee's specialisation and placement by).
-    Call { site: usize, callee: mimic_check::FnId, args: Vec<Val> },
+    /// `takes`: which parameters the callee takes over; `moves`: which
+    /// arguments are handed over as they are (an owned value at its last
+    /// use, set by [`own`]), the others lent (a callee that takes one gets a
+    /// reference of its own).
+    Call { site: usize, callee: mimic_check::FnId, args: Vec<Val>, takes: Vec<bool>, moves: Vec<bool> },
     /// `if cond { then } else { els }`: the value the branch taken yields.
     If { cond: Val, then: Region, els: Region },
     /// A value kept in registers made of its parts (a tuple's elements, a
@@ -185,11 +197,20 @@ pub enum Op {
     /// (placed by [`own`]; gives nothing).
     Drop(Val),
     /// A record of type `tid` on the heap, its fields in declaration order
-    /// (owned).
-    Record { tid: usize, fields: Vec<Val> },
+    /// (owned). `moves`: the fields handed over as they are (owned values at
+    /// their last use, set by [`own`]); the record takes a reference of its
+    /// own to the others.
+    Record { tid: usize, fields: Vec<Val>, moves: Vec<bool> },
     /// Field `k` of a record on the heap: borrowed from a borrowed record,
-    /// its own reference from an owned one.
-    Field { base: Val, tid: usize, k: u32 },
+    /// its own reference from an owned one, unless `borrow` (set by
+    /// [`own`]: the record is kept until the field's last use).
+    Field { base: Val, tid: usize, k: u32, borrow: bool },
+    /// `{ base with … }` of a record on the heap: fields `k` replaced
+    /// (owned). It changes the record in place when it is held once:
+    /// `moved` (set by [`own`]) hands it the base, an owned value at its
+    /// last use; else the base is lent, and copied unless held once.
+    /// `moves`: the new values handed over as they are, as [`Op::Record`]'s.
+    With { base: Val, tid: usize, fields: Vec<(u32, Val)>, moved: bool, moves: Vec<bool> },
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -300,10 +321,11 @@ impl Op {
     /// The values the operation reads itself (not inside its regions).
     pub fn operands(&self) -> Vec<Val> {
         match self {
-            Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => vec![],
+            Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) | Op::Take(_) => vec![],
             Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
             Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
             Op::Record { fields, .. } => fields.clone(),
+            Op::With { base, fields, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).collect(),
             Op::Reduce(_, t, _) | Op::Map(t) => {
                 let mut v = Vec::new();
                 t.vals(&mut v);
@@ -334,10 +356,11 @@ impl Region {
     }
 }
 
-/// Whether the instruction makes a list it owns: a call giving a list, or
-/// an `if` yielding one (both branches then yield owned lists).
+/// Whether the instruction gives a value on the heap it owns (a list or a
+/// record): a call's, an `if`'s (both branches then yield owned values), a
+/// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { .. })
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_))
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -373,14 +396,17 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Param(n) => {
                 let _ = writeln!(out, "param {n}");
             }
+            Op::Take(n) => {
+                let _ = writeln!(out, "take param {n}: {}", i.ty.name());
+            }
             Op::Bin(op, a, b) => {
                 let _ = writeln!(out, "{a} {} {b}: {}", op.symbol(), i.ty.name());
             }
             Op::Un(op, a) => {
                 let _ = writeln!(out, "{op:?} {a}: {}", i.ty.name());
             }
-            Op::Call { callee, args, .. } => {
-                let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+            Op::Call { callee, args, takes, moves, .. } => {
+                let a: Vec<String> = args.iter().enumerate().map(|(k, v)| if moves[k] { format!("move {v}") } else if takes[k] { format!("lend {v}") } else { v.to_string() }).collect();
                 let _ = writeln!(out, "call fn#{callee}({}): {}", a.join(", "), i.ty.name());
             }
             Op::Make(xs) => {
@@ -402,12 +428,16 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Drop(v) => {
                 let _ = writeln!(out, "drop {v}");
             }
-            Op::Record { tid, fields } => {
+            Op::Record { tid, fields, .. } => {
                 let a: Vec<String> = fields.iter().map(|v| v.to_string()).collect();
                 let _ = writeln!(out, "record #{tid}({}): {}", a.join(", "), i.ty.name());
             }
-            Op::Field { base, k, .. } => {
-                let _ = writeln!(out, "{base}.field {k}: {}", i.ty.name());
+            Op::Field { base, k, borrow, .. } => {
+                let _ = writeln!(out, "{}{base}.field {k}: {}", if *borrow { "borrow " } else { "" }, i.ty.name());
+            }
+            Op::With { base, fields, moved, .. } => {
+                let a: Vec<String> = fields.iter().map(|(k, v)| format!(".{k} = {v}")).collect();
+                let _ = writeln!(out, "{}{base} with {}: {}", if *moved { "move " } else { "" }, a.join(", "), i.ty.name());
             }
             Op::Embed { uses, lazies, .. } => {
                 let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
@@ -507,7 +537,7 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
         };
         match &i.op {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit => {}
-            Op::Param(n) => {
+            Op::Param(n) | Op::Take(n) => {
                 let want = f.params.get(*n as usize).map(|p| p.1).ok_or_else(|| format!("{}: no parameter {n}", f.name))?;
                 if want != i.ty {
                     return Err(format!("{}: parameter {n} is {}, not {}", f.name, want.name(), i.ty.name()));
@@ -520,9 +550,17 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Un(_, a) => {
                 ty(*a, types)?;
             }
-            Op::Call { args, .. } | Op::Make(args) => {
+            Op::Make(args) => {
                 for a in args {
                     ty(*a, types)?;
+                }
+            }
+            Op::Call { args, takes, moves, .. } => {
+                for a in args {
+                    ty(*a, types)?;
+                }
+                if takes.len() != args.len() || moves.len() != args.len() || moves.iter().zip(takes).any(|(m, t)| *m && !t) {
+                    return Err(format!("{}: a call {} moves an argument its callee does not take", f.name, i.dst));
                 }
             }
             Op::Embed { uses, .. } => {
@@ -555,7 +593,10 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: drop of {v}, not on the heap", f.name));
                 }
             }
-            Op::Record { fields, .. } => {
+            Op::Record { fields, moves, .. } => {
+                if moves.len() != fields.len() {
+                    return Err(format!("{}: a record {} with moves not one per field", f.name, i.dst));
+                }
                 for v in fields {
                     ty(*v, types)?;
                 }
@@ -566,6 +607,17 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Field { base, .. } => {
                 if !matches!(ty(*base, types)?, Ty::Rec(_)) {
                     return Err(format!("{}: a field of {base}, not a record", f.name));
+                }
+            }
+            Op::With { base, fields, moves, .. } => {
+                if moves.len() != fields.len() {
+                    return Err(format!("{}: a `with` {} with moves not one per field", f.name, i.dst));
+                }
+                if ty(*base, types)? != i.ty || !matches!(i.ty, Ty::Rec(_)) {
+                    return Err(format!("{}: `with` on {base}, not a record of its type", f.name));
+                }
+                for (_, v) in fields {
+                    ty(*v, types)?;
                 }
             }
             Op::Index(v, k, _) => {

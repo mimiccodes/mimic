@@ -40,10 +40,14 @@ struct Lower<'a> {
     local_names: Vec<String>,
     /// Variables in scope, innermost last.
     env: Vec<(String, Val, Ty)>,
+    /// Set when an expression left to the old path would take over a
+    /// variable (see [`Lower::takes_var`]): the whole function stays there.
+    bail: bool,
 }
 
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
-pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, hints: &mut dyn crate::Hints) -> Option<Function> {
+/// `takes`: the parameters it takes over (owned here).
+pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool], hints: &mut dyn crate::Hints) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
     let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
     let ret = Ty::of(p, spec.ret)?;
@@ -52,13 +56,25 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, hints: &mut dyn
     }
     let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
     decl.body.bound_names(&mut local_names);
-    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new() };
+    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new(), bail: false };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
-        let v = l.emit(&mut body, *t, Op::Param(i as u32), decl.span);
+        let op = if takes.get(i).copied().unwrap_or(false) {
+            // (taken over: a value on the heap the function owns)
+            if !matches!(t, Ty::List(_) | Ty::Rec(_)) {
+                return None;
+            }
+            Op::Take(i as u32)
+        } else {
+            Op::Param(i as u32)
+        };
+        let v = l.emit(&mut body, *t, op, decl.span);
         l.env.push((name.clone(), v, *t));
     }
     let r = l.block(&mut body, &decl.body)?;
+    if l.bail {
+        return None;
+    }
     // what the body gives must be what the function returns
     let rt = l.types[r.0 as usize];
     if ret != Ty::Unit && rt != ret {
@@ -499,7 +515,11 @@ impl Lower<'_> {
             self.ty(a)?;
             vals.push(self.expr(r, a)?);
         }
-        Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals }, e.span))
+        let key = self.spec.calls.get(&id(e))?.clone();
+        let mut takes = self.hints.takes(&key);
+        takes.resize(vals.len(), false);
+        let moves = vec![false; vals.len()];
+        Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals, takes, moves }, e.span))
     }
 
     /// The callee of `e`, when it is a call worth lowering in place: a user
@@ -675,8 +695,51 @@ impl Lower<'_> {
         if matches!(e.kind, ExprKind::Lambda { .. }) {
             return None;
         }
+        if self.takes_var(e) {
+            self.bail = true;
+            return None;
+        }
         let (uses, lazies) = self.reads(e)?;
         Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+    }
+
+    /// Whether the old path, compiling `e`, would take over a variable on
+    /// the heap (and so change it in place where it is held once): the base
+    /// of `{ x with … }`, the list of `push`/`put`/`concat`, an argument a
+    /// user function takes over. Embedded, it would only borrow it (the IR
+    /// owns its values) and copy instead.
+    fn takes_var(&mut self, e: &Expr) -> bool {
+        let heap_var = |l: &Self, x: &Expr| matches!(&x.kind, ExprKind::Path(q) if q.len() == 1 && l.env.iter().rev().find(|(n, ..)| *n == q[0]).is_some_and(|(_, _, t)| matches!(t, Ty::List(_) | Ty::Rec(_))));
+        let mut found = false;
+        // (each call passing one: its node, its callee, which arguments are such variables)
+        let mut calls: Vec<(usize, Vec<String>, Vec<bool>)> = Vec::new();
+        e.walk(&mut |x| match &x.kind {
+            ExprKind::With { base, .. } if heap_var(self, base) => found = true,
+            ExprKind::Call { callee, args } if args.iter().any(|a| heap_var(self, a)) => {
+                if let ExprKind::Path(path) = &callee.kind {
+                    calls.push((id(x), path.clone(), args.iter().map(|a| heap_var(self, a)).collect()));
+                }
+            }
+            _ => {}
+        });
+        if found {
+            return true;
+        }
+        for (site, path, heap) in calls {
+            let Some(Resolved::Fn(f)) = self.p.lookup(self.module, &path) else { continue };
+            match &self.p.fns[f].kind {
+                FnKind::Extern { decl, .. } if decl.intrinsic && matches!(decl.name.as_str(), "push" | "put" | "concat") && heap[0] => return true,
+                FnKind::User(_) => {
+                    let Some(key) = self.spec.calls.get(&site).cloned() else { continue };
+                    let takes = self.hints.takes(&key);
+                    if heap.iter().zip(takes).any(|(h, t)| *h && t) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// The variables `e` reads, as the IR's values, and the lazy lets it
@@ -827,7 +890,7 @@ impl Lower<'_> {
                     vals[i] = Some(v);
                 }
                 let fields: Vec<Val> = vals.into_iter().collect::<Option<_>>()?;
-                Some(self.emit(r, ty, Op::Record { tid, fields }, e.span))
+                Some(self.emit(r, ty, Op::Record { tid, moves: vec![false; fields.len()], fields }, e.span))
             }
             // a field of a record on the heap, of the type it declares
             ExprKind::Field { base, name } if matches!(self.ty(base)?, Ty::Rec(_)) => {
@@ -839,7 +902,46 @@ impl Lower<'_> {
                     return None;
                 }
                 let b = self.expr(r, base)?;
-                Some(self.emit(r, ty, Op::Field { base: b, tid: id as usize, k: k as u32 }, e.span))
+                Some(self.emit(r, ty, Op::Field { base: b, tid: id as usize, k: k as u32, borrow: false }, e.span))
+            }
+            // `{ r with f: x, … }` of a record on the heap, each new value of
+            // the type its field declares. Not a list field changed from its
+            // own old value (`{ s with v: put(s.v, i, x) }`): the old path
+            // takes such a list out of the record to change it in place.
+            ExprKind::With { base, fields } if matches!(ty, Ty::Rec(_)) && self.ty(base)? == ty => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = id as usize;
+                let td = &self.p.types[tid];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let mut steals = false;
+                if let ExprKind::Path(bp) = &base.kind {
+                    for (_, x, _) in fields {
+                        x.walk(&mut |y| {
+                            if let ExprKind::Call { args, .. } = &y.kind
+                                && let Some(ExprKind::Field { base: fb, .. }) = args.first().map(|a| &a.kind)
+                                && matches!(&fb.kind, ExprKind::Path(q) if q == bp)
+                            {
+                                steals = true;
+                            }
+                        });
+                    }
+                }
+                if steals {
+                    return None;
+                }
+                // the new values first (they may read the base), then the base
+                let mut news = Vec::new();
+                for (n, x, _) in fields {
+                    let k = fs.iter().position(|(m, _, _)| m == n)?;
+                    let want = Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[k].1)?)?;
+                    let v = self.expr(r, x)?;
+                    if self.types[v.0 as usize] != want {
+                        return None;
+                    }
+                    news.push((k as u32, v));
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news, moved: false }, e.span))
             }
             // ≢ xs of a list (an array expression the old path computes
             // fused, without building it: embedded whole)

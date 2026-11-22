@@ -63,7 +63,7 @@ fn movable(op: &Op) -> bool {
         Op::Bin(op, ..) => !matches!(op, BinOp::Div | BinOp::Mod | BinOp::IntDiv),
         // (a reduction is work: it stays where the program does it)
         // (a record made, or a field taken, is owned: it stays)
-        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } | Op::Drop(_) | Op::Record { .. } | Op::Field { .. } => false,
+        Op::Param(_) | Op::Take(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } | Op::Drop(_) | Op::Record { .. } | Op::Field { .. } | Op::With { .. } => false,
     }
 }
 
