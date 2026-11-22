@@ -62,7 +62,7 @@ fn movable(op: &Op) -> bool {
         // a division by zero stops the program: it must stay where it is
         Op::Bin(op, ..) => !matches!(op, BinOp::Div | BinOp::Mod | BinOp::IntDiv),
         // (a reduction is work: it stays where the program does it)
-        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } => false,
+        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } | Op::Drop(_) => false,
     }
 }
 
@@ -102,7 +102,7 @@ fn reads(op: &Op, v: Val) -> bool {
     match op {
         Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => false,
         Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => *a == v || *b == v,
-        Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) => *a == v,
+        Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => *a == v,
         Op::Reduce(_, t, _) | Op::Map(t) => t.reads(v),
         Op::Call { args, .. } => args.contains(&v),
         Op::Make(xs) => xs.contains(&v),
