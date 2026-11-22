@@ -34,6 +34,9 @@ pub trait Hints {
     /// Whether the old path computes `e` (a list) element by element, as
     /// part of a fused loop (`xs ¨ f` with a pure `f` on numbers).
     fn fusible(&mut self, e: &mimic_syntax::ast::Expr, scope: &[(String, Ty)], lazies: &[(String, *const mimic_syntax::ast::Expr)]) -> bool;
+
+    /// The types of a user function's specialisation (for inlining it).
+    fn spec(&mut self, key: &mimic_check::types::Key) -> Option<std::rc::Rc<mimic_check::types::Spec>>;
 }
 pub mod fuse;
 pub mod sink;

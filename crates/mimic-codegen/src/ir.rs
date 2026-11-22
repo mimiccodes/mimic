@@ -60,6 +60,10 @@ impl mimic_ir::Hints for Cg<'_, '_> {
         self.scopes.pop();
         ok
     }
+
+    fn spec(&mut self, key: &crate::types::Key) -> Option<std::rc::Rc<crate::types::Spec>> {
+        Cg::spec(self, key).ok()
+    }
 }
 
 pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {

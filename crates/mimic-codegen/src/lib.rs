@@ -1991,7 +1991,7 @@ impl<'ctx> Cg<'ctx, '_> {
             && self.fj.quiet()
             && only.as_ref().is_none_or(|o| path.contains(o.as_str()))
         {
-            mimic_ir::lower::function(self.p, k.0, &spec, self).filter(|f| match mimic_ir::verify(f) {
+            mimic_ir::lower::function(self.p, k.0, spec.clone(), self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
                 Err(e) => {
                     eprintln!("mimic: IR check failed, compiling `{path}` without it: {e}");
