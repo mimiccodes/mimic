@@ -1992,10 +1992,14 @@ impl<'ctx> Cg<'ctx, '_> {
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
         // which function an IR difference comes from)
         let only = std::env::var("MIMIC_IR_ONLY").ok();
+        // (a function that takes over a record argument, as consumed
+        // parameters do, keeps the old path: its callers hand it a reference
+        // the IR does not release yet)
         let lowered = if use_ir
             && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq)
             && self.fj.quiet()
             && only.as_ref().is_none_or(|o| path.contains(o.as_str()))
+            && !self.consumed(k).iter().any(|c| *c)
         {
             mimic_ir::lower::function(self.p, k.0, spec.clone(), self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,

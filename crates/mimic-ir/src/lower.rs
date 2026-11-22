@@ -809,6 +809,38 @@ impl Lower<'_> {
                 let a = self.expr(r, expr)?;
                 Some(self.emit(r, ty, Op::Un(*op, a), e.span))
             }
+            // a record on the heap: its fields' values, each of the type its
+            // field declares, in declaration order
+            ExprKind::Record { fields, .. } if matches!(ty, Ty::Rec(_)) => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = id as usize;
+                let td = &self.p.types[tid];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let mut vals: Vec<Option<Val>> = vec![None; fs.len()];
+                for (n, x, _) in fields {
+                    let i = fs.iter().position(|(m, _, _)| m == n)?;
+                    let want = Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[i].1)?)?;
+                    let v = self.expr(r, x)?;
+                    if self.types[v.0 as usize] != want {
+                        return None;
+                    }
+                    vals[i] = Some(v);
+                }
+                let fields: Vec<Val> = vals.into_iter().collect::<Option<_>>()?;
+                Some(self.emit(r, ty, Op::Record { tid, fields }, e.span))
+            }
+            // a field of a record on the heap, of the type it declares
+            ExprKind::Field { base, name } if matches!(self.ty(base)?, Ty::Rec(_)) => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = self.ty(base)? else { return None };
+                let td = &self.p.types[id as usize];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let k = fs.iter().position(|(m, _, _)| m == name)?;
+                if Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[k].1)?)? != ty {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::Field { base: b, tid: id as usize, k: k as u32 }, e.span))
+            }
             // ≢ xs of a list (an array expression the old path computes
             // fused, without building it: embedded whole)
             ExprKind::Prim { prim: Prim::Len, args } if args.len() == 1 && ty == Ty::I64 && matches!(self.ty(&args[0])?, Ty::List(_)) => {
@@ -870,7 +902,7 @@ impl Lower<'_> {
                 let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
                 // (a list as the state: each step's list would have to free
                 // the last one; not covered yet)
-                if matches!(ty, Ty::List(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                if matches!(ty, Ty::List(_) | Ty::Rec(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
                     return None;
                 }
                 let init = self.expr(r, &args[0])?;

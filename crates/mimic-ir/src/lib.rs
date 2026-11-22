@@ -61,6 +61,9 @@ pub enum Ty {
     /// released at the end of the region that made it unless that region
     /// yields it ([`owns`]).
     List(mimic_check::types::Ty),
+    /// A record on the heap (a plain record type, not generic, not kept in
+    /// registers): owned or borrowed as a list is.
+    Rec(mimic_check::types::Ty),
 }
 
 impl Ty {
@@ -72,6 +75,7 @@ impl Ty {
             Ty::Bool => "bool".into(),
             Ty::Agg(t) => format!("regs {t}"),
             Ty::List(t) => format!("list {t}"),
+            Ty::Rec(t) => format!("rec {t}"),
         }
     }
 
@@ -86,6 +90,8 @@ impl Ty {
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
             C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8, 0) => Ty::List(t),
+            // (a plain record: not an instance of a generic or shaped one)
+            C::Obj(id) if mimic_check::types::obj_tid(id) == id as usize && matches!(p.types[id as usize].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(t),
             _ => return None,
         })
     }
@@ -178,6 +184,12 @@ pub enum Op {
     /// Releases an owned list right after its last use in its region
     /// (placed by [`own`]; gives nothing).
     Drop(Val),
+    /// A record of type `tid` on the heap, its fields in declaration order
+    /// (owned).
+    Record { tid: usize, fields: Vec<Val> },
+    /// Field `k` of a record on the heap: borrowed from a borrowed record,
+    /// its own reference from an owned one.
+    Field { base: Val, tid: usize, k: u32 },
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -290,7 +302,8 @@ impl Op {
         match self {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => vec![],
             Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
-            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => vec![*a],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
+            Op::Record { fields, .. } => fields.clone(),
             Op::Reduce(_, t, _) | Op::Map(t) => {
                 let mut v = Vec::new();
                 t.vals(&mut v);
@@ -324,7 +337,7 @@ impl Region {
 /// Whether the instruction makes a list it owns: a call giving a list, or
 /// an `if` yielding one (both branches then yield owned lists).
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_))
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -388,6 +401,13 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             }
             Op::Drop(v) => {
                 let _ = writeln!(out, "drop {v}");
+            }
+            Op::Record { tid, fields } => {
+                let a: Vec<String> = fields.iter().map(|v| v.to_string()).collect();
+                let _ = writeln!(out, "record #{tid}({}): {}", a.join(", "), i.ty.name());
+            }
+            Op::Field { base, k, .. } => {
+                let _ = writeln!(out, "{base}.field {k}: {}", i.ty.name());
             }
             Op::Embed { uses, lazies, .. } => {
                 let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
@@ -531,8 +551,21 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                 tree_ok(f, t, types, scope)?;
             }
             Op::Drop(v) => {
-                if !matches!(ty(*v, types)?, Ty::List(_)) {
-                    return Err(format!("{}: drop of {v}, not a list", f.name));
+                if !matches!(ty(*v, types)?, Ty::List(_) | Ty::Rec(_)) {
+                    return Err(format!("{}: drop of {v}, not on the heap", f.name));
+                }
+            }
+            Op::Record { fields, .. } => {
+                for v in fields {
+                    ty(*v, types)?;
+                }
+                if !matches!(i.ty, Ty::Rec(_)) {
+                    return Err(format!("{}: a record giving {}", f.name, i.ty.name()));
+                }
+            }
+            Op::Field { base, .. } => {
+                if !matches!(ty(*base, types)?, Ty::Rec(_)) {
+                    return Err(format!("{}: a field of {base}, not a record", f.name));
                 }
             }
             Op::Index(v, k, _) => {

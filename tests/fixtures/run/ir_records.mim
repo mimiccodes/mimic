@@ -1,0 +1,43 @@
+module main
+
+// Records on the heap through the IR: built, fields read from borrowed and
+// owned records, through calls and an if (the if's record owned: no extra
+// reference, the leak check). The same output with MIMIC_IR=0.
+
+type Inner = { xs: [i64], k: i64 }
+type Box = { name: str, inner: Inner, w: f64, n: i64 }
+
+fn make(n: i64) -> Inner {
+    Inner { xs: ⍳ n ¨ (i => i * n), k: n }
+}
+
+fn sum_inner(a: Inner) -> i64 {
+    (a.xs ▷ +/) + a.k
+}
+
+fn pick(c: bool, a: Inner, b: Inner) -> Inner {
+    if c { a } else { b }
+}
+
+fn wrap(n: i64) -> Box {
+    Box { name: "b", inner: make(n), w: 0.5, n: n * 2 }
+}
+
+fn deep(b: Box) -> i64 {
+    sum_inner(b.inner) + b.n + (b.inner.xs ▷ ⌈/)
+}
+
+fn fresh(n: i64) -> i64 {
+    let a = make(n)
+    let b = make(n + 1)
+    sum_inner(pick(n > 3, a, b)) + a.k
+}
+
+fn main() {
+    let n = ≢ os::args() + 5
+    print(sum_inner(make(n)))
+    print(deep(wrap(n)))
+    print(fresh(n))
+    print(fresh(2))
+    print(wrap(n).w)
+}

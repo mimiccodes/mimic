@@ -72,7 +72,7 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
     }
 }
 
@@ -195,6 +195,43 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.reduce_tree(*p, t, &|v| get(vals, v), *el, i.span)?
                     };
                     self.as_ty(out, ty, "reduction")?
+                }
+                // a record on the heap: its fields moved in as the code
+                // generator builds one (lists the IR owns lent: the record
+                // takes its own reference, the region still drops its own)
+                Op::Record { tid, fields } => {
+                    let vs = fields
+                        .iter()
+                        .map(|v| {
+                            get(vals, *v).map(|x| match x {
+                                V::P(p, true) => V::P(p, false),
+                                x => x,
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
+                    self.construct(*tid, None, vs)?
+                }
+                // a field read in place: a number stored raw loaded, else
+                // borrowed from a borrowed record, its own reference from an
+                // owned one (released after its last use, as any)
+                Op::Field { base: b, tid, k } => {
+                    let base = get(vals, *b)?;
+                    let tid = *tid;
+                    let p = self.basic(base).into_pointer_value();
+                    let fp = self.slot_ptr(p, *k as usize)?;
+                    if let Some(el) = self.raw_field(tid, None, *k as usize) {
+                        let x = self.load_raw(fp, el)?;
+                        self.as_ty(x, ty, "field")?
+                    } else {
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let v = if let V::P(_, true) = base {
+                            self.call_rt("mim_retain", &[x.into()])?;
+                            V::P(x, true)
+                        } else {
+                            V::P(x, false)
+                        };
+                        self.as_ty(v, ty, "field")?
+                    }
                 }
                 // an owned list's last use is past: released now
                 Op::Drop(v) => {
@@ -381,7 +418,8 @@ impl<'ctx> Cg<'ctx, '_> {
         for (v, b) in &incoming {
             phi.add_incoming(&[(v, *b)]);
         }
-        let owned = matches!(ty, Ty::Arr(..)) && !matches!(self.val_of(phi.as_basic_value(), ty, false), V::A(..));
+        // (a list or a record on the heap: owned from either branch)
+        let owned = matches!(ty, Ty::Arr(..) | Ty::Obj(_)) && matches!(self.val_of(phi.as_basic_value(), ty, false), V::P(..));
         Ok(self.val_of(phi.as_basic_value(), ty, owned))
     }
 }

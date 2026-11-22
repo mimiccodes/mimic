@@ -131,36 +131,11 @@ fn count(r: &Region, uses: &mut [u32]) {
         }
     };
     for i in &r.insts {
-        match &i.op {
-            Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => {}
-            Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => {
-                bump(*a, uses);
-                bump(*b, uses);
-            }
-            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => bump(*a, uses),
-            Op::Call { args, .. } => args.iter().for_each(|a| bump(*a, uses)),
-            Op::Make(xs) => xs.iter().for_each(|a| bump(*a, uses)),
-            Op::Embed { uses: us, .. } => us.iter().for_each(|(_, a, _)| bump(*a, uses)),
-            Op::Map(t) | Op::Reduce(_, t, _) => {
-                let mut vs = Vec::new();
-                t.vals(&mut vs);
-                vs.into_iter().for_each(|a| bump(a, uses));
-            }
-            Op::If { cond, then, els } => {
-                bump(*cond, uses);
-                count(then, uses);
-                count(els, uses);
-            }
-            Op::Loop { init, count: n, done, step, .. } => {
-                bump(*init, uses);
-                if let Some(n) = n {
-                    bump(*n, uses);
-                }
-                if let Some(d) = done {
-                    count(d, uses);
-                }
-                count(step, uses);
-            }
+        for a in i.op.operands() {
+            bump(a, uses);
+        }
+        for g in i.op.regions() {
+            count(g, uses);
         }
     }
     if let Some(v) = r.result {
