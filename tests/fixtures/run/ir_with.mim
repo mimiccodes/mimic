@@ -1,0 +1,61 @@
+module main
+
+// `{ r with … }` through the IR: a record taken over and changed in place,
+// through a helper, from a borrowed record (copied), with list and record
+// fields; and the shapes the IR leaves to the old path (a `with` in each
+// branch of an if, a field changed through a call). The leak check holds
+// and the output is the same with MIMIC_IR=0.
+
+type P = { x: i64, y: f64, tag: str, hist: [i64] }
+type W = { p: P, n: i64 }
+
+fn step(p: P, d: i64) -> P {
+    { p with x: p.x + d, y: p.y * 0.5 }
+}
+
+fn branch(p: P, c: bool) -> P {
+    if c { { p with x: p.x * 2 } } else { { p with tag: "odd" } }
+}
+
+fn twice(p: P) -> P {
+    step(step(p, 1), 2)
+}
+
+fn both_x(p: P) -> i64 {
+    let q = { p with x: 100 }
+    q.x + p.x
+}
+
+fn relist(p: P, n: i64) -> P {
+    { p with hist: ⍳ n }
+}
+
+fn nest(w: W) -> W {
+    { w with p: step(w.p, 5), n: w.n + 1 }
+}
+
+fn unused(p: P, k: i64) -> i64 {
+    k + 1
+}
+
+fn run(n: i64) -> i64 {
+    let p = P { x: n, y: 8.0, tag: "a", hist: ⍳ 3 }
+    let a = twice(p)
+    let b = branch(a, n > 3)
+    let c = branch(b, n > 30)
+    let d = relist(c, n)
+    let w = nest(W { p: d, n: 0 })
+    let w2 = nest(w)
+    w2.p.x + both_x(w2.p) + (w2.p.hist ▷ +/) + w2.n + unused(p, 1)
+}
+
+fn main() {
+    let n = ≢ os::args() + 5
+    print(run(n))
+    print(run(40))
+    let p = P { x: 1, y: 2.0, tag: "t", hist: [1 2] }
+    let q = branch(p, false)
+    print(q.tag)
+    print(p.tag)
+    print(step(p, 3).y)
+}

@@ -62,7 +62,8 @@ fn movable(op: &Op) -> bool {
         // a division by zero stops the program: it must stay where it is
         Op::Bin(op, ..) => !matches!(op, BinOp::Div | BinOp::Mod | BinOp::IntDiv),
         // (a reduction is work: it stays where the program does it)
-        Op::Param(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } | Op::Drop(_) => false,
+        // (a record made, or a field taken, is owned: it stays)
+        Op::Param(_) | Op::Take(_) | Op::Call { .. } | Op::If { .. } | Op::Index(..) | Op::Reduce(..) | Op::Map(_) | Op::Embed { .. } | Op::Loop { .. } | Op::Drop(_) | Op::Record { .. } | Op::Field { .. } | Op::With { .. } => false,
     }
 }
 
@@ -99,17 +100,7 @@ fn sole_branch(r: &Region, from: usize, v: Val) -> Option<(usize, bool)> {
 
 /// Whether the operation reads `v` itself (not inside its regions).
 fn reads(op: &Op, v: Val) -> bool {
-    match op {
-        Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => false,
-        Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => *a == v || *b == v,
-        Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => *a == v,
-        Op::Reduce(_, t, _) | Op::Map(t) => t.reads(v),
-        Op::Call { args, .. } => args.contains(&v),
-        Op::Make(xs) => xs.contains(&v),
-        Op::Embed { uses, .. } => uses.iter().any(|(_, u, _)| *u == v),
-        Op::If { cond, .. } => *cond == v,
-        Op::Loop { init, count, .. } => *init == v || *count == Some(v),
-    }
+    op.operands().contains(&v)
 }
 
 /// Whether anything in `r` (nested regions included) reads `v`.

@@ -64,6 +64,10 @@ impl mimic_ir::Hints for Cg<'_, '_> {
     fn spec(&mut self, key: &crate::types::Key) -> Option<std::rc::Rc<crate::types::Spec>> {
         Cg::spec(self, key).ok()
     }
+
+    fn takes(&mut self, key: &crate::types::Key) -> Vec<bool> {
+        self.consumed(key)
+    }
 }
 
 pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
@@ -72,7 +76,7 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
     }
 }
 
@@ -101,6 +105,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
                     self.val_of(bv, lt, false)
                 }
+                // a parameter taken over: owned by the IR from here (its slot
+                // cleared, so the function's end does not release it again)
+                Op::Take(n) => {
+                    let name = &f.params[*n as usize].0;
+                    let l = self.scopes[0].iter().find(|l| l.name == *name).ok_or("internal compiler error: IR parameter without a slot")?;
+                    let (slot, lt) = (l.slot, l.ty);
+                    let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+                    self.b.build_store(slot, self.ptr.const_null()).s()?;
+                    self.val_of(bv, lt, true)
+                }
                 Op::Bin(op, a, b) => {
                     let r = self.scalar_binary(*op, get(vals, *a)?, get(vals, *b)?)?;
                     self.as_ty(r, ty, "operator result")?
@@ -109,16 +123,17 @@ impl<'ctx> Cg<'ctx, '_> {
                     let r = self.scalar_unary(*op, get(vals, *a)?)?;
                     self.as_ty(r, ty, "operator result")?
                 }
-                Op::Call { site, callee, args } => {
-                    // a list the IR owns is lent to the call: a callee that
-                    // takes its parameter over gets its own reference (the
-                    // call retains a lent value it hands over), and the IR
-                    // still releases its own at the region's end
+                Op::Call { site, callee, args, moves, .. } => {
+                    // an owned value at its last use, to a callee that takes
+                    // it over: handed over as it is; any other lent (a callee
+                    // that takes its parameter over gets its own reference:
+                    // the call retains a lent value it hands over)
                     let a = args
                         .iter()
-                        .map(|v| {
+                        .zip(moves)
+                        .map(|(v, m)| {
                             get(vals, *v).map(|x| match x {
-                                V::P(p, true) => V::P(p, false),
+                                V::P(p, true) if !m => V::P(p, false),
                                 x => x,
                             })
                         })
@@ -196,6 +211,68 @@ impl<'ctx> Cg<'ctx, '_> {
                     };
                     self.as_ty(out, ty, "reduction")?
                 }
+                // a record on the heap, built as the code generator builds one:
+                // a value the IR moves in becomes the record's, any other is
+                // lent (the record takes a reference of its own)
+                Op::Record { tid, fields, moves } => {
+                    let vs = fields
+                        .iter()
+                        .zip(moves)
+                        .map(|(v, m)| {
+                            get(vals, *v).map(|x| match x {
+                                V::P(p, true) if !m => V::P(p, false),
+                                x => x,
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
+                    self.construct(*tid, None, vs)?
+                }
+                // a field read in place: a number stored raw loaded, else
+                // borrowed from a borrowed record, its own reference from an
+                // owned one (released after its last use, as any)
+                Op::Field { base: b, tid, k, borrow } => {
+                    let base = get(vals, *b)?;
+                    let tid = *tid;
+                    let p = self.basic(base).into_pointer_value();
+                    let fp = self.slot_ptr(p, *k as usize)?;
+                    if let Some(el) = self.raw_field(tid, None, *k as usize) {
+                        let x = self.load_raw(fp, el)?;
+                        self.as_ty(x, ty, "field")?
+                    } else {
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let v = if let (V::P(_, true), false) = (base, *borrow) {
+                            self.call_rt("mim_retain", &[x.into()])?;
+                            V::P(x, true)
+                        } else {
+                            V::P(x, false)
+                        };
+                        self.as_ty(v, ty, "field")?
+                    }
+                }
+                // `{ r with … }` (in place when the record is held once, else
+                // on a copy): the base handed over when the IR moves it there,
+                // else a reference of its own; each new value moved in or lent,
+                // as a record's
+                Op::With { base, tid, fields, moved, moves } => {
+                    let b = get(vals, *base)?;
+                    let b = match b {
+                        V::P(p, true) if !moved => V::P(p, false),
+                        x => x,
+                    };
+                    let cur = self.own(self.boxed(b)?)?;
+                    let news = fields
+                        .iter()
+                        .zip(moves)
+                        .map(|((k, x), m)| {
+                            get(vals, *x).map(|x| match x {
+                                V::P(p, owned) => (*k as usize, V::P(p, owned && *m)),
+                                x => (*k as usize, x),
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
+                    let r = self.ir_with(*tid, cur, news)?;
+                    self.as_ty(r, ty, "record")?
+                }
                 // an owned list's last use is past: released now
                 Op::Drop(v) => {
                     let x = get(vals, *v)?;
@@ -240,21 +317,58 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             vals[i.dst.0 as usize] = Some(v);
         }
-        // the lists this region owns, released now; the one it yields
-        // moves out
-        // (each is released after its last use by a drop, when the
-        // ownership pass placed one; any other here)
-        let dropped: Vec<mimic_ir::Val> = r.insts.iter().filter_map(|i| if let Op::Drop(v) = i.op { Some(v) } else { None }).collect();
-        for i in &r.insts {
-            if mimic_ir::owns(i) && Some(i.dst) != r.result && !dropped.contains(&i.dst) {
-                let v = get(vals, i.dst)?;
-                self.drop_tmp(v)?;
-            }
-        }
+        // (every value the region owns ends where the ownership pass says:
+        // dropped, moved on, or yielded)
         match r.result {
             Some(v) => get(vals, v),
             None => Ok(self.null()),
         }
+    }
+
+    /// `{ r with … }` on the owned record `cur`: used as it is when held
+    /// once (one load, one compare: the common case once the IR moves it),
+    /// else copied; then each field written directly (a number raw, any
+    /// other value with a reference of its own, the old one released).
+    fn ir_with(&mut self, tid: usize, cur: V<'ctx>, news: Vec<(usize, V<'ctx>)>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let V::P(p0, _) = cur else { return Err("internal compiler error: `with` on a value not on the heap".into()) };
+        if !self.in_place_ok() {
+            let mut cur = cur;
+            for (k, x) in news {
+                let v = self.boxed(x)?;
+                cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(k as u64, false).into(), self.basic(v).into()])?;
+                self.drop_tmp(v)?;
+            }
+            return Ok(cur);
+        }
+        let rc = self.b.build_load(i64t, p0, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let one = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let fun = self.cur_fn.ok_or("internal compiler error: `with` outside a function")?;
+        let pre = self.b.get_insert_block().unwrap();
+        let copy_bb = self.ctx.append_basic_block(fun, "with_copy");
+        let go_bb = self.ctx.append_basic_block(fun, "with_go");
+        self.b.build_conditional_branch(one, go_bb, copy_bb).s()?;
+        self.b.position_at_end(copy_bb);
+        let V::P(copied, _) = self.call_rt_ptr("mim_obj_unique", &[p0.into()])? else { unreachable!() };
+        let copy_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(go_bb).s()?;
+        self.b.position_at_end(go_bb);
+        let phi = self.b.build_phi(self.ptr, "rec").s()?;
+        phi.add_incoming(&[(&p0, pre), (&copied, copy_end)]);
+        let rec = phi.as_basic_value().into_pointer_value();
+        for (k, v) in news {
+            let fp = self.slot_ptr(rec, k)?;
+            if let Some(el) = self.raw_field(tid, None, k) {
+                self.store_raw(fp, v, el)?;
+                continue;
+            }
+            let v = self.own(self.boxed(v)?)?;
+            let old = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
+            self.b.build_store(fp, self.basic(v)).s()?;
+            self.release(old)?;
+        }
+        Ok(V::P(rec, true))
     }
 
     /// A loop over a state (evolve, settle): the state a phi of its type;
@@ -381,7 +495,8 @@ impl<'ctx> Cg<'ctx, '_> {
         for (v, b) in &incoming {
             phi.add_incoming(&[(v, *b)]);
         }
-        let owned = matches!(ty, Ty::Arr(..)) && !matches!(self.val_of(phi.as_basic_value(), ty, false), V::A(..));
+        // (a list or a record on the heap: owned from either branch)
+        let owned = matches!(ty, Ty::Arr(..) | Ty::Obj(_)) && matches!(self.val_of(phi.as_basic_value(), ty, false), V::P(..));
         Ok(self.val_of(phi.as_basic_value(), ty, owned))
     }
 }
