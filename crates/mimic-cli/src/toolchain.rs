@@ -159,7 +159,7 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
         && cfg!(target_os = "macos")
     {
         let Some(sdk) = xcode_sdk(sdk_name) else { return Ok(None) };
-        let sdk_version = tool_output("xcrun", &["--sdk", sdk_name, "--show-sdk-version"]).unwrap_or_else(|| "11.0".into());
+        let sdk_version = sdk_version(&sdk).or_else(|| tool_output("xcrun", &["--sdk", sdk_name, "--show-sdk-version"])).unwrap_or_else(|| "11.0".into());
         // native builds target this machine's OS; cross builds the triple's minimum
         let min_os = match &target.llvm {
             Some(t) => t
@@ -168,7 +168,7 @@ fn embedded_sysroot(target: &Target) -> Result<Option<Sysroot>, String> {
                 .map(|os| os.trim_start_matches(|c: char| c.is_ascii_alphabetic()).to_string())
                 .filter(|v| !v.is_empty()),
             // this machine's OS, major version (what Clang targets natively)
-            None => tool_output("sw_vers", &["-productVersion"]).map(|v| format!("{}.0", v.split('.').next().unwrap_or("11"))),
+            None => macos_version().or_else(|| tool_output("sw_vers", &["-productVersion"])).map(|v| format!("{}.0", v.split('.').next().unwrap_or("11"))),
         }
         .unwrap_or_else(|| "11.0".into());
         return Ok(Some(Sysroot::Darwin { sdk, min_os, sdk_version, platform }));
@@ -270,7 +270,51 @@ pub(crate) fn xcode_sdk(name: &str) -> Option<PathBuf> {
     {
         return Some(s);
     }
-    tool_output("xcrun", &["--sdk", name, "--show-sdk-path"]).map(PathBuf::from).filter(|p| p.is_dir())
+    // what xcrun said last time, while the same developer tools are selected
+    // and their SDKs folder is unchanged (each run of xcrun costs ~25 ms)
+    let dev = std::env::var_os("DEVELOPER_DIR").map(PathBuf::from).or_else(|| std::fs::read_link("/var/db/xcode_select_link").ok());
+    let memo = libc_cache().join(format!("sdk-{name}.txt"));
+    if let Some(dev) = &dev
+        && let Ok(text) = std::fs::read_to_string(&memo)
+        && let [d, path, when] = text.lines().collect::<Vec<_>>()[..]
+        && Path::new(d) == dev.as_path()
+        && sdks_changed(Path::new(path)).as_deref() == Some(when)
+    {
+        return Some(PathBuf::from(path));
+    }
+    let sdk = tool_output("xcrun", &["--sdk", name, "--show-sdk-path"]).map(PathBuf::from).filter(|p| p.is_dir())?;
+    if let Some(dev) = &dev
+        && let Some(when) = sdks_changed(&sdk)
+        && std::fs::create_dir_all(libc_cache()).is_ok()
+    {
+        let _ = mimic_toolchain::jobs::write_atomic(&memo, format!("{}\n{}\n{when}\n", dev.display(), sdk.display()).as_bytes());
+    }
+    Some(sdk)
+}
+
+/// When the folder holding an SDK last changed (an SDK added or removed),
+/// or None if the SDK is gone.
+fn sdks_changed(sdk: &Path) -> Option<String> {
+    if !sdk.is_dir() {
+        return None;
+    }
+    let t = std::fs::metadata(sdk.parent()?).ok()?.modified().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos().to_string())
+}
+
+/// An SDK's version, from its own SDKSettings.json (as `xcrun --show-sdk-version` reads it).
+fn sdk_version(sdk: &Path) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(sdk.join("SDKSettings.json")).ok()?).ok()?;
+    v["Version"].as_str().map(String::from).filter(|s| !s.is_empty())
+}
+
+/// This Mac's OS version, from the file `sw_vers` reads.
+fn macos_version() -> Option<String> {
+    let text = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
+    let after = &text[text.find("<key>ProductVersion</key>")? + 25..];
+    let start = after.find("<string>")? + 8;
+    let end = after[start..].find("</string>")? + start;
+    Some(after[start..end].trim().to_string()).filter(|s| !s.is_empty())
 }
 
 fn self_exe() -> PathBuf {
@@ -536,6 +580,19 @@ pub fn archive(tc: &Toolchain, target: &Target, output: &Path, objects: &[PathBu
 }
 
 pub fn run_tool(mut c: Command, what: &str) -> Result<(), String> {
+    // LLD (this binary run as `ld.lld`, `ld64.lld`, …): in this process, which
+    // saves starting a second one (~0.1 s)
+    if c.get_program() == self_exe().as_os_str()
+        && c.get_envs().next().is_none()
+        && c.get_current_dir().is_none()
+        && !crate::driver::debug_disabled("in-process-link")
+    {
+        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        if args.first().is_some_and(|f| mimic_toolchain::LLD_FLAVOURS.contains(&f.as_str())) {
+            let (code, text) = mimic_toolchain::lld_link(&args);
+            return if code == 0 { Ok(()) } else { Err(format!("{what} failed:\n{text}")) };
+        }
+    }
     let out = c.output().map_err(|e| format!("cannot run {what}: {e}"))?;
     if !out.status.success() {
         return Err(format!("{what} failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));

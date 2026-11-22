@@ -258,10 +258,11 @@ impl<'ctx> Cg<'ctx, '_> {
         out
     }
 
-    /// Optimised builds on targets with the inline allocator: where `with`
-    /// updates in place (see heap_ok).
+    /// Where values move and parameters are taken over (so `with` updates in
+    /// place): every build, debug included, on targets with the atomic loads
+    /// this needs (not eBPF).
     fn heap_ok_target(&self) -> bool {
-        self.opt_level >= 2 && !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
+        !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
     }
 
     /// Where `let name = …` (followed by `rest`) may move (see move_site).

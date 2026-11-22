@@ -753,6 +753,15 @@ impl Infer<'_> {
                     Ok(t) => ret = t,
                     Err(m) => w.err(Diag::new(&C::TYPE_MISMATCH, format!("return value of `{path}`: {m}"), d.span)),
                 }
+                // `-> [i64]` (or `[f64]`) whose body gives a list of unknown
+                // type (`if … { [] } else { [x] }`): the declared list, the
+                // value made typed (checked) once as it is returned, so a
+                // caller's `flatten`, indexing and arithmetic on it run typed
+                if let Ty::Arr(El::Dyn, _) = ret
+                    && let Some(Ty::Arr(el @ (El::I64 | El::F64), _)) = ann_env(p, module, rt, &env)
+                {
+                    ret = Ty::Arr(el, 0);
+                }
             }
             w.out.ret = ret;
             let out = std::mem::take(&mut w.out);
@@ -1052,6 +1061,41 @@ impl Walk<'_, '_> {
         r
     }
 
+    /// `push(xs, x)` with the prelude's `push`, xs a list of i64 or f64 and
+    /// x a number of the same kind: that list, of any length.
+    fn push_of_numbers(&self, f: FnId, argt: &[Ty]) -> Option<Ty> {
+        let p = self.inf.p;
+        let m = &p.mods[p.fns[f].module];
+        if p.fns[f].name != "push" || m.name != "prelude" || m.package != "std" || argt.len() != 2 {
+            return None;
+        }
+        match (argt[0], argt[1]) {
+            (Ty::Arr(El::I64, _), Ty::I64) => Some(Ty::Arr(El::I64, 0)),
+            (Ty::Arr(El::F64, _), Ty::F64) => Some(Ty::Arr(El::F64, 0)),
+            // the number not known yet (a call whose result a later pass
+            // finds): not known yet either, rather than a list of anything,
+            // which would settle a loop's state as dynamic for good
+            (Ty::Arr(El::I64 | El::F64, _), Ty::Never) | (Ty::Never, _) => Some(Ty::Never),
+            _ => None,
+        }
+    }
+
+    /// `flatten(xs ¨ (x => …))` with the prelude's `flatten`, the lambda's
+    /// result (already typed) a list of i64 or f64: that element type.
+    fn flatten_of_numbers(&self, f: FnId, args: &[Expr]) -> Option<El> {
+        let p = self.inf.p;
+        let m = &p.mods[p.fns[f].module];
+        if p.fns[f].name != "flatten" || m.name != "prelude" || m.package != "std" || args.len() != 1 {
+            return None;
+        }
+        let ExprKind::Prim { prim: Prim::Each, args: each } = &args[0].kind else { return None };
+        let lam = each.get(1).filter(|x| matches!(x.kind, ExprKind::Lambda { .. }))?;
+        match self.out.lambdas.get(&id(lam))?.1 {
+            Ty::Arr(el @ (El::I64 | El::F64), _) => Some(el),
+            _ => None,
+        }
+    }
+
     /// `f` used as a value: its dynamic specialisation must exist.
     fn fn_value(&mut self, f: FnId) {
         if !self.inf.p.fns[f].is_extern() {
@@ -1169,7 +1213,24 @@ impl Walk<'_, '_> {
                                 };
                             }
                             self.check_args_at_call(e, path, f, args, &mut argt);
-                            self.call_user(id(e), f, argt)
+                            // the prelude's `push(xs, x)`: a number onto a list of
+                            // that kind of number gives such a list (the runtime
+                            // keeps it typed), so a list grown in a loop stays typed
+                            let pushed = self.push_of_numbers(f, &argt);
+                            let r = self.call_user(id(e), f, argt);
+                            if let Some(t) = pushed {
+                                return t;
+                            }
+                            // the prelude's `flatten(xs ¨ (x => …))` whose lambda gives a
+                            // list of numbers: a list of those numbers (the result is
+                            // checked and made typed once, here; everything after it
+                            // then runs typed instead of on values of unknown type)
+                            if let Some(el) = self.flatten_of_numbers(f, args)
+                                && matches!(r, Ty::Dyn | Ty::Arr(El::Dyn, _))
+                            {
+                                return Ty::Arr(el, 0);
+                            }
+                            r
                         }
                         Ok(Resolved::Variant(t, v)) => {
                             let p = self.inf.p;
@@ -1465,6 +1526,21 @@ impl Walk<'_, '_> {
                 {
                     return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { Ty::of_el(el) };
                 }
+                // xs ▷ trail((a, b) => …) / gather(…) over numbers, with a
+                // lambda that gives back the same kind of number: typed as
+                // (number, number) → number, so its body compiles typed
+                // (code generation folds it in a loop, nothing boxed)
+                if matches!(prim, Prim::Trail | Prim::Gather)
+                    && let Ty::Arr(el @ (El::I64 | El::F64), _) = a
+                    && matches!(&args[1].kind, ExprKind::Lambda { params, .. } if params.len() == 2)
+                {
+                    let t = Ty::of_el(el);
+                    if self.lambda(&args[1], vec![t, t]) == t {
+                        // (the lambda itself: a function value)
+                        self.out.exprs.insert(id(&args[1]), Ty::Dyn);
+                        return if *prim == Prim::Trail { Ty::Arr(el, 0) } else { t };
+                    }
+                }
                 // x ▷ evolve(n, step) / x ▷ settle(step, done): the step
                 // function takes the state; when it gives back the same type,
                 // the state keeps that type throughout (else it is dynamic)
@@ -1492,9 +1568,17 @@ impl Walk<'_, '_> {
                     // (a start built from `[x]` knows one): the record type
                     // without them is the state throughout
                     let same_record = matches!((a, r), (Ty::Obj(x), Ty::Obj(y)) if x != y && obj_tid(x) == obj_tid(y) && obj_args(x) == obj_args(y));
+                    // the same kind of list, its length changing (a message
+                    // schedule grown by `push` from 16 words): a list of that
+                    // kind of any length is the state throughout
+                    let same_list = matches!((a, r), (Ty::Arr(x, n), Ty::Arr(y, m)) if x == y && n != m && !matches!(x, El::Dyn));
                     let (a, r) = if same_record {
                         let Ty::Obj(x) = a else { unreachable!() };
                         let plain = obj(obj_tid(x), &obj_args(x));
+                        (plain, self.lambda(step, vec![plain]))
+                    } else if same_list {
+                        let Ty::Arr(x, _) = a else { unreachable!() };
+                        let plain = Ty::Arr(x, 0);
                         (plain, self.lambda(step, vec![plain]))
                     } else {
                         (a, r)

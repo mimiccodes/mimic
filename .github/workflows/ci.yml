@@ -145,6 +145,12 @@ jobs:
       - name: Tutorial
         run: python3 tools/check-tutorial.py --mimic target/release/mimic
 
+      # the Mimic IR is on by default: every fixture must give the same
+      # output on the old path too, while it remains (docs/design/ir.md)
+      - name: Without the Mimic IR
+        if: runner.os == 'Linux'
+        run: MIMIC_IR=0 cargo test --release --test golden run_fixtures -- --exact
+
       # ui::run in a native window, driven through the real controls: GTK 3
       # under a virtual display on Linux, AppKit on macOS
       - name: Native windows

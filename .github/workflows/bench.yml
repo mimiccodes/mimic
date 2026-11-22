@@ -301,7 +301,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: verdict-${{ matrix.platform }}-${{ matrix.shard }}
+          # one per attempt: a machine re-run with "Re-run failed jobs" adds
+          # its own verdict beside the first, and the latest one counts
+          name: verdict-${{ matrix.platform }}-${{ matrix.shard }}-a${{ github.run_attempt }}
           path: verdict/
           retention-days: 7
 
@@ -328,19 +330,23 @@ jobs:
     name: bench (${{ matrix.platform }})
     runs-on: ubuntu-24.04
     steps:
+      # each verdict in its own folder (merged into one, the first
+      # attempt's file could win over a re-run's)
       - uses: actions/download-artifact@v4
         with:
           pattern: verdict-${{ matrix.platform }}-*
           path: verdicts
-          merge-multiple: true
       - name: All three machines
         run: |
           ls verdicts 2>/dev/null || true
-          cat verdicts/gate-*.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           bad=0
           for i in 0 1 2; do
-            v=$(cat "verdicts/$i" 2>/dev/null || echo missing)
-            echo "machine $i/3: $v"
+            # the latest attempt of machine i
+            last=$(ls -d verdicts/verdict-${{ matrix.platform }}-$i-a* 2>/dev/null | sed 's/.*-a//' | sort -n | tail -1)
+            d="verdicts/verdict-${{ matrix.platform }}-$i-a$last"
+            v=$( [ -n "$last" ] && cat "$d/$i" 2>/dev/null || echo missing)
+            echo "machine $i/3: $v (attempt ${last:-none})"
+            cat "$d/gate-$i.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
             [ "$v" = pass ] || bad=1
           done
           exit $bad

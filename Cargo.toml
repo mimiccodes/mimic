@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -11,6 +11,7 @@ license = "Apache-2.0"
 mimic-syntax = { path = "crates/mimic-syntax" }
 mimic-check = { path = "crates/mimic-check" }
 mimic-codegen = { path = "crates/mimic-codegen" }
+mimic-ir = { path = "crates/mimic-ir" }
 mimic-project = { path = "crates/mimic-project" }
 mimic-net = { path = "crates/mimic-net" }
 mimic-toolchain = { path = "crates/mimic-toolchain" }

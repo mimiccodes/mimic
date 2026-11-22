@@ -32,7 +32,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, Functi
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use inkwell::basic_block::BasicBlock;
 use mimic_check::types::{self, El, Key, Spec, Ty, id};
-use mimic_check::{FnKind, ModId, Program, Resolved, TypeId};
+use mimic_check::{FnId, FnKind, ModId, Program, Resolved, TypeId};
 use mimic_syntax::ast::*;
 use mimic_syntax::glyphs::Prim;
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 mod forkjoin;
+mod ir;
 mod owned;
 mod fuse;
 mod gpu;
@@ -355,6 +356,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         contract: !settings.strict_math,
         fast: settings.fast_math,
         exit_fid: None,
+        building_literal: false,
         body_exit: None,
         lazy_deep: None,
         cur_kind: Kind::Plain,
@@ -617,6 +619,8 @@ struct Cg<'ctx, 'p> {
     /// ten million records one by one only to exit costs more than making
     /// them; the system takes the memory back at once.
     exit_fid: Option<mimic_check::FnId>,
+    /// Building a list of literals for its cache (the cached path is off).
+    building_literal: bool,
     /// The scope depth of that function's body while it is compiled.
     body_exit: Option<usize>,
     /// In a native function of plain numbers: its key (the depth is checked
@@ -852,6 +856,24 @@ impl<'ctx> Cg<'ctx, '_> {
     /// values or lists of known length (a shaped record; at most 64 numbers in
     /// all). Its field types, in declaration order.
     fn flat(&self, t: Ty) -> Option<Vec<Ty>> {
+        // a tuple of numbers and truth values: in registers too (a `settle`
+        // over (position, crc) keeps its state there, not on the heap)
+        if let Ty::Tup(id) = t {
+            // (numbers, truth values and short lists of known length, as a
+            // flat record holds: a round counter and its 8 working words)
+            let es = types::tuple_elems(id);
+            let mut n = 0;
+            for e in &es {
+                match e {
+                    Ty::I64 | Ty::F64 | Ty::Bool => n += 1,
+                    _ => match fixed(*e) {
+                        Some((_, k)) => n += k as usize,
+                        None => return None,
+                    },
+                }
+            }
+            return (!es.is_empty() && n <= 64).then_some(es);
+        }
         let Ty::Obj(id) = t else { return None };
         let tid = types::obj_tid(id);
         let mimic_syntax::ast::TypeKind::Record(fs) = &self.p.types[tid].decl.kind else { return None };
@@ -1023,6 +1045,13 @@ impl<'ctx> Cg<'ctx, '_> {
     /// targets with the atomic loads the inline paths use (not eBPF).
     fn heap_ok(&self) -> bool {
         self.cur_fn.is_some() && self.opt_level >= 2 && !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
+    }
+
+    /// Whether a record held once is updated in place by `with` (its lists
+    /// taken out and changed, not copied): every build, debug included (it
+    /// needs only atomic loads, which eBPF lacks), unlike the inline heap.
+    fn in_place_ok(&self) -> bool {
+        self.cur_fn.is_some() && !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
     }
 
     fn heap(&self) -> R<Option<PointerValue<'ctx>>> {
@@ -1242,13 +1271,16 @@ impl<'ctx> Cg<'ctx, '_> {
             // a flat record becomes a record on the heap
             V::R(r, t) => {
                 let fs = self.flat(t).ok_or("internal compiler error: not a flat record")?;
-                let Ty::Obj(id) = t else { unreachable!() };
                 let mut vals = Vec::new();
                 for (k, ft) in fs.iter().enumerate() {
                     let x = self.b.build_extract_value(r, k as u32, "").s()?;
                     vals.push(self.val_of(x, *ft, false));
                 }
-                self.construct_in(types::obj_tid(id), None, vals)?
+                match t {
+                    Ty::Obj(id) => self.construct_in(types::obj_tid(id), None, vals)?,
+                    // (a tuple: what `(a, b)` makes on the heap)
+                    _ => self.construct_in(usize::MAX, None, vals)?,
+                }
             }
             // a list in registers becomes a vector on the heap
             V::A(a, el) => {
@@ -1476,6 +1508,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
                 }
             }
+            V::P(p, _) if matches!(t, Ty::Tup(_)) => {
+                // a tuple on the heap: element by element (the runtime checks
+                // that it is a tuple long enough)
+                for (k, ft) in fs.iter().enumerate() {
+                    let x = self.call_rt_ptr("mim_obj_get", &[p.into(), self.ctx.i64_type().const_int(k as u64, false).into()])?;
+                    let x = self.as_ty(x, *ft, what)?;
+                    out = self.b.build_insert_value(out, self.basic(x), k as u32, "").s()?.into_struct_value();
+                }
+                self.drop_tmp(v)?;
+            }
             V::P(p, _) => {
                 let Ty::Obj(id) = t else { unreachable!() };
                 // a record of this type (else the runtime reports it)
@@ -1606,6 +1648,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_get" => ptr.fn_type(&[p, i64t], false),
             "mim_obj_get_named" => ptr.fn_type(&[p, p], false),
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
+            "mim_lit_list" => ptr.fn_type(&[p, p], false),
             "mim_obj_unique" => ptr.fn_type(&[p], false),
             "mim_format" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
@@ -1938,7 +1981,35 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Plain | Kind::Seq => {}
         }
         self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
-        let v = self.block(&decl.body)?;
+        // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
+        let (use_ir, print_ir) = ir::wanted();
+        // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
+        // which function an IR difference comes from)
+        let only = std::env::var("MIMIC_IR_ONLY").ok();
+        let lowered = if use_ir
+            && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq)
+            && self.fj.quiet()
+            && only.as_ref().is_none_or(|o| path.contains(o.as_str()))
+        {
+            mimic_ir::lower::function(self.p, k.0, spec.clone(), self).filter(|f| match mimic_ir::verify(f) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("mimic: IR check failed, compiling `{path}` without it: {e}");
+                    false
+                }
+            })
+        } else {
+            None
+        };
+        let v = match &lowered {
+            Some(f) => {
+                if print_ir {
+                    eprint!("{f}");
+                }
+                self.ir_body(f)?
+            }
+            None => self.block(&decl.body)?,
+        };
         self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
@@ -2766,6 +2837,25 @@ impl<'ctx> Cg<'ctx, '_> {
             Stmt::LetTuple { names, value, .. } if self.let_tuple_in_regs(s, names, value)? => {}
             Stmt::LetTuple { names, value, .. } => {
                 let v = self.expr(value)?;
+                if let V::R(r, rt) = v
+                    && let Some(fs) = self.flat(rt)
+                    && fs.len() >= names.len()
+                {
+                    // in registers: each part straight from them
+                    for (i, n) in names.iter().enumerate() {
+                        if n == "_" {
+                            continue;
+                        }
+                        let t = self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn);
+                        let x = self.b.build_extract_value(r, i as u32, n).s()?;
+                        let fv = self.as_ty(self.val_of(x, fs[i], false), t, &format!("`{n}`"))?;
+                        let slot = self.entry_alloca(t, n)?;
+                        self.b.build_store(slot, self.basic(fv)).s()?;
+                        let owned = matches!(fv, V::P(..));
+                        self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves: false });
+                    }
+                    return Ok(());
+                }
                 let b = self.boxed(v)?;
                 for (i, n) in names.iter().enumerate() {
                     if n == "_" {
@@ -2918,7 +3008,7 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         // a record on the heap is handed to the step, which may change it
         // in place (it holds the only reference); anything else is lent
-        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.in_place_ok();
         let (f, _, _) = self.lambda_fn_owning(step, &caps, own_state)?;
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
@@ -2965,7 +3055,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let p0 = *pts.first()?;
         // x may be the same record with list lengths known (`[x]`): the
         // step's type is the state's, and x converts to it
-        let same = p0 == t || matches!((p0, t), (Ty::Obj(a), Ty::Obj(b)) if types::obj_tid(a) == types::obj_tid(b));
+        // (and a list of known length becomes the step's list of any length)
+        let same = p0 == t
+            || matches!((p0, t), (Ty::Obj(a), Ty::Obj(b)) if types::obj_tid(a) == types::obj_tid(b))
+            || matches!((p0, t), (Ty::Arr(a, 0), Ty::Arr(b, _)) if a == b);
         (same && rt == p0).then_some(p0)
     }
 
@@ -2993,7 +3086,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let dcaps = self.captures(dp, db);
         let sv = load_caps(self, &scaps)?;
         let dv = load_caps(self, &dcaps)?;
-        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.heap_ok();
+        let own_state = matches!(st, Ty::Obj(_)) && self.flat(st).is_none() && self.in_place_ok();
         let (sf, _, _) = self.lambda_fn_owning(step, &scaps, own_state)?;
         let (df, _, _) = self.lambda_fn_with(done, &dcaps)?;
         let fun = self.cur_fn.unwrap();
@@ -3028,6 +3121,116 @@ impl<'ctx> Cg<'ctx, '_> {
             self.drop_tmp(v)?;
         }
         Ok(self.val_of(xp.as_basic_value(), st, true))
+    }
+
+    /// `xs ▷ gather(f)` (`trail`: every running value, a new list) with `f`
+    /// a typed lambda over the list's numbers, left to right as the
+    /// runtime's fold_range: an empty list stops the program (`gather`, as
+    /// the runtime does) or gives an empty list (`trail`).
+    fn typed_fold(&mut self, trail: bool, xs: &Expr, f: &Expr, el: El) -> R<V<'ctx>> {
+        let ExprKind::Lambda { params, body } = &f.kind else { return Err("internal compiler error: fold".into()) };
+        let i64t = self.ctx.i64_type();
+        let t = Ty::of_el(el);
+        let et = self.repr(t);
+        let list = self.expr(xs)?;
+        let list = self.as_ty(list, Ty::Arr(el, 0), "fold list")?;
+        let list = self.own(list)?;
+        let (n, data) = self.vec_header(list, el)?;
+        let data = data.into_pointer_value();
+        let caps = self.captures(params, body);
+        let mut capv = Vec::new();
+        for (name, ct) in &caps {
+            let l = self.lookup(name).ok_or("internal error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+            capv.push(self.as_ty(self.val_of(bv, lt, false), *ct, name)?);
+        }
+        let (lf, _, _) = self.lambda_fn_with(f, &caps)?;
+        let fun = self.cur_fn.unwrap();
+        let empty_bb = self.ctx.append_basic_block(fun, "fold_empty");
+        let start_bb = self.ctx.append_basic_block(fun, "fold_start");
+        let is_empty = self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(is_empty, empty_bb, start_bb).s()?;
+        // an empty list
+        self.b.position_at_end(empty_bb);
+        let empty_end;
+        let empty_v = if trail {
+            let v = self.alloc_vec(if el == El::F64 { 1 } else { 0 }, i64t.const_zero())?;
+            // (what the loop would have released at its end)
+            for c in &capv {
+                self.drop_tmp(*c)?;
+            }
+            self.drop_tmp(list)?;
+            empty_end = self.b.get_insert_block().unwrap();
+            Some(v)
+        } else {
+            let m = self.cstring("gather of an empty array: there is no first value to start from")?;
+            self.call_rt("mim_panic", &[m.into()])?;
+            self.b.build_unreachable().s()?;
+            empty_end = empty_bb;
+            None
+        };
+        let done_bb = self.ctx.append_basic_block(fun, "fold_done");
+        if empty_v.is_some() {
+            self.b.build_unconditional_branch(done_bb).s()?;
+        }
+        // the first value, then each next one folded in
+        self.b.position_at_end(start_bb);
+        let x0 = self.b.build_load(et, data, "x0").s()?;
+        let out = if trail {
+            let o = self.alloc_vec(if el == El::F64 { 1 } else { 0 }, n)?;
+            let od = self.data_of(o)?.into_pointer_value();
+            self.b.build_store(od, x0).s()?;
+            Some((o, od))
+        } else {
+            None
+        };
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "fold");
+        let step_bb = self.ctx.append_basic_block(fun, "fold_step");
+        let end_bb = self.ctx.append_basic_block(fun, "fold_end");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let ip = self.b.build_phi(i64t, "i").s()?;
+        let accp = self.b.build_phi(et, "acc").s()?;
+        let i = ip.as_basic_value().into_int_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, n, "").s()?;
+        self.b.build_conditional_branch(more, step_bb, end_bb).s()?;
+        self.b.position_at_end(step_bb);
+        let xp = unsafe { self.b.build_in_bounds_gep(et, data, &[i], "").s()? };
+        let x = self.b.build_load(et, xp, "x").s()?;
+        let mut argv: Vec<BasicMetadataValueEnum> = vec![accp.as_basic_value().into(), x.into()];
+        argv.extend(capv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let next = self.b.build_call(lf, &argv, "").s()?.try_as_basic_value().basic().ok_or("fold: the lambda gives nothing")?;
+        if let Some((_, od)) = out {
+            let op = unsafe { self.b.build_in_bounds_gep(et, od, &[i], "").s()? };
+            self.b.build_store(op, next).s()?;
+        }
+        let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+        let latch = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(head).s()?;
+        ip.add_incoming(&[(&i64t.const_int(1, false), pre), (&i1, latch)]);
+        accp.add_incoming(&[(&x0, pre), (&next, latch)]);
+        self.b.position_at_end(end_bb);
+        for v in capv {
+            self.drop_tmp(v)?;
+        }
+        self.drop_tmp(list)?;
+        let full = match out {
+            Some((o, _)) => o,
+            None => self.val_of(accp.as_basic_value(), t, false),
+        };
+        let full_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done_bb).s()?;
+        self.b.position_at_end(done_bb);
+        match empty_v {
+            Some(ev) => {
+                let phi = self.b.build_phi(self.ptr, "trail").s()?;
+                phi.add_incoming(&[(&self.basic(ev), empty_end), (&self.basic(full), full_end)]);
+                Ok(V::P(phi.as_basic_value().into_pointer_value(), true))
+            }
+            None => Ok(full),
+        }
     }
 
     /// The outer variables a lambda's body uses: captured by value.
@@ -4427,6 +4630,79 @@ impl<'ctx> Cg<'ctx, '_> {
         }))
     }
 
+    /// A call of user function `fid` with its arguments already computed,
+    /// from the call at `site` (its syntax node: the callee's
+    /// specialisation and the version to run are keyed by it).
+    pub(crate) fn call_user(&mut self, site: usize, fid: FnId, vals: Vec<V<'ctx>>) -> R<V<'ctx>> {
+        let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&site).cloned()) else {
+            // the call's argument types never became known (it cannot be reached)
+            let m = self.cstring("internal error: unreachable call")?;
+            self.call_rt("mim_panic", &[m.into()])?;
+            return Ok(self.null());
+        };
+        let (kind, fork_depth) = match self.fj.kinds.remove(&site) {
+            Some((kd, d)) => (kd, d),
+            None => (self.kind_for(fid), None),
+        };
+        let f = self.request(&k, kind)?;
+        let spec = self.spec(&k)?;
+        let path_s = self.p.fn_path(fid).join("::");
+        let pnames: Vec<String> = match &self.p.fns[fid].kind {
+            FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+            _ => vec![],
+        };
+        let mut argv = Vec::new();
+        let mut conv = Vec::new();
+        let consumed = self.consumed(&k);
+        for (i, v) in vals.into_iter().enumerate() {
+            let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
+            if consumed.get(i).copied().unwrap_or(false) {
+                let c = self.hand_over(c)?; // the callee takes it
+                argv.push(self.basic(c).into());
+                continue;
+            }
+            argv.push(self.basic(c).into());
+            conv.push(c);
+        }
+        if matches!(kind, Kind::Native | Kind::NativeSeq)
+            && let Some(me) = self.lazy_deep.clone()
+        {
+            // too deep: this whole call starts over on the net
+            let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+            let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
+            let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
+            let is_deep = self.b.build_int_compare(IntPredicate::UGT, d, limit, "deep").s()?;
+            let fun = self.cur_fn.unwrap();
+            let deep_bb = self.ctx.append_basic_block(fun, "restart_deep");
+            let go = self.ctx.append_basic_block(fun, "call");
+            self.b.build_conditional_branch(is_deep, deep_bb, go).s()?;
+            self.b.position_at_end(deep_bb);
+            let wrap = self.request(&me, Kind::NetWrap)?;
+            let n = fun.count_params() - 1;
+            let own: Vec<BasicMetadataValueEnum> = (0..n).map(|i| fun.get_nth_param(i).unwrap().into()).collect();
+            self.call_rt("mim_deep_enter", &[])?;
+            let r = self.b.build_call(wrap, &own, "").s()?.try_as_basic_value().basic().unwrap();
+            self.call_rt("mim_deep_leave", &[])?;
+            self.b.build_return(Some(&r)).s()?;
+            self.b.position_at_end(go);
+        }
+        if kind.has_depth() {
+            let d1 = match fork_depth {
+                Some(d) => d,
+                None => {
+                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
+                    self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?
+                }
+            };
+            argv.push(d1.into());
+        }
+        let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+        for c in conv {
+            self.drop_tmp(c)?;
+        }
+        Ok(self.val_of(r, spec.ret, true))
+    }
+
     pub(crate) fn scalar_unary(&self, op: UnOp, a: V<'ctx>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let a = self.widen(a)?;
@@ -5059,6 +5335,48 @@ impl<'ctx> Cg<'ctx, '_> {
                 let V::P(x, _) = v else { unreachable!() };
                 Ok(V::P(x, false))
             }
+            // a list of literals (a table of names, of constants): built the
+            // first time, then the same immortal list every time after (a
+            // change to it copies, as to any list held more than once)
+            ExprKind::Array(xs)
+                if xs.len() >= 2
+                    && !self.building_literal
+                    && fixed(ty).is_none()
+                    && self.cur_fn.is_some()
+                    && xs.iter().all(|x| matches!(x.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_))) =>
+            {
+                let g = self.module.add_global(self.ptr, None, "litlist");
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&self.ptr.const_null());
+                let slot = self.gaddr(g);
+                let cached = self.b.build_load(self.ptr, slot, "lit").s()?;
+                inkwell::values::BasicValue::as_instruction_value(&cached)
+                    .unwrap()
+                    .set_atomic_ordering(inkwell::AtomicOrdering::Acquire)
+                    .map_err(|e| e.to_string())?;
+                let cached = cached.into_pointer_value();
+                let f = self.cur_fn.unwrap();
+                let pre = self.b.get_insert_block().unwrap();
+                let build_bb = self.ctx.append_basic_block(f, "lit_build");
+                let done_bb = self.ctx.append_basic_block(f, "lit_done");
+                let have = self.b.build_is_not_null(cached, "").s()?;
+                self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+                self.b.position_at_end(build_bb);
+                self.building_literal = true;
+                let built = self.expr_raw(e);
+                self.building_literal = false;
+                let built = self.boxed(built?)?;
+                let built = self.own(built)?;
+                let published = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])?;
+                let V::P(published, _) = published else { unreachable!() };
+                let build_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done_bb).s()?;
+                self.b.position_at_end(done_bb);
+                let phi = self.b.build_phi(self.ptr, "list").s()?;
+                phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+                let v = V::P(phi.as_basic_value().into_pointer_value(), false);
+                self.as_ty(v, ty, "list")
+            }
             ExprKind::Array(xs) if fixed(ty).is_some() => {
                 let (el, _) = fixed(ty).unwrap();
                 let mut elems = Vec::new();
@@ -5351,73 +5669,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     return Ok(out);
                 }
-                let Some(k) = self.cur_spec.as_ref().and_then(|s| s.calls.get(&id(e)).cloned()) else {
-                    // the call's argument types never became known (it cannot be reached)
-                    let m = self.cstring("internal error: unreachable call")?;
-                    self.call_rt("mim_panic", &[m.into()])?;
-                    return Ok(self.null());
-                };
-                let (kind, fork_depth) = match self.fj.kinds.remove(&id(e)) {
-                    Some((kd, d)) => (kd, d),
-                    None => (self.kind_for(fid), None),
-                };
-                let f = self.request(&k, kind)?;
-                let spec = self.spec(&k)?;
-                let path_s = self.p.fn_path(fid).join("::");
-                let pnames: Vec<String> = match &self.p.fns[fid].kind {
-                    FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
-                    _ => vec![],
-                };
-                let mut argv = Vec::new();
-                let mut conv = Vec::new();
-                let consumed = self.consumed(&k);
-                for (i, v) in vals.into_iter().enumerate() {
-                    let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
-                    if consumed.get(i).copied().unwrap_or(false) {
-                        let c = self.hand_over(c)?; // the callee takes it
-                        argv.push(self.basic(c).into());
-                        continue;
-                    }
-                    argv.push(self.basic(c).into());
-                    conv.push(c);
-                }
-                if matches!(kind, Kind::Native | Kind::NativeSeq)
-                    && let Some(me) = self.lazy_deep.clone()
-                {
-                    // too deep: this whole call starts over on the net
-                    let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
-                    let wasm = self.module.get_triple().as_str().to_string_lossy().starts_with("wasm");
-                    let limit = self.ctx.i32_type().const_int(if wasm { NATIVE_LIMIT_WASM } else { NATIVE_LIMIT }, false);
-                    let is_deep = self.b.build_int_compare(IntPredicate::UGT, d, limit, "deep").s()?;
-                    let fun = self.cur_fn.unwrap();
-                    let deep_bb = self.ctx.append_basic_block(fun, "restart_deep");
-                    let go = self.ctx.append_basic_block(fun, "call");
-                    self.b.build_conditional_branch(is_deep, deep_bb, go).s()?;
-                    self.b.position_at_end(deep_bb);
-                    let wrap = self.request(&me, Kind::NetWrap)?;
-                    let n = fun.count_params() - 1;
-                    let own: Vec<BasicMetadataValueEnum> = (0..n).map(|i| fun.get_nth_param(i).unwrap().into()).collect();
-                    self.call_rt("mim_deep_enter", &[])?;
-                    let r = self.b.build_call(wrap, &own, "").s()?.try_as_basic_value().basic().unwrap();
-                    self.call_rt("mim_deep_leave", &[])?;
-                    self.b.build_return(Some(&r)).s()?;
-                    self.b.position_at_end(go);
-                }
-                if kind.has_depth() {
-                    let d1 = match fork_depth {
-                        Some(d) => d,
-                        None => {
-                            let d = self.cur_depth.ok_or("internal compiler error: native call outside a native frame")?;
-                            self.b.build_int_add(d, self.ctx.i32_type().const_int(1, false), "").s()?
-                        }
-                    };
-                    argv.push(d1.into());
-                }
-                let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
-                for c in conv {
-                    self.drop_tmp(c)?;
-                }
-                Ok(self.val_of(r, spec.ret, true))
+                self.call_user(id(e), fid, vals)
             }
             // an element of a list in registers
             ExprKind::Index { base, index } if fixed(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() => {
@@ -5673,6 +5925,18 @@ impl<'ctx> Cg<'ctx, '_> {
                 let r = self.settle_loop(&args[0], &args[1], &args[2], st)?;
                 self.as_ty(r, ty, "settle result")
             }
+            // xs ▷ gather((a, b) => …) / trail(…) over a list of numbers, the
+            // lambda typed (number, number) → number: a loop here, left to
+            // right, calling the lambda as a typed function (nothing boxed)
+            ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail), args }
+                if let ExprKind::Lambda { params, .. } = &args[1].kind
+                    && params.len() == 2
+                    && let Ty::Arr(el @ (El::I64 | El::F64), 0) = self.ty_of(&args[0])
+                    && self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1]))).is_some_and(|(pts, rt)| *pts == [Ty::of_el(el), Ty::of_el(el)] && *rt == Ty::of_el(el)) =>
+            {
+                let r = self.typed_fold(*prim == Prim::Trail, &args[0], &args[1], el)?;
+                self.as_ty(r, ty, "fold result")
+            }
             // loop words: runtime loops over function values
             ExprKind::Prim { prim: prim @ (Prim::Gather | Prim::Trail | Prim::Evolve | Prim::Settle), args } => {
                 let mut vals = Vec::new();
@@ -5844,6 +6108,17 @@ impl<'ctx> Cg<'ctx, '_> {
                 for x in xs {
                     vals.push(self.expr(x)?);
                 }
+                // numbers and truth values: in registers
+                if let Some(fs) = self.flat(ty)
+                    && fs.len() == vals.len()
+                {
+                    let mut out = self.repr(ty).into_struct_type().get_undef();
+                    for (k, (v, ft)) in vals.into_iter().zip(&fs).enumerate() {
+                        let v = self.as_ty(v, *ft, "tuple element")?;
+                        out = self.b.build_insert_value(out, self.basic(v), k as u32, "").s()?.into_struct_value();
+                    }
+                    return Ok(V::R(out, ty));
+                }
                 self.construct(usize::MAX, None, vals)
             }
             ExprKind::Record { path, fields } => {
@@ -5881,8 +6156,10 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Field { base, name } => {
                 let b = self.expr(base)?;
                 if let V::R(r, rt) = b {
-                    let Ty::Obj(id) = rt else { unreachable!() };
-                    let k = self.p.types[types::obj_tid(id)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
+                    let k = match rt {
+                        Ty::Obj(id) => self.p.types[types::obj_tid(id)].field_index(name).ok_or_else(|| format!("no field {name}"))?,
+                        _ => name.parse().map_err(|_| "bad tuple index")?,
+                    };
                     let fs = self.flat(rt).unwrap();
                     let x = self.b.build_extract_value(r, k as u32, name).s()?;
                     return self.as_ty(self.val_of(x, fs[k], false), ty, &format!("field `{name}`"));
@@ -5945,7 +6222,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // a record on the heap: updated in place when nothing else holds
             // it (else copied once), its fields written directly
             ExprKind::With { base, fields }
-                if matches!(self.ty_of(base), Ty::Obj(_)) && self.heap_ok() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) =>
+                if matches!(self.ty_of(base), Ty::Obj(_)) && self.in_place_ok() && fields.iter().all(|(n, _, _)| !n.contains(['.', '['])) =>
             {
                 let Ty::Obj(t) = self.ty_of(base) else { unreachable!() };
                 let tid = types::obj_tid(t);

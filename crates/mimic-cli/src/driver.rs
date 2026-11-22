@@ -1666,6 +1666,7 @@ fn codegen_and_link(
         return Ok(Artifact { path: out, kind, note: None });
     }
     let _ = fs::remove_file(&stamp);
+    let mut clock = Phases::new();
     let objs = mimic_codegen::compile(
         program,
         &mimic_codegen::Settings {
@@ -1692,6 +1693,7 @@ fn codegen_and_link(
         emit_ir.then_some(ir.as_path()),
         emit_net.then_some(net.as_path()),
     )?;
+    clock.mark("code generation");
     let obj = objs[0].clone();
     let parts: Vec<PathBuf> = objs[1..].to_vec();
     if profile.emit_header {
@@ -1707,8 +1709,11 @@ fn codegen_and_link(
         }
         Err(why) => return Err(why),
     };
+    clock.mark("toolchain");
     let rt = runtime_object(&tc, target, profile.release, profile.cpu.as_deref(), profile.frame_pointers)?;
+    clock.mark("runtime");
     let c_objects = compile_c_sources(input, &program.c_sources, &header_dirs(input, None), &tc, target, profile, &dir)?;
+    clock.mark("C sources");
     if is_exe {
         let exe = dir.join(format!("{name}{}", target.exe_suffix()));
         let mut objects = vec![obj, rt];
@@ -1721,6 +1726,7 @@ fn codegen_and_link(
             job.libs = p.manifest.ffi_link.clone();
         }
         run_tool(toolchain::link(&tc, target, &job), "linking")?;
+        clock.mark("link");
         let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })
     } else {
@@ -1783,6 +1789,10 @@ fn build_key(input: &Input, p: &Program, profile: &Profile, target: &Target, cpu
     }
     if let Input::Project(pr) = input {
         text.push_str(&format!("{:?}{:?}", pr.manifest.ffi_link, pr.manifest.ffi_search));
+    }
+    // switches that change the code made (the IR, parts turned off for tests)
+    for v in ["MIMIC_IR", "MIMIC_IR_ONLY", "MIMIC_DEBUG_DISABLE"] {
+        text.push_str(&format!("|{v}={}", std::env::var(v).unwrap_or_default()));
     }
     let exe = std::env::current_exe().ok().and_then(|e| fs::metadata(e).ok());
     let compiler = exe.map(|m| format!("{}:{:?}", m.len(), m.modified().ok())).unwrap_or_default();

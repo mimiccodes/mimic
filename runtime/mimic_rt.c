@@ -1838,6 +1838,12 @@ mim_val *mim_lit_str(mim_val **slot, const char *s, int64_t len) {
     return publish(slot, n);
 }
 
+/* a list of literals, built once: v made immortal and cached in *slot
+ * (or the one another thread published first) */
+mim_val *mim_lit_list(mim_val **slot, mim_val *v) {
+    return publish(slot, v);
+}
+
 mim_val *mim_str(const char *s, int64_t len) {
     mim_val *v = alloc(MIM_CHAR, 1, len);
     memcpy(v->data, s, (size_t)len);

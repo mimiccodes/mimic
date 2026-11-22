@@ -17,6 +17,8 @@ use std::ffi::{CString, c_char, c_int};
 unsafe extern "C" {
     fn mimic_split_codegen(module: *mut std::ffi::c_void, tm: *mut std::ffi::c_void, n: c_int, paths: *const *const c_char, err: *mut c_char, errlen: usize) -> c_int;
     fn mimic_lld_main(argc: c_int, argv: *const *const c_char) -> c_int;
+    fn mimic_lld_link(argc: c_int, argv: *const *const c_char, msg: *mut *mut c_char) -> c_int;
+    fn free(p: *mut std::ffi::c_void);
     fn mimic_write_archive(out: *const c_char, kind: c_int, n: c_int, members: *const *const c_char, err: *mut c_char, errlen: usize) -> c_int;
     fn mimic_list_cpus(
         triple: *const c_char,
@@ -60,6 +62,25 @@ pub fn lld_main(args: &[String]) -> i32 {
     let owned = c_args(args);
     let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
     unsafe { mimic_lld_main(ptrs.len() as c_int, ptrs.as_ptr()) }
+}
+
+/// Link with LLD in this process, one link at a time (LLD keeps global
+/// state): its exit code and what it printed.
+pub fn lld_link(args: &[String]) -> (i32, String) {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+    let owned = c_args(args);
+    let ptrs: Vec<*const c_char> = owned.iter().map(|c| c.as_ptr()).collect();
+    let mut msg: *mut c_char = std::ptr::null_mut();
+    let code = unsafe { mimic_lld_link(ptrs.len() as c_int, ptrs.as_ptr(), &mut msg) };
+    let text = if msg.is_null() {
+        String::new()
+    } else {
+        let t = unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy().into_owned();
+        unsafe { free(msg.cast()) };
+        t
+    };
+    (code, text)
 }
 
 /// Run the Clang driver in this process. `args[0]` is the program name.
