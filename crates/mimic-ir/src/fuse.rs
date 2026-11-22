@@ -137,7 +137,7 @@ fn count(r: &Region, uses: &mut [u32]) {
                 bump(*a, uses);
                 bump(*b, uses);
             }
-            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) => bump(*a, uses),
+            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => bump(*a, uses),
             Op::Call { args, .. } => args.iter().for_each(|a| bump(*a, uses)),
             Op::Make(xs) => xs.iter().for_each(|a| bump(*a, uses)),
             Op::Embed { uses: us, .. } => us.iter().for_each(|(_, a, _)| bump(*a, uses)),

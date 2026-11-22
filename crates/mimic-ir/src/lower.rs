@@ -68,6 +68,7 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, hints: &mut dyn
     let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
     crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
+    crate::own::function(&mut f);
     Some(f)
 }
 

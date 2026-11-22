@@ -196,6 +196,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     };
                     self.as_ty(out, ty, "reduction")?
                 }
+                // an owned list's last use is past: released now
+                Op::Drop(v) => {
+                    let x = get(vals, *v)?;
+                    self.drop_tmp(x)?;
+                    self.null()
+                }
                 // a list computed element by element: one loop (owned)
                 Op::Map(t) => {
                     let Ty::Arr(el, _) = ty else { return Err("internal compiler error: an IR map that is not a list".into()) };
@@ -236,8 +242,11 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         // the lists this region owns, released now; the one it yields
         // moves out
+        // (each is released after its last use by a drop, when the
+        // ownership pass placed one; any other here)
+        let dropped: Vec<mimic_ir::Val> = r.insts.iter().filter_map(|i| if let Op::Drop(v) = i.op { Some(v) } else { None }).collect();
         for i in &r.insts {
-            if mimic_ir::owns(i) && Some(i.dst) != r.result {
+            if mimic_ir::owns(i) && Some(i.dst) != r.result && !dropped.contains(&i.dst) {
                 let v = get(vals, i.dst)?;
                 self.drop_tmp(v)?;
             }

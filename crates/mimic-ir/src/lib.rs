@@ -39,6 +39,7 @@ pub trait Hints {
     fn spec(&mut self, key: &mimic_check::types::Key) -> Option<std::rc::Rc<mimic_check::types::Spec>>;
 }
 pub mod fuse;
+pub mod own;
 pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
@@ -174,6 +175,9 @@ pub enum Op {
     Reduce(mimic_syntax::glyphs::Prim, Tree, mimic_check::types::El),
     /// The list of the elements `tree` computes, in one loop (owned).
     Map(Tree),
+    /// Releases an owned list right after its last use in its region
+    /// (placed by [`own`]; gives nothing).
+    Drop(Val),
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -280,6 +284,43 @@ pub struct Function {
     pub values: u32,
 }
 
+impl Op {
+    /// The values the operation reads itself (not inside its regions).
+    pub fn operands(&self) -> Vec<Val> {
+        match self {
+            Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) => vec![],
+            Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) => vec![*a],
+            Op::Reduce(_, t, _) | Op::Map(t) => {
+                let mut v = Vec::new();
+                t.vals(&mut v);
+                v
+            }
+            Op::Call { args, .. } => args.clone(),
+            Op::Make(xs) => xs.clone(),
+            Op::Embed { uses, .. } => uses.iter().map(|(_, v, _)| *v).collect(),
+            Op::If { cond, .. } => vec![*cond],
+            Op::Loop { init, count, .. } => std::iter::once(*init).chain(*count).collect(),
+        }
+    }
+
+    /// The regions inside the operation.
+    pub fn regions(&self) -> Vec<&Region> {
+        match self {
+            Op::If { then, els, .. } => vec![then, els],
+            Op::Loop { done, step, .. } => done.iter().chain(std::iter::once(step)).collect(),
+            _ => vec![],
+        }
+    }
+}
+
+impl Region {
+    /// Whether anything in the region (its regions included) reads `v`.
+    pub fn mentions(&self, v: Val) -> bool {
+        self.result == Some(v) || self.insts.iter().any(|i| i.op.operands().contains(&v) || i.op.regions().iter().any(|r| r.mentions(v)))
+    }
+}
+
 /// Whether the instruction makes a list it owns: a call giving a list, or
 /// an `if` yielding one (both branches then yield owned lists).
 pub fn owns(i: &Inst) -> bool {
@@ -344,6 +385,9 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             }
             Op::Map(t) => {
                 let _ = writeln!(out, "map {}: {}", t.show(), i.ty.name());
+            }
+            Op::Drop(v) => {
+                let _ = writeln!(out, "drop {v}");
             }
             Op::Embed { uses, lazies, .. } => {
                 let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
@@ -485,6 +529,11 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: a map giving {}", f.name, i.ty.name()));
                 }
                 tree_ok(f, t, types, scope)?;
+            }
+            Op::Drop(v) => {
+                if !matches!(ty(*v, types)?, Ty::List(_)) {
+                    return Err(format!("{}: drop of {v}, not a list", f.name));
+                }
             }
             Op::Index(v, k, _) => {
                 if !matches!(ty(*v, types)?, Ty::List(_)) || ty(*k, types)? != Ty::I64 {
