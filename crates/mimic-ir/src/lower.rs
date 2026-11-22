@@ -27,7 +27,10 @@ struct Lower<'a> {
     hints: &'a mut dyn crate::Hints,
     lazies: Vec<Lazy>,
     module: mimic_check::ModId,
-    spec: &'a Spec,
+    spec: std::rc::Rc<Spec>,
+    /// The function lowered, and how many calls deep inlining is now.
+    fid: FnId,
+    inline_depth: u32,
     next: u32,
     /// The type of every value so far, by number.
     types: Vec<Ty>,
@@ -40,16 +43,16 @@ struct Lower<'a> {
 }
 
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
-pub fn function(p: &Program, fid: FnId, spec: &Spec, hints: &mut dyn crate::Hints) -> Option<Function> {
+pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, hints: &mut dyn crate::Hints) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
     let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
     let ret = Ty::of(p, spec.ret)?;
-    if !calls_apart(&decl.body) {
+    if !calls_apart(p, p.fns[fid].module, &decl.body) {
         return None;
     }
     let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
     decl.body.bound_names(&mut local_names);
-    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec, next: 0, types: Vec::new(), local_names, env: Vec::new() };
+    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new() };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
         let v = l.emit(&mut body, *t, Op::Param(i as u32), decl.span);
@@ -71,7 +74,13 @@ pub fn function(p: &Program, fid: FnId, spec: &Spec, hints: &mut dyn crate::Hint
 /// No block runs two statements that call functions: such calls may run
 /// at once (the code generator starts independent calls in parallel),
 /// which the IR does not do yet.
-fn calls_apart(b: &Block) -> bool {
+///
+/// A statement that is itself a call of a small helper (a user function
+/// whose body is one expression with no calls of its own: what the IR
+/// inlines), its arguments calling nothing, does not count: the code
+/// generator would gain little running one apart, and it gives the same
+/// result in turn. (A helper called inside a lambda counts, as any call.)
+fn calls_apart(p: &Program, module: mimic_check::ModId, b: &Block) -> bool {
     let mut ok = true;
     b.walk(&mut |e| {
         let blocks: Vec<&Block> = match &e.kind {
@@ -80,17 +89,34 @@ fn calls_apart(b: &Block) -> bool {
             _ => vec![],
         };
         for b in blocks {
-            ok &= calls_in_stmts(b) <= 1;
+            ok &= calls_in_stmts(p, module, b) <= 1;
         }
     });
-    ok && calls_in_stmts(b) <= 1
+    ok && calls_in_stmts(p, module, b) <= 1
 }
 
-fn calls_in_stmts(b: &Block) -> usize {
+/// Whether `e` calls a small helper (see [`calls_apart`]).
+fn helper_call(p: &Program, module: mimic_check::ModId, e: &Expr) -> bool {
+    let ExprKind::Call { callee, .. } = &e.kind else { return false };
+    let ExprKind::Path(path) = &callee.kind else { return false };
+    let Some(Resolved::Fn(f)) = p.lookup(module, path) else { return false };
+    let FnKind::User(d) = &p.fns[f].kind else { return false };
+    let Some(tail) = d.body.tail.as_deref() else { return false };
+    let mut inner = false;
+    tail.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
+    d.body.stmts.is_empty() && !inner
+}
+
+fn calls_in_stmts(p: &Program, module: mimic_check::ModId, b: &Block) -> usize {
     let has_call = |e: &Expr| {
         let mut c = false;
         e.walk(&mut |x| c |= matches!(x.kind, ExprKind::Call { .. }));
-        c
+        let ExprKind::Call { args, .. } = &e.kind else { return c };
+        let mut inner = false;
+        for a in args {
+            a.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
+        }
+        c && !(helper_call(p, module, e) && !inner)
     };
     let mut n = b
         .stmts
@@ -453,6 +479,101 @@ impl Lower<'_> {
         true
     }
 
+    /// A call of a user function.
+    fn call(&mut self, r: &mut Region, e: &Expr, ty: Ty) -> Option<Val> {
+        let ExprKind::Call { callee, args } = &e.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        // a variable holding a function: not covered yet
+        if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
+            return None;
+        }
+        let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
+        // (a call's specialisation is looked up in the caller's types by
+        // the code generator: none inside an inlined body)
+        if !matches!(self.p.fns[f].kind, FnKind::User(_)) || !self.spec.calls.contains_key(&id(e)) || self.inline_depth > 0 {
+            return None;
+        }
+        let mut vals = Vec::new();
+        for a in args {
+            self.ty(a)?;
+            vals.push(self.expr(r, a)?);
+        }
+        Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals }, e.span))
+    }
+
+    /// The callee of `e`, when it is a call worth lowering in place: a user
+    /// function (not this one, at most 4 calls deep) whose body is one
+    /// expression, and whose specialisation the code generator knows.
+    fn inlinable(&mut self, e: &Expr) -> Option<(FnId, std::rc::Rc<Spec>)> {
+        let ExprKind::Call { callee, args } = &e.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        if self.inline_depth >= 4 || (path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0])) {
+            return None;
+        }
+        let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
+        let FnKind::User(d) = &self.p.fns[f].kind else { return None };
+        if f == self.fid || !d.body.stmts.is_empty() || d.body.tail.is_none() || d.params.len() != args.len() {
+            return None;
+        }
+        let key = self.spec.calls.get(&id(e))?.clone();
+        let cs = self.hints.spec(&key)?;
+        Some((f, cs))
+    }
+
+    /// The body of the helper `e` calls as a tree, its parameters the
+    /// arguments (each evaluated once, here, as the call would).
+    fn inline_tree(&mut self, r: &mut Region, e: &Expr) -> Option<Tree> {
+        let (f, cs) = self.inlinable(e)?;
+        let ExprKind::Call { args, .. } = &e.kind else { return None };
+        let FnKind::User(d) = &self.p.fns[f].kind else { return None };
+        let mut binds = Vec::new();
+        for (k, (prm, a)) in d.params.iter().zip(args).enumerate() {
+            let t = self.ty(a)?;
+            // the callee specialised on exactly these types
+            if Ty::of(self.p, *cs.params.get(k)?) != Some(t) {
+                return None;
+            }
+            binds.push((prm.name.clone(), self.expr(r, a)?, t));
+        }
+        let mut names: Vec<String> = d.params.iter().map(|q| q.name.clone()).collect();
+        d.body.bound_names(&mut names);
+        let saved = (
+            std::mem::replace(&mut self.spec, cs),
+            std::mem::replace(&mut self.module, self.p.fns[f].module),
+            std::mem::replace(&mut self.env, binds),
+            std::mem::replace(&mut self.local_names, names),
+        );
+        self.inline_depth += 1;
+        let body_mark = r.insts.len();
+        let t = d.body.tail.as_deref().and_then(|tail| self.tree(r, tail));
+        self.inline_depth -= 1;
+        // what the body computes once is at the call, for debug information
+        // (the callee's places are in its own file)
+        fn at(r: &mut Region, span: mimic_syntax::Span) {
+            for i in &mut r.insts {
+                i.span = span;
+                match &mut i.op {
+                    Op::If { then, els, .. } => {
+                        at(then, span);
+                        at(els, span);
+                    }
+                    Op::Loop { done, step, .. } => {
+                        if let Some(d) = done {
+                            at(d, span);
+                        }
+                        at(step, span);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut body = Region { insts: r.insts.split_off(body_mark), result: None };
+        at(&mut body, e.span);
+        r.insts.append(&mut body.insts);
+        (self.spec, self.module, self.env, self.local_names) = saved;
+        t
+    }
+
     /// `e`, an operand of an element-by-element computation: a number (the
     /// same for every element), or a list, computed element by element
     /// where it is `⍳`, an operator or a list the IR holds.
@@ -480,9 +601,21 @@ impl Lower<'_> {
                 Some(Tree::Bin(*op, Box::new(a), Box::new(b)))
             }
             ExprKind::Unary { op, expr } => Some(Tree::Un(*op, Box::new(self.tree(r, expr)?))),
+            // a small helper's body, inlined (else the call's list, below)
+            ExprKind::Call { .. } if self.inlinable(e).is_some() => {
+                let (mark, env_mark) = (r.insts.len(), self.env.len());
+                match self.inline_tree(r, e) {
+                    Some(t) => Some(t),
+                    None => {
+                        r.insts.truncate(mark);
+                        self.env.truncate(env_mark);
+                        Some(Tree::Leaf(self.direct(r, e)?, el))
+                    }
+                }
+            }
             // `xs ¨ f` the old path computes element by element (a pure
             // `f` on numbers): built by its engine inside this loop
-            ExprKind::Prim { prim: Prim::Each, .. } => {
+            ExprKind::Prim { prim: Prim::Each, .. } if self.inline_depth == 0 => {
                 let scope: Vec<(String, Ty)> = self.env.iter().filter(|(_, v, _)| v.0 < LAZY).map(|(n, _, t)| (n.clone(), *t)).collect();
                 let lazies: Vec<(String, *const Expr)> =
                     self.env.iter().filter(|(_, v, _)| v.0 >= LAZY).map(|(n, v, _)| (n.clone(), self.lazies[(v.0 - LAZY) as usize].expr)).collect();
@@ -510,6 +643,9 @@ impl Lower<'_> {
                 self.env.truncate(mark);
                 t
             }
+            // a computation this tree cannot hold: not a list to read
+            // either (lowering it as a value would come back here)
+            ExprKind::Prim { prim: Prim::Iota | Prim::Each, .. } | ExprKind::Binary { .. } => None,
             _ => Some(Tree::Leaf(self.direct(r, e)?, el)),
         }
     }
@@ -528,6 +664,11 @@ impl Lower<'_> {
 
     /// `e` kept whole for the old path, reading these variables.
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        // (inside an inlined body the code generator's types are the
+        // caller's: the old path could not compile the callee's syntax)
+        if self.inline_depth > 0 {
+            return None;
+        }
         let ty = self.ty(e)?;
         // (a lambda on its own is a function value: not an IR type anyway)
         if matches!(e.kind, ExprKind::Lambda { .. }) {
@@ -637,6 +778,20 @@ impl Lower<'_> {
                 }
                 Some(self.emit(r, ty, Op::Map(t), e.span))
             }
+            // a small helper giving a list element by element: its body
+            // here, a map the fusion pass can move into what reads it
+            ExprKind::Call { .. } if elementwise_list(ty) && self.inlinable(e).is_some() => {
+                let (mark, env_mark) = (r.insts.len(), self.env.len());
+                match self.inline_tree(r, e) {
+                    Some(t) if !matches!(t, Tree::Leaf(..)) => Some(self.emit(r, ty, Op::Map(t), e.span)),
+                    // (not a computation after all: the call as it is)
+                    _ => {
+                        r.insts.truncate(mark);
+                        self.env.truncate(env_mark);
+                        self.call(r, e, ty)
+                    }
+                }
+            }
             // (operators on single values: on lists, above)
             ExprKind::Binary { op, lhs, rhs } => {
                 if !scalar(ty) || !scalar(self.ty(lhs)?) || !scalar(self.ty(rhs)?) {
@@ -685,23 +840,7 @@ impl Lower<'_> {
                 let i = self.expr(r, index)?;
                 Some(self.emit(r, ty, Op::Index(b, i, el), e.span))
             }
-            ExprKind::Call { callee, args } => {
-                let ExprKind::Path(path) = &callee.kind else { return None };
-                // a variable holding a function: not covered yet
-                if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
-                    return None;
-                }
-                let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
-                if !matches!(self.p.fns[f].kind, FnKind::User(_)) || !self.spec.calls.contains_key(&id(e)) {
-                    return None;
-                }
-                let mut vals = Vec::new();
-                for a in args {
-                    self.ty(a)?;
-                    vals.push(self.expr(r, a)?);
-                }
-                Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals }, e.span))
-            }
+            ExprKind::Call { .. } => self.call(r, e, ty),
             ExprKind::If { cond, then, els } => {
                 if self.ty(cond)? != Ty::Bool {
                     return None;
