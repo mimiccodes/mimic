@@ -216,8 +216,76 @@ pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &m
 impl<'ctx> Cg<'ctx, '_> {
     /// Which parameters of the specialisation `k` it takes owned (see the
     /// module comment): a record used once, as the base of a `with`.
+    ///
+    /// Also a list of i64 that the function changes with `put` or `push`,
+    /// or hands to a function that takes it: it arrives owned, so the
+    /// change is in place when the caller gives up its list (released at
+    /// the end when no site moves it).
     pub(crate) fn consumed(&self, k: &Key) -> Vec<bool> {
-        self.consumed_sites(k).iter().map(|s| !s.is_empty()).collect()
+        self.consumed_in(k, &mut Vec::new())
+    }
+
+    /// `consumed`, with `stack` the functions being decided (a call back
+    /// into one of them does not take: that answer is still open; nor does
+    /// a call 8 deep). Not cached: what it reads can still change while
+    /// functions are being compiled, and every caller must see the answer
+    /// the callee is compiled with.
+    fn consumed_in(&self, k: &Key, stack: &mut Vec<Key>) -> Vec<bool> {
+        let mut out: Vec<bool> = self.consumed_sites(k).iter().map(|s| !s.is_empty()).collect();
+        let FnKind::User(d) = &self.p.fns[k.0].kind else { return out };
+        let Ok(spec) = self.spec(k) else { return out };
+        if self.plan.entered.contains(&k.0) || d.export_c || !self.heap_ok_target() {
+            return out;
+        }
+        stack.push(k.clone());
+        for (i, prm) in d.params.iter().enumerate() {
+            if !out[i] && spec.params[i] == Ty::Arr(El::I64, 0) {
+                out[i] = self.list_taken(k, &prm.name, &d.body, &spec, stack);
+            }
+        }
+        stack.pop();
+        out
+    }
+
+    /// Whether the list parameter `name` of `k` reaches, at a last use, the
+    /// list of a `put`/`push` on i64s or a parameter another function takes:
+    /// only then can taking it save a copy (a list still read after its
+    /// change is copied anyway, and taking it would cost a retain per call).
+    fn list_taken(&self, k: &Key, name: &str, body: &Block, spec: &Spec, stack: &mut Vec<Key>) -> bool {
+        let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name);
+        let order = UseOrder::new(name, body);
+        if order.in_closure {
+            return false;
+        }
+        let module = self.p.fns[k.0].module;
+        let list = Ty::Arr(El::I64, 0);
+        let mut found = false;
+        body.walk(&mut |x| {
+            let ExprKind::Call { callee, args } = &x.kind else { return };
+            if found || !args.iter().any(|a| is_name(a) && order.last(a)) {
+                return;
+            }
+            if let Some(k2) = spec.calls.get(&id(x)) {
+                if k2 == k || stack.contains(k2) || stack.len() >= 8 {
+                    return;
+                }
+                let takes = self.consumed_in(k2, stack);
+                found = args.iter().enumerate().any(|(j, a)| is_name(a) && order.last(a) && takes.get(j).copied().unwrap_or(false));
+                return;
+            }
+            let ExprKind::Path(path) = &callee.kind else { return };
+            let Some(Resolved::Fn(f)) = self.p.lookup(module, path) else { return };
+            let FnKind::Extern { decl, .. } = &self.p.fns[f].kind else { return };
+            let ty = |e: &Expr| spec.exprs.get(&id(e)).copied();
+            found = decl.intrinsic
+                && self.p.mods[self.p.fns[f].module].name == "prelude"
+                && matches!((decl.name.as_str(), args.len()), ("put", 3) | ("push", 2))
+                && is_name(&args[0])
+                && order.last(&args[0])
+                && ty(x) == Some(list)
+                && args[1..].iter().all(|a| ty(a) == Some(Ty::I64));
+        });
+        found
     }
 
     /// For each parameter it consumes: where it moves (the bases of the
@@ -279,5 +347,76 @@ impl<'ctx> Cg<'ctx, '_> {
     /// (the caller's, when it is a temporary; else a new one).
     pub(crate) fn hand_over(&mut self, v: V<'ctx>) -> R<V<'ctx>> {
         self.own(v)
+    }
+}
+
+/// The uses of a name in a body, in the order they run (the walk's order:
+/// a function has no loops), and the branches of each `if` and `match`.
+struct UseOrder {
+    /// (expression id, position) of each use
+    uses: Vec<(usize, usize)>,
+    /// each `if`/`match`: the position range of every branch
+    branches: Vec<Vec<(usize, usize)>>,
+    /// a use inside a lambda (it may run any number of times, any time)
+    in_closure: bool,
+}
+
+impl UseOrder {
+    fn new(name: &str, body: &Block) -> UseOrder {
+        let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name);
+        // a pre-order walk: every subtree is a run of positions
+        let size = |e: &Expr| {
+            let mut n = 0;
+            e.walk(&mut |_| n += 1);
+            n
+        };
+        let bsize = |b: &Block| {
+            let mut n = 0;
+            b.walk(&mut |_| n += 1);
+            n
+        };
+        let mut uses = Vec::new();
+        let mut closures = Vec::new();
+        let mut branches = Vec::new();
+        let mut n = 0;
+        body.walk(&mut |x| {
+            if is_name(x) {
+                uses.push((id(x), n));
+            }
+            match &x.kind {
+                ExprKind::Lambda { .. } | ExprKind::Arms { .. } => closures.push((n, n + size(x))),
+                ExprKind::If { cond, then, els } => {
+                    let t = n + 1 + size(cond);
+                    let e = t + bsize(then);
+                    branches.push(vec![(t, e), (e, e + els.as_deref().map_or(0, size))]);
+                }
+                ExprKind::Match { scrut, arms } => {
+                    let mut at = n + 1 + size(scrut);
+                    let mut r = Vec::new();
+                    for arm in arms {
+                        let len = arm.guard.as_ref().map_or(0, size) + size(&arm.body);
+                        r.push((at, at + len));
+                        at += len;
+                    }
+                    branches.push(r);
+                }
+                _ => {}
+            }
+            n += 1;
+        });
+        let in_closure = uses.iter().any(|(_, p)| closures.iter().any(|(s, e)| p > s && p < e));
+        UseOrder { uses, branches, in_closure }
+    }
+
+    /// Whether the use `e` is a last use: every use after it is in another
+    /// branch of an `if`/`match` that holds both.
+    fn last(&self, e: &Expr) -> bool {
+        let Some(&(_, u)) = self.uses.iter().find(|(i, _)| *i == id(e)) else { return false };
+        self.uses.iter().filter(|(_, w)| *w > u).all(|(_, w)| {
+            self.branches.iter().any(|bs| {
+                let at = |p: usize| bs.iter().position(|(s, t)| p >= *s && p < *t);
+                matches!((at(u), at(*w)), (Some(a), Some(b)) if a != b)
+            })
+        })
     }
 }

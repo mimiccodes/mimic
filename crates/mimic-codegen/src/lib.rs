@@ -1892,7 +1892,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.fj_begin(fv, kind, decl)?;
         // parameters it consumes arrive owned (released at the end unless moved on)
         let sites = self.consumed_sites(k);
-        let consumed: Vec<bool> = sites.iter().map(|s| !s.is_empty()).collect();
+        let consumed = self.consumed(k);
         self.move_at.clear();
         self.move_at.extend(sites.iter().flatten());
         for (i, prm) in decl.params.iter().enumerate() {
@@ -1901,7 +1901,8 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
             self.dbg_var(&prm.name, slot, t, decl.span.line, Some(i as u32 + 1));
             let c = consumed.get(i).copied().unwrap_or(false);
-            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: c });
+            let m = sites.get(i).is_some_and(|s| !s.is_empty());
+            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: m });
         }
         if self.opt_level >= 2 {
             for (i, t) in spec.params.iter().enumerate() {
