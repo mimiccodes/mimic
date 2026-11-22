@@ -426,6 +426,15 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
     if !cg.cov_order.is_empty() && !plan_only {
         cg.emit_coverage(obj)?;
     }
+    // optimised x86-64 code: every function on a cache line of its own, so
+    // a change elsewhere in the program (or the runtime) cannot move a hot
+    // loop across a line or decode-window boundary and change its speed
+    // (a benchmark built twice the same moved 6–9% on Windows that way)
+    if settings.opt_level > 0 && triple.as_str().to_string_lossy().starts_with("x86_64") {
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            f.as_global_value().set_alignment(64);
+        }
+    }
     if settings.frame_pointers {
         let fp = cg.ctx.create_string_attribute("frame-pointer", "all");
         for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {

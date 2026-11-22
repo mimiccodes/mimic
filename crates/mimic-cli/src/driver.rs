@@ -1098,6 +1098,12 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     if frame_pointers {
         flags.push("-fno-omit-frame-pointer".into());
     }
+    // optimised: every runtime function on a cache line of its own, so its
+    // hot loops land the same way whatever else changes (a benchmark built
+    // twice the same moved 6–9% on Windows with the runtime's size)
+    if release {
+        flags.push("-falign-functions=64".into());
+    }
     if !target.is_apple() {
         // a section per function, so the linker drops what a program does not
         // use (Mach-O linkers do this by symbol without being asked)
