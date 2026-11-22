@@ -131,7 +131,7 @@ Mimic's parallel numbers need no annotations; Rayon's are parallelised by hand. 
 
 ## Status and roadmap
 
-**Latest release: 0.3.18** ([changelog](CHANGELOG.md)).
+**Latest release: 0.4.1** ([changelog](CHANGELOG.md)).
 
 | Era | Versions | |
 |---|---|---|
