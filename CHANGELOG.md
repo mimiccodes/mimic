@@ -4,6 +4,10 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Changed
+- **Values are released as soon as they are last used, and handed over instead of shared** (docs/design/ownership.md): in the functions the IR covers, a list or record is freed right after its last use (not at the end of its block), given as it is to a function that takes it over, and stored into a record without a new reference. A field read borrows its record. Records on the heap, `{ r with … }` and functions that take over a record argument now go through the IR; `floyd` is 1.26× faster.
+- **`put` and `push` on a list of `i64` change it in place when nothing else holds it:** a list the function owns at its last use (`let g = push(h, x)`, `put(put(h, p, b), i, a)`) is changed where it is, and `{ s with v: put(s.v, i, x) }` stores the number in place without a call. Before, a bare `put` always copied the list.
+
 ## 0.4.1 — 2026-11-22
 
 Step 0.4.1, the Mimic IR: programs are now compiled through a typed intermediate representation between the syntax tree and LLVM, on by default, with fusion as a pass over it. Array code computed element by element (`⍳ n`, operators on lists, `xs ¨ f`, reductions) is fused by the IR, across `let`s and small helpers it inlines; what the IR does not cover yet is compiled by the old code generator where it stands, until that is retired (0.4.10). Also a security fix for the HTTP client's redirects, and the slowest benchmarks of 0.4.0 traced and most of them made several times faster without a change to the programs: tuples of numbers and short lists stay in registers, lists grown in a loop and lists from `flatten` stay typed, `let` lambdas and `count`'s lambda are compiled as functions, `gather`/`trail` with a lambda are typed loops, and debug builds change lists in place. `fnv1a`, `crc32`, `adler32`, `pagerank`, `topo` and `siphash` 7–25× faster, `sha256` 13×, `diff` 7×, `utf8` 5.6×; no benchmark slower on Linux, macOS or Windows.

@@ -703,10 +703,53 @@ impl Lower<'_> {
         Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
     }
 
+    /// `put(xs, i, x)` or `push(xs, x)` (the prelude's) of a list of i64
+    /// and numbers, giving a list of i64: its name and arguments.
+    fn list_change<'e>(&self, e: &'e Expr) -> Option<(&'static str, &'e [Expr])> {
+        let ExprKind::Call { callee, args } = &e.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
+            return None;
+        }
+        let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
+        let FnKind::Extern { decl, .. } = &self.p.fns[f].kind else { return None };
+        if !decl.intrinsic || self.p.mods[self.p.fns[f].module].name != "prelude" {
+            return None;
+        }
+        let op = match (decl.name.as_str(), args.len()) {
+            ("put", 3) => "put",
+            ("push", 2) => "push",
+            _ => return None,
+        };
+        let list = Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0));
+        if self.ty(&args[0])? != list || self.ty(e)? != list || args[1..].iter().any(|a| self.ty(a) != Some(Ty::I64)) {
+            return None;
+        }
+        Some((op, args))
+    }
+
+    /// `x`, the new value of field `n` of the record `base` names, as
+    /// changes of that field's old value (`push(put(s.v, i, x), y)`): each
+    /// (name, the other arguments), innermost first.
+    fn change_chain<'e>(&self, base: &[String], n: &str, x: &'e Expr) -> Option<Vec<(&'static str, &'e [Expr])>> {
+        let mut chain = Vec::new();
+        let mut cur = x;
+        loop {
+            let (op, args) = self.list_change(cur)?;
+            chain.push((op, &args[1..]));
+            match &args[0].kind {
+                ExprKind::Field { base: fb, name } if name == n && matches!(&fb.kind, ExprKind::Path(q) if q == base) => break,
+                _ => cur = &args[0],
+            }
+        }
+        chain.reverse();
+        Some(chain)
+    }
+
     /// Whether the old path, compiling `e`, would take over a variable on
     /// the heap (and so change it in place where it is held once): the base
-    /// of `{ x with … }`, the list of `push`/`put`/`concat`, an argument a
-    /// user function takes over. Embedded, it would only borrow it (the IR
+    /// of `{ x with … }`, an argument a user function takes over. (Not the
+    /// list of `push`/`put`: the old path copies it anyway.) Embedded, it would only borrow it (the IR
     /// owns its values) and copy instead.
     fn takes_var(&mut self, e: &Expr) -> bool {
         let heap_var = |l: &Self, x: &Expr| matches!(&x.kind, ExprKind::Path(q) if q.len() == 1 && l.env.iter().rev().find(|(n, ..)| *n == q[0]).is_some_and(|(_, _, t)| matches!(t, Ty::List(_) | Ty::Rec(_))));
@@ -727,16 +770,11 @@ impl Lower<'_> {
         }
         for (site, path, heap) in calls {
             let Some(Resolved::Fn(f)) = self.p.lookup(self.module, &path) else { continue };
-            match &self.p.fns[f].kind {
-                FnKind::Extern { decl, .. } if decl.intrinsic && matches!(decl.name.as_str(), "push" | "put" | "concat") && heap[0] => return true,
-                FnKind::User(_) => {
-                    let Some(key) = self.spec.calls.get(&site).cloned() else { continue };
-                    let takes = self.hints.takes(&key);
-                    if heap.iter().zip(takes).any(|(h, t)| *h && t) {
-                        return true;
-                    }
-                }
-                _ => {}
+            if let FnKind::User(_) = &self.p.fns[f].kind
+                && let Some(key) = self.spec.calls.get(&site).cloned()
+                && heap.iter().zip(self.hints.takes(&key)).any(|(h, t)| *h && t)
+            {
+                return true;
             }
         }
         false
@@ -905,34 +943,49 @@ impl Lower<'_> {
                 Some(self.emit(r, ty, Op::Field { base: b, tid: id as usize, k: k as u32, borrow: false }, e.span))
             }
             // `{ r with f: x, … }` of a record on the heap, each new value of
-            // the type its field declares. Not a list field changed from its
-            // own old value (`{ s with v: put(s.v, i, x) }`): the old path
-            // takes such a list out of the record to change it in place.
+            // the type its field declares. A list of i64 changed from its own
+            // old value by `put`/`push` (`{ s with v: put(s.v, i, x) }`) is a
+            // change: taken out of the record and changed in place. Any other
+            // field value changing a field of the base: the old path's.
             ExprKind::With { base, fields } if matches!(ty, Ty::Rec(_)) && self.ty(base)? == ty => {
                 let Ty::Rec(mimic_check::types::Ty::Obj(id)) = ty else { return None };
                 let tid = id as usize;
                 let td = &self.p.types[tid];
                 let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
-                let mut steals = false;
-                if let ExprKind::Path(bp) = &base.kind {
-                    for (_, x, _) in fields {
+                let bp = match &base.kind {
+                    ExprKind::Path(bp) => Some(bp.clone()),
+                    _ => None,
+                };
+                // the new values first (they may read the base), then the base
+                let mut news = Vec::new();
+                let mut changes = Vec::new();
+                for (n, x, _) in fields {
+                    let k = fs.iter().position(|(m, _, _)| m == n)?;
+                    if let Some(bp) = &bp
+                        && let Some(chain) = self.change_chain(bp, n, x)
+                    {
+                        let mut cs = Vec::new();
+                        for (op, rest) in chain {
+                            let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
+                            cs.push(if op == "put" { crate::Change::Put(vs[0], vs[1]) } else { crate::Change::Push(vs[0]) });
+                        }
+                        changes.push((k as u32, cs));
+                        continue;
+                    }
+                    if let Some(bp) = &bp {
+                        let mut changes_field = false;
                         x.walk(&mut |y| {
                             if let ExprKind::Call { args, .. } = &y.kind
                                 && let Some(ExprKind::Field { base: fb, .. }) = args.first().map(|a| &a.kind)
                                 && matches!(&fb.kind, ExprKind::Path(q) if q == bp)
                             {
-                                steals = true;
+                                changes_field = true;
                             }
                         });
+                        if changes_field {
+                            return None;
+                        }
                     }
-                }
-                if steals {
-                    return None;
-                }
-                // the new values first (they may read the base), then the base
-                let mut news = Vec::new();
-                for (n, x, _) in fields {
-                    let k = fs.iter().position(|(m, _, _)| m == n)?;
                     let want = Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[k].1)?)?;
                     let v = self.expr(r, x)?;
                     if self.types[v.0 as usize] != want {
@@ -941,7 +994,7 @@ impl Lower<'_> {
                     news.push((k as u32, v));
                 }
                 let b = self.expr(r, base)?;
-                Some(self.emit(r, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news, moved: false }, e.span))
+                Some(self.emit(r, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news, moved: false, changes }, e.span))
             }
             // ≢ xs of a list (an array expression the old path computes
             // fused, without building it: embedded whole)
@@ -974,6 +1027,20 @@ impl Lower<'_> {
                 let b = self.expr(r, base)?;
                 let i = self.expr(r, index)?;
                 Some(self.emit(r, ty, Op::Index(b, i, el), e.span))
+            }
+            // put/push of a list of i64: in place where the IR owns the list
+            // at its last use (own), else on a copy
+            ExprKind::Call { .. } if self.list_change(e).is_some() => {
+                let (op, args) = self.list_change(e)?;
+                let list = self.expr(r, &args[0])?;
+                let a = self.expr(r, &args[1])?;
+                let o = if op == "put" {
+                    let x = self.expr(r, &args[2])?;
+                    Op::Put { list, index: a, value: x, moved: false }
+                } else {
+                    Op::Push { list, value: a, moved: false }
+                };
+                Some(self.emit(r, ty, o, e.span))
             }
             ExprKind::Call { .. } => self.call(r, e, ty),
             ExprKind::If { cond, then, els } => {

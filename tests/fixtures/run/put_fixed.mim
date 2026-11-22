@@ -1,0 +1,25 @@
+module main
+
+// put into a list of i64 held once in a record stores in place (the runtime
+// only when it is shared or the index is out of range); put on short lists,
+// with constant and computed indexes, and a float into a list of integers
+// (the list becomes floats) as before.
+
+type S = { v: [i64] }
+
+fn qr(s: S, a: i64, b: i64) -> S {
+    let x = (s.v[a] + s.v[b]) & 0xFFFF
+    { s with v: put(s.v, a, x) }
+}
+
+fn main() {
+    let s = S { v: ⍳ 8 ¨ (i => i * 7 + 1) } ▷ evolve(1000, s => qr(qr(s, 0, 4), 1, 5))
+    print(s.v)
+    let w = ⍳ 6 ¨ (i => i)
+    let k = ≢ w - 2
+    print(put(put(w, k, 40), 0, 9))
+    print(put(⍳ 3 ¨ (i => i * 1.5), 1, 7.25))
+    print(put([1 2 3], 2, 2.5))
+    let big = S { v: ⍳ 100 ¨ (i => i) } ▷ evolve(50, s => { s with v: put(s.v, s.v[99] % 100, s.v[0] + 1) })
+    print(+/ big.v)
+}

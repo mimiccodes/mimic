@@ -127,15 +127,19 @@ fn take(op: &mut Op, v: Val) -> bool {
             }
             _ => false,
         },
-        Op::With { base, moved, .. } if *base == v => {
+        Op::With { base, moved, .. } | Op::Put { list: base, moved, .. } | Op::Push { list: base, moved, .. } if *base == v => {
             *moved = true;
             true
         }
-        Op::With { fields, moves, .. } => {
-            let k = fields.iter().position(|f| f.1 == v).expect("an operand");
-            moves[k] = true;
-            true
-        }
+        Op::Put { .. } | Op::Push { .. } => false,
+        Op::With { fields, moves, .. } => match fields.iter().position(|f| f.1 == v) {
+            Some(k) => {
+                moves[k] = true;
+                true
+            }
+            // (a number a change reads)
+            None => false,
+        },
         Op::Record { fields, moves, .. } => {
             let k = fields.iter().position(|f| *f == v).expect("an operand");
             moves[k] = true;

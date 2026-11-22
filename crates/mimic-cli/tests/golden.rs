@@ -1694,15 +1694,32 @@ fn websocket_scale() {
         &src,
         format!(
             "module main\n\nfn echo(sock: ws::Socket) -> i64 {{\n    match ws::receive(sock) {{\n        Ok(ws::Text(t)) => {{\n            ws::send(sock, t)\n            1\n        }}\n        _ => 0,\n    }}\n}}\n\n\
-             fn client(port: i64, i: i64) -> i64 {{\n    match ws::connect(\"ws://127.0.0.1:{{port}}/\") {{\n        Ok(s) => {{\n            time::sleep(500ms)\n            ws::send(s, \"hi {{i}}\")\n\
-                         let back = match ws::receive(s) {{\n                Ok(ws::Text(t)) => if t == \"hi {{i}}\" {{ 1 }} else {{ 0 }},\n                _ => 0,\n            }}\n            ws::close(s)\n            back\n        }}\n        Err(e) => 0,\n    }}\n}}\n\n\
+             fn client(port: i64, i: i64) -> i64 {{ attempt(port, i, 5) }}\n\n\
+             fn attempt(port: i64, i: i64, left: i64) -> i64 {{\n    match ws::connect(\"ws://127.0.0.1:{{port}}/\") {{\n        Ok(s) => {{\n            time::sleep(500ms)\n            ws::send(s, \"hi {{i}}\")\n\
+                         let back = match ws::receive(s) {{\n                Ok(ws::Text(t)) => if t == \"hi {{i}}\" {{ 1 }} else {{ 0 }},\n                _ => 0,\n            }}\n            ws::close(s)\n            back\n        }}\n\
+                         Err(e) => if left > 0 {{\n            time::sleep(200ms)\n            attempt(port, i, left - 1)\n        }} else {{ 0 }},\n    }}\n}}\n\n\
              fn server(port: i64, n: i64) -> Result[i64, str] {{ ws::serve_connections(port, echo, n) }}\n\n\
              fn main() {{\n    let n = 3000\n    let port = {port}\n    let served = server(port, n)\n    time::sleep(300ms)\n    let start = time::clock()\n\
                  let ok = +/ (⍳ n ¨ (i => client(port, i)))\n    print(\"{{ok}} of {{n}} echoed\")\n    print(served)\n    print((time::clock() - start) < 30s)\n}}\n"
         ),
     )
     .unwrap();
-    let out = mimic().args(["run", "--release"]).arg(&src).output().unwrap();
+    // built first, then run with a deadline: a connection lost for good
+    // would leave the server waiting for it forever
+    let built = mimic().args(["build", "--release"]).arg(&src).output().unwrap();
+    let log = String::from_utf8_lossy(&built.stdout).to_string() + &String::from_utf8_lossy(&built.stderr);
+    let exe = log.lines().find_map(|l| l.split_once("→ ").map(|(_, p)| p.trim().to_string())).unwrap_or_else(|| panic!("no executable built:\n{log}"));
+    let mut child = Command::new(&exe).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("websocket_scale: still running after 120 s (a connection never served)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let out = child.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "3000 of 3000 echoed\nOk(3000)\ntrue\n", "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }

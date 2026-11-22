@@ -210,7 +210,16 @@ pub enum Op {
     /// `moved` (set by [`own`]) hands it the base, an owned value at its
     /// last use; else the base is lent, and copied unless held once.
     /// `moves`: the new values handed over as they are, as [`Op::Record`]'s.
-    With { base: Val, tid: usize, fields: Vec<(u32, Val)>, moved: bool, moves: Vec<bool> },
+    /// `changes`: list fields changed from their own old value (`{ s with
+    /// v: put(s.v, i, x) }`): taken out of the record once it is held once,
+    /// changed in place when held once themselves, stored back.
+    With { base: Val, tid: usize, fields: Vec<(u32, Val)>, moved: bool, moves: Vec<bool>, changes: Vec<(u32, Vec<Change>)> },
+    /// `put(list, index, value)` on a list of i64 (owned): in place when
+    /// `moved` (set by [`own`]: the list at its last use) and held once,
+    /// else on a copy; an index out of range stops the program.
+    Put { list: Val, index: Val, value: Val, moved: bool },
+    /// `push(list, value)` on a list of i64 (owned), as [`Op::Put`].
+    Push { list: Val, value: Val, moved: bool },
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -227,6 +236,22 @@ pub enum Op {
     /// stops the program); with `done` (settle) it runs until `done`,
     /// asked before each step, yields true. The loop gives the last state.
     Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region },
+}
+
+/// One change of a list of i64 (in a [`Op::With`]'s `changes`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Change {
+    Put(Val, Val),
+    Push(Val),
+}
+
+impl Change {
+    fn vals(&self) -> Vec<Val> {
+        match self {
+            Change::Put(i, x) => vec![*i, *x],
+            Change::Push(x) => vec![*x],
+        }
+    }
 }
 
 /// A computation over lists done one element at a time: every list in it
@@ -325,7 +350,9 @@ impl Op {
             Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
             Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
             Op::Record { fields, .. } => fields.clone(),
-            Op::With { base, fields, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).collect(),
+            Op::With { base, fields, changes, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).chain(changes.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.vals()))).collect(),
+            Op::Put { list, index, value, .. } => vec![*list, *index, *value],
+            Op::Push { list, value, .. } => vec![*list, *value],
             Op::Reduce(_, t, _) | Op::Map(t) => {
                 let mut v = Vec::new();
                 t.vals(&mut v);
@@ -360,7 +387,7 @@ impl Region {
 /// record): a call's, an `if`'s (both branches then yield owned values), a
 /// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_))
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -435,8 +462,24 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Field { base, k, borrow, .. } => {
                 let _ = writeln!(out, "{}{base}.field {k}: {}", if *borrow { "borrow " } else { "" }, i.ty.name());
             }
-            Op::With { base, fields, moved, .. } => {
-                let a: Vec<String> = fields.iter().map(|(k, v)| format!(".{k} = {v}")).collect();
+            Op::Put { list, index, value, moved } => {
+                let _ = writeln!(out, "put {}{list}[{index}] = {value}: {}", if *moved { "move " } else { "" }, i.ty.name());
+            }
+            Op::Push { list, value, moved } => {
+                let _ = writeln!(out, "push {}{list}, {value}: {}", if *moved { "move " } else { "" }, i.ty.name());
+            }
+            Op::With { base, fields, moved, changes, .. } => {
+                let mut a: Vec<String> = fields.iter().map(|(k, v)| format!(".{k} = {v}")).collect();
+                for (k, cs) in changes {
+                    let c: Vec<String> = cs
+                        .iter()
+                        .map(|c| match c {
+                            Change::Put(i, x) => format!("put [{i}] = {x}"),
+                            Change::Push(x) => format!("push {x}"),
+                        })
+                        .collect();
+                    a.push(format!(".{k} changed by {}", c.join(", ")));
+                }
                 let _ = writeln!(out, "{}{base} with {}: {}", if *moved { "move " } else { "" }, a.join(", "), i.ty.name());
             }
             Op::Embed { uses, lazies, .. } => {
@@ -609,7 +652,26 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: a field of {base}, not a record", f.name));
                 }
             }
-            Op::With { base, fields, moves, .. } => {
+            Op::Put { list, index, value, .. } => {
+                if ty(*list, types)? != i.ty || ty(*index, types)? != Ty::I64 || ty(*value, types)? != Ty::I64 || i.ty != Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0)) {
+                    return Err(format!("{}: put {} is not of a list of i64", f.name, i.dst));
+                }
+            }
+            Op::Push { list, value, .. } => {
+                if ty(*list, types)? != i.ty || ty(*value, types)? != Ty::I64 || i.ty != Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0)) {
+                    return Err(format!("{}: push {} is not of a list of i64", f.name, i.dst));
+                }
+            }
+            Op::With { base, fields, moves, changes, .. } => {
+                for (_, cs) in changes {
+                    for c in cs {
+                        for v in c.vals() {
+                            if ty(v, types)? != Ty::I64 {
+                                return Err(format!("{}: a change in `with` {} by {v}, not an i64", f.name, i.dst));
+                            }
+                        }
+                    }
+                }
                 if moves.len() != fields.len() {
                     return Err(format!("{}: a `with` {} with moves not one per field", f.name, i.dst));
                 }

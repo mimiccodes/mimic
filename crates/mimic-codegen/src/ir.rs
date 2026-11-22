@@ -9,7 +9,7 @@
 //! `MIMIC_IR=print` also prints each function's IR.
 
 use crate::{Cg, OrStr, R, V};
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 use mimic_check::types::Ty;
 use mimic_ir::{Function, Op, Region};
 
@@ -78,6 +78,13 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::Bool => Ty::Bool,
         mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
     }
+}
+
+/// One change of a list of i64, its numbers computed.
+#[derive(Clone, Copy)]
+enum Ch<'ctx> {
+    Put(IntValue<'ctx>, IntValue<'ctx>),
+    Push(IntValue<'ctx>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -253,7 +260,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 // on a copy): the base handed over when the IR moves it there,
                 // else a reference of its own; each new value moved in or lent,
                 // as a record's
-                Op::With { base, tid, fields, moved, moves } => {
+                Op::With { base, tid, fields, moved, moves, changes } => {
                     let b = get(vals, *base)?;
                     let b = match b {
                         V::P(p, true) if !moved => V::P(p, false),
@@ -270,8 +277,32 @@ impl<'ctx> Cg<'ctx, '_> {
                             })
                         })
                         .collect::<R<Vec<_>>>()?;
-                    let r = self.ir_with(*tid, cur, news)?;
+                    let mut chs = Vec::new();
+                    for (k, cs) in changes {
+                        let mut steps = Vec::new();
+                        for c in cs {
+                            steps.push(match c {
+                                mimic_ir::Change::Put(i, x) => Ch::Put(self.to_i64(get(vals, *i)?)?, self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
+                            });
+                        }
+                        chs.push((*k as usize, steps));
+                    }
+                    let r = self.ir_with(*tid, cur, news, chs)?;
                     self.as_ty(r, ty, "record")?
+                }
+                // put/push of a list of i64: the list handed over when the IR
+                // moves it there (in place when held once), else a reference
+                // of its own (so a copy)
+                Op::Put { list, index, value, moved } => {
+                    let l = self.list_arg(get(vals, *list)?, *moved)?;
+                    let (i, x) = (self.to_i64(get(vals, *index)?)?, self.to_i64(get(vals, *value)?)?);
+                    V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                }
+                Op::Push { list, value, moved } => {
+                    let l = self.list_arg(get(vals, *list)?, *moved)?;
+                    let x = self.to_i64(get(vals, *value)?)?;
+                    V::P(self.ir_change(l, Ch::Push(x))?, true)
                 }
                 // an owned list's last use is past: released now
                 Op::Drop(v) => {
@@ -329,7 +360,10 @@ impl<'ctx> Cg<'ctx, '_> {
     /// once (one load, one compare: the common case once the IR moves it),
     /// else copied; then each field written directly (a number raw, any
     /// other value with a reference of its own, the old one released).
-    fn ir_with(&mut self, tid: usize, cur: V<'ctx>, news: Vec<(usize, V<'ctx>)>) -> R<V<'ctx>> {
+    /// `changes`: list fields changed from their old value, after the
+    /// others: taken out of the record (held once by then), changed, stored
+    /// back; a list still shared is seen as shared (and copied).
+    fn ir_with(&mut self, tid: usize, cur: V<'ctx>, news: Vec<(usize, V<'ctx>)>, changes: Vec<(usize, Vec<Ch<'ctx>>)>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let V::P(p0, _) = cur else { return Err("internal compiler error: `with` on a value not on the heap".into()) };
         if !self.in_place_ok() {
@@ -338,6 +372,18 @@ impl<'ctx> Cg<'ctx, '_> {
                 let v = self.boxed(x)?;
                 cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(k as u64, false).into(), self.basic(v).into()])?;
                 self.drop_tmp(v)?;
+            }
+            for (k, steps) in changes {
+                // (the old list, a reference of its own: so changed on a copy)
+                let V::P(c, _) = cur else { unreachable!() };
+                let fp = self.slot_ptr(c, k)?;
+                let mut list = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
+                self.call_rt("mim_retain", &[list.into()])?;
+                for st in steps {
+                    list = self.ir_change(list, st)?;
+                }
+                cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(k as u64, false).into(), list.into()])?;
+                self.release(list)?;
             }
             return Ok(cur);
         }
@@ -368,7 +414,79 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(fp, self.basic(v)).s()?;
             self.release(old)?;
         }
+        for (k, steps) in changes {
+            let fp = self.slot_ptr(rec, k)?;
+            let mut list = self.b.build_load(self.ptr, fp, "taken").s()?.into_pointer_value();
+            self.b.build_store(fp, self.ptr.const_null()).s()?;
+            for st in steps {
+                list = self.ir_change(list, st)?;
+            }
+            self.b.build_store(fp, list).s()?;
+        }
         Ok(V::P(rec, true))
+    }
+
+    /// A list handed to put/push (which take it): as it is when moved
+    /// there, else a reference of its own.
+    fn list_arg(&mut self, l: V<'ctx>, moved: bool) -> R<PointerValue<'ctx>> {
+        let l = match l {
+            V::P(p, true) if !moved => V::P(p, false),
+            x => x,
+        };
+        let V::P(p, _) = self.own(self.boxed(l)?)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
+        Ok(p)
+    }
+
+    /// One change of the owned list of i64 `list` (taken): the list it gives.
+    fn ir_change(&mut self, list: PointerValue<'ctx>, c: Ch<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        match c {
+            Ch::Put(i, x) => self.put_i64_inline(list, i, x),
+            Ch::Push(x) => {
+                let f = self.module.get_function("mim_push_i64_own").unwrap_or_else(|| self.module.add_function("mim_push_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
+        }
+    }
+
+    /// `put(xs, i, x)` on the owned list `xs`: held once, of i64, one
+    /// dimension and `i` in range, the number is stored in place here;
+    /// anything else is mim_put_i64_own's (which copies, converts or stops
+    /// with the message).
+    fn put_i64_inline(&mut self, list: PointerValue<'ctx>, i: IntValue<'ctx>, x: IntValue<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?.into_int_value();
+        let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
+        let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        let inside = self.b.build_int_compare(inkwell::IntPredicate::ULT, i, len, "").s()?;
+        let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, inside, "").s()?, "").s()?;
+        let f = self.cur_fn.ok_or("internal compiler error: put outside a function")?;
+        let here = self.ctx.append_basic_block(f, "put_here");
+        let slow = self.ctx.append_basic_block(f, "put_slow");
+        let done = self.ctx.append_basic_block(f, "put_done");
+        self.b.build_conditional_branch(ok, here, slow).s()?;
+        self.b.position_at_end(here);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
+        let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
+        self.b.build_store(at, x).s()?;
+        let here_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow);
+        let rf = self.module.get_function("mim_put_i64_own").unwrap_or_else(|| self.module.add_function("mim_put_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+        let r = self.b.build_call(rf, &[list.into(), i.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "list").s()?;
+        phi.add_incoming(&[(&list, here_end), (&r, slow_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
     }
 
     /// A loop over a state (evolve, settle): the state a phi of its type;

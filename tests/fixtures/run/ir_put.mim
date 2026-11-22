@@ -1,0 +1,54 @@
+module main
+
+// put and push on bare lists of i64 through the IR: in place where the
+// function owns the list at its last use (a heap's sift-up, a list grown
+// by push), copied where it is still read after (the original unchanged).
+
+fn up(h: [i64], i: i64) -> [i64] {
+    if i == 0 { h }
+    else {
+        let p = (i - 1) div 2
+        if h[p] <= h[i] { h }
+        else {
+            let a = h[p]
+            let b = h[i]
+            up(put(put(h, p, b), i, a), p)
+        }
+    }
+}
+
+fn insert(h: [i64], x: i64) -> [i64] {
+    let g = push(h, x)
+    up(g, ≢ g - 1)
+}
+
+fn build(h: [i64], k: i64, n: i64) -> [i64] {
+    if k == n { h } else { build(insert(h, (k * 37 + 11) % 101), k + 1, n) }
+}
+
+fn grow(n: i64) -> [i64] {
+    let xs = ⍳ 0
+    let ys = push(push(xs, n), n * 2)
+    put(ys, 0, 7)
+}
+
+fn first_two(xs: [i64]) -> i64 {
+    let ys = put(xs, 0, 100)
+    ys[0] + xs[0]
+}
+
+fn main() {
+    let n = ≢ os::args() + 5
+    let h = build(⍳ 0, 0, 50)
+    print(h[0])
+    print(≢ h)
+    print(+/ h)
+    print(grow(n))
+    let base = ⍳ n
+    print(first_two(base))
+    print(base)
+    let shared = ⍳ 4
+    let changed = put(shared, 1, 9)
+    print(shared)
+    print(changed)
+}
