@@ -1163,6 +1163,26 @@ impl<'ctx> Cg<'ctx, '_> {
                 Node::Bin(*op, Box::new(a), Box::new(b))
             }
             T::Un(op, a) => Node::Un(*op, Box::new(self.ir_node(a, val, plan)?)),
+            // the engine's own computation of the syntax, its variables
+            // the IR's values (lent, in slots of their own)
+            T::Ast { expr, uses, lazies } => {
+                let mut locals = Vec::new();
+                for (name, v, t) in uses {
+                    let ct = super::ir::checker_ty(*t);
+                    let x = val(*v)?;
+                    let slot = self.entry_alloca(ct, name)?;
+                    self.b.build_store(slot, self.basic(x)).s()?;
+                    locals.push(super::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
+                }
+                self.scopes.push(locals);
+                let mark = self.lazies.len();
+                self.lazies.extend(lazies.iter().cloned());
+                // SAFETY: the syntax tree outlives the compile
+                let node = self.build(unsafe { &**expr }, plan);
+                self.lazies.truncate(mark);
+                self.scopes.pop();
+                node?
+            }
         })
     }
 
