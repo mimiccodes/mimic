@@ -1239,6 +1239,11 @@ impl<'ctx> Cg<'ctx, '_> {
             let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(1 << 18, false), "").s()?; // FREE_LIST_CAP
             b.build_conditional_branch(room, push_bb, slow).s()?;
             b.position_at_end(push_bb);
+            // (MIMIC_COUNT_RC=1: the one release that does not reach the
+            // runtime, counted there; the code around stays as it is)
+            if counting_rc() {
+                b.build_call(self.rt("mim_rc_inline_free"), &[], "").s()?;
+            }
             let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero, zero, c_safe], "").s()? };
             let head = b.build_load(self.ptr, slot, "").s()?;
             b.build_store(v, head).s()?;
@@ -1605,6 +1610,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_lit_variant" => ptr.fn_type(&[p, p], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
             "mim_retain" | "mim_release" | "mim_panic" => void.fn_type(&[p], false),
+            "mim_rc_inline_free" => void.fn_type(&[], false),
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
             "mim_unop" | "mim_prim1" => ptr.fn_type(&[i32t, p], false),
             "mim_index" => ptr.fn_type(&[p, p], false),
@@ -6538,6 +6544,14 @@ impl<'ctx> Cg<'ctx, '_> {
             }
         }
     }
+}
+
+/// `MIMIC_COUNT_RC=1` (read once): the inline release's fast path tells the
+/// runtime, which counts every reference-count operation
+/// (docs/design/ownership.md).
+fn counting_rc() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MIMIC_COUNT_RC").is_ok_and(|v| v == "1"))
 }
 
 #[cfg(test)]
