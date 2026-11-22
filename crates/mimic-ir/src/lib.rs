@@ -30,6 +30,10 @@ pub trait Hints {
         scope: &[(String, Ty)],
         lazies: &[(String, *const mimic_syntax::ast::Expr)],
     ) -> bool;
+
+    /// Whether the old path computes `e` (a list) element by element, as
+    /// part of a fused loop (`xs ¨ f` with a pure `f` on numbers).
+    fn fusible(&mut self, e: &mimic_syntax::ast::Expr, scope: &[(String, Ty)], lazies: &[(String, *const mimic_syntax::ast::Expr)]) -> bool;
 }
 pub mod fuse;
 pub mod sink;
@@ -202,6 +206,10 @@ pub enum Tree {
     Iota(Val),
     Bin(BinOp, Box<Tree>, Box<Tree>),
     Un(UnOp, Box<Tree>),
+    /// A list the old path's engine computes element by element (`xs ¨ f`),
+    /// built inside the loop from its syntax: `uses` the variables it reads,
+    /// `lazies` the lazy lets (as for [`Op::Embed`]).
+    Ast { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)> },
 }
 
 impl Tree {
@@ -215,6 +223,7 @@ impl Tree {
                 b.vals(out);
             }
             Tree::Un(_, a) => a.vals(out),
+            Tree::Ast { uses, .. } => out.extend(uses.iter().map(|(_, v, _)| *v)),
         }
     }
 
@@ -233,6 +242,11 @@ impl Tree {
             Tree::Iota(n) => format!("⍳{n}"),
             Tree::Bin(op, a, b) => format!("({} {} {})", a.show(), op.symbol(), b.show()),
             Tree::Un(op, a) => format!("{op:?}({})", a.show()),
+            Tree::Ast { uses, lazies, .. } => {
+                let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+                a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
+                format!("ast({})", a.join(", "))
+            }
         }
     }
 }
@@ -389,6 +403,14 @@ fn tree_ok(f: &Function, t: &Tree, types: &[Option<Ty>], scope: &[Val]) -> Resul
         Tree::Iota(v) if ty(*v)? != Ty::I64 => Err(format!("{}: ⍳ of {v}, not an i64", f.name)),
         Tree::Bin(_, a, b) => tree_ok(f, a, types, scope).and(tree_ok(f, b, types, scope)),
         Tree::Un(_, a) => tree_ok(f, a, types, scope),
+        Tree::Ast { uses, .. } => {
+            for (_, v, t) in uses {
+                if ty(*v)? != *t {
+                    return Err(format!("{}: a tree's syntax reads {v} as another type", f.name));
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

@@ -48,9 +48,21 @@ impl mimic_ir::Hints for Cg<'_, '_> {
         self.scopes.pop();
         lazy
     }
+
+    fn fusible(&mut self, e: &mimic_syntax::ast::Expr, scope: &[(String, mimic_ir::Ty)], lazies: &[(String, *const mimic_syntax::ast::Expr)]) -> bool {
+        let null = self.ptr.const_null();
+        let locals = scope.iter().map(|(n, t)| crate::Local { name: n.clone(), slot: null, ty: checker_ty(*t), owned: false, mutable: false, moves: false }).collect();
+        self.scopes.push(locals);
+        let mark = self.lazies.len();
+        self.lazies.extend(lazies.iter().cloned());
+        let ok = self.is_fae(e);
+        self.lazies.truncate(mark);
+        self.scopes.pop();
+        ok
+    }
 }
 
-fn checker_ty(t: mimic_ir::Ty) -> Ty {
+pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
     match t {
         mimic_ir::Ty::Unit => Ty::Unit,
         mimic_ir::Ty::I64 => Ty::I64,

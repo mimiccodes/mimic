@@ -480,6 +480,18 @@ impl Lower<'_> {
                 Some(Tree::Bin(*op, Box::new(a), Box::new(b)))
             }
             ExprKind::Unary { op, expr } => Some(Tree::Un(*op, Box::new(self.tree(r, expr)?))),
+            // `xs ¨ f` the old path computes element by element (a pure
+            // `f` on numbers): built by its engine inside this loop
+            ExprKind::Prim { prim: Prim::Each, .. } => {
+                let scope: Vec<(String, Ty)> = self.env.iter().filter(|(_, v, _)| v.0 < LAZY).map(|(n, _, t)| (n.clone(), *t)).collect();
+                let lazies: Vec<(String, *const Expr)> =
+                    self.env.iter().filter(|(_, v, _)| v.0 >= LAZY).map(|(n, v, _)| (n.clone(), self.lazies[(v.0 - LAZY) as usize].expr)).collect();
+                if !self.hints.fusible(e, &scope, &lazies) {
+                    return None;
+                }
+                let (uses, lazies) = self.reads(e)?;
+                Some(Tree::Ast { expr: e as *const Expr, uses, lazies })
+            }
             // a lazy let: its computation here (read with the variables
             // as they were where it was bound), as the old path does where
             // it fuses one
@@ -521,6 +533,16 @@ impl Lower<'_> {
         if matches!(e.kind, ExprKind::Lambda { .. }) {
             return None;
         }
+        let (uses, lazies) = self.reads(e)?;
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+    }
+
+    /// The variables `e` reads, as the IR's values, and the lazy lets it
+    /// reads (with those they read, in the order they were bound, and the
+    /// variables they read): what the old path needs to compile `e` where
+    /// it stands. None when it cannot be compiled from here.
+    #[allow(clippy::type_complexity)]
+    fn reads(&self, e: &Expr) -> Option<(Vec<(String, Val, Ty)>, Vec<(String, *const Expr)>)> {
         // the variables it reads: the IR's values for them (names it binds
         // itself are its own)
         let mut inside = Vec::new();
@@ -576,7 +598,7 @@ impl Lower<'_> {
             }
             lazies.push((z.name.clone(), z.expr));
         }
-        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+        Some((uses, lazies))
     }
 
     fn lower(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
@@ -607,8 +629,8 @@ impl Lower<'_> {
                 Some(self.emit(r, Ty::Bool, Op::If { cond: a, then, els }, e.span))
             }
             // a list computed element by element (`⍳ n % k × 2`, `xs + ys`,
-            // `-xs`): one map, the whole expression one loop
-            ExprKind::Prim { prim: Prim::Iota, .. } | ExprKind::Binary { .. } | ExprKind::Unary { .. } if elementwise_list(ty) => {
+            // `-xs`, `xs ¨ f`): one map, the whole expression one loop
+            ExprKind::Prim { prim: Prim::Iota | Prim::Each, .. } | ExprKind::Binary { .. } | ExprKind::Unary { .. } if elementwise_list(ty) => {
                 let t = self.tree(r, e)?;
                 if matches!(t, Tree::Leaf(..)) {
                     return None;
