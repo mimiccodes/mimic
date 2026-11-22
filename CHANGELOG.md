@@ -2,6 +2,8 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
+## Unreleased
+
 ## 0.4.1 — 2026-11-22
 
 Step 0.4.1, the Mimic IR: programs are now compiled through a typed intermediate representation between the syntax tree and LLVM, on by default, with fusion as a pass over it. Array code computed element by element (`⍳ n`, operators on lists, `xs ¨ f`, reductions) is fused by the IR, across `let`s and small helpers it inlines; what the IR does not cover yet is compiled by the old code generator where it stands, until that is retired (0.4.10). Also a security fix for the HTTP client's redirects, and the slowest benchmarks of 0.4.0 traced and most of them made several times faster without a change to the programs: tuples of numbers and short lists stay in registers, lists grown in a loop and lists from `flatten` stay typed, `let` lambdas and `count`'s lambda are compiled as functions, `gather`/`trail` with a lambda are typed loops, and debug builds change lists in place. `fnv1a`, `crc32`, `adler32`, `pagerank`, `topo` and `siphash` 7–25× faster, `sha256` 13×, `diff` 7×, `utf8` 5.6×; no benchmark slower on Linux, macOS or Windows.
