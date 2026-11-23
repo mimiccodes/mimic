@@ -2179,8 +2179,25 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         /* bool & bool stays bool (non-short-circuit logic on masks) */
         dt = (a->dtype == MIM_BOOL && b->dtype == MIM_BOOL && op <= OP_BXOR) ? MIM_BOOL : MIM_I64;
     }
-    mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
     int jt = arith_dtype(a->dtype, a->rank, b->dtype, b->rank);
+    if (!like && (dt == MIM_BOOL || dt == MIM_I64)) {
+        /* two scalars giving a truth value or an integer: computed on the
+         * stack, then the runtime's own true/false or small integer (no
+         * allocation for those; `op == 0` on a dynamic value ran here once
+         * per step and allocated every result) */
+        _Alignas(16) unsigned char buf[sizeof(mim_val) + 16];
+        mim_val *t = (mim_val *)(void *)buf;
+        t->rc = MIM_IMMORTAL;
+        t->dtype = dt;
+        t->rank = 0;
+        t->len = 1;
+        t->desc = NULL;
+        binop_ctx c1 = {op, a, b, t, 0, 0, jt == MIM_F32, jt == MIM_I32};
+        binop_range(&c1, 0, 1);
+        int64_t x = geti(t, 0);
+        return dt == MIM_BOOL ? mim_bool(x) : mim_int(x);
+    }
+    mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
     binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1, jt == MIM_F32, jt == MIM_I32};
     /* the fast loops index x[i] for vectors and x[0] for scalars */
     parallel_for(n, binop_range, &c);
@@ -2208,6 +2225,21 @@ mim_val *mim_unop(int32_t op, mim_val *a) {
     if (op == UOP_BNOT && (IS_FLOAT(a->dtype) || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
     int keep = a->dtype == MIM_F64 || a->dtype == MIM_F32 || a->dtype == MIM_I32;
     int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (keep ? a->dtype : MIM_I64);
+    if (a->rank == 0 && (dt == MIM_BOOL || dt == MIM_I64)) {
+        /* a scalar giving a truth value or an integer: the runtime's own
+         * true/false or small integer, as in mim_binop */
+        _Alignas(16) unsigned char buf[sizeof(mim_val) + 16];
+        mim_val *t = (mim_val *)(void *)buf;
+        t->rc = MIM_IMMORTAL;
+        t->dtype = dt;
+        t->rank = 0;
+        t->len = 1;
+        t->desc = NULL;
+        unop_ctx c1 = {op, a, t};
+        unop_range(&c1, 0, 1);
+        int64_t x = geti(t, 0);
+        return dt == MIM_BOOL ? mim_bool(x) : mim_int(x);
+    }
     mim_val *r = alloc_like(dt, a);
     unop_ctx c = {op, a, r};
     parallel_for(a->len, unop_range, &c);
