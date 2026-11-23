@@ -227,9 +227,8 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// `consumed`, with `stack` the functions being decided (a call back
     /// into one of them does not take: that answer is still open; nor does
-    /// a call 8 deep). Not cached: what it reads can still change while
-    /// functions are being compiled, and every caller must see the answer
-    /// the callee is compiled with.
+    /// a call 8 deep). The answer depends only on `k`, so every caller sees
+    /// the one the callee is compiled with.
     fn consumed_in(&self, k: &Key, stack: &mut Vec<Key>) -> Vec<bool> {
         let mut out: Vec<bool> = self.consumed_sites(k).iter().map(|s| !s.is_empty()).collect();
         let FnKind::User(d) = &self.p.fns[k.0].kind else { return out };

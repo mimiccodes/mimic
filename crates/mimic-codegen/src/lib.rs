@@ -1256,7 +1256,13 @@ impl<'ctx> Cg<'ctx, '_> {
             let st = b.build_store(live, b.build_int_sub(cnt.into_int_value(), i64t.const_int(1, false), "").s()?).s()?;
             st.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
             b.build_unconditional_branch(done).s()?;
+            // an immortal value (a small number, true, false, a literal):
+            // never counted or freed, so nothing to call the runtime for
             b.position_at_end(slow);
+            let call_bb = self.ctx.append_basic_block(f, "call");
+            let immortal = b.build_int_compare(IntPredicate::SGE, rc.into_int_value(), i64t.const_int(1 << 62, false), "").s()?; // MIM_IMMORTAL
+            b.build_conditional_branch(immortal, done, call_bb).s()?;
+            b.position_at_end(call_bb);
             b.build_call(self.rt("mim_release"), &[v.into()], "").s()?;
             b.build_unconditional_branch(done).s()?;
             b.position_at_end(done);
