@@ -103,6 +103,7 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool],
     let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
     crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
+    crate::fold::function(&mut f);
     crate::own::function(&mut f);
     if !crate::worth(&f) {
         return miss("it only leaves expressions to the old path, which compiles them as well on its own");
@@ -729,13 +730,16 @@ impl Lower<'_> {
         let op = match (decl.name.as_str(), args.len()) {
             ("put", 3) => "put",
             ("push", 2) => "push",
+            ("concat", 2) => "concat",
             _ => return None,
         };
         let list = Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0));
-        if self.ty(&args[0])? != list || self.ty(e)? != list || args[1..].iter().any(|a| self.ty(a) != Some(Ty::I64)) {
+        if self.ty(&args[0])? != list || self.ty(e)? != list {
             return None;
         }
-        Some((op, args))
+        // (concat: another list of i64; put and push: numbers)
+        let ok = if op == "concat" { self.ty(&args[1]).is_some_and(crate::i64_list) } else { args[1..].iter().all(|a| self.ty(a) == Some(Ty::I64)) };
+        ok.then_some((op, args))
     }
 
     /// `x`, the new value of field `n` of the record `base` names, as
@@ -977,7 +981,11 @@ impl Lower<'_> {
                         let mut cs = Vec::new();
                         for (op, rest) in chain {
                             let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
-                            cs.push(if op == "put" { crate::Change::Put(vs[0], vs[1]) } else { crate::Change::Push(vs[0]) });
+                            cs.push(match op {
+                                "put" => crate::Change::Put(vs[0], vs[1]),
+                                "push" => crate::Change::Push(vs[0]),
+                                _ => crate::Change::Concat(vs[0]),
+                            });
                         }
                         changes.push((k as u32, cs));
                         continue;
@@ -1040,7 +1048,7 @@ impl Lower<'_> {
             }
             // put/push of a list of i64: in place where the IR owns the list
             // at its last use (own), else on a copy
-            ExprKind::Call { .. } if self.list_change(e).is_some() => {
+            ExprKind::Call { .. } if self.list_change(e).is_some_and(|(op, _)| op != "concat") => {
                 let (op, args) = self.list_change(e)?;
                 let list = self.expr(r, &args[0])?;
                 let a = self.expr(r, &args[1])?;

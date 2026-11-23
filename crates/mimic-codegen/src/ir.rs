@@ -95,6 +95,8 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
 enum Ch<'ctx> {
     Put(IntValue<'ctx>, IntValue<'ctx>),
     Push(IntValue<'ctx>),
+    /// appends a list of i64 (lent)
+    Concat(PointerValue<'ctx>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -323,17 +325,34 @@ impl<'ctx> Cg<'ctx, '_> {
                         })
                         .collect::<R<Vec<_>>>()?;
                     let mut chs = Vec::new();
+                    // (lists boxed here from registers for a concat: released after)
+                    let mut temps = Vec::new();
                     for (k, cs) in changes {
                         let mut steps = Vec::new();
                         for c in cs {
                             steps.push(match c {
                                 mimic_ir::Change::Put(i, x) => Ch::Put(self.to_i64(get(vals, *i)?)?, self.to_i64(get(vals, *x)?)?),
                                 mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Concat(x) => {
+                                    let v = get(vals, *x)?;
+                                    let b = match v {
+                                        V::P(..) => v,
+                                        _ => {
+                                            let b = self.boxed(v)?;
+                                            temps.push(b);
+                                            b
+                                        }
+                                    };
+                                    Ch::Concat(self.basic(b).into_pointer_value())
+                                }
                             });
                         }
                         chs.push((*k as usize, steps));
                     }
                     let r = self.ir_with(*tid, cur, news, chs)?;
+                    for t in temps {
+                        self.drop_tmp(t)?;
+                    }
                     self.as_ty(r, ty, "record")?
                 }
                 // put/push of a list of i64: the list handed over when the IR
@@ -519,6 +538,10 @@ impl<'ctx> Cg<'ctx, '_> {
             Ch::Push(x) => {
                 let f = self.module.get_function("mim_push_i64_own").unwrap_or_else(|| self.module.add_function("mim_push_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
                 Ok(self.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
+            Ch::Concat(ys) => {
+                let f = self.module.get_function("mim_std_concat_own").unwrap_or_else(|| self.module.add_function("mim_std_concat_own", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
             }
         }
     }

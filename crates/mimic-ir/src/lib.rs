@@ -87,12 +87,23 @@ pub fn worth(f: &Function) -> bool {
 }
 
 pub mod copies;
+pub mod fold;
 pub mod fuse;
 pub mod own;
 pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
 use std::fmt::{self, Write as _};
+
+/// A list of i64: on the heap, or short and in registers.
+pub fn i64_list(t: Ty) -> bool {
+    use mimic_check::types::{El, Ty as C};
+    match t {
+        Ty::List(C::Arr(El::I64, _)) => true,
+        Ty::Agg(c) => matches!(short_list(c), Some((El::I64, _))),
+        _ => false,
+    }
+}
 
 /// The type of an IR value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -292,13 +303,15 @@ pub enum Op {
 pub enum Change {
     Put(Val, Val),
     Push(Val),
+    /// `concat(field, ys)`: `ys` a list of i64, on the heap or in registers.
+    Concat(Val),
 }
 
 impl Change {
     fn vals(&self) -> Vec<Val> {
         match self {
             Change::Put(i, x) => vec![*i, *x],
-            Change::Push(x) => vec![*x],
+            Change::Push(x) | Change::Concat(x) => vec![*x],
         }
     }
 }
@@ -525,6 +538,7 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                         .map(|c| match c {
                             Change::Put(i, x) => format!("put [{i}] = {x}"),
                             Change::Push(x) => format!("push {x}"),
+                            Change::Concat(x) => format!("concat {x}"),
                         })
                         .collect();
                     a.push(format!(".{k} changed by {}", c.join(", ")));
@@ -714,6 +728,12 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::With { base, fields, moves, changes, .. } => {
                 for (_, cs) in changes {
                     for c in cs {
+                        if let Change::Concat(v) = c {
+                            if !i64_list(ty(*v, types)?) {
+                                return Err(format!("{}: a `concat` in `with` {} of {v}, not a list of i64", f.name, i.dst));
+                            }
+                            continue;
+                        }
                         for v in c.vals() {
                             if ty(v, types)? != Ty::I64 {
                                 return Err(format!("{}: a change in `with` {} by {v}, not an i64", f.name, i.dst));
