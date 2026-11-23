@@ -1239,6 +1239,11 @@ impl<'ctx> Cg<'ctx, '_> {
             let room = b.build_int_compare(IntPredicate::ULT, fl, i32t.const_int(1 << 18, false), "").s()?; // FREE_LIST_CAP
             b.build_conditional_branch(room, push_bb, slow).s()?;
             b.position_at_end(push_bb);
+            // (MIMIC_COUNT_RC=1: the one release that does not reach the
+            // runtime, counted there; the code around stays as it is)
+            if counting_rc() {
+                b.build_call(self.rt("mim_rc_inline_free"), &[], "").s()?;
+            }
             let slot = unsafe { b.build_in_bounds_gep(ht, h, &[zero, zero, c_safe], "").s()? };
             let head = b.build_load(self.ptr, slot, "").s()?;
             b.build_store(v, head).s()?;
@@ -1251,7 +1256,13 @@ impl<'ctx> Cg<'ctx, '_> {
             let st = b.build_store(live, b.build_int_sub(cnt.into_int_value(), i64t.const_int(1, false), "").s()?).s()?;
             st.set_atomic_ordering(inkwell::AtomicOrdering::Monotonic).map_err(|e| e.to_string())?;
             b.build_unconditional_branch(done).s()?;
+            // an immortal value (a small number, true, false, a literal):
+            // never counted or freed, so nothing to call the runtime for
             b.position_at_end(slow);
+            let call_bb = self.ctx.append_basic_block(f, "call");
+            let immortal = b.build_int_compare(IntPredicate::SGE, rc.into_int_value(), i64t.const_int(1 << 62, false), "").s()?; // MIM_IMMORTAL
+            b.build_conditional_branch(immortal, done, call_bb).s()?;
+            b.position_at_end(call_bb);
             b.build_call(self.rt("mim_release"), &[v.into()], "").s()?;
             b.build_unconditional_branch(done).s()?;
             b.position_at_end(done);
@@ -1605,6 +1616,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_lit_variant" => ptr.fn_type(&[p, p], false),
             "mim_array_lit" => ptr.fn_type(&[i64t, p], false),
             "mim_retain" | "mim_release" | "mim_panic" => void.fn_type(&[p], false),
+            "mim_rc_inline_free" => void.fn_type(&[], false),
             "mim_binop" | "mim_prim2" => ptr.fn_type(&[i32t, p, p], false),
             "mim_unop" | "mim_prim1" => ptr.fn_type(&[i32t, p], false),
             "mim_index" => ptr.fn_type(&[p, p], false),
@@ -1886,7 +1898,7 @@ impl<'ctx> Cg<'ctx, '_> {
         self.fj_begin(fv, kind, decl)?;
         // parameters it consumes arrive owned (released at the end unless moved on)
         let sites = self.consumed_sites(k);
-        let consumed: Vec<bool> = sites.iter().map(|s| !s.is_empty()).collect();
+        let consumed = self.consumed(k);
         self.move_at.clear();
         self.move_at.extend(sites.iter().flatten());
         for (i, prm) in decl.params.iter().enumerate() {
@@ -1895,7 +1907,8 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
             self.dbg_var(&prm.name, slot, t, decl.span.line, Some(i as u32 + 1));
             let c = consumed.get(i).copied().unwrap_or(false);
-            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: c });
+            let m = sites.get(i).is_some_and(|s| !s.is_empty());
+            self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: m });
         }
         if self.opt_level >= 2 {
             for (i, t) in spec.params.iter().enumerate() {
@@ -1986,12 +1999,10 @@ impl<'ctx> Cg<'ctx, '_> {
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
         // which function an IR difference comes from)
         let only = std::env::var("MIMIC_IR_ONLY").ok();
-        let lowered = if use_ir
-            && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq)
-            && self.fj.quiet()
-            && only.as_ref().is_none_or(|o| path.contains(o.as_str()))
-        {
-            mimic_ir::lower::function(self.p, k.0, spec.clone(), self).filter(|f| match mimic_ir::verify(f) {
+        // (not in coverage builds: the IR counts no lines)
+        let lowered = if use_ir && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
+            let takes = self.consumed(k);
+            mimic_ir::lower::function(self.p, k.0, spec.clone(), &takes, self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
                 Err(e) => {
                     eprintln!("mimic: IR check failed, compiling `{path}` without it: {e}");
@@ -6538,6 +6549,14 @@ impl<'ctx> Cg<'ctx, '_> {
             }
         }
     }
+}
+
+/// `MIMIC_COUNT_RC=1` (read once): the inline release's fast path tells the
+/// runtime, which counts every reference-count operation
+/// (docs/design/ownership.md).
+fn counting_rc() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MIMIC_COUNT_RC").is_ok_and(|v| v == "1"))
 }
 
 #[cfg(test)]

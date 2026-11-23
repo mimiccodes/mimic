@@ -448,6 +448,37 @@ mim_val *mim_put_i64_own(mim_val *xs, int64_t i, int64_t v) {
     return r;
 }
 
+/* put and push on a list of i64 the caller only borrows (compiled code
+ * that does not own it): a copy with the change, without boxing the numbers
+ * or touching the list's count. Anything else takes the general path. */
+mim_val *mim_put_i64(mim_val *xs, int64_t i, int64_t v) {
+    if (xs && xs->rank == 1 && xs->dtype == MIM_I64 && i >= 0 && i < xs->len) {
+        mim_val *r = alloc(MIM_I64, 1, xs->len);
+        memcpy(r->data, xs->data, sizeof(int64_t) * (size_t)xs->len);
+        ((int64_t *)r->data)[i] = v;
+        return r;
+    }
+    mim_val *k = mim_int(i), *x = mim_int(v);
+    mim_val *r = mim_std_put(xs, k, x);
+    mim_release(k);
+    mim_release(x);
+    return r;
+}
+
+mim_val *mim_push_i64(mim_val *xs, int64_t v) {
+    if (xs && xs->rank == 1 && xs->dtype == MIM_I64) {
+        int64_t n = xs->len;
+        mim_val *r = alloc(MIM_I64, 1, n + 1);
+        memcpy(r->data, xs->data, sizeof(int64_t) * (size_t)n);
+        ((int64_t *)r->data)[n] = v;
+        return r;
+    }
+    mim_val *x = mim_int(v);
+    mim_val *r = mim_std_push(xs, x);
+    mim_release(x);
+    return r;
+}
+
 /* put(xs, i, v) on a list of bytes held once, with raw numbers: no boxing;
  * anything else (shared, out of range, not a byte) goes the general way,
  * which copies, converts or stops with the same message */

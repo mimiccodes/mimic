@@ -216,8 +216,21 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// `let a = f(…)` `let b = f(…)` …: a run of independent calls.
     pub(crate) fn fork_lets(&mut self, stmts: &[Stmt]) -> R<()> {
-        if self.cur_fn.is_none() || self.cur_fn != self.fj.site_fn || matches!(self.fj.mode, Mode::Seq) || !self.fj_target() {
+        if self.cur_fn.is_none() || self.cur_fn != self.fj.site_fn {
             return Ok(());
+        }
+        let run = self.fork_run(stmts);
+        if run.len() >= 2 {
+            self.fork_site(&run)?;
+        }
+        Ok(())
+    }
+
+    /// The independent calls the `let`s at the start of `stmts` bind (run
+    /// in parallel when there are two or more): what `fork_lets` forks.
+    pub(crate) fn fork_run(&mut self, stmts: &[Stmt]) -> Vec<*const Expr> {
+        if matches!(self.fj.mode, Mode::Seq) || !self.fj_target() {
+            return Vec::new();
         }
         let mut run: Vec<*const Expr> = Vec::new();
         let mut names: Vec<String> = Vec::new();
@@ -234,10 +247,17 @@ impl<'ctx> Cg<'ctx, '_> {
             names.push(name.clone());
             run.push(value as *const Expr);
         }
-        if run.len() >= 2 {
-            self.fork_site(&run)?;
-        }
-        Ok(())
+        run
+    }
+
+    /// Whether compiling a block with these statements would run some of
+    /// them apart: a run of independent calls in parallel (`fork_lets`), or
+    /// a call with effects that may overlap started as a task (start_future).
+    pub(crate) fn runs_apart(&mut self, stmts: &[Stmt]) -> bool {
+        (0..stmts.len()).any(|i| {
+            self.fork_run(&stmts[i..]).len() >= 2
+                || matches!(&stmts[i], Stmt::Let { mutable: false, value, .. } if self.purity.future_call(self.p, self.cur_mod, self.cur_fid, value).is_some())
+        })
     }
 
     fn global_i32(&self, name: &str) -> R<IntValue<'ctx>> {

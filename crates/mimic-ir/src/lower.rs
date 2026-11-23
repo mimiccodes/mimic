@@ -40,98 +40,113 @@ struct Lower<'a> {
     local_names: Vec<String>,
     /// Variables in scope, innermost last.
     env: Vec<(String, Val, Ty)>,
+    /// Set when an expression left to the old path would take over a
+    /// variable (see [`Lower::takes_var`]): the whole function stays there.
+    bail: bool,
+    /// The first expression neither the IR nor an embed could take (for
+    /// `MIMIC_IR=why`).
+    miss: Option<String>,
 }
 
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
-pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, hints: &mut dyn crate::Hints) -> Option<Function> {
+/// `takes`: the parameters it takes over (owned here).
+pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool], hints: &mut dyn crate::Hints) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
-    let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
-    let ret = Ty::of(p, spec.ret)?;
-    if !calls_apart(p, p.fns[fid].module, &decl.body) {
-        return None;
+    let miss = |why: &str| {
+        if crate::why() {
+            eprintln!("mimic: IR: `{}` stays on the old path: {why}", p.fn_path(fid).join("::"));
+        }
+        if crate::copies::on() {
+            crate::copies::missed(p, fid, why);
+        }
+        None
+    };
+    let mut params = Vec::new();
+    for (prm, t) in decl.params.iter().zip(&spec.params) {
+        let Some(it) = Ty::of(p, *t) else { return miss(&format!("parameter `{}` is of type `{}`", prm.name, mimic_check::types::show(p, *t))) };
+        params.push((prm.name.clone(), it));
+    }
+    let Some(ret) = Ty::of(p, spec.ret) else { return miss(&format!("it returns a `{}`", mimic_check::types::show(p, spec.ret))) };
+    if runs_apart(hints, &decl.body) {
+        return miss("the old path runs some of its calls apart (in parallel, or as a task)");
     }
     let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
     decl.body.bound_names(&mut local_names);
-    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new() };
+    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new(), bail: false, miss: None };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
-        let v = l.emit(&mut body, *t, Op::Param(i as u32), decl.span);
+        let op = if takes.get(i).copied().unwrap_or(false) {
+            // (taken over: a value on the heap the function owns)
+            if !matches!(t, Ty::List(_) | Ty::Rec(_)) {
+                return miss(&format!("parameter `{name}` is taken over but not on the heap"));
+            }
+            Op::Take(i as u32)
+        } else {
+            Op::Param(i as u32)
+        };
+        let v = l.emit(&mut body, *t, op, decl.span);
         l.env.push((name.clone(), v, *t));
     }
-    let r = l.block(&mut body, &decl.body)?;
+    let Some(r) = l.block(&mut body, &decl.body) else {
+        let at = l.miss.take().unwrap_or_else(|| "a statement it does not cover".into());
+        return miss(&at);
+    };
+    if l.bail {
+        return miss("an expression left to the old path would take over a variable");
+    }
     // what the body gives must be what the function returns
     let rt = l.types[r.0 as usize];
     if ret != Ty::Unit && rt != ret {
-        return None;
+        return miss("its body gives another type than it returns");
     }
     body.result = Some(r);
     let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
     crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
+    crate::fold::function(&mut f);
+    crate::own::function(&mut f);
+    if !crate::worth(&f) {
+        return miss("it only leaves expressions to the old path, which compiles them as well on its own");
+    }
+    if crate::copies::on() {
+        crate::copies::scan(p, fid, &f);
+    }
     Some(f)
 }
 
-/// No block runs two statements that call functions: such calls may run
-/// at once (the code generator starts independent calls in parallel),
-/// which the IR does not do yet.
-///
-/// A statement that is itself a call of a small helper (a user function
-/// whose body is one expression with no calls of its own: what the IR
-/// inlines), its arguments calling nothing, does not count: the code
-/// generator would gain little running one apart, and it gives the same
-/// result in turn. (A helper called inside a lambda counts, as any call.)
-fn calls_apart(p: &Program, module: mimic_check::ModId, b: &Block) -> bool {
-    let mut ok = true;
-    b.walk(&mut |e| {
-        let blocks: Vec<&Block> = match &e.kind {
-            ExprKind::Block(b) | ExprKind::Unsafe(b) => vec![b],
-            ExprKind::If { then, .. } => vec![then],
-            _ => vec![],
-        };
-        for b in blocks {
-            ok &= calls_in_stmts(p, module, b) <= 1;
+/// Whether the old path runs some statements of a block of `body` apart
+/// (see [`crate::Hints::runs_apart`]).
+fn runs_apart(hints: &mut dyn crate::Hints, body: &Block) -> bool {
+    // every block: the body, those of expressions, and the `else` blocks
+    // of `let … else` (statements, not expressions), at any depth
+    let mut todo: Vec<&Block> = vec![body];
+    let mut seen = 0;
+    while seen < todo.len() {
+        let b = todo[seen];
+        seen += 1;
+        if hints.runs_apart(&b.stmts) {
+            return true;
         }
-    });
-    ok && calls_in_stmts(p, module, b) <= 1
-}
-
-/// Whether `e` calls a small helper (see [`calls_apart`]).
-fn helper_call(p: &Program, module: mimic_check::ModId, e: &Expr) -> bool {
-    let ExprKind::Call { callee, .. } = &e.kind else { return false };
-    let ExprKind::Path(path) = &callee.kind else { return false };
-    let Some(Resolved::Fn(f)) = p.lookup(module, path) else { return false };
-    let FnKind::User(d) = &p.fns[f].kind else { return false };
-    let Some(tail) = d.body.tail.as_deref() else { return false };
-    let mut inner = false;
-    tail.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
-    d.body.stmts.is_empty() && !inner
-}
-
-fn calls_in_stmts(p: &Program, module: mimic_check::ModId, b: &Block) -> usize {
-    let has_call = |e: &Expr| {
-        let mut c = false;
-        e.walk(&mut |x| c |= matches!(x.kind, ExprKind::Call { .. }));
-        let ExprKind::Call { args, .. } = &e.kind else { return c };
-        let mut inner = false;
-        for a in args {
-            a.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
+        for st in &b.stmts {
+            if let Stmt::LetElse { els, .. } = st {
+                todo.push(els);
+            }
         }
-        c && !(helper_call(p, module, e) && !inner)
-    };
-    let mut n = b
-        .stmts
-        .iter()
-        .filter(|s| match s {
-            Stmt::Let { value, .. } | Stmt::Expr(value) => has_call(value),
-            _ => false,
-        })
-        .count();
-    if let Some(t) = &b.tail
-        && has_call(t)
-    {
-        n += 1;
+        // the blocks directly inside this one's expressions (deeper ones
+        // are reached from those)
+        let mut inner: Vec<&Block> = Vec::new();
+        b.walk(&mut |e| {
+            if let ExprKind::Block(x) | ExprKind::Unsafe(x) | ExprKind::If { then: x, .. } | ExprKind::Arms { body: x, .. } = &e.kind {
+                inner.push(unsafe { &*(x as *const Block) });
+            }
+        });
+        for x in inner {
+            if !todo.iter().any(|t| std::ptr::eq(*t, x)) {
+                todo.push(x);
+            }
+        }
     }
-    n
+    false
 }
 
 impl Lower<'_> {
@@ -498,7 +513,11 @@ impl Lower<'_> {
             self.ty(a)?;
             vals.push(self.expr(r, a)?);
         }
-        Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals }, e.span))
+        let key = self.spec.calls.get(&id(e))?.clone();
+        let mut takes = self.hints.takes(&key);
+        takes.resize(vals.len(), false);
+        let moves = vec![false; vals.len()];
+        Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals, takes, moves }, e.span))
     }
 
     /// The callee of `e`, when it is a call worth lowering in place: a user
@@ -664,6 +683,18 @@ impl Lower<'_> {
 
     /// `e` kept whole for the old path, reading these variables.
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let v = self.embed_here(r, e);
+        if v.is_none() && self.miss.is_none() && self.inline_depth == 0 {
+            let what = match self.spec.exprs.get(&id(e)) {
+                Some(t) => format!("of type `{}`", mimic_check::types::show(self.p, *t)),
+                None => "of a type it does not know".into(),
+            };
+            self.miss = Some(format!("line {}:{}: an expression {what} it cannot take or embed", e.span.line, e.span.col));
+        }
+        v
+    }
+
+    fn embed_here(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         // (inside an inlined body the code generator's types are the
         // caller's: the old path could not compile the callee's syntax)
         if self.inline_depth > 0 {
@@ -674,8 +705,103 @@ impl Lower<'_> {
         if matches!(e.kind, ExprKind::Lambda { .. }) {
             return None;
         }
+        if self.takes_var(e) {
+            self.bail = true;
+            return None;
+        }
         let (uses, lazies) = self.reads(e)?;
-        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+        let moves = vec![false; uses.len()];
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies, moves }, e.span))
+    }
+
+    /// `put(xs, i, x)` or `push(xs, x)` (the prelude's) of a list of i64
+    /// and numbers, giving a list of i64: its name and arguments.
+    fn list_change<'e>(&self, e: &'e Expr) -> Option<(&'static str, &'e [Expr])> {
+        let ExprKind::Call { callee, args } = &e.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
+            return None;
+        }
+        let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
+        let FnKind::Extern { decl, .. } = &self.p.fns[f].kind else { return None };
+        if !decl.intrinsic || self.p.mods[self.p.fns[f].module].name != "prelude" {
+            return None;
+        }
+        let op = match (decl.name.as_str(), args.len()) {
+            ("put", 3) => "put",
+            ("push", 2) => "push",
+            ("concat", 2) => "concat",
+            _ => return None,
+        };
+        let list = Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0));
+        if self.ty(&args[0])? != list || self.ty(e)? != list {
+            return None;
+        }
+        // (concat: another list of i64; put and push: numbers)
+        let ok = if op == "concat" { self.ty(&args[1]).is_some_and(crate::i64_list) } else { args[1..].iter().all(|a| self.ty(a) == Some(Ty::I64)) };
+        ok.then_some((op, args))
+    }
+
+    /// One branch of a field's new value (see the split in `with`): the
+    /// field kept as it is (`k.next`), or changed from it (`push(k.next, w)`).
+    #[allow(clippy::type_complexity)]
+    fn branch_change<'e>(&self, base: &[String], n: &str, t: &'e Expr) -> Option<Option<Vec<(&'static str, &'e [Expr])>>> {
+        if matches!(&t.kind, ExprKind::Field { base: fb, name: f } if f == n && matches!(&fb.kind, ExprKind::Path(q) if q == base)) {
+            return Some(None);
+        }
+        self.change_chain(base, n, t).map(Some)
+    }
+
+    /// `x`, the new value of field `n` of the record `base` names, as
+    /// changes of that field's old value (`push(put(s.v, i, x), y)`): each
+    /// (name, the other arguments), innermost first.
+    fn change_chain<'e>(&self, base: &[String], n: &str, x: &'e Expr) -> Option<Vec<(&'static str, &'e [Expr])>> {
+        let mut chain = Vec::new();
+        let mut cur = x;
+        loop {
+            let (op, args) = self.list_change(cur)?;
+            chain.push((op, &args[1..]));
+            match &args[0].kind {
+                ExprKind::Field { base: fb, name } if name == n && matches!(&fb.kind, ExprKind::Path(q) if q == base) => break,
+                _ => cur = &args[0],
+            }
+        }
+        chain.reverse();
+        Some(chain)
+    }
+
+    /// Whether the old path, compiling `e`, would take over a variable on
+    /// the heap (and so change it in place where it is held once): the base
+    /// of `{ x with … }`, an argument a user function takes over. (Not the
+    /// list of `push`/`put`: the old path copies it anyway.) Embedded, it would only borrow it (the IR
+    /// owns its values) and copy instead.
+    fn takes_var(&mut self, e: &Expr) -> bool {
+        let heap_var = |l: &Self, x: &Expr| matches!(&x.kind, ExprKind::Path(q) if q.len() == 1 && l.env.iter().rev().find(|(n, ..)| *n == q[0]).is_some_and(|(_, _, t)| matches!(t, Ty::List(_) | Ty::Rec(_))));
+        let mut found = false;
+        // (each call passing one: its node, its callee, which arguments are such variables)
+        let mut calls: Vec<(usize, Vec<String>, Vec<bool>)> = Vec::new();
+        e.walk(&mut |x| match &x.kind {
+            ExprKind::With { base, .. } if heap_var(self, base) => found = true,
+            ExprKind::Call { callee, args } if args.iter().any(|a| heap_var(self, a)) => {
+                if let ExprKind::Path(path) = &callee.kind {
+                    calls.push((id(x), path.clone(), args.iter().map(|a| heap_var(self, a)).collect()));
+                }
+            }
+            _ => {}
+        });
+        if found {
+            return true;
+        }
+        for (site, path, heap) in calls {
+            let Some(Resolved::Fn(f)) = self.p.lookup(self.module, &path) else { continue };
+            if let FnKind::User(_) = &self.p.fns[f].kind
+                && let Some(key) = self.spec.calls.get(&site).cloned()
+                && heap.iter().zip(self.hints.takes(&key)).any(|(h, t)| *h && t)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// The variables `e` reads, as the IR's values, and the lazy lets it
@@ -808,6 +934,147 @@ impl Lower<'_> {
                 let a = self.expr(r, expr)?;
                 Some(self.emit(r, ty, Op::Un(*op, a), e.span))
             }
+            // a record on the heap: its fields' values, each of the type its
+            // field declares, in declaration order
+            ExprKind::Record { fields, .. } if matches!(ty, Ty::Rec(_)) => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = id as usize;
+                let td = &self.p.types[tid];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let mut vals: Vec<Option<Val>> = vec![None; fs.len()];
+                for (n, x, _) in fields {
+                    let i = fs.iter().position(|(m, _, _)| m == n)?;
+                    let want = Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[i].1)?)?;
+                    let v = self.expr(r, x)?;
+                    if self.types[v.0 as usize] != want {
+                        return None;
+                    }
+                    vals[i] = Some(v);
+                }
+                let fields: Vec<Val> = vals.into_iter().collect::<Option<_>>()?;
+                Some(self.emit(r, ty, Op::Record { tid, moves: vec![false; fields.len()], fields }, e.span))
+            }
+            // a field of a record on the heap, of the type it declares
+            ExprKind::Field { base, name } if matches!(self.ty(base)?, Ty::Rec(_)) => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = self.ty(base)? else { return None };
+                let td = &self.p.types[id as usize];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let k = fs.iter().position(|(m, _, _)| m == name)?;
+                if Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[k].1)?)? != ty {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::Field { base: b, tid: id as usize, k: k as u32, borrow: false }, e.span))
+            }
+            // `{ r with f: x, … }` of a record on the heap, each new value of
+            // the type its field declares. A list of i64 changed from its own
+            // old value by `put`/`push` (`{ s with v: put(s.v, i, x) }`) is a
+            // change: taken out of the record and changed in place. Any other
+            // field value changing a field of the base: the old path's.
+            ExprKind::With { base, fields } if matches!(ty, Ty::Rec(_)) && self.ty(base)? == ty => {
+                let Ty::Rec(mimic_check::types::Ty::Obj(id)) = ty else { return None };
+                let tid = id as usize;
+                let td = &self.p.types[tid];
+                let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return None };
+                let bp = match &base.kind {
+                    ExprKind::Path(bp) => Some(bp.clone()),
+                    _ => None,
+                };
+                // the new values first (they may read the base), then the base
+                let mut news = Vec::new();
+                let mut changes = Vec::new();
+                // a field changed in one branch and kept in the other: split
+                #[allow(clippy::type_complexity)]
+                let mut split: Option<(usize, &Expr, Option<Vec<(&'static str, &[Expr])>>, Option<Vec<(&'static str, &[Expr])>>)> = None;
+                for (n, x, _) in fields {
+                    let k = fs.iter().position(|(m, _, _)| m == n)?;
+                    // `next: if d == 0 { push(k.next, w) } else { k.next }`:
+                    // two updates, one changing the field in place and one
+                    // keeping it, chosen by the condition (each branch's own
+                    // values computed in that branch only)
+                    if split.is_none()
+                        && let Some(bp) = &bp
+                        && let ExprKind::If { cond, then, els: Some(els) } = &x.kind
+                        && then.stmts.is_empty()
+                        && let Some(tt) = then.tail.as_deref()
+                        && let ExprKind::Block(eb) = &els.kind
+                        && eb.stmts.is_empty()
+                        && let Some(et) = eb.tail.as_deref()
+                        && let (Some(a), Some(b)) = (self.branch_change(bp, n, tt), self.branch_change(bp, n, et))
+                        && (a.is_some() || b.is_some())
+                    {
+                        split = Some((k, cond.as_ref(), a, b));
+                        continue;
+                    }
+                    if let Some(bp) = &bp
+                        && let Some(chain) = self.change_chain(bp, n, x)
+                    {
+                        let mut cs = Vec::new();
+                        for (op, rest) in chain {
+                            let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
+                            cs.push(match op {
+                                "put" => crate::Change::Put(vs[0], vs[1]),
+                                "push" => crate::Change::Push(vs[0]),
+                                _ => crate::Change::Concat(vs[0]),
+                            });
+                        }
+                        changes.push((k as u32, cs));
+                        continue;
+                    }
+                    if let Some(bp) = &bp {
+                        let mut changes_field = false;
+                        x.walk(&mut |y| {
+                            if let ExprKind::Call { args, .. } = &y.kind
+                                && let Some(ExprKind::Field { base: fb, .. }) = args.first().map(|a| &a.kind)
+                                && matches!(&fb.kind, ExprKind::Path(q) if q == bp)
+                            {
+                                changes_field = true;
+                            }
+                        });
+                        if changes_field {
+                            return None;
+                        }
+                    }
+                    let want = Ty::of(self.p, mimic_check::types::ann_in(self.p, td.module, &fs[k].1)?)?;
+                    let v = self.expr(r, x)?;
+                    if self.types[v.0 as usize] != want {
+                        return None;
+                    }
+                    news.push((k as u32, v));
+                }
+                if let Some((k, cond, a, other)) = split {
+                    if self.ty(cond)? != Ty::Bool {
+                        return None;
+                    }
+                    let c = self.expr(r, cond)?;
+                    let b = self.expr(r, base)?;
+                    let mut regions = Vec::new();
+                    for chain in [a, other] {
+                        let mut g = Region::default();
+                        let mut ch = changes.clone();
+                        if let Some(chain) = chain {
+                            let mut cs = Vec::new();
+                            for (op, rest) in chain {
+                                let vs = rest.iter().map(|x| self.expr(&mut g, x)).collect::<Option<Vec<_>>>()?;
+                                cs.push(match op {
+                                    "put" => crate::Change::Put(vs[0], vs[1]),
+                                    "push" => crate::Change::Push(vs[0]),
+                                    _ => crate::Change::Concat(vs[0]),
+                                });
+                            }
+                            ch.push((k as u32, cs));
+                        }
+                        let v = self.emit(&mut g, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news.clone(), moved: false, changes: ch }, e.span);
+                        g.result = Some(v);
+                        regions.push(g);
+                    }
+                    let els = regions.pop()?;
+                    let then = regions.pop()?;
+                    return Some(self.emit(r, ty, Op::If { cond: c, then, els }, e.span));
+                }
+                let b = self.expr(r, base)?;
+                Some(self.emit(r, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news, moved: false, changes }, e.span))
+            }
             // ≢ xs of a list (an array expression the old path computes
             // fused, without building it: embedded whole)
             ExprKind::Prim { prim: Prim::Len, args } if args.len() == 1 && ty == Ty::I64 && matches!(self.ty(&args[0])?, Ty::List(_)) => {
@@ -840,6 +1107,20 @@ impl Lower<'_> {
                 let i = self.expr(r, index)?;
                 Some(self.emit(r, ty, Op::Index(b, i, el), e.span))
             }
+            // put/push of a list of i64: in place where the IR owns the list
+            // at its last use (own), else on a copy
+            ExprKind::Call { .. } if self.list_change(e).is_some_and(|(op, _)| op != "concat") => {
+                let (op, args) = self.list_change(e)?;
+                let list = self.expr(r, &args[0])?;
+                let a = self.expr(r, &args[1])?;
+                let o = if op == "put" {
+                    let x = self.expr(r, &args[2])?;
+                    Op::Put { list, index: a, value: x, moved: false }
+                } else {
+                    Op::Push { list, value: a, moved: false }
+                };
+                Some(self.emit(r, ty, o, e.span))
+            }
             ExprKind::Call { .. } => self.call(r, e, ty),
             ExprKind::If { cond, then, els } => {
                 if self.ty(cond)? != Ty::Bool {
@@ -869,7 +1150,7 @@ impl Lower<'_> {
                 let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
                 // (a list as the state: each step's list would have to free
                 // the last one; not covered yet)
-                if matches!(ty, Ty::List(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                if matches!(ty, Ty::List(_) | Ty::Rec(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
                     return None;
                 }
                 let init = self.expr(r, &args[0])?;

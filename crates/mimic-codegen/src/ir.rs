@@ -9,7 +9,7 @@
 //! `MIMIC_IR=print` also prints each function's IR.
 
 use crate::{Cg, OrStr, R, V};
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 use mimic_check::types::Ty;
 use mimic_ir::{Function, Op, Region};
 
@@ -21,6 +21,12 @@ pub(crate) fn wanted() -> (bool, bool) {
         Ok("0") => (false, false),
         _ => (true, false),
     })
+}
+
+/// Whether the region (or one inside it) takes parameter `n` over, clearing
+/// its slot.
+fn takes(r: &Region, n: u32) -> bool {
+    r.insts.iter().any(|i| matches!(i.op, Op::Take(m) if m == n) || i.op.regions().into_iter().any(|g| takes(g, n)))
 }
 
 /// A region that only yields a truth value written in the program.
@@ -64,6 +70,14 @@ impl mimic_ir::Hints for Cg<'_, '_> {
     fn spec(&mut self, key: &crate::types::Key) -> Option<std::rc::Rc<crate::types::Spec>> {
         Cg::spec(self, key).ok()
     }
+
+    fn takes(&mut self, key: &crate::types::Key) -> Vec<bool> {
+        self.consumed(key)
+    }
+
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool {
+        Cg::runs_apart(self, stmts)
+    }
 }
 
 pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
@@ -72,8 +86,17 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
     }
+}
+
+/// One change of a list of i64, its numbers computed.
+#[derive(Clone, Copy)]
+enum Ch<'ctx> {
+    Put(IntValue<'ctx>, IntValue<'ctx>),
+    Push(IntValue<'ctx>),
+    /// appends a list of i64 (lent)
+    Concat(PointerValue<'ctx>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -81,6 +104,16 @@ impl<'ctx> Cg<'ctx, '_> {
     /// gives (its parameters are in their slots already).
     pub(crate) fn ir_body(&mut self, f: &Function) -> R<V<'ctx>> {
         let mut vals: Vec<Option<V<'ctx>>> = vec![None; f.values as usize];
+        if self.body_exit.is_some() {
+            // `main` runs once and the process exits after it, so its own
+            // values are not freed one by one (see Cg::exit_fid); the old
+            // path keeps a `let` until the end of its scope too, so this
+            // holds no more memory than it would. Drops inside loops and
+            // branches stay.
+            let mut body = f.body.clone();
+            body.insts.retain(|i| !matches!(i.op, Op::Drop(_)));
+            return self.ir_region(f, &body, &mut vals);
+        }
         self.ir_region(f, &f.body, &mut vals)
     }
 
@@ -101,6 +134,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
                     self.val_of(bv, lt, false)
                 }
+                // a parameter taken over: owned by the IR from here (its slot
+                // cleared, so the function's end does not release it again)
+                Op::Take(n) => {
+                    let name = &f.params[*n as usize].0;
+                    let l = self.scopes[0].iter().find(|l| l.name == *name).ok_or("internal compiler error: IR parameter without a slot")?;
+                    let (slot, lt) = (l.slot, l.ty);
+                    let bv = self.b.build_load(self.repr(lt), slot, name).s()?;
+                    self.b.build_store(slot, self.ptr.const_null()).s()?;
+                    self.val_of(bv, lt, true)
+                }
                 Op::Bin(op, a, b) => {
                     let r = self.scalar_binary(*op, get(vals, *a)?, get(vals, *b)?)?;
                     self.as_ty(r, ty, "operator result")?
@@ -109,16 +152,17 @@ impl<'ctx> Cg<'ctx, '_> {
                     let r = self.scalar_unary(*op, get(vals, *a)?)?;
                     self.as_ty(r, ty, "operator result")?
                 }
-                Op::Call { site, callee, args } => {
-                    // a list the IR owns is lent to the call: a callee that
-                    // takes its parameter over gets its own reference (the
-                    // call retains a lent value it hands over), and the IR
-                    // still releases its own at the region's end
+                Op::Call { site, callee, args, moves, .. } => {
+                    // an owned value at its last use, to a callee that takes
+                    // it over: handed over as it is; any other lent (a callee
+                    // that takes its parameter over gets its own reference:
+                    // the call retains a lent value it hands over)
                     let a = args
                         .iter()
-                        .map(|v| {
+                        .zip(moves)
+                        .map(|(v, m)| {
                             get(vals, *v).map(|x| match x {
-                                V::P(p, true) => V::P(p, false),
+                                V::P(p, true) if !m => V::P(p, false),
                                 x => x,
                             })
                         })
@@ -153,10 +197,36 @@ impl<'ctx> Cg<'ctx, '_> {
                 // an expression the IR does not cover yet: the old path
                 // compiles it here, its variables the IR's values (lent: in
                 // slots of their own, never released from there)
-                Op::Embed { expr, uses, lazies } => {
+                Op::Embed { expr, uses, lazies, moves } => {
+                    // SAFETY: the syntax tree outlives the compile
+                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let mut locals = Vec::new();
-                    for (name, v, t) in uses {
+                    let mut moved = Vec::new();
+                    for ((name, v, t), m) in uses.iter().zip(moves) {
                         let ct = checker_ty(*t);
+                        // its last use: owned by the expression's slot, moved
+                        // on where the old path can, released after it if not
+                        if *m {
+                            let slot = self.entry_alloca(ct, name)?;
+                            self.b.build_store(slot, self.basic(get(vals, *v)?)).s()?;
+                            if let Some(site) = self.let_move_site(name, &[], Some(e)) {
+                                self.move_at.insert(site);
+                            }
+                            moved.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            continue;
+                        }
+                        // a parameter read as it is: its own slot (never
+                        // written while the function runs, and a record in
+                        // registers is not copied once per embed)
+                        let own = f.body.insts.iter().find(|i| i.dst == *v).and_then(|i| match i.op {
+                            Op::Param(n) if !takes(&f.body, n) => self.scopes[0].iter().find(|l| l.name == f.params[n as usize].0 && l.ty == ct).map(|l| l.slot),
+                            _ => None,
+                        });
+                        if let Some(slot) = own {
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
+                            continue;
+                        }
                         let val = get(vals, *v)?;
                         let slot = self.entry_alloca(ct, name)?;
                         self.b.build_store(slot, self.basic(val)).s()?;
@@ -166,8 +236,6 @@ impl<'ctx> Cg<'ctx, '_> {
                     // the lazy lets it reads: fused where it reads them
                     let lazy_mark = self.lazies.len();
                     self.lazies.extend(lazies.iter().cloned());
-                    // SAFETY: the syntax tree outlives the compile
-                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let out = self.expr(e);
                     self.lazies.truncate(lazy_mark);
                     self.scopes.pop();
@@ -176,6 +244,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if self.terminated() {
                         self.dead_block();
                     }
+                    self.release_scope(&moved)?;
                     self.as_ty(out, ty, "value")?
                 }
                 // a list's length, from its header (a list passed in: never
@@ -195,6 +264,126 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.reduce_tree(*p, t, &|v| get(vals, v), *el, i.span)?
                     };
                     self.as_ty(out, ty, "reduction")?
+                }
+                // a record on the heap, built as the code generator builds one:
+                // a value the IR moves in becomes the record's, any other is
+                // lent (the record takes a reference of its own)
+                Op::Record { tid, fields, moves } => {
+                    let vs = fields
+                        .iter()
+                        .zip(moves)
+                        .map(|(v, m)| {
+                            get(vals, *v).map(|x| match x {
+                                V::P(p, true) if !m => V::P(p, false),
+                                x => x,
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
+                    self.construct(*tid, None, vs)?
+                }
+                // a field read in place: a number stored raw loaded, else
+                // borrowed from a borrowed record, its own reference from an
+                // owned one (released after its last use, as any)
+                Op::Field { base: b, tid, k, borrow } => {
+                    let base = get(vals, *b)?;
+                    let tid = *tid;
+                    let p = self.basic(base).into_pointer_value();
+                    let fp = self.slot_ptr(p, *k as usize)?;
+                    if let Some(el) = self.raw_field(tid, None, *k as usize) {
+                        let x = self.load_raw(fp, el)?;
+                        self.as_ty(x, ty, "field")?
+                    } else {
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let v = if let (V::P(_, true), false) = (base, *borrow) {
+                            self.call_rt("mim_retain", &[x.into()])?;
+                            V::P(x, true)
+                        } else {
+                            V::P(x, false)
+                        };
+                        self.as_ty(v, ty, "field")?
+                    }
+                }
+                // `{ r with … }` (in place when the record is held once, else
+                // on a copy): the base handed over when the IR moves it there,
+                // else a reference of its own; each new value moved in or lent,
+                // as a record's
+                Op::With { base, tid, fields, moved, moves, changes } => {
+                    let b = get(vals, *base)?;
+                    let b = match b {
+                        V::P(p, true) if !moved => V::P(p, false),
+                        x => x,
+                    };
+                    let cur = self.own(self.boxed(b)?)?;
+                    let news = fields
+                        .iter()
+                        .zip(moves)
+                        .map(|((k, x), m)| {
+                            get(vals, *x).map(|x| match x {
+                                V::P(p, owned) => (*k as usize, V::P(p, owned && *m)),
+                                x => (*k as usize, x),
+                            })
+                        })
+                        .collect::<R<Vec<_>>>()?;
+                    let mut chs = Vec::new();
+                    // (lists boxed here from registers for a concat: released after)
+                    let mut temps = Vec::new();
+                    for (k, cs) in changes {
+                        let mut steps = Vec::new();
+                        for c in cs {
+                            steps.push(match c {
+                                mimic_ir::Change::Put(i, x) => Ch::Put(self.to_i64(get(vals, *i)?)?, self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Concat(x) => {
+                                    let v = get(vals, *x)?;
+                                    let b = match v {
+                                        V::P(..) => v,
+                                        _ => {
+                                            let b = self.boxed(v)?;
+                                            temps.push(b);
+                                            b
+                                        }
+                                    };
+                                    Ch::Concat(self.basic(b).into_pointer_value())
+                                }
+                            });
+                        }
+                        chs.push((*k as usize, steps));
+                    }
+                    let r = self.ir_with(*tid, cur, news, chs)?;
+                    for t in temps {
+                        self.drop_tmp(t)?;
+                    }
+                    self.as_ty(r, ty, "record")?
+                }
+                // put/push of a list of i64: the list handed over when the IR
+                // moves it there (in place when held once), else a reference
+                // of its own (so a copy)
+                Op::Put { list, index, value, moved } => {
+                    let (i, x) = (self.to_i64(get(vals, *index)?)?, self.to_i64(get(vals, *value)?)?);
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                    } else {
+                        // borrowed: a copy with the change (no reference taken)
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_put_i64", &[l.into(), i.into(), x.into()])?, true)
+                    }
+                }
+                Op::Push { list, value, moved } => {
+                    let x = self.to_i64(get(vals, *value)?)?;
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Push(x))?, true)
+                    } else {
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_push_i64", &[l.into(), x.into()])?, true)
+                    }
+                }
+                // an owned list's last use is past: released now
+                Op::Drop(v) => {
+                    let x = get(vals, *v)?;
+                    self.drop_tmp(x)?;
+                    self.null()
                 }
                 // a list computed element by element: one loop (owned)
                 Op::Map(t) => {
@@ -234,18 +423,167 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             vals[i.dst.0 as usize] = Some(v);
         }
-        // the lists this region owns, released now; the one it yields
-        // moves out
-        for i in &r.insts {
-            if mimic_ir::owns(i) && Some(i.dst) != r.result {
-                let v = get(vals, i.dst)?;
-                self.drop_tmp(v)?;
-            }
-        }
+        // (every value the region owns ends where the ownership pass says:
+        // dropped, moved on, or yielded)
         match r.result {
             Some(v) => get(vals, v),
             None => Ok(self.null()),
         }
+    }
+
+    /// `{ r with … }` on the owned record `cur`: used as it is when held
+    /// once (one load, one compare: the common case once the IR moves it),
+    /// else copied; then each field written directly (a number raw, any
+    /// other value with a reference of its own, the old one released).
+    /// `changes`: list fields changed from their old value, after the
+    /// others: taken out of the record (held once by then), changed, stored
+    /// back; a list still shared is seen as shared (and copied).
+    fn ir_with(&mut self, tid: usize, cur: V<'ctx>, news: Vec<(usize, V<'ctx>)>, changes: Vec<(usize, Vec<Ch<'ctx>>)>) -> R<V<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let V::P(p0, _) = cur else { return Err("internal compiler error: `with` on a value not on the heap".into()) };
+        if !self.in_place_ok() {
+            let mut cur = cur;
+            for (k, x) in news {
+                let v = self.boxed(x)?;
+                cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(k as u64, false).into(), self.basic(v).into()])?;
+                self.drop_tmp(v)?;
+            }
+            for (k, steps) in changes {
+                // (the old list, a reference of its own: so changed on a copy)
+                let V::P(c, _) = cur else { unreachable!() };
+                let fp = self.slot_ptr(c, k)?;
+                let mut list = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
+                self.call_rt("mim_retain", &[list.into()])?;
+                for st in steps {
+                    list = self.ir_change(list, st)?;
+                }
+                cur = self.call_rt_ptr("mim_obj_with", &[self.basic(cur).into(), i64t.const_int(k as u64, false).into(), list.into()])?;
+                self.release(list)?;
+            }
+            return Ok(cur);
+        }
+        let rc = self.b.build_load(i64t, p0, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let one = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let fun = self.cur_fn.ok_or("internal compiler error: `with` outside a function")?;
+        let pre = self.b.get_insert_block().unwrap();
+        let copy_bb = self.ctx.append_basic_block(fun, "with_copy");
+        let go_bb = self.ctx.append_basic_block(fun, "with_go");
+        self.b.build_conditional_branch(one, go_bb, copy_bb).s()?;
+        self.b.position_at_end(copy_bb);
+        let V::P(copied, _) = self.call_rt_ptr("mim_obj_unique", &[p0.into()])? else { unreachable!() };
+        let copy_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(go_bb).s()?;
+        self.b.position_at_end(go_bb);
+        let phi = self.b.build_phi(self.ptr, "rec").s()?;
+        phi.add_incoming(&[(&p0, pre), (&copied, copy_end)]);
+        let rec = phi.as_basic_value().into_pointer_value();
+        for (k, v) in news {
+            let fp = self.slot_ptr(rec, k)?;
+            if let Some(el) = self.raw_field(tid, None, k) {
+                self.store_raw(fp, v, el)?;
+                continue;
+            }
+            let v = self.own(self.boxed(v)?)?;
+            let old = self.b.build_load(self.ptr, fp, "old").s()?.into_pointer_value();
+            self.b.build_store(fp, self.basic(v)).s()?;
+            self.release(old)?;
+        }
+        for (k, steps) in changes {
+            let fp = self.slot_ptr(rec, k)?;
+            let mut list = self.b.build_load(self.ptr, fp, "taken").s()?.into_pointer_value();
+            self.b.build_store(fp, self.ptr.const_null()).s()?;
+            for st in steps {
+                list = self.ir_change(list, st)?;
+            }
+            self.b.build_store(fp, list).s()?;
+        }
+        Ok(V::P(rec, true))
+    }
+
+    /// A list handed to put/push (which take it): as it is when moved
+    /// there, else a reference of its own.
+    fn list_arg(&mut self, l: V<'ctx>, moved: bool) -> R<PointerValue<'ctx>> {
+        let l = match l {
+            V::P(p, true) if !moved => V::P(p, false),
+            x => x,
+        };
+        let V::P(p, _) = self.own(self.boxed(l)?)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
+        Ok(p)
+    }
+
+    /// A list the IR reads without taking a reference.
+    fn borrowed_list(&mut self, l: V<'ctx>) -> R<PointerValue<'ctx>> {
+        let V::P(p, _) = self.boxed(l)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
+        Ok(p)
+    }
+
+    /// A runtime function on lists of i64 (a list, then i64s) giving a new
+    /// list: declared on first use.
+    fn rt_list_fn(&mut self, name: &str, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let mut ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.ptr.into()];
+            ps.extend(std::iter::repeat_n(inkwell::types::BasicMetadataTypeEnum::from(i64t), args.len() - 1));
+            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(inkwell::module::Linkage::External))
+        });
+        Ok(self.b.build_call(f, args, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+    }
+
+    /// One change of the owned list of i64 `list` (taken): the list it gives.
+    fn ir_change(&mut self, list: PointerValue<'ctx>, c: Ch<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        match c {
+            Ch::Put(i, x) => self.put_i64_inline(list, i, x),
+            Ch::Push(x) => {
+                let f = self.module.get_function("mim_push_i64_own").unwrap_or_else(|| self.module.add_function("mim_push_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
+            Ch::Concat(ys) => {
+                let f = self.module.get_function("mim_std_concat_own").unwrap_or_else(|| self.module.add_function("mim_std_concat_own", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
+        }
+    }
+
+    /// `put(xs, i, x)` on the owned list `xs`: held once, of i64, one
+    /// dimension and `i` in range, the number is stored in place here;
+    /// anything else is mim_put_i64_own's (which copies, converts or stops
+    /// with the message).
+    fn put_i64_inline(&mut self, list: PointerValue<'ctx>, i: IntValue<'ctx>, x: IntValue<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?.into_int_value();
+        let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
+        let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        let inside = self.b.build_int_compare(inkwell::IntPredicate::ULT, i, len, "").s()?;
+        let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, inside, "").s()?, "").s()?;
+        let f = self.cur_fn.ok_or("internal compiler error: put outside a function")?;
+        let here = self.ctx.append_basic_block(f, "put_here");
+        let slow = self.ctx.append_basic_block(f, "put_slow");
+        let done = self.ctx.append_basic_block(f, "put_done");
+        self.b.build_conditional_branch(ok, here, slow).s()?;
+        self.b.position_at_end(here);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
+        let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
+        self.b.build_store(at, x).s()?;
+        let here_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow);
+        let rf = self.module.get_function("mim_put_i64_own").unwrap_or_else(|| self.module.add_function("mim_put_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+        let r = self.b.build_call(rf, &[list.into(), i.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "list").s()?;
+        phi.add_incoming(&[(&list, here_end), (&r, slow_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
     }
 
     /// A loop over a state (evolve, settle): the state a phi of its type;
@@ -372,7 +710,8 @@ impl<'ctx> Cg<'ctx, '_> {
         for (v, b) in &incoming {
             phi.add_incoming(&[(v, *b)]);
         }
-        let owned = matches!(ty, Ty::Arr(..)) && !matches!(self.val_of(phi.as_basic_value(), ty, false), V::A(..));
+        // (a list or a record on the heap: owned from either branch)
+        let owned = matches!(ty, Ty::Arr(..) | Ty::Obj(_)) && matches!(self.val_of(phi.as_basic_value(), ty, false), V::P(..));
         Ok(self.val_of(phi.as_basic_value(), ty, owned))
     }
 }

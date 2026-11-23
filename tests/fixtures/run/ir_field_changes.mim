@@ -1,0 +1,35 @@
+module main
+
+// A list field changed under a `let` and stored back by `{ s with … }`
+// (changed in place by the `with`), and a field grown by `concat`. The
+// old list must stay as it was wherever it is still read.
+
+type T = { n: i64, table: [i64], out: [i64] }
+
+fn step(s: T, k: i64) -> T {
+    let h = k % 7
+    let before = s.table[h]
+    let table = put(s.table, h, before + k)
+    if k % 2 == 0 {
+        { s with n: s.n + 1, table: table, out: concat(s.out, [k, before]) }
+    } else {
+        { s with n: s.n + 1, table: table }
+    }
+}
+
+// the old field read after the change: the change must not show there
+fn keeps(s: T) -> (i64, i64) {
+    let t = push(put(s.table, 0, 99), 5)
+    let old = s.table[0]
+    let r = { s with table: t }
+    (old, r.table[0] + ≢ r.table)
+}
+
+fn main() {
+    let m = (≢ os::args()) * 0 + 7
+    let start = T { n: 0, table: ⍳ m ¨ (_ => 0), out: ⍳ 0 }
+    let s = start ▷ evolve(20, x => step(x, x.n))
+    print("{s.n} {s.table} {s.out}")
+    let (a, b) = keeps(s)
+    print("{a} {b} {s.table[0]}")
+}

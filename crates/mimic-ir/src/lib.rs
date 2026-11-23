@@ -15,6 +15,13 @@
 
 pub mod lower;
 
+/// `MIMIC_IR=why`: say why each function the IR does not cover stays on the
+/// old path.
+pub fn why() -> bool {
+    static WHY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WHY.get_or_init(|| std::env::var("MIMIC_IR").as_deref() == Ok("why"))
+}
+
 /// What lowering asks the code generator.
 pub trait Hints {
     /// Whether `let name = value` (followed by `rest` and `tail`) is a list
@@ -37,12 +44,87 @@ pub trait Hints {
 
     /// The types of a user function's specialisation (for inlining it).
     fn spec(&mut self, key: &mimic_check::types::Key) -> Option<std::rc::Rc<mimic_check::types::Spec>>;
+
+    /// Which parameters of a user function's specialisation it takes over
+    /// (its callers hand over a reference).
+    fn takes(&mut self, key: &mimic_check::types::Key) -> Vec<bool>;
+
+    /// Whether the old path would run some statements of a block with
+    /// these statements apart (independent calls in parallel, a call with
+    /// effects as a task): the IR runs everything in order, so it leaves
+    /// such a function to the old path.
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool;
 }
+/// Whether compiling `f` from its IR gains anything over the old path. A
+/// function the IR covers whole always does (it may sink work into
+/// branches); one that leaves expressions to the old path (embedded) only
+/// when it also does what the old path cannot: change a record or list in
+/// place, build or read records, fuse array work (more than a lambda map the
+/// old path builds the same way), index, take over a
+/// parameter, hand a value over to a call, or pass a short list or record in
+/// registers (unless its body passes lists from one embedded expression to
+/// another). Otherwise its embeds only lend
+/// their variables (the old path would move them at their last use: `head +
+/// "\r\n"` appends in place there) and copy what they read in registers.
+pub fn worth(f: &Function) -> bool {
+    /// `lists`: the embedded expressions' results that are lists
+    fn scan(r: &Region, embeds: &mut bool, work: &mut bool, lists: &mut Vec<Val>, chained: &mut bool) {
+        for i in &r.insts {
+            match &i.op {
+                Op::Embed { uses, .. } => {
+                    *embeds = true;
+                    // (a list from one embedded expression read by another)
+                    if uses.iter().any(|u| lists.contains(&u.1)) {
+                        *chained = true;
+                    }
+                    if matches!(i.ty, Ty::List(_) | Ty::Agg(_)) {
+                        lists.push(i.dst);
+                    }
+                }
+                // (a map that is only a lambda over a range, `⍳ n ¨ (i => …)`:
+                // the old path's engine builds it the same way)
+                Op::Map(Tree::Ast { .. }) => {}
+                // (a loop counts by what its step does: one that only calls
+                // a function the old path compiles gains nothing here, and
+                // the old path compiling it with the rest fuses across it,
+                // as `nbody`'s `main` showed)
+                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) => *work = true,
+                Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
+                _ => {}
+            }
+            for g in i.op.regions() {
+                scan(g, embeds, work, lists, chained);
+            }
+        }
+    }
+    let (mut embeds, mut work, mut chained) = (false, false, false);
+    scan(&f.body, &mut embeds, &mut work, &mut Vec::new(), &mut chained);
+    // a short list or record passed or given back in registers: callers in
+    // the IR skip building it on the heap. Not where the body hands lists
+    // from one embedded expression to the next: the old path, compiling the
+    // body whole, fuses and vectorizes across them (`nbody`'s `step`)
+    let regs = f.params.iter().map(|p| p.1).chain([f.ret]).any(|t| matches!(t, Ty::Agg(_)));
+    !embeds || work || (regs && !chained)
+}
+
+pub mod copies;
+pub mod fold;
 pub mod fuse;
+pub mod own;
 pub mod sink;
 
 use mimic_syntax::ast::{BinOp, UnOp};
 use std::fmt::{self, Write as _};
+
+/// A list of i64: on the heap, or short and in registers.
+pub fn i64_list(t: Ty) -> bool {
+    use mimic_check::types::{El, Ty as C};
+    match t {
+        Ty::List(C::Arr(El::I64, _)) => true,
+        Ty::Agg(c) => matches!(short_list(c), Some((El::I64, _))),
+        _ => false,
+    }
+}
 
 /// The type of an IR value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,6 +142,9 @@ pub enum Ty {
     /// released at the end of the region that made it unless that region
     /// yields it ([`owns`]).
     List(mimic_check::types::Ty),
+    /// A record on the heap (a plain record type, not generic, not kept in
+    /// registers): owned or borrowed as a list is.
+    Rec(mimic_check::types::Ty),
 }
 
 impl Ty {
@@ -71,6 +156,7 @@ impl Ty {
             Ty::Bool => "bool".into(),
             Ty::Agg(t) => format!("regs {t}"),
             Ty::List(t) => format!("list {t}"),
+            Ty::Rec(t) => format!("rec {t}"),
         }
     }
 
@@ -84,7 +170,11 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
-            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8, 0) => Ty::List(t),
+            // (text and lists of text too: the IR moves and releases them as
+            // any list; reading their elements is left to the old path)
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
+            // (a plain record: not an instance of a generic or shaped one)
+            C::Obj(id) if mimic_check::types::obj_tid(id) == id as usize && matches!(p.types[id as usize].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(t),
             _ => return None,
         })
     }
@@ -145,13 +235,21 @@ pub enum Op {
     Unit,
     /// The function's parameter number `n`.
     Param(u32),
+    /// The function's parameter number `n`, which it takes over: the caller
+    /// handed over a reference, owned here (released after its last use, or
+    /// moved on).
+    Take(u32),
     /// An operator on two values, both always evaluated (`and`/`or` become
     /// an [`Op::If`]).
     Bin(BinOp, Val, Val),
     Un(UnOp, Val),
     /// A call of a user function. `site` is the call's syntax node (what
     /// the code generator keys the callee's specialisation and placement by).
-    Call { site: usize, callee: mimic_check::FnId, args: Vec<Val> },
+    /// `takes`: which parameters the callee takes over; `moves`: which
+    /// arguments are handed over as they are (an owned value at its last
+    /// use, set by [`own`]), the others lent (a callee that takes one gets a
+    /// reference of its own).
+    Call { site: usize, callee: mimic_check::FnId, args: Vec<Val>, takes: Vec<bool>, moves: Vec<bool> },
     /// `if cond { then } else { els }`: the value the branch taken yields.
     If { cond: Val, then: Region, els: Region },
     /// A value kept in registers made of its parts (a tuple's elements, a
@@ -174,6 +272,33 @@ pub enum Op {
     Reduce(mimic_syntax::glyphs::Prim, Tree, mimic_check::types::El),
     /// The list of the elements `tree` computes, in one loop (owned).
     Map(Tree),
+    /// Releases an owned list right after its last use in its region
+    /// (placed by [`own`]; gives nothing).
+    Drop(Val),
+    /// A record of type `tid` on the heap, its fields in declaration order
+    /// (owned). `moves`: the fields handed over as they are (owned values at
+    /// their last use, set by [`own`]); the record takes a reference of its
+    /// own to the others.
+    Record { tid: usize, fields: Vec<Val>, moves: Vec<bool> },
+    /// Field `k` of a record on the heap: borrowed from a borrowed record,
+    /// its own reference from an owned one, unless `borrow` (set by
+    /// [`own`]: the record is kept until the field's last use).
+    Field { base: Val, tid: usize, k: u32, borrow: bool },
+    /// `{ base with … }` of a record on the heap: fields `k` replaced
+    /// (owned). It changes the record in place when it is held once:
+    /// `moved` (set by [`own`]) hands it the base, an owned value at its
+    /// last use; else the base is lent, and copied unless held once.
+    /// `moves`: the new values handed over as they are, as [`Op::Record`]'s.
+    /// `changes`: list fields changed from their own old value (`{ s with
+    /// v: put(s.v, i, x) }`): taken out of the record once it is held once,
+    /// changed in place when held once themselves, stored back.
+    With { base: Val, tid: usize, fields: Vec<(u32, Val)>, moved: bool, moves: Vec<bool>, changes: Vec<(u32, Vec<Change>)> },
+    /// `put(list, index, value)` on a list of i64 (owned): in place when
+    /// `moved` (set by [`own`]: the list at its last use) and held once,
+    /// else on a copy; an index out of range stops the program.
+    Put { list: Val, index: Val, value: Val, moved: bool },
+    /// `push(list, value)` on a list of i64 (owned), as [`Op::Put`].
+    Push { list: Val, value: Val, moved: bool },
     /// An expression the IR does not cover yet (a map, a reduction, a call
     /// of the runtime, …), compiled by the code generator's old path where
     /// it stands: `uses` are the variables it reads, given as these IR
@@ -181,8 +306,10 @@ pub enum Op {
     /// of its own. (The syntax node lives as long as the compile.)
     /// `lazies`: `let`s of lists used only inside array expressions, never
     /// built: the old path fuses each into where it is read (in order:
-    /// one may read an earlier one).
-    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)> },
+    /// one may read an earlier one). `moves[k]`: the expression is the last
+    /// use of record `uses[k]`, which the old path may move on there (into a
+    /// loop that changes it in place) or release after it.
+    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)>, moves: Vec<bool> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -190,6 +317,24 @@ pub enum Op {
     /// stops the program); with `done` (settle) it runs until `done`,
     /// asked before each step, yields true. The loop gives the last state.
     Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region },
+}
+
+/// One change of a list of i64 (in a [`Op::With`]'s `changes`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Change {
+    Put(Val, Val),
+    Push(Val),
+    /// `concat(field, ys)`: `ys` a list of i64, on the heap or in registers.
+    Concat(Val),
+}
+
+impl Change {
+    fn vals(&self) -> Vec<Val> {
+        match self {
+            Change::Put(i, x) => vec![*i, *x],
+            Change::Push(x) | Change::Concat(x) => vec![*x],
+        }
+    }
 }
 
 /// A computation over lists done one element at a time: every list in it
@@ -280,10 +425,52 @@ pub struct Function {
     pub values: u32,
 }
 
-/// Whether the instruction makes a list it owns: a call giving a list, or
-/// an `if` yielding one (both branches then yield owned lists).
+impl Op {
+    /// The values the operation reads itself (not inside its regions).
+    pub fn operands(&self) -> Vec<Val> {
+        match self {
+            Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) | Op::Take(_) => vec![],
+            Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
+            Op::Record { fields, .. } => fields.clone(),
+            Op::With { base, fields, changes, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).chain(changes.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.vals()))).collect(),
+            Op::Put { list, index, value, .. } => vec![*list, *index, *value],
+            Op::Push { list, value, .. } => vec![*list, *value],
+            Op::Reduce(_, t, _) | Op::Map(t) => {
+                let mut v = Vec::new();
+                t.vals(&mut v);
+                v
+            }
+            Op::Call { args, .. } => args.clone(),
+            Op::Make(xs) => xs.clone(),
+            Op::Embed { uses, .. } => uses.iter().map(|(_, v, _)| *v).collect(),
+            Op::If { cond, .. } => vec![*cond],
+            Op::Loop { init, count, .. } => std::iter::once(*init).chain(*count).collect(),
+        }
+    }
+
+    /// The regions inside the operation.
+    pub fn regions(&self) -> Vec<&Region> {
+        match self {
+            Op::If { then, els, .. } => vec![then, els],
+            Op::Loop { done, step, .. } => done.iter().chain(std::iter::once(step)).collect(),
+            _ => vec![],
+        }
+    }
+}
+
+impl Region {
+    /// Whether anything in the region (its regions included) reads `v`.
+    pub fn mentions(&self, v: Val) -> bool {
+        self.result == Some(v) || self.insts.iter().any(|i| i.op.operands().contains(&v) || i.op.regions().iter().any(|r| r.mentions(v)))
+    }
+}
+
+/// Whether the instruction gives a value on the heap it owns (a list or a
+/// record): a call's, an `if`'s (both branches then yield owned values), a
+/// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_))
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -319,14 +506,17 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Param(n) => {
                 let _ = writeln!(out, "param {n}");
             }
+            Op::Take(n) => {
+                let _ = writeln!(out, "take param {n}: {}", i.ty.name());
+            }
             Op::Bin(op, a, b) => {
                 let _ = writeln!(out, "{a} {} {b}: {}", op.symbol(), i.ty.name());
             }
             Op::Un(op, a) => {
                 let _ = writeln!(out, "{op:?} {a}: {}", i.ty.name());
             }
-            Op::Call { callee, args, .. } => {
-                let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+            Op::Call { callee, args, takes, moves, .. } => {
+                let a: Vec<String> = args.iter().enumerate().map(|(k, v)| if moves[k] { format!("move {v}") } else if takes[k] { format!("lend {v}") } else { v.to_string() }).collect();
                 let _ = writeln!(out, "call fn#{callee}({}): {}", a.join(", "), i.ty.name());
             }
             Op::Make(xs) => {
@@ -345,8 +535,39 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Map(t) => {
                 let _ = writeln!(out, "map {}: {}", t.show(), i.ty.name());
             }
-            Op::Embed { uses, lazies, .. } => {
-                let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+            Op::Drop(v) => {
+                let _ = writeln!(out, "drop {v}");
+            }
+            Op::Record { tid, fields, .. } => {
+                let a: Vec<String> = fields.iter().map(|v| v.to_string()).collect();
+                let _ = writeln!(out, "record #{tid}({}): {}", a.join(", "), i.ty.name());
+            }
+            Op::Field { base, k, borrow, .. } => {
+                let _ = writeln!(out, "{}{base}.field {k}: {}", if *borrow { "borrow " } else { "" }, i.ty.name());
+            }
+            Op::Put { list, index, value, moved } => {
+                let _ = writeln!(out, "put {}{list}[{index}] = {value}: {}", if *moved { "move " } else { "" }, i.ty.name());
+            }
+            Op::Push { list, value, moved } => {
+                let _ = writeln!(out, "push {}{list}, {value}: {}", if *moved { "move " } else { "" }, i.ty.name());
+            }
+            Op::With { base, fields, moved, changes, .. } => {
+                let mut a: Vec<String> = fields.iter().map(|(k, v)| format!(".{k} = {v}")).collect();
+                for (k, cs) in changes {
+                    let c: Vec<String> = cs
+                        .iter()
+                        .map(|c| match c {
+                            Change::Put(i, x) => format!("put [{i}] = {x}"),
+                            Change::Push(x) => format!("push {x}"),
+                            Change::Concat(x) => format!("concat {x}"),
+                        })
+                        .collect();
+                    a.push(format!(".{k} changed by {}", c.join(", ")));
+                }
+                let _ = writeln!(out, "{}{base} with {}: {}", if *moved { "move " } else { "" }, a.join(", "), i.ty.name());
+            }
+            Op::Embed { uses, lazies, moves, .. } => {
+                let mut a: Vec<String> = uses.iter().zip(moves).map(|((n, v, _), m)| format!("{}{n}={v}", if *m { "move " } else { "" })).collect();
                 a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
                 let _ = writeln!(out, "embed({}): {}", a.join(", "), i.ty.name());
             }
@@ -443,7 +664,7 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
         };
         match &i.op {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit => {}
-            Op::Param(n) => {
+            Op::Param(n) | Op::Take(n) => {
                 let want = f.params.get(*n as usize).map(|p| p.1).ok_or_else(|| format!("{}: no parameter {n}", f.name))?;
                 if want != i.ty {
                     return Err(format!("{}: parameter {n} is {}, not {}", f.name, want.name(), i.ty.name()));
@@ -456,9 +677,17 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Un(_, a) => {
                 ty(*a, types)?;
             }
-            Op::Call { args, .. } | Op::Make(args) => {
+            Op::Make(args) => {
                 for a in args {
                     ty(*a, types)?;
+                }
+            }
+            Op::Call { args, takes, moves, .. } => {
+                for a in args {
+                    ty(*a, types)?;
+                }
+                if takes.len() != args.len() || moves.len() != args.len() || moves.iter().zip(takes).any(|(m, t)| *m && !t) {
+                    return Err(format!("{}: a call {} moves an argument its callee does not take", f.name, i.dst));
                 }
             }
             Op::Embed { uses, .. } => {
@@ -485,6 +714,63 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                     return Err(format!("{}: a map giving {}", f.name, i.ty.name()));
                 }
                 tree_ok(f, t, types, scope)?;
+            }
+            Op::Drop(v) => {
+                if !matches!(ty(*v, types)?, Ty::List(_) | Ty::Rec(_)) {
+                    return Err(format!("{}: drop of {v}, not on the heap", f.name));
+                }
+            }
+            Op::Record { fields, moves, .. } => {
+                if moves.len() != fields.len() {
+                    return Err(format!("{}: a record {} with moves not one per field", f.name, i.dst));
+                }
+                for v in fields {
+                    ty(*v, types)?;
+                }
+                if !matches!(i.ty, Ty::Rec(_)) {
+                    return Err(format!("{}: a record giving {}", f.name, i.ty.name()));
+                }
+            }
+            Op::Field { base, .. } => {
+                if !matches!(ty(*base, types)?, Ty::Rec(_)) {
+                    return Err(format!("{}: a field of {base}, not a record", f.name));
+                }
+            }
+            Op::Put { list, index, value, .. } => {
+                if ty(*list, types)? != i.ty || ty(*index, types)? != Ty::I64 || ty(*value, types)? != Ty::I64 || i.ty != Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0)) {
+                    return Err(format!("{}: put {} is not of a list of i64", f.name, i.dst));
+                }
+            }
+            Op::Push { list, value, .. } => {
+                if ty(*list, types)? != i.ty || ty(*value, types)? != Ty::I64 || i.ty != Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0)) {
+                    return Err(format!("{}: push {} is not of a list of i64", f.name, i.dst));
+                }
+            }
+            Op::With { base, fields, moves, changes, .. } => {
+                for (_, cs) in changes {
+                    for c in cs {
+                        if let Change::Concat(v) = c {
+                            if !i64_list(ty(*v, types)?) {
+                                return Err(format!("{}: a `concat` in `with` {} of {v}, not a list of i64", f.name, i.dst));
+                            }
+                            continue;
+                        }
+                        for v in c.vals() {
+                            if ty(v, types)? != Ty::I64 {
+                                return Err(format!("{}: a change in `with` {} by {v}, not an i64", f.name, i.dst));
+                            }
+                        }
+                    }
+                }
+                if moves.len() != fields.len() {
+                    return Err(format!("{}: a `with` {} with moves not one per field", f.name, i.dst));
+                }
+                if ty(*base, types)? != i.ty || !matches!(i.ty, Ty::Rec(_)) {
+                    return Err(format!("{}: `with` on {base}, not a record of its type", f.name));
+                }
+                for (_, v) in fields {
+                    ty(*v, types)?;
+                }
             }
             Op::Index(v, k, _) => {
                 if !matches!(ty(*v, types)?, Ty::List(_)) || ty(*k, types)? != Ty::I64 {

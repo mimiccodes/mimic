@@ -1353,10 +1353,30 @@ static void map_dealloc_meta(mim_val *m);
 
 static void dealloc_in(heap_state *h, mim_val *v);
 
+/* MIMIC_COUNT_RC=1 builds count every reference-count operation (the
+ * compiled code's inline release tells mim_rc_inline_free) and print the
+ * totals at exit: how the ownership analysis is measured. Other builds: nothing. */
+#ifdef MIM_COUNT_RC
+static int64_t g_rc_retains, g_rc_releases, g_rc_frees;
+#define RC_COUNT(c) __atomic_fetch_add(&(c), 1, __ATOMIC_RELAXED)
+/* the compiled code's own release of a value held once (its fast path) */
+void mim_rc_inline_free(void) {
+    RC_COUNT(g_rc_releases);
+    RC_COUNT(g_rc_frees);
+}
+static void rc_report(void) {
+    fprintf(stderr, "mimic: reference counts: %lld retains, %lld releases, %lld values freed\n", (long long)__atomic_load_n(&g_rc_retains, __ATOMIC_RELAXED),
+            (long long)__atomic_load_n(&g_rc_releases, __ATOMIC_RELAXED), (long long)__atomic_load_n(&g_rc_frees, __ATOMIC_RELAXED));
+}
+#else
+#define RC_COUNT(c) ((void)0)
+#endif
+
 /* Drop one reference (h: this thread's heap). The only reference: no other
  * thread can see the value, so no atomic update. */
 static inline void release_in(heap_state *h, mim_val *v) {
     if (!v) return;
+    RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1) dealloc_in(h, v);
     else if (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0) dealloc_in(h, v);
@@ -1367,6 +1387,7 @@ static inline int holds_values(int dt) { return dt == MIM_BOXED || dt == MIM_OBJ
 /* Drop a reference: 1 when it was the last. */
 static inline int drop_ref(mim_val *v) {
     if (!v) return 0;
+    RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     return rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0);
 }
@@ -1475,6 +1496,7 @@ static void release_all(mim_val **items, int64_t n) {
 }
 
 static void dealloc_in(heap_state *h, mim_val *v) {
+    RC_COUNT(g_rc_frees);
     if (holds_values(v->dtype)) release_all(&v, 1);
     else free_block(h, v);
 }
@@ -1491,11 +1513,13 @@ static void free_list_drain(void) {
 mim_val *mim_alloc_vec(int32_t dtype, int64_t n) { return alloc(dtype, 1, n); }
 
 void mim_retain(mim_val *v) {
+    if (v) RC_COUNT(g_rc_retains);
     if (v && __atomic_load_n(&v->rc, __ATOMIC_RELAXED) < MIM_IMMORTAL) __atomic_fetch_add(&v->rc, 1, __ATOMIC_RELAXED);
 }
 
 void mim_release(mim_val *v) {
     if (!v) return;
+    RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0)) dealloc_in(&t_heap, v);
 }
@@ -1569,6 +1593,9 @@ static void raise_open_files(void) {
 
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+#ifdef MIM_COUNT_RC
+    atexit(rc_report);
+#endif
 #if !defined(_WIN32) && !defined(__wasi__)
     raise_open_files();
 #endif
@@ -2152,8 +2179,25 @@ mim_val *mim_binop(int32_t op, mim_val *a, mim_val *b) {
         /* bool & bool stays bool (non-short-circuit logic on masks) */
         dt = (a->dtype == MIM_BOOL && b->dtype == MIM_BOOL && op <= OP_BXOR) ? MIM_BOOL : MIM_I64;
     }
-    mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
     int jt = arith_dtype(a->dtype, a->rank, b->dtype, b->rank);
+    if (!like && (dt == MIM_BOOL || dt == MIM_I64)) {
+        /* two scalars giving a truth value or an integer: computed on the
+         * stack, then the runtime's own true/false or small integer (no
+         * allocation for those; `op == 0` on a dynamic value ran here once
+         * per step and allocated every result) */
+        _Alignas(16) unsigned char buf[sizeof(mim_val) + 16];
+        mim_val *t = (mim_val *)(void *)buf;
+        t->rc = MIM_IMMORTAL;
+        t->dtype = dt;
+        t->rank = 0;
+        t->len = 1;
+        t->desc = NULL;
+        binop_ctx c1 = {op, a, b, t, 0, 0, jt == MIM_F32, jt == MIM_I32};
+        binop_range(&c1, 0, 1);
+        int64_t x = geti(t, 0);
+        return dt == MIM_BOOL ? mim_bool(x) : mim_int(x);
+    }
+    mim_val *r = like ? alloc_like(dt, like) : alloc(dt, 0, n);
     binop_ctx c = {op, a, b, r, a->rank == 0 ? 0 : 1, b->rank == 0 ? 0 : 1, jt == MIM_F32, jt == MIM_I32};
     /* the fast loops index x[i] for vectors and x[0] for scalars */
     parallel_for(n, binop_range, &c);
@@ -2181,6 +2225,21 @@ mim_val *mim_unop(int32_t op, mim_val *a) {
     if (op == UOP_BNOT && (IS_FLOAT(a->dtype) || a->dtype == MIM_CHAR)) mim_panic("`~` needs an integer");
     int keep = a->dtype == MIM_F64 || a->dtype == MIM_F32 || a->dtype == MIM_I32;
     int dt = op == UOP_NOT || (op == UOP_BNOT && a->dtype == MIM_BOOL) ? MIM_BOOL : (keep ? a->dtype : MIM_I64);
+    if (a->rank == 0 && (dt == MIM_BOOL || dt == MIM_I64)) {
+        /* a scalar giving a truth value or an integer: the runtime's own
+         * true/false or small integer, as in mim_binop */
+        _Alignas(16) unsigned char buf[sizeof(mim_val) + 16];
+        mim_val *t = (mim_val *)(void *)buf;
+        t->rc = MIM_IMMORTAL;
+        t->dtype = dt;
+        t->rank = 0;
+        t->len = 1;
+        t->desc = NULL;
+        unop_ctx c1 = {op, a, t};
+        unop_range(&c1, 0, 1);
+        int64_t x = geti(t, 0);
+        return dt == MIM_BOOL ? mim_bool(x) : mim_int(x);
+    }
     mim_val *r = alloc_like(dt, a);
     unop_ctx c = {op, a, r};
     parallel_for(a->len, unop_range, &c);
