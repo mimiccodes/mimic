@@ -43,26 +43,39 @@ struct Lower<'a> {
     /// Set when an expression left to the old path would take over a
     /// variable (see [`Lower::takes_var`]): the whole function stays there.
     bail: bool,
+    /// The first expression neither the IR nor an embed could take (for
+    /// `MIMIC_IR=why`).
+    miss: Option<String>,
 }
 
 /// The IR of `fid` specialised as `spec`, if the IR covers all of it.
 /// `takes`: the parameters it takes over (owned here).
 pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool], hints: &mut dyn crate::Hints) -> Option<Function> {
     let FnKind::User(decl) = &p.fns[fid].kind else { return None };
-    let params: Vec<(String, Ty)> = decl.params.iter().zip(&spec.params).map(|(prm, t)| Some((prm.name.clone(), Ty::of(p, *t)?))).collect::<Option<_>>()?;
-    let ret = Ty::of(p, spec.ret)?;
-    if !calls_apart(p, p.fns[fid].module, &decl.body) {
-        return None;
+    let miss = |why: &str| {
+        if crate::why() {
+            eprintln!("mimic: IR: `{}` stays on the old path: {why}", p.fn_path(fid).join("::"));
+        }
+        None
+    };
+    let mut params = Vec::new();
+    for (prm, t) in decl.params.iter().zip(&spec.params) {
+        let Some(it) = Ty::of(p, *t) else { return miss(&format!("parameter `{}` is a {t:?}", prm.name)) };
+        params.push((prm.name.clone(), it));
+    }
+    let Some(ret) = Ty::of(p, spec.ret) else { return miss(&format!("it returns a {:?}", spec.ret)) };
+    if runs_apart(hints, &decl.body) {
+        return miss("the old path runs some of its calls apart (in parallel, or as a task)");
     }
     let mut local_names: Vec<String> = decl.params.iter().map(|q| q.name.clone()).collect();
     decl.body.bound_names(&mut local_names);
-    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new(), bail: false };
+    let mut l = Lower { p, hints, lazies: Vec::new(), module: p.fns[fid].module, spec: spec.clone(), fid, inline_depth: 0, next: 0, types: Vec::new(), local_names, env: Vec::new(), bail: false, miss: None };
     let mut body = Region::default();
     for (i, (name, t)) in params.iter().enumerate() {
         let op = if takes.get(i).copied().unwrap_or(false) {
             // (taken over: a value on the heap the function owns)
             if !matches!(t, Ty::List(_) | Ty::Rec(_)) {
-                return None;
+                return miss(&format!("parameter `{name}` is taken over but not on the heap"));
             }
             Op::Take(i as u32)
         } else {
@@ -71,84 +84,62 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool],
         let v = l.emit(&mut body, *t, op, decl.span);
         l.env.push((name.clone(), v, *t));
     }
-    let r = l.block(&mut body, &decl.body)?;
+    let Some(r) = l.block(&mut body, &decl.body) else {
+        let at = l.miss.take().unwrap_or_else(|| "a statement it does not cover".into());
+        return miss(&at);
+    };
     if l.bail {
-        return None;
+        return miss("an expression left to the old path would take over a variable");
     }
     // what the body gives must be what the function returns
     let rt = l.types[r.0 as usize];
     if ret != Ty::Unit && rt != ret {
-        return None;
+        return miss("its body gives another type than it returns");
     }
     body.result = Some(r);
     let mut f = Function { name: p.fn_path(fid).join("::"), params, ret, body, values: l.next };
     crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
     crate::own::function(&mut f);
+    if !crate::worth(&f) {
+        return miss("it only leaves expressions to the old path, which compiles them as well on its own");
+    }
     Some(f)
 }
 
-/// No block runs two statements that call functions: such calls may run
-/// at once (the code generator starts independent calls in parallel),
-/// which the IR does not do yet.
-///
-/// A statement that is itself a call of a small helper (a user function
-/// whose body is one expression with no calls of its own: what the IR
-/// inlines), its arguments calling nothing, does not count: the code
-/// generator would gain little running one apart, and it gives the same
-/// result in turn. (A helper called inside a lambda counts, as any call.)
-fn calls_apart(p: &Program, module: mimic_check::ModId, b: &Block) -> bool {
-    let mut ok = true;
-    b.walk(&mut |e| {
-        let blocks: Vec<&Block> = match &e.kind {
-            ExprKind::Block(b) | ExprKind::Unsafe(b) => vec![b],
-            ExprKind::If { then, .. } => vec![then],
-            _ => vec![],
-        };
-        for b in blocks {
-            ok &= calls_in_stmts(p, module, b) <= 1;
+/// Whether the old path runs some statements of a block of `body` apart
+/// (see [`crate::Hints::runs_apart`]).
+fn runs_apart(hints: &mut dyn crate::Hints, body: &Block) -> bool {
+    // every block: the body, those of expressions, and the `else` blocks
+    // of `let … else` (statements, not expressions), at any depth
+    let mut todo: Vec<&Block> = vec![body];
+    let mut seen = 0;
+    while seen < todo.len() {
+        let b = todo[seen];
+        seen += 1;
+        if hints.runs_apart(&b.stmts) {
+            return true;
         }
-    });
-    ok && calls_in_stmts(p, module, b) <= 1
-}
-
-/// Whether `e` calls a small helper (see [`calls_apart`]).
-fn helper_call(p: &Program, module: mimic_check::ModId, e: &Expr) -> bool {
-    let ExprKind::Call { callee, .. } = &e.kind else { return false };
-    let ExprKind::Path(path) = &callee.kind else { return false };
-    let Some(Resolved::Fn(f)) = p.lookup(module, path) else { return false };
-    let FnKind::User(d) = &p.fns[f].kind else { return false };
-    let Some(tail) = d.body.tail.as_deref() else { return false };
-    let mut inner = false;
-    tail.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
-    d.body.stmts.is_empty() && !inner
-}
-
-fn calls_in_stmts(p: &Program, module: mimic_check::ModId, b: &Block) -> usize {
-    let has_call = |e: &Expr| {
-        let mut c = false;
-        e.walk(&mut |x| c |= matches!(x.kind, ExprKind::Call { .. }));
-        let ExprKind::Call { args, .. } = &e.kind else { return c };
-        let mut inner = false;
-        for a in args {
-            a.walk(&mut |x| inner |= matches!(x.kind, ExprKind::Call { .. }));
+        for st in &b.stmts {
+            if let Stmt::LetElse { els, .. } = st {
+                todo.push(els);
+            }
         }
-        c && !(helper_call(p, module, e) && !inner)
-    };
-    let mut n = b
-        .stmts
-        .iter()
-        .filter(|s| match s {
-            Stmt::Let { value, .. } | Stmt::Expr(value) => has_call(value),
-            _ => false,
-        })
-        .count();
-    if let Some(t) = &b.tail
-        && has_call(t)
-    {
-        n += 1;
+        // the blocks directly inside this one's expressions (deeper ones
+        // are reached from those)
+        let mut inner: Vec<&Block> = Vec::new();
+        b.walk(&mut |e| {
+            if let ExprKind::Block(x) | ExprKind::Unsafe(x) | ExprKind::If { then: x, .. } | ExprKind::Arms { body: x, .. } = &e.kind {
+                inner.push(unsafe { &*(x as *const Block) });
+            }
+        });
+        for x in inner {
+            if !todo.iter().any(|t| std::ptr::eq(*t, x)) {
+                todo.push(x);
+            }
+        }
     }
-    n
+    false
 }
 
 impl Lower<'_> {
@@ -685,6 +676,18 @@ impl Lower<'_> {
 
     /// `e` kept whole for the old path, reading these variables.
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let v = self.embed_here(r, e);
+        if v.is_none() && self.miss.is_none() && self.inline_depth == 0 {
+            let what = match self.ty(e) {
+                None => format!("{:?}", self.spec.exprs.get(&id(e))),
+                Some(t) => format!("{t:?}"),
+            };
+            self.miss = Some(format!("line {}:{}: an expression of type {what} it cannot take or embed", e.span.line, e.span.col));
+        }
+        v
+    }
+
+    fn embed_here(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         // (inside an inlined body the code generator's types are the
         // caller's: the old path could not compile the callee's syntax)
         if self.inline_depth > 0 {
@@ -700,7 +703,8 @@ impl Lower<'_> {
             return None;
         }
         let (uses, lazies) = self.reads(e)?;
-        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+        let moves = vec![false; uses.len()];
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies, moves }, e.span))
     }
 
     /// `put(xs, i, x)` or `push(xs, x)` (the prelude's) of a list of i64

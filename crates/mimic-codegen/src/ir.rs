@@ -23,6 +23,12 @@ pub(crate) fn wanted() -> (bool, bool) {
     })
 }
 
+/// Whether the region (or one inside it) takes parameter `n` over, clearing
+/// its slot.
+fn takes(r: &Region, n: u32) -> bool {
+    r.insts.iter().any(|i| matches!(i.op, Op::Take(m) if m == n) || i.op.regions().into_iter().any(|g| takes(g, n)))
+}
+
 /// A region that only yields a truth value written in the program.
 fn const_bool(r: &Region) -> Option<bool> {
     match (r.insts.as_slice(), r.result) {
@@ -68,6 +74,10 @@ impl mimic_ir::Hints for Cg<'_, '_> {
     fn takes(&mut self, key: &crate::types::Key) -> Vec<bool> {
         self.consumed(key)
     }
+
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool {
+        Cg::runs_apart(self, stmts)
+    }
 }
 
 pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
@@ -92,6 +102,16 @@ impl<'ctx> Cg<'ctx, '_> {
     /// gives (its parameters are in their slots already).
     pub(crate) fn ir_body(&mut self, f: &Function) -> R<V<'ctx>> {
         let mut vals: Vec<Option<V<'ctx>>> = vec![None; f.values as usize];
+        if self.body_exit.is_some() {
+            // `main` runs once and the process exits after it, so its own
+            // values are not freed one by one (see Cg::exit_fid); the old
+            // path keeps a `let` until the end of its scope too, so this
+            // holds no more memory than it would. Drops inside loops and
+            // branches stay.
+            let mut body = f.body.clone();
+            body.insts.retain(|i| !matches!(i.op, Op::Drop(_)));
+            return self.ir_region(f, &body, &mut vals);
+        }
         self.ir_region(f, &f.body, &mut vals)
     }
 
@@ -175,10 +195,36 @@ impl<'ctx> Cg<'ctx, '_> {
                 // an expression the IR does not cover yet: the old path
                 // compiles it here, its variables the IR's values (lent: in
                 // slots of their own, never released from there)
-                Op::Embed { expr, uses, lazies } => {
+                Op::Embed { expr, uses, lazies, moves } => {
+                    // SAFETY: the syntax tree outlives the compile
+                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let mut locals = Vec::new();
-                    for (name, v, t) in uses {
+                    let mut moved = Vec::new();
+                    for ((name, v, t), m) in uses.iter().zip(moves) {
                         let ct = checker_ty(*t);
+                        // its last use: owned by the expression's slot, moved
+                        // on where the old path can, released after it if not
+                        if *m {
+                            let slot = self.entry_alloca(ct, name)?;
+                            self.b.build_store(slot, self.basic(get(vals, *v)?)).s()?;
+                            if let Some(site) = self.let_move_site(name, &[], Some(e)) {
+                                self.move_at.insert(site);
+                            }
+                            moved.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            continue;
+                        }
+                        // a parameter read as it is: its own slot (never
+                        // written while the function runs, and a record in
+                        // registers is not copied once per embed)
+                        let own = f.body.insts.iter().find(|i| i.dst == *v).and_then(|i| match i.op {
+                            Op::Param(n) if !takes(&f.body, n) => self.scopes[0].iter().find(|l| l.name == f.params[n as usize].0 && l.ty == ct).map(|l| l.slot),
+                            _ => None,
+                        });
+                        if let Some(slot) = own {
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
+                            continue;
+                        }
                         let val = get(vals, *v)?;
                         let slot = self.entry_alloca(ct, name)?;
                         self.b.build_store(slot, self.basic(val)).s()?;
@@ -188,8 +234,6 @@ impl<'ctx> Cg<'ctx, '_> {
                     // the lazy lets it reads: fused where it reads them
                     let lazy_mark = self.lazies.len();
                     self.lazies.extend(lazies.iter().cloned());
-                    // SAFETY: the syntax tree outlives the compile
-                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let out = self.expr(e);
                     self.lazies.truncate(lazy_mark);
                     self.scopes.pop();
@@ -198,6 +242,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if self.terminated() {
                         self.dead_block();
                     }
+                    self.release_scope(&moved)?;
                     self.as_ty(out, ty, "value")?
                 }
                 // a list's length, from its header (a list passed in: never
@@ -295,14 +340,25 @@ impl<'ctx> Cg<'ctx, '_> {
                 // moves it there (in place when held once), else a reference
                 // of its own (so a copy)
                 Op::Put { list, index, value, moved } => {
-                    let l = self.list_arg(get(vals, *list)?, *moved)?;
                     let (i, x) = (self.to_i64(get(vals, *index)?)?, self.to_i64(get(vals, *value)?)?);
-                    V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                    } else {
+                        // borrowed: a copy with the change (no reference taken)
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_put_i64", &[l.into(), i.into(), x.into()])?, true)
+                    }
                 }
                 Op::Push { list, value, moved } => {
-                    let l = self.list_arg(get(vals, *list)?, *moved)?;
                     let x = self.to_i64(get(vals, *value)?)?;
-                    V::P(self.ir_change(l, Ch::Push(x))?, true)
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Push(x))?, true)
+                    } else {
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_push_i64", &[l.into(), x.into()])?, true)
+                    }
                 }
                 // an owned list's last use is past: released now
                 Op::Drop(v) => {
@@ -435,6 +491,24 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         let V::P(p, _) = self.own(self.boxed(l)?)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
         Ok(p)
+    }
+
+    /// A list the IR reads without taking a reference.
+    fn borrowed_list(&mut self, l: V<'ctx>) -> R<PointerValue<'ctx>> {
+        let V::P(p, _) = self.boxed(l)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
+        Ok(p)
+    }
+
+    /// A runtime function on lists of i64 (a list, then i64s) giving a new
+    /// list: declared on first use.
+    fn rt_list_fn(&mut self, name: &str, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let mut ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.ptr.into()];
+            ps.extend(std::iter::repeat_n(inkwell::types::BasicMetadataTypeEnum::from(i64t), args.len() - 1));
+            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(inkwell::module::Linkage::External))
+        });
+        Ok(self.b.build_call(f, args, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
     }
 
     /// One change of the owned list of i64 `list` (taken): the list it gives.

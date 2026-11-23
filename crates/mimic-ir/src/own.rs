@@ -145,6 +145,16 @@ fn take(op: &mut Op, v: Val) -> bool {
             moves[k] = true;
             true
         }
+        // a record an embedded expression reads last: the old path moves it
+        // on where it can (`start ▷ evolve(…)` changes it in place), else
+        // releases it after the expression
+        Op::Embed { uses, moves, .. } => match uses.iter().position(|u| u.1 == v) {
+            Some(k) if matches!(uses[k].2, Ty::Rec(_)) => {
+                moves[k] = true;
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

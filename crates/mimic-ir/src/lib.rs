@@ -15,6 +15,13 @@
 
 pub mod lower;
 
+/// `MIMIC_IR=why`: say why each function the IR does not cover stays on the
+/// old path.
+pub fn why() -> bool {
+    static WHY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WHY.get_or_init(|| std::env::var("MIMIC_IR").as_deref() == Ok("why"))
+}
+
 /// What lowering asks the code generator.
 pub trait Hints {
     /// Whether `let name = value` (followed by `rest` and `tail`) is a list
@@ -41,7 +48,44 @@ pub trait Hints {
     /// Which parameters of a user function's specialisation it takes over
     /// (its callers hand over a reference).
     fn takes(&mut self, key: &mimic_check::types::Key) -> Vec<bool>;
+
+    /// Whether the old path would run some statements of a block with
+    /// these statements apart (independent calls in parallel, a call with
+    /// effects as a task): the IR runs everything in order, so it leaves
+    /// such a function to the old path.
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool;
 }
+/// Whether compiling `f` from its IR gains anything over the old path. A
+/// function the IR covers whole always does (it may sink work into
+/// branches); one that leaves expressions to the old path (embedded) only
+/// when it also does what the old path cannot: change a record or list in
+/// place, build or read records, fuse array work, index, loop, take over a
+/// parameter, hand a value over to a call, or pass a short list or record in
+/// registers. Otherwise its embeds only lend
+/// their variables (the old path would move them at their last use: `head +
+/// "\r\n"` appends in place there) and copy what they read in registers.
+pub fn worth(f: &Function) -> bool {
+    fn scan(r: &Region, embeds: &mut bool, work: &mut bool) {
+        for i in &r.insts {
+            match &i.op {
+                Op::Embed { .. } => *embeds = true,
+                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::Loop { .. } => *work = true,
+                Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
+                _ => {}
+            }
+            for g in i.op.regions() {
+                scan(g, embeds, work);
+            }
+        }
+    }
+    // a short list or record passed or given back in registers: callers in
+    // the IR skip building it on the heap
+    let regs = f.params.iter().map(|p| p.1).chain([f.ret]).any(|t| matches!(t, Ty::Agg(_)));
+    let (mut embeds, mut work) = (false, regs);
+    scan(&f.body, &mut embeds, &mut work);
+    !embeds || work
+}
+
 pub mod fuse;
 pub mod own;
 pub mod sink;
@@ -93,7 +137,9 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
-            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8, 0) => Ty::List(t),
+            // (text and lists of text too: the IR moves and releases them as
+            // any list; reading their elements is left to the old path)
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
             // (a plain record: not an instance of a generic or shaped one)
             C::Obj(id) if mimic_check::types::obj_tid(id) == id as usize && matches!(p.types[id as usize].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(t),
             _ => return None,
@@ -227,8 +273,10 @@ pub enum Op {
     /// of its own. (The syntax node lives as long as the compile.)
     /// `lazies`: `let`s of lists used only inside array expressions, never
     /// built: the old path fuses each into where it is read (in order:
-    /// one may read an earlier one).
-    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)> },
+    /// one may read an earlier one). `moves[k]`: the expression is the last
+    /// use of record `uses[k]`, which the old path may move on there (into a
+    /// loop that changes it in place) or release after it.
+    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)>, moves: Vec<bool> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -482,8 +530,8 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                 }
                 let _ = writeln!(out, "{}{base} with {}: {}", if *moved { "move " } else { "" }, a.join(", "), i.ty.name());
             }
-            Op::Embed { uses, lazies, .. } => {
-                let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+            Op::Embed { uses, lazies, moves, .. } => {
+                let mut a: Vec<String> = uses.iter().zip(moves).map(|((n, v, _), m)| format!("{}{n}={v}", if *m { "move " } else { "" })).collect();
                 a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
                 let _ = writeln!(out, "embed({}): {}", a.join(", "), i.ty.name());
             }
