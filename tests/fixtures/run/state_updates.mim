@@ -1,0 +1,65 @@
+module main
+
+// The shapes of state updates that copied in 0.4.0 (docs/gaps.md), each
+// changed in place now: the result must not change.
+
+type S = { i: i64, v: [i64] }
+type T = { k: i64, at: [i64] }
+type K = { n: i64, next: [i64] }
+type U = { parent: [i64] }
+
+// gaps.md (diff): read from the state's list, then change it
+fn read_then_change(s: S) -> S {
+    let x = s.v[s.i] + 1
+    { s with i: s.i + 1, v: put(s.v, (s.i + 1) % ≢ s.v, x) }
+}
+
+// gaps.md (trie): a helper changes the state, the old state used after
+fn grow(t: T, x: i64) -> T { { t with at: push(t.at, x) } }
+fn trie_step(t: T) -> T { { grow(t, t.k) with k: t.k + 1 } }
+
+// gaps.md (hull): an element read first, then the state handed on
+fn pop(s: S, p: i64) -> S { { s with v: push(s.v, p) } }
+fn hull_step(s: S, ps: [i64]) -> S {
+    let p = ps[s.i % ≢ ps]
+    let c = { s with i: s.i + 1 }
+    pop(c, p)
+}
+
+// gaps.md (maze): helpers' result in a let, then a with on it
+fn look(s: S, d: i64) -> S { { s with v: put(s.v, d, s.v[d] + 1) } }
+fn maze_step(s: S) -> S {
+    let done = look(look(s, 0), 1)
+    { done with i: done.i + 1 }
+}
+
+// gaps.md (topo): a branch inside the with
+fn topo_step(k: K, d: i64, w: i64) -> K {
+    { k with n: k.n + 1, next: if d == 0 { push(k.next, w) } else { k.next } }
+}
+
+// gaps.md (union-find): a find that changes the links (path halving)
+fn find(u: U, x: i64) -> (U, i64) {
+    let p = u.parent[x]
+    if p == x { (u, x) } else {
+        let g = u.parent[p]
+        find({ u with parent: put(u.parent, x, g) }, g)
+    }
+}
+
+// gaps.md (chacha20): a small fixed list as state, put in every round
+fn quarter(st: [i64], a: i64, b: i64) -> [i64] {
+    put(put(st, a, (st[a] + st[b]) & 4294967295), b, st[b] ^ st[a])
+}
+
+fn main() {
+    let n = (≢ os::args()) * 0 + 1000
+    let s = S { i: 0, v: ⍳ n } ▷ evolve(100, s => read_then_change(s))
+    let t = T { k: 0, at: ⍳ 0 } ▷ evolve(100, t => trie_step(t))
+    let h = S { i: 0, v: ⍳ 0 } ▷ evolve(100, c => hull_step(c, ⍳ n))
+    let m = S { i: 0, v: ⍳ n } ▷ evolve(100, s => maze_step(s))
+    let k = K { n: 0, next: ⍳ 0 } ▷ evolve(100, k => topo_step(k, k.n % 2, k.n))
+    let (u, r) = find(U { parent: ⍳ n ¨ (i => i div 2) }, n - 1)
+    let st = ⍳ 16 ▷ evolve(100, q => quarter(q, 1, 5))
+    print("{s.v[0]} {≢ t.at} {≢ h.v} {m.v[1]} {≢ k.next} {r} {u.parent[n - 1]} {st[1]}")
+}

@@ -59,7 +59,8 @@ pub trait Hints {
 /// function the IR covers whole always does (it may sink work into
 /// branches); one that leaves expressions to the old path (embedded) only
 /// when it also does what the old path cannot: change a record or list in
-/// place, build or read records, fuse array work, index, loop, take over a
+/// place, build or read records, fuse array work (more than a lambda map the
+/// old path builds the same way), index, loop, take over a
 /// parameter, hand a value over to a call, or pass a short list or record in
 /// registers. Otherwise its embeds only lend
 /// their variables (the old path would move them at their last use: `head +
@@ -69,6 +70,9 @@ pub fn worth(f: &Function) -> bool {
         for i in &r.insts {
             match &i.op {
                 Op::Embed { .. } => *embeds = true,
+                // (a map that is only a lambda over a range, `⍳ n ¨ (i => …)`:
+                // the old path's engine builds it the same way)
+                Op::Map(Tree::Ast { .. }) => {}
                 Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::Loop { .. } => *work = true,
                 Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
                 _ => {}
