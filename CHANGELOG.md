@@ -2,6 +2,8 @@
 
 Every user-visible change, by version. The plan for the versions ahead is in [docs/versions.md](docs/versions.md).
 
+## Unreleased
+
 ## 0.4.2 — 2026-11-24
 
 Step 0.4.2, ownership by analysis: in the functions the Mimic IR compiles, a list or record is released right after its last use, handed over instead of shared, and changed in place wherever nothing else holds it, through helper calls, record updates and branches, in debug builds as in optimised ones. Text and functions that call several others now go through the IR too, numbers and literals that live for the whole run are never counted, and operators on values of unknown type no longer allocate their results. Reference-count operations over the corpus fell by 40% (937 million to 563 million, short of the halving the plan aimed at; what is left is mostly in code the IR does not cover yet). `mimic check --copies` lists the copies a program still makes and why: `paths`' step makes none; `qoi`'s steps are still compiled by the old code generator (they wait for typed empty lists and tuples holding lists, 0.4.3–0.4.4). `sudoku` 1.9× faster, `vm` 1.7×, `tokenize` 1.5×, `totient` 1.3×, `paths` 1.27×, `hull` 1.2×, `lz77` 1.18× on this machine; the whole corpus on Linux, macOS and Windows is in BENCHMARK.md.
