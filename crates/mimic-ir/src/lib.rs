@@ -86,6 +86,7 @@ pub fn worth(f: &Function) -> bool {
     !embeds || work
 }
 
+pub mod copies;
 pub mod fuse;
 pub mod own;
 pub mod sink;

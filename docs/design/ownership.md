@@ -67,7 +67,13 @@ nothing else holds it. No annotation: the language does not change.
    that calls itself, a small fixed list as state, `put` without a call.
 4. A result built where its caller keeps it (a list grown in a state).
 5. `mimic check --copies`: every copy left, where, and why (the analysis's
-   own reasons).
+   own reasons). Done: after the ownership pass, a `put`, `push` or
+   `{ … with … }` not handed its value copies it every time, and a value
+   lent to a function that takes it over is copied there; each is listed
+   with the reason (used again after, at which line; read from outside a
+   loop; a borrowed parameter; a field of a record still in use).
+   Functions the IR does not cover are listed with why
+   (`crates/mimic-ir/src/copies.rs`).
 
 **Done when:** the steps of `qoi` and `paths` copy nothing, and the
 reference-count operations of the corpus are at least halved (counted

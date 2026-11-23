@@ -1003,6 +1003,7 @@ dependencies = [
  "lsp-types",
  "mimic-check",
  "mimic-codegen",
+ "mimic-ir",
  "mimic-net",
  "mimic-project",
  "mimic-syntax",
