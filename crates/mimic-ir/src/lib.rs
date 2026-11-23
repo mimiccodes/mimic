@@ -273,8 +273,10 @@ pub enum Op {
     /// of its own. (The syntax node lives as long as the compile.)
     /// `lazies`: `let`s of lists used only inside array expressions, never
     /// built: the old path fuses each into where it is read (in order:
-    /// one may read an earlier one).
-    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)> },
+    /// one may read an earlier one). `moves[k]`: the expression is the last
+    /// use of record `uses[k]`, which the old path may move on there (into a
+    /// loop that changes it in place) or release after it.
+    Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)>, moves: Vec<bool> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
     /// regions; it starts as `init`; `step` yields the next state. With
@@ -528,8 +530,8 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                 }
                 let _ = writeln!(out, "{}{base} with {}: {}", if *moved { "move " } else { "" }, a.join(", "), i.ty.name());
             }
-            Op::Embed { uses, lazies, .. } => {
-                let mut a: Vec<String> = uses.iter().map(|(n, v, _)| format!("{n}={v}")).collect();
+            Op::Embed { uses, lazies, moves, .. } => {
+                let mut a: Vec<String> = uses.iter().zip(moves).map(|((n, v, _), m)| format!("{}{n}={v}", if *m { "move " } else { "" })).collect();
                 a.extend(lazies.iter().map(|(n, _)| format!("{n}=lazy")));
                 let _ = writeln!(out, "embed({}): {}", a.join(", "), i.ty.name());
             }

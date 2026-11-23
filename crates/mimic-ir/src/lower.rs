@@ -703,7 +703,8 @@ impl Lower<'_> {
             return None;
         }
         let (uses, lazies) = self.reads(e)?;
-        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies }, e.span))
+        let moves = vec![false; uses.len()];
+        Some(self.emit(r, ty, Op::Embed { expr: e as *const Expr, uses, lazies, moves }, e.span))
     }
 
     /// `put(xs, i, x)` or `push(xs, x)` (the prelude's) of a list of i64

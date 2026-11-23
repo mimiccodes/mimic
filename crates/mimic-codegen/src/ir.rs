@@ -23,6 +23,12 @@ pub(crate) fn wanted() -> (bool, bool) {
     })
 }
 
+/// Whether the region (or one inside it) takes parameter `n` over, clearing
+/// its slot.
+fn takes(r: &Region, n: u32) -> bool {
+    r.insts.iter().any(|i| matches!(i.op, Op::Take(m) if m == n) || i.op.regions().into_iter().any(|g| takes(g, n)))
+}
+
 /// A region that only yields a truth value written in the program.
 fn const_bool(r: &Region) -> Option<bool> {
     match (r.insts.as_slice(), r.result) {
@@ -189,10 +195,36 @@ impl<'ctx> Cg<'ctx, '_> {
                 // an expression the IR does not cover yet: the old path
                 // compiles it here, its variables the IR's values (lent: in
                 // slots of their own, never released from there)
-                Op::Embed { expr, uses, lazies } => {
+                Op::Embed { expr, uses, lazies, moves } => {
+                    // SAFETY: the syntax tree outlives the compile
+                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let mut locals = Vec::new();
-                    for (name, v, t) in uses {
+                    let mut moved = Vec::new();
+                    for ((name, v, t), m) in uses.iter().zip(moves) {
                         let ct = checker_ty(*t);
+                        // its last use: owned by the expression's slot, moved
+                        // on where the old path can, released after it if not
+                        if *m {
+                            let slot = self.entry_alloca(ct, name)?;
+                            self.b.build_store(slot, self.basic(get(vals, *v)?)).s()?;
+                            if let Some(site) = self.let_move_site(name, &[], Some(e)) {
+                                self.move_at.insert(site);
+                            }
+                            moved.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: true, mutable: false, moves: true });
+                            continue;
+                        }
+                        // a parameter read as it is: its own slot (never
+                        // written while the function runs, and a record in
+                        // registers is not copied once per embed)
+                        let own = f.body.insts.iter().find(|i| i.dst == *v).and_then(|i| match i.op {
+                            Op::Param(n) if !takes(&f.body, n) => self.scopes[0].iter().find(|l| l.name == f.params[n as usize].0 && l.ty == ct).map(|l| l.slot),
+                            _ => None,
+                        });
+                        if let Some(slot) = own {
+                            locals.push(crate::Local { name: name.clone(), slot, ty: ct, owned: false, mutable: false, moves: false });
+                            continue;
+                        }
                         let val = get(vals, *v)?;
                         let slot = self.entry_alloca(ct, name)?;
                         self.b.build_store(slot, self.basic(val)).s()?;
@@ -202,8 +234,6 @@ impl<'ctx> Cg<'ctx, '_> {
                     // the lazy lets it reads: fused where it reads them
                     let lazy_mark = self.lazies.len();
                     self.lazies.extend(lazies.iter().cloned());
-                    // SAFETY: the syntax tree outlives the compile
-                    let e: &mimic_syntax::ast::Expr = unsafe { &**expr };
                     let out = self.expr(e);
                     self.lazies.truncate(lazy_mark);
                     self.scopes.pop();
@@ -212,6 +242,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     if self.terminated() {
                         self.dead_block();
                     }
+                    self.release_scope(&moved)?;
                     self.as_ty(out, ty, "value")?
                 }
                 // a list's length, from its header (a list passed in: never
