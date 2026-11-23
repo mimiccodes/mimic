@@ -60,34 +60,51 @@ pub trait Hints {
 /// branches); one that leaves expressions to the old path (embedded) only
 /// when it also does what the old path cannot: change a record or list in
 /// place, build or read records, fuse array work (more than a lambda map the
-/// old path builds the same way), index, loop, take over a
+/// old path builds the same way), index, take over a
 /// parameter, hand a value over to a call, or pass a short list or record in
-/// registers. Otherwise its embeds only lend
+/// registers (unless its body passes lists from one embedded expression to
+/// another). Otherwise its embeds only lend
 /// their variables (the old path would move them at their last use: `head +
 /// "\r\n"` appends in place there) and copy what they read in registers.
 pub fn worth(f: &Function) -> bool {
-    fn scan(r: &Region, embeds: &mut bool, work: &mut bool) {
+    /// `lists`: the embedded expressions' results that are lists
+    fn scan(r: &Region, embeds: &mut bool, work: &mut bool, lists: &mut Vec<Val>, chained: &mut bool) {
         for i in &r.insts {
             match &i.op {
-                Op::Embed { .. } => *embeds = true,
+                Op::Embed { uses, .. } => {
+                    *embeds = true;
+                    // (a list from one embedded expression read by another)
+                    if uses.iter().any(|u| lists.contains(&u.1)) {
+                        *chained = true;
+                    }
+                    if matches!(i.ty, Ty::List(_) | Ty::Agg(_)) {
+                        lists.push(i.dst);
+                    }
+                }
                 // (a map that is only a lambda over a range, `⍳ n ¨ (i => …)`:
                 // the old path's engine builds it the same way)
                 Op::Map(Tree::Ast { .. }) => {}
-                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::Loop { .. } => *work = true,
+                // (a loop counts by what its step does: one that only calls
+                // a function the old path compiles gains nothing here, and
+                // the old path compiling it with the rest fuses across it,
+                // as `nbody`'s `main` showed)
+                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) => *work = true,
                 Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
                 _ => {}
             }
             for g in i.op.regions() {
-                scan(g, embeds, work);
+                scan(g, embeds, work, lists, chained);
             }
         }
     }
+    let (mut embeds, mut work, mut chained) = (false, false, false);
+    scan(&f.body, &mut embeds, &mut work, &mut Vec::new(), &mut chained);
     // a short list or record passed or given back in registers: callers in
-    // the IR skip building it on the heap
+    // the IR skip building it on the heap. Not where the body hands lists
+    // from one embedded expression to the next: the old path, compiling the
+    // body whole, fuses and vectorizes across them (`nbody`'s `step`)
     let regs = f.params.iter().map(|p| p.1).chain([f.ret]).any(|t| matches!(t, Ty::Agg(_)));
-    let (mut embeds, mut work) = (false, regs);
-    scan(&f.body, &mut embeds, &mut work);
-    !embeds || work
+    !embeds || work || (regs && !chained)
 }
 
 pub mod copies;
