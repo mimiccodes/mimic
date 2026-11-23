@@ -1999,7 +1999,8 @@ impl<'ctx> Cg<'ctx, '_> {
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
         // which function an IR difference comes from)
         let only = std::env::var("MIMIC_IR_ONLY").ok();
-        let lowered = if use_ir && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
+        // (not in coverage builds: the IR counts no lines)
+        let lowered = if use_ir && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
             let takes = self.consumed(k);
             mimic_ir::lower::function(self.p, k.0, spec.clone(), &takes, self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,

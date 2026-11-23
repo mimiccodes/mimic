@@ -68,6 +68,10 @@ impl mimic_ir::Hints for Cg<'_, '_> {
     fn takes(&mut self, key: &crate::types::Key) -> Vec<bool> {
         self.consumed(key)
     }
+
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool {
+        Cg::runs_apart(self, stmts)
+    }
 }
 
 pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
@@ -92,6 +96,16 @@ impl<'ctx> Cg<'ctx, '_> {
     /// gives (its parameters are in their slots already).
     pub(crate) fn ir_body(&mut self, f: &Function) -> R<V<'ctx>> {
         let mut vals: Vec<Option<V<'ctx>>> = vec![None; f.values as usize];
+        if self.body_exit.is_some() {
+            // the end of `main`: the process exits next, so what is still
+            // alive is not freed one by one (see Cg::exit_fid); earlier
+            // drops stay, freeing memory while main still works
+            let mut body = f.body.clone();
+            while body.insts.last().is_some_and(|i| matches!(i.op, Op::Drop(_))) {
+                body.insts.pop();
+            }
+            return self.ir_region(f, &body, &mut vals);
+        }
         self.ir_region(f, &f.body, &mut vals)
     }
 
@@ -295,14 +309,25 @@ impl<'ctx> Cg<'ctx, '_> {
                 // moves it there (in place when held once), else a reference
                 // of its own (so a copy)
                 Op::Put { list, index, value, moved } => {
-                    let l = self.list_arg(get(vals, *list)?, *moved)?;
                     let (i, x) = (self.to_i64(get(vals, *index)?)?, self.to_i64(get(vals, *value)?)?);
-                    V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Put(i, x))?, true)
+                    } else {
+                        // borrowed: a copy with the change (no reference taken)
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_put_i64", &[l.into(), i.into(), x.into()])?, true)
+                    }
                 }
                 Op::Push { list, value, moved } => {
-                    let l = self.list_arg(get(vals, *list)?, *moved)?;
                     let x = self.to_i64(get(vals, *value)?)?;
-                    V::P(self.ir_change(l, Ch::Push(x))?, true)
+                    if *moved {
+                        let l = self.list_arg(get(vals, *list)?, true)?;
+                        V::P(self.ir_change(l, Ch::Push(x))?, true)
+                    } else {
+                        let l = self.borrowed_list(get(vals, *list)?)?;
+                        V::P(self.rt_list_fn("mim_push_i64", &[l.into(), x.into()])?, true)
+                    }
                 }
                 // an owned list's last use is past: released now
                 Op::Drop(v) => {
@@ -435,6 +460,24 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         let V::P(p, _) = self.own(self.boxed(l)?)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
         Ok(p)
+    }
+
+    /// A list the IR reads without taking a reference.
+    fn borrowed_list(&mut self, l: V<'ctx>) -> R<PointerValue<'ctx>> {
+        let V::P(p, _) = self.boxed(l)? else { return Err("internal compiler error: put/push of a value not on the heap".into()) };
+        Ok(p)
+    }
+
+    /// A runtime function on lists of i64 (a list, then i64s) giving a new
+    /// list: declared on first use.
+    fn rt_list_fn(&mut self, name: &str, args: &[inkwell::values::BasicMetadataValueEnum<'ctx>]) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let mut ps: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![self.ptr.into()];
+            ps.extend(std::iter::repeat_n(inkwell::types::BasicMetadataTypeEnum::from(i64t), args.len() - 1));
+            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(inkwell::module::Linkage::External))
+        });
+        Ok(self.b.build_call(f, args, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
     }
 
     /// One change of the owned list of i64 `list` (taken): the list it gives.

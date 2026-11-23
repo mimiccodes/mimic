@@ -15,6 +15,13 @@
 
 pub mod lower;
 
+/// `MIMIC_IR=why`: say why each function the IR does not cover stays on the
+/// old path.
+pub fn why() -> bool {
+    static WHY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WHY.get_or_init(|| std::env::var("MIMIC_IR").as_deref() == Ok("why"))
+}
+
 /// What lowering asks the code generator.
 pub trait Hints {
     /// Whether `let name = value` (followed by `rest` and `tail`) is a list
@@ -41,6 +48,12 @@ pub trait Hints {
     /// Which parameters of a user function's specialisation it takes over
     /// (its callers hand over a reference).
     fn takes(&mut self, key: &mimic_check::types::Key) -> Vec<bool>;
+
+    /// Whether the old path would run some statements of a block with
+    /// these statements apart (independent calls in parallel, a call with
+    /// effects as a task): the IR runs everything in order, so it leaves
+    /// such a function to the old path.
+    fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool;
 }
 pub mod fuse;
 pub mod own;
@@ -93,7 +106,9 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
-            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8, 0) => Ty::List(t),
+            // (text and lists of text too: the IR moves and releases them as
+            // any list; reading their elements is left to the old path)
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
             // (a plain record: not an instance of a generic or shaped one)
             C::Obj(id) if mimic_check::types::obj_tid(id) == id as usize && matches!(p.types[id as usize].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(t),
             _ => return None,
