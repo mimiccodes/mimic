@@ -27,6 +27,31 @@ error[E0501]: `match` does not cover every case: missing `Dot`
 
 A `fix:` line means `mimic check --fix` can make the change for you.
 
+## Copies left in your code
+
+A list or record is changed in place when nothing else holds it, and copied when something does. `mimic check --copies` builds the program as `mimic build --release` does and lists the copies it still makes, each with its reason:
+
+```mimic
+module main
+
+fn grown(xs: [i64]) -> i64 {
+    let ys = push(xs, 1)
+    ≢ ys + xs[0]
+}
+
+fn main() {
+    print(grown(⍳ 1000 ¨ (i => i * 2)))
+}
+```
+
+```text
+main.mim:4:14: `push(xs, 1)` copies the list: `xs` is used again after this (line 5)
+main.mim:8:1: `main` is compiled by the old code generator (it only leaves expressions to the old path, which compiles them as well on its own); its copies are not listed
+      Copies 1 left
+```
+
+`push` cannot grow `xs` in place, because the line after it still reads `xs[0]`. Read what you need first (`let first = xs[0]`), and the copy goes. Functions the compiler does not analyse yet are listed with the reason; their copies are not.
+
 ## Tests
 
 Write a test next to the code it checks, with `test "what it checks" { … }`, and check with `expect`:

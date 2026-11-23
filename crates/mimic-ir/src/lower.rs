@@ -56,14 +56,17 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool],
         if crate::why() {
             eprintln!("mimic: IR: `{}` stays on the old path: {why}", p.fn_path(fid).join("::"));
         }
+        if crate::copies::on() {
+            crate::copies::missed(p, fid, why);
+        }
         None
     };
     let mut params = Vec::new();
     for (prm, t) in decl.params.iter().zip(&spec.params) {
-        let Some(it) = Ty::of(p, *t) else { return miss(&format!("parameter `{}` is a {t:?}", prm.name)) };
+        let Some(it) = Ty::of(p, *t) else { return miss(&format!("parameter `{}` is of type `{}`", prm.name, mimic_check::types::show(p, *t))) };
         params.push((prm.name.clone(), it));
     }
-    let Some(ret) = Ty::of(p, spec.ret) else { return miss(&format!("it returns a {:?}", spec.ret)) };
+    let Some(ret) = Ty::of(p, spec.ret) else { return miss(&format!("it returns a `{}`", mimic_check::types::show(p, spec.ret))) };
     if runs_apart(hints, &decl.body) {
         return miss("the old path runs some of its calls apart (in parallel, or as a task)");
     }
@@ -103,6 +106,9 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool],
     crate::own::function(&mut f);
     if !crate::worth(&f) {
         return miss("it only leaves expressions to the old path, which compiles them as well on its own");
+    }
+    if crate::copies::on() {
+        crate::copies::scan(p, fid, &f);
     }
     Some(f)
 }
@@ -678,11 +684,11 @@ impl Lower<'_> {
     fn embed(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
         let v = self.embed_here(r, e);
         if v.is_none() && self.miss.is_none() && self.inline_depth == 0 {
-            let what = match self.ty(e) {
-                None => format!("{:?}", self.spec.exprs.get(&id(e))),
-                Some(t) => format!("{t:?}"),
+            let what = match self.spec.exprs.get(&id(e)) {
+                Some(t) => format!("of type `{}`", mimic_check::types::show(self.p, *t)),
+                None => "of a type it does not know".into(),
             };
-            self.miss = Some(format!("line {}:{}: an expression of type {what} it cannot take or embed", e.span.line, e.span.col));
+            self.miss = Some(format!("line {}:{}: an expression {what} it cannot take or embed", e.span.line, e.span.col));
         }
         v
     }

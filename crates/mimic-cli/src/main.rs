@@ -81,6 +81,28 @@ struct ProfileArgs {
 
 /// `default_release`: `build` produces the fastest binary unless told otherwise;
 /// `run` defaults to debug for quick iteration with the leak check.
+/// `mimic check --copies`: compiles the program as an optimised build does
+/// and lists the copies the compiler could not avoid (see mimic_ir::copies).
+fn copies_report(file: Option<&std::path::Path>, emit_json: bool) -> Result<ExitCode, Report> {
+    let input = driver::input_from(file)?;
+    let prof = Profile::for_input(&input, true);
+    mimic_ir::copies::start();
+    let built = driver::build(&input, &prof, &Target::host(), false, false);
+    let notes = mimic_ir::copies::finish();
+    built?;
+    let n = notes.iter().filter(|n| !n.text.contains("old code generator")).count();
+    if emit_json {
+        let list: Vec<serde_json::Value> = notes.iter().map(|n| serde_json::json!({ "file": n.file, "line": n.line, "col": n.col, "message": n.text })).collect();
+        println!("{}", serde_json::json!({ "command": "check", "copies": list, "count": n }));
+    } else {
+        for x in &notes {
+            println!("{}:{}:{}: {}", x.file, x.line, x.col, x.text);
+        }
+        status("Copies", if n == 0 { "none left in the code the IR compiles".to_string() } else { format!("{n} left") });
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn profile_of(input: &Input, args: ProfileArgs, default_release: bool) -> Profile {
     let release = args.release || (default_release && !args.debug);
     let mut p = Profile::for_input(input, release);
@@ -240,6 +262,10 @@ enum Cmd {
         /// Apply every machine-applicable fix to the sources, then re-check
         #[arg(long)]
         fix: bool,
+        /// Also list every copy of a list or record the program still makes,
+        /// and why (builds it as `mimic build --release` does)
+        #[arg(long)]
+        copies: bool,
     },
     /// List what LLVM can target (architectures, OSes, environments) and what builds executables
     Targets {
@@ -587,7 +613,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             status("Created", format!("{} `{name}` project", kind_label(bin, lib)));
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Check { file, emit_json, fix } => {
+        Cmd::Check { file, emit_json, fix, copies } => {
             let check_once = || -> Result<(String, Program), Report> {
                 let input = driver::input_for_check(file.as_deref())?;
                 let p = driver::load(&input)?;
@@ -617,7 +643,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             match checked {
                 Ok((name, p)) => {
                     let nfiles = p.files.iter().filter(|f| f.package == p.root_package).count();
-                    if emit_json {
+                    if emit_json && copies {
+                        // (one JSON document: the copies report's)
+                    } else if emit_json {
                         let mut v = Report::default().json("check");
                         v["fixed"] = fixed.into();
                         v["package"] = name.clone().into();
@@ -626,6 +654,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         println!("{v}");
                     } else {
                         status("Checked", format!("`{name}`: no errors ({nfiles} file(s), {} function(s))", p.fns.len()));
+                    }
+                    if copies {
+                        return match copies_report(file.as_deref(), emit_json) {
+                            Ok(c) => Ok(c),
+                            Err(r) => fail(r, false, "check", false),
+                        };
                     }
                     Ok(ExitCode::SUCCESS)
                 }
