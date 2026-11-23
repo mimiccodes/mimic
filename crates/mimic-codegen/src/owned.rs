@@ -241,6 +241,9 @@ impl<'ctx> Cg<'ctx, '_> {
             if !out[i] && spec.params[i] == Ty::Arr(El::I64, 0) {
                 out[i] = self.list_taken(k, &prm.name, &d.body, &spec, stack);
             }
+            if !out[i] && matches!(spec.params[i], Ty::Obj(_)) && self.flat(spec.params[i]).is_none() {
+                out[i] = self.record_taken(k, &prm.name, &d.body, &spec, stack);
+            }
         }
         stack.pop();
         out
@@ -285,6 +288,78 @@ impl<'ctx> Cg<'ctx, '_> {
                 && args[1..].iter().all(|a| ty(a) == Some(Ty::I64));
         });
         found
+    }
+
+    /// Whether the record parameter `name` of `k` ends, at a last use, as the
+    /// base of a `{ … with … }` or as an argument another function takes
+    /// (`look(look(s, 0), 1)`, `{ grow(t, t.k) with k: t.k + 1 }`, a field
+    /// read and then `{ s with i: s.i + 1 }` handed on). A later use that
+    /// only reads a field and is computed before the record moves does not
+    /// count: one in another argument of the same call, or in the field
+    /// values of the `with` whose base holds the move. Taking a record that
+    /// is then not moved costs one retain per call; never a wrong result
+    /// (callers and the callee ask the same question).
+    fn record_taken(&self, k: &Key, name: &str, body: &Block, spec: &Spec, stack: &mut Vec<Key>) -> bool {
+        let is_name = |x: &Expr| matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name);
+        let order = UseOrder::new(name, body);
+        if order.in_closure {
+            return false;
+        }
+        // pre-order positions: each node's [start, end)
+        let mut span: std::collections::HashMap<usize, (usize, usize)> = std::collections::HashMap::new();
+        let mut n = 0;
+        body.walk(&mut |x| {
+            let mut len = 0;
+            x.walk(&mut |_| len += 1);
+            span.insert(id(x), (n, n + len));
+            n += 1;
+        });
+        // the name's field reads, the `with` holding each node as its base,
+        // and the places it may move: (its use, the node that takes it, the
+        // call and argument when that is a call)
+        let mut reads = HashSet::new();
+        let mut base_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut moves: Vec<(usize, usize, Option<usize>)> = Vec::new();
+        body.walk(&mut |x| match &x.kind {
+            ExprKind::Field { base, .. } if is_name(base) => {
+                reads.insert(id(base.as_ref()));
+            }
+            ExprKind::With { base, .. } => {
+                base_of.insert(id(base.as_ref()), id(x));
+                if is_name(base) {
+                    moves.push((id(base.as_ref()), id(x), None));
+                }
+            }
+            ExprKind::Call { args, .. } => {
+                for (j, a) in args.iter().enumerate() {
+                    if is_name(a) {
+                        moves.push((id(a), id(x), Some(j)));
+                    }
+                }
+            }
+            _ => {}
+        });
+        for (u, at, arg) in moves {
+            // what is computed before the move: the node, and the `with`
+            // whose base it is
+            let mut region = span[&at];
+            if let Some(w) = base_of.get(&at) {
+                region = span[w];
+            }
+            let ok = order.last_but(u, |w_id, w_pos| reads.contains(&w_id) && w_pos >= region.0 && w_pos < region.1);
+            if !ok {
+                continue;
+            }
+            let Some(j) = arg else { return true };
+            let Some(k2) = spec.calls.get(&at) else { continue };
+            if k2 == k || stack.contains(k2) || stack.len() >= 8 {
+                continue;
+            }
+            if self.consumed_in(k2, stack).get(j).copied().unwrap_or(false) {
+                return true;
+            }
+        }
+        false
     }
 
     /// For each parameter it consumes: where it moves (the bases of the
@@ -405,6 +480,19 @@ impl UseOrder {
         });
         let in_closure = uses.iter().any(|(_, p)| closures.iter().any(|(s, e)| p > s && p < e));
         UseOrder { uses, branches, in_closure }
+    }
+
+    /// `last` for the use with id `u`, where a later use `allow(id,
+    /// position)` accepts does not count.
+    fn last_but(&self, u: usize, allow: impl Fn(usize, usize) -> bool) -> bool {
+        let Some(&(_, at)) = self.uses.iter().find(|(i, _)| *i == u) else { return false };
+        self.uses.iter().filter(|(_, w)| *w > at).all(|&(wi, w)| {
+            allow(wi, w)
+                || self.branches.iter().any(|bs| {
+                    let pos = |p: usize| bs.iter().position(|(s, t)| p >= *s && p < *t);
+                    matches!((pos(at), pos(w)), (Some(a), Some(b)) if a != b)
+                })
+        })
     }
 
     /// Whether the use `e` is a last use: every use after it is in another

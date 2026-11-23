@@ -742,6 +742,16 @@ impl Lower<'_> {
         ok.then_some((op, args))
     }
 
+    /// One branch of a field's new value (see the split in `with`): the
+    /// field kept as it is (`k.next`), or changed from it (`push(k.next, w)`).
+    #[allow(clippy::type_complexity)]
+    fn branch_change<'e>(&self, base: &[String], n: &str, t: &'e Expr) -> Option<Option<Vec<(&'static str, &'e [Expr])>>> {
+        if matches!(&t.kind, ExprKind::Field { base: fb, name: f } if f == n && matches!(&fb.kind, ExprKind::Path(q) if q == base)) {
+            return Some(None);
+        }
+        self.change_chain(base, n, t).map(Some)
+    }
+
     /// `x`, the new value of field `n` of the record `base` names, as
     /// changes of that field's old value (`push(put(s.v, i, x), y)`): each
     /// (name, the other arguments), innermost first.
@@ -973,8 +983,29 @@ impl Lower<'_> {
                 // the new values first (they may read the base), then the base
                 let mut news = Vec::new();
                 let mut changes = Vec::new();
+                // a field changed in one branch and kept in the other: split
+                #[allow(clippy::type_complexity)]
+                let mut split: Option<(usize, &Expr, Option<Vec<(&'static str, &[Expr])>>, Option<Vec<(&'static str, &[Expr])>>)> = None;
                 for (n, x, _) in fields {
                     let k = fs.iter().position(|(m, _, _)| m == n)?;
+                    // `next: if d == 0 { push(k.next, w) } else { k.next }`:
+                    // two updates, one changing the field in place and one
+                    // keeping it, chosen by the condition (each branch's own
+                    // values computed in that branch only)
+                    if split.is_none()
+                        && let Some(bp) = &bp
+                        && let ExprKind::If { cond, then, els: Some(els) } = &x.kind
+                        && then.stmts.is_empty()
+                        && let Some(tt) = then.tail.as_deref()
+                        && let ExprKind::Block(eb) = &els.kind
+                        && eb.stmts.is_empty()
+                        && let Some(et) = eb.tail.as_deref()
+                        && let (Some(a), Some(b)) = (self.branch_change(bp, n, tt), self.branch_change(bp, n, et))
+                        && (a.is_some() || b.is_some())
+                    {
+                        split = Some((k, cond.as_ref(), a, b));
+                        continue;
+                    }
                     if let Some(bp) = &bp
                         && let Some(chain) = self.change_chain(bp, n, x)
                     {
@@ -1010,6 +1041,36 @@ impl Lower<'_> {
                         return None;
                     }
                     news.push((k as u32, v));
+                }
+                if let Some((k, cond, a, other)) = split {
+                    if self.ty(cond)? != Ty::Bool {
+                        return None;
+                    }
+                    let c = self.expr(r, cond)?;
+                    let b = self.expr(r, base)?;
+                    let mut regions = Vec::new();
+                    for chain in [a, other] {
+                        let mut g = Region::default();
+                        let mut ch = changes.clone();
+                        if let Some(chain) = chain {
+                            let mut cs = Vec::new();
+                            for (op, rest) in chain {
+                                let vs = rest.iter().map(|x| self.expr(&mut g, x)).collect::<Option<Vec<_>>>()?;
+                                cs.push(match op {
+                                    "put" => crate::Change::Put(vs[0], vs[1]),
+                                    "push" => crate::Change::Push(vs[0]),
+                                    _ => crate::Change::Concat(vs[0]),
+                                });
+                            }
+                            ch.push((k as u32, cs));
+                        }
+                        let v = self.emit(&mut g, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news.clone(), moved: false, changes: ch }, e.span);
+                        g.result = Some(v);
+                        regions.push(g);
+                    }
+                    let els = regions.pop()?;
+                    let then = regions.pop()?;
+                    return Some(self.emit(r, ty, Op::If { cond: c, then, els }, e.span));
                 }
                 let b = self.expr(r, base)?;
                 Some(self.emit(r, ty, Op::With { base: b, tid, moves: vec![false; news.len()], fields: news, moved: false, changes }, e.span))
