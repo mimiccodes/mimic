@@ -101,6 +101,9 @@ pub fn function(p: &Program, fid: FnId, spec: std::rc::Rc<Spec>, takes: &[bool],
     crate::fuse::function(&mut f);
     crate::sink::function(&mut f);
     crate::own::function(&mut f);
+    if !crate::worth(&f) {
+        return miss("it only leaves expressions to the old path, which compiles them as well on its own");
+    }
     Some(f)
 }
 

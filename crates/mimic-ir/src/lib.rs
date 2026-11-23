@@ -55,6 +55,33 @@ pub trait Hints {
     /// such a function to the old path.
     fn runs_apart(&mut self, stmts: &[mimic_syntax::ast::Stmt]) -> bool;
 }
+/// Whether compiling `f` from its IR gains anything over the old path. A
+/// function the IR covers whole always does (it may sink work into
+/// branches); one that leaves expressions to the old path (embedded) only
+/// when it also does what the old path cannot: change a record or list in
+/// place, build or read records, fuse array work, index, loop, take over a
+/// parameter or hand a value over to a call. Otherwise its embeds only lend
+/// their variables (the old path would move them at their last use: `head +
+/// "\r\n"` appends in place there) and copy what they read in registers.
+pub fn worth(f: &Function) -> bool {
+    fn scan(r: &Region, embeds: &mut bool, work: &mut bool) {
+        for i in &r.insts {
+            match &i.op {
+                Op::Embed { .. } => *embeds = true,
+                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::Loop { .. } => *work = true,
+                Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
+                _ => {}
+            }
+            for g in i.op.regions() {
+                scan(g, embeds, work);
+            }
+        }
+    }
+    let (mut embeds, mut work) = (false, false);
+    scan(&f.body, &mut embeds, &mut work);
+    !embeds || work
+}
+
 pub mod fuse;
 pub mod own;
 pub mod sink;
