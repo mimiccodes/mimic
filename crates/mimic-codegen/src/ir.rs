@@ -97,13 +97,13 @@ impl<'ctx> Cg<'ctx, '_> {
     pub(crate) fn ir_body(&mut self, f: &Function) -> R<V<'ctx>> {
         let mut vals: Vec<Option<V<'ctx>>> = vec![None; f.values as usize];
         if self.body_exit.is_some() {
-            // the end of `main`: the process exits next, so what is still
-            // alive is not freed one by one (see Cg::exit_fid); earlier
-            // drops stay, freeing memory while main still works
+            // `main` runs once and the process exits after it, so its own
+            // values are not freed one by one (see Cg::exit_fid); the old
+            // path keeps a `let` until the end of its scope too, so this
+            // holds no more memory than it would. Drops inside loops and
+            // branches stay.
             let mut body = f.body.clone();
-            while body.insts.last().is_some_and(|i| matches!(i.op, Op::Drop(_))) {
-                body.insts.pop();
-            }
+            body.insts.retain(|i| !matches!(i.op, Op::Drop(_)));
             return self.ir_region(f, &body, &mut vals);
         }
         self.ir_region(f, &f.body, &mut vals)

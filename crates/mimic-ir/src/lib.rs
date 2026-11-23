@@ -60,7 +60,8 @@ pub trait Hints {
 /// branches); one that leaves expressions to the old path (embedded) only
 /// when it also does what the old path cannot: change a record or list in
 /// place, build or read records, fuse array work, index, loop, take over a
-/// parameter or hand a value over to a call. Otherwise its embeds only lend
+/// parameter, hand a value over to a call, or pass a short list or record in
+/// registers. Otherwise its embeds only lend
 /// their variables (the old path would move them at their last use: `head +
 /// "\r\n"` appends in place there) and copy what they read in registers.
 pub fn worth(f: &Function) -> bool {
@@ -77,7 +78,10 @@ pub fn worth(f: &Function) -> bool {
             }
         }
     }
-    let (mut embeds, mut work) = (false, false);
+    // a short list or record passed or given back in registers: callers in
+    // the IR skip building it on the heap
+    let regs = f.params.iter().map(|p| p.1).chain([f.ret]).any(|t| matches!(t, Ty::Agg(_)));
+    let (mut embeds, mut work) = (false, regs);
     scan(&f.body, &mut embeds, &mut work);
     !embeds || work
 }
