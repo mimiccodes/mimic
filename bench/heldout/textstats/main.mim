@@ -1,0 +1,42 @@
+module main
+
+// Generates about 10 MB of text (random words, separated by spaces and now
+// and then a newline) and prints the number of lines, words and
+// characters, the longest line and the most common letter.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn random_word(n: i64, x: i64, letters: [str]) -> (str, i64) {
+    if n == 0 {
+        (join(letters, ""), x)
+    } else {
+        let y = next(x)
+        random_word(n - 1, y, push(letters, char_of(97 + y % 26)))
+    }
+}
+
+fn build(size: i64, length: i64, x: i64, pieces: [str]) -> str {
+    if length >= size {
+        join(pieces, "")
+    } else {
+        let x1 = next(x)
+        let n = x1 % 8 + 1
+        let (word, x2) = random_word(n, x1, [])
+        let x3 = next(x2)
+        let sep = if x3 % 10 == 0 { "\n" } else { " " }
+        build(size, length + n + 1, x3, push(push(pieces, word), sep))
+    }
+}
+
+fn main() {
+    let text = build(10000000, 0, 42, [])
+    let b = bytes::of_text(text)
+    let longest = lines(text) ¨ (l => ≢ l) ▷ ⌈/
+    let letters = ⍳ 26 ¨ (k => count(b, c => c == 97 + k))
+    let top = max_by(⍳ 26, k => letters[k]) else { return }
+    print("lines {count(b, c => c == 10)}")
+    print("words {≢ words(text)}")
+    print("characters {≢ text}")
+    print("longest line {longest}")
+    print("most common letter {char_of(97 + top)} ({letters[top]})")
+}

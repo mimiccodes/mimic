@@ -1,6 +1,6 @@
 module main
 
-// Counts the ways to place 11 queens on an 11 x 11 board so that none
+// Counts the ways to place 12 queens on a 12 x 12 board so that none
 // attack each other, by backtracking row by row.
 
 // can a queen go in column c of the next row?
@@ -18,5 +18,5 @@ fn solve(n: i64, placed: [i64]) -> i64 {
 }
 
 fn main() {
-    print(solve(11, []))
+    print(solve(12, []))
 }

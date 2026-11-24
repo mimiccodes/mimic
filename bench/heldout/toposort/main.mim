@@ -1,6 +1,6 @@
 module main
 
-// Topological order of a generated DAG of 200,000 nodes and 600,000
+// Topological order of a generated DAG of 400,000 nodes and 1,200,000
 // edges (every edge goes from a smaller to a larger node); prints the
 // number of nodes in the order and a checksum of it.
 
@@ -19,8 +19,8 @@ fn make_edges(count: i64, n: i64, x: i64, from: [i64], to: [i64]) -> ([i64], [i6
 }
 
 fn main() {
-    let n = 200000
-    let (from, to) = make_edges(600000, n, 42, [], [])
+    let n = 400000
+    let (from, to) = make_edges(1200000, n, 42, [], [])
     match graph::topo(n, from, to) {
         Some(order) => {
             let idx = ⍳ (≢ order)

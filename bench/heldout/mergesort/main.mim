@@ -1,6 +1,6 @@
 module main
 
-// Sorts 2,000,000 generated numbers with a hand-written recursive merge
+// Sorts 1,000,000 generated numbers with a hand-written recursive merge
 // sort, then prints a checksum and whether the result is sorted.
 
 fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
@@ -44,7 +44,7 @@ fn checksum(xs: [i64]) -> i64 {
 }
 
 fn main() {
-    let xs = generate(2000000, 42, [])
+    let xs = generate(1000000, 42, [])
     let sorted = merge_sort(xs)
     print(checksum(sorted))
     let n = ≢ sorted

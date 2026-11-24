@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define N 2000000
+#define N 1000000
 
 static void quicksort(int64_t *a, int n) {
     if (n <= 1) return;

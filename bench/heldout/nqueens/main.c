@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define N 11
+#define N 12
 
 static int64_t placed[N];
 

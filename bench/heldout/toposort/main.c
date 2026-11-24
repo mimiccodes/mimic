@@ -5,8 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NODES 200000
-#define EDGES 600000
+#define NODES 400000
+#define EDGES 1200000
 
 int main(void) {
     int64_t *from = malloc(EDGES * sizeof *from), *to = malloc(EDGES * sizeof *to);

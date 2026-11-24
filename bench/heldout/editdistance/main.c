@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define PAIRS 2000
+#define PAIRS 4000
 #define LEN 100
 
 static int64_t seed = 42;

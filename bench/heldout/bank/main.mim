@@ -1,6 +1,6 @@
 module main
 
-// 500 bank accounts as records. Applies 2,000,000 generated deposits,
+// 500 bank accounts as records. Applies 4,000,000 generated deposits,
 // withdrawals (refused when the balance is short) and transfers, then
 // prints the total money, the richest account and the refusals.
 
@@ -46,7 +46,7 @@ fn apply(n: i64, x: i64, accounts: [Account], refused: i64) -> ([Account], i64) 
 
 fn main() {
     let start = ⍳ 500 ¨ (i => Account { id: i, balance: 1000 })
-    let (accounts, refused) = apply(2000000, 42, start, 0)
+    let (accounts, refused) = apply(4000000, 42, start, 0)
     let total = accounts ¨ (a => a.balance) ▷ +/
     print("total {total}")
     let richest = max_by(accounts, a => a.balance) else { return }

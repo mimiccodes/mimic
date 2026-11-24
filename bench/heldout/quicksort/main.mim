@@ -1,6 +1,6 @@
 module main
 
-// Sorts 2,000,000 generated numbers with a hand-written quicksort
+// Sorts 1,000,000 generated numbers with a hand-written quicksort
 // (middle element as pivot, split three ways) and prints a checksum.
 
 fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
@@ -32,6 +32,6 @@ fn checksum(xs: [i64]) -> i64 {
 }
 
 fn main() {
-    let xs = generate(2000000, 42, [])
+    let xs = generate(1000000, 42, [])
     print(checksum(quicksort(xs)))
 }

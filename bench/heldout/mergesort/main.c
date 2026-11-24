@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define N 2000000
+#define N 1000000
 
 static void merge_sort(int64_t *a, int64_t *tmp, int n) {
     if (n <= 1) return;

@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 #define ACCOUNTS 500
-#define OPS 2000000
+#define OPS 4000000
 
 typedef struct {
     int64_t id;
