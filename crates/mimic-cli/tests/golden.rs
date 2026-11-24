@@ -2157,9 +2157,11 @@ fn profile_names_functions() {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("busy.mim");
     // a long sequential chain: one function holds nearly all the time
+    // (long enough for 20 samples on a fast machine: 50,000,000 steps took
+    // 0.24 s on one, 16 samples)
     std::fs::write(
         &f,
-        "module main\n\nfn spin(n: i64, acc: i64) -> i64 {\n    if n == 0 { acc } else { spin(n - 1, (acc * 31 + n) % 1000003) }\n}\n\nfn main() {\n    print(spin(50000000, 1) > 0)\n}\n",
+        "module main\n\nfn spin(n: i64, acc: i64) -> i64 {\n    if n == 0 { acc } else { spin(n - 1, (acc * 31 + n) % 1000003) }\n}\n\nfn main() {\n    print(spin(300000000, 1) > 0)\n}\n",
     )
     .unwrap();
     let out = mimic().args(["profile", "--json"]).arg(&f).output().unwrap();
