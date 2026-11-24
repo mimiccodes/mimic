@@ -45,6 +45,7 @@ Primitives are built-in array operations. Each has a **glyph** and a **word**:
 | `⌿` | `keep` | keep elements where a mask is true |
 | `+/` `×/` | `sum` `product` | add or multiply all elements |
 | `⌈/` `⌊/` | `maximum` `minimum` | largest or smallest element |
+| `∧/` `∨/` | `all` `any` | are all of these true? is any? |
 | `⌈` `⌊` | `max` `min` | larger or smaller of two values |
 | `∣` | `abs` | absolute value |
 | `¨` | `each` | apply a function to every element |

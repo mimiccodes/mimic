@@ -545,7 +545,9 @@ impl Server {
             glyphs += text.matches(p.glyph).count();
             words += text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|t| *t == p.word).count();
         }
-        let formatted = mimic_syntax::format::format(&text, glyphs > words).ok()?;
+        // (a file that does not parse: no edits, its errors are reported)
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let formatted = mimic_syntax::format::format_file(&name, &text, glyphs > words).ok()?;
         if formatted == text {
             return serde_json::to_value(Vec::<TextEdit>::new()).ok();
         }

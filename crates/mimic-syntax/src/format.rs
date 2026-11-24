@@ -62,6 +62,20 @@ fn wordy(c: char) -> bool {
 
 /// Format a whole file. `Err` when it does not lex (or, which would be a
 /// bug, when the result would not mean the same).
+/// [`format`] a file, after checking that it parses: a file that does not
+/// is left as it is, and the parse error comes back, as `gofmt` and
+/// `rustfmt` do (respelling `/` beside a glyph the lexer misread would
+/// otherwise change code its author never wrote). `name` is the file's
+/// name: `mim.mim` and `build.mim` are a project's configuration.
+pub fn format_file(name: &str, src: &str, glyphs: bool) -> Result<String, Diag> {
+    if matches!(name, "mim.mim" | "build.mim") {
+        crate::config::parse(src)?;
+    } else {
+        crate::parser::parse_file(src)?;
+    }
+    format(src, glyphs)
+}
+
 pub fn format(src: &str, glyphs: bool) -> Result<String, Diag> {
     let toks = lex(src)?;
     // 1. spellings
@@ -182,7 +196,7 @@ pub fn format(src: &str, glyphs: bool) -> Result<String, Diag> {
 
 #[cfg(test)]
 mod tests {
-    use super::format;
+    use super::{format, format_file};
 
     #[test]
     fn words_and_glyphs() {
@@ -192,6 +206,22 @@ mod tests {
         let g = format(&w, true).unwrap();
         assert_eq!(g, "module main\n\nfn main() {\n    ⎕(⍳ 4 ¨ (x ⇒ x × x) ▷ +/)\n\n    let ok = 1 ≠ 2 ∧ ¬ false\n}\n");
         assert_eq!(format(&g, false).unwrap(), w);
+    }
+
+    #[test]
+    fn and_or_reductions_keep_their_slash() {
+        // `∧/` is one token (all): `--glyphs` must not respell its `/` as `÷`
+        let src = "module main\nfn main() {\n    let ys = [true false] |> ∧/\n    let zs = ∨/ [true]\n}\n";
+        let g = format(src, true).unwrap();
+        assert!(g.contains("▷ ∧/") && g.contains("∨/ [true]"), "{g}");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_left_alone() {
+        let src = "module main\nfn main() {\n    let x = 4 / 2 (\n}\n";
+        assert!(format_file("main.mim", src, true).is_err());
+        let ok = "module main\nfn main() {\n    let x = 4 / 2\n}\n";
+        assert!(format_file("main.mim", ok, true).unwrap().contains("4 ÷ 2"));
     }
 
     #[test]
