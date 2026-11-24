@@ -5621,7 +5621,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     // releases it, as lending it would)
                     let own_first = m.name == "prelude" && matches!(decl.name.as_str(), "push" | "put" | "concat") && matches!(vals.first(), Some(V::P(_, true)));
                     let name = if own_first {
-                        format!("mim_std_{}_own", decl.name)
+                        format!("mim_take_{}", decl.name)
                     } else if m.name == "prelude" {
                         format!("mim_std_{}", decl.name)
                     } else {

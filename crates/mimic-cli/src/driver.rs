@@ -25,6 +25,7 @@ pub const RUNTIME_GPU_C: &str = include_str!("../../../runtime/mimic_gpu.c");
 /// wepoll 1.5.8 (BSD-2-Clause): epoll on Windows, for the event loop there
 pub const RUNTIME_WEPOLL_C: &str = include_str!("../../../runtime/third_party/wepoll.c");
 pub const RUNTIME_JSON_C: &str = include_str!("../../../runtime/mimic_json.c");
+pub const RUNTIME_OWN_C: &str = include_str!("../../../runtime/mimic_own.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -1134,7 +1135,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{RUNTIME_WINDOW_C}{RUNTIME_GPU_C}{RUNTIME_WEPOLL_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{RUNTIME_WINDOW_C}{RUNTIME_GPU_C}{RUNTIME_OWN_C}{RUNTIME_WEPOLL_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -1180,6 +1181,7 @@ fn runtime_sources(dir: &Path, key: u64) -> Result<PathBuf, String> {
         ("mimic_json.c", RUNTIME_JSON_C),
         ("mimic_window.c", RUNTIME_WINDOW_C),
         ("mimic_gpu.c", RUNTIME_GPU_C),
+        ("mimic_own.c", RUNTIME_OWN_C),
         ("wepoll.c", RUNTIME_WEPOLL_C),
         ("mimic_rt.h", RUNTIME_H),
     ] {

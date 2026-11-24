@@ -318,11 +318,6 @@ static int own_plain(const mim_val *xs) {
     return xs && xs->rank == 1 && !IS_HANDLES(xs) && xs->dtype != MIM_MAP && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
 }
 
-/* lists of references held once, changed in place: at the end of the file
- * (out of the way of the functions above, whose code stays where it was) */
-static mim_val *push_own_handles(mim_val *xs, mim_val *x);
-static mim_val *put_own_handles(mim_val *xs, mim_val *k, mim_val *v);
-
 /* xs (held once, plain elements) with room for n elements, len set to n;
  * may move */
 /* A list grown here remembers its room (payload bytes) in `desc`, which a
@@ -378,10 +373,6 @@ mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
         ((uint8_t *)xs->data)[n] = (uint8_t)b;
         return xs;
     }
-    /* a value onto a list of references held once: grown in place (before,
-     * a list of strings or records was copied at every push) */
-    mim_val *h = push_own_handles(xs, x);
-    if (h) return h;
     mim_val *r = mim_std_push(xs, x);
     mim_release(xs);
     return r;
@@ -508,11 +499,7 @@ mim_val *mim_put_u8_own(mim_val *xs, int64_t i, int64_t v) {
  * store converts it exactly as the copying path does, in place when it can.
  * (Out of line, so the fast path stays small enough to inline.) */
 static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_val *k, mim_val *v) {
-    /* a list of references held once: the slot changes in place */
-    mim_val *h = put_own_handles(xs, k, v);
-    if (h) return h;
-    /* a map held once: changed in place too (as `m[k] = v` changes one) */
-    if ((own_plain(xs) || (xs && xs->dtype == MIM_MAP && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1)) && v != xs) {
+    if (own_plain(xs) && v != xs) {
         mim_val *slot = xs;
         mim_set_index(&slot, k, v);
         return slot;
@@ -1160,6 +1147,11 @@ MATH2(pow, pow(x, y))
 MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
+MATH1(tanh, tanh(x))
+MATH1(sinh, sinh(x))
+MATH1(cosh, cosh(x))
+MATH1(log1p, log1p(x))
+MATH1(expm1, expm1(x))
 
 /* math::mulmod(a, b, m): a × b modulo m for any m > 0 an i64 holds, the
  * result in 0 … m - 1 (a 128-bit product where the target has one, else
@@ -1745,36 +1737,4 @@ mim_val *mim_std_panic(mim_val *message) {
     fflush(stdout);
     mim_panic(str_arg(message, "panic"));
     return NULL;
-}
-
-/* ---- lists of references held once, changed in place ------------------- */
-
-/* a list of values held by reference (strings, records, lists, …), held
- * once: its slots can change in place, each holding a reference of its own */
-static int own_handles(const mim_val *xs) {
-    return xs && xs->rank == 1 && xs->dtype == MIM_BOXED && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
-}
-
-/* push(xs, x), xs such a list: grown in place (NULL: not such a list) */
-static __attribute__((noinline)) mim_val *push_own_handles(mim_val *xs, mim_val *x) {
-    if (!own_handles(xs) || !x || x == xs) return NULL;
-    int64_t n = xs->len;
-    xs = grow_owned(xs, n + 1);
-    mim_retain(x);
-    ((mim_val **)xs->data)[n] = x;
-    return xs;
-}
-
-/* put(xs, i, v), xs such a list and i in range: the slot changed in place
- * (NULL: anything else) */
-static __attribute__((noinline)) mim_val *put_own_handles(mim_val *xs, mim_val *k, mim_val *v) {
-    if (!own_handles(xs) || !v || v == xs || !k || k->rank != 0 || (k->dtype != MIM_I64 && k->dtype != MIM_I32)) return NULL;
-    int64_t i = geti(k, 0);
-    if (i < 0 || i >= xs->len) return NULL;
-    mim_val **slot = (mim_val **)xs->data + i;
-    mim_val *old = *slot;
-    mim_retain(v);
-    *slot = v;
-    mim_release(old);
-    return xs;
 }

@@ -4331,3 +4331,6 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_window.c"
 /* GPU kernels (Metal, macOS) */
 #include "mimic_gpu.c"
+/* lists and maps handed over by compiled code, changed in place (last, so
+ * the code of everything above stays where it is) */
+#include "mimic_own.c"
