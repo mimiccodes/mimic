@@ -419,6 +419,10 @@ pub struct Spec {
     pub tuple_lets: HashMap<(usize, usize), Ty>,
     /// Route-pattern capture types, by (pattern id, capture index).
     pub route_binds: HashMap<(usize, usize), Ty>,
+    /// Arguments converted to their parameter's declared list type, by (call
+    /// id, argument index): a list of unknown type passed for `xs: [i64]`
+    /// (the callee is compiled for `[i64]`, the call converts it).
+    pub converts: std::collections::HashSet<(usize, usize)>,
 }
 
 pub struct TypeInfo {
@@ -1036,6 +1040,25 @@ impl Walk<'_, '_> {
         }
         if args.contains(&Ty::Never) {
             return Ty::Never; // argument types not known yet
+        }
+        // a list of unknown type (`[]`, a `flatten`, a value of unknown type)
+        // for a parameter declared a typed list (`xs: [i64]`): the function
+        // is compiled for the declared type, and this call converts the list
+        // (before, the declaration was only checked: the function ran on
+        // the generic path for that call)
+        let mut args = args;
+        if let FnKind::User(d) = &self.inf.p.fns[fid].kind {
+            let m = self.inf.p.fns[fid].module;
+            for (i, prm) in d.params.iter().enumerate() {
+                if i < args.len()
+                    && matches!(args[i], Ty::Dyn | Ty::Arr(El::Dyn, _))
+                    && let Some(t) = prm.ty.as_ref().and_then(|t| ann_in(self.inf.p, m, t))
+                    && matches!(t, Ty::Arr(El::I64 | El::F64, 0))
+                {
+                    args[i] = t;
+                    self.out.converts.insert((at, i));
+                }
+            }
         }
         let k: Key = (fid, args);
         self.inf.ensure(k.clone());
