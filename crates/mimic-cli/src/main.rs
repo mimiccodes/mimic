@@ -828,8 +828,23 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else if window {
                 child.env("MIMIC_UI", "window");
             }
-            let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
-            Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
+            // the program takes this process's place: stopping it (Ctrl-C,
+            // `kill`, a time limit) stops the program, not only `mimic`, and
+            // the shell sees the program's own exit status, a signal included
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::process::CommandExt;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                let e = child.exec();
+                Err(format!("cannot run {}: {e}", a.path.display()))
+            }
+            #[cfg(not(unix))]
+            {
+                let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
+                Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
+            }
         }
         Cmd::Test { args, profile, coverage } => test_cmd(args, profile, coverage),
         Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
