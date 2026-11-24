@@ -276,7 +276,6 @@ typedef CONDITION_VARIABLE mim_cond;
 #define cond_init(c) InitializeConditionVariable(c)
 #define cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, 0)
 #define cond_broadcast(c) WakeAllConditionVariable(c)
-#define cond_signal(c) WakeConditionVariable(c)
 #else
 typedef pthread_mutex_t mim_mutex;
 typedef pthread_cond_t mim_cond;
@@ -287,7 +286,6 @@ typedef pthread_cond_t mim_cond;
 #define cond_init(c) pthread_cond_init(c, NULL)
 #define cond_wait(c, m) pthread_cond_wait(c, m)
 #define cond_broadcast(c) pthread_cond_broadcast(c)
-#define cond_signal(c) pthread_cond_signal(c)
 #endif
 
 /* One job at a time, published by the main thread. Workers that pick it up
@@ -382,10 +380,6 @@ typedef int mim_mutex;
 
 /* Run fn over [0, n) in chunks of `grain`, in parallel when worthwhile.
  * Nested calls (from inside a parallel task) run sequentially. */
-/* (mimic_own.c) */
-static void pool_wake(int64_t nchunks);
-static int worth_sharing(int64_t spent, int64_t done, int64_t left);
-
 static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx) {
     if (n <= 0) return;
     if (grain < 1) grain = 1;
@@ -399,7 +393,7 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED); /* no regions inside */
         g_job = &j;
         g_gen++;
-        pool_wake(nchunks);
+        cond_broadcast(&g_work);
         mutex_unlock(&g_mu);
         t_in_parallel = 1;
         run_chunks(&j);
@@ -528,7 +522,7 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
         if (done == n) return;
         clock_gettime(CLOCK_MONOTONIC, &b);
         int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-        if (worth_sharing(spent, done, n - done)) {
+        if (spent / done * (n - done) > 50000) {
             timed_ctx c = {f, ctx, done};
             parallel_for_grain(n - done, fine_grain(n - done), timed_range, &c);
             return;
@@ -3437,6 +3431,9 @@ static int memo_same_closure(const memo_tab *old, const mim_val *f) {
 }
 
 static mim_val *each_memo_run(mim_val *xs, mim_fn1 f, mim_val *closure, int32_t pure, void **site);
+/* (mimic_own.c) */
+static int each_worth_sharing(int64_t spent, int64_t done, int64_t left);
+
 mim_val *mim_each_fn(mim_val *xs, mim_val *f);
 
 mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
@@ -3628,7 +3625,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
             if (done == n) break;
             clock_gettime(CLOCK_MONOTONIC, &b);
             int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-            if (worth_sharing(spent, done, n - done)) {
+            if (each_worth_sharing(spent, done, n - done)) {
                 c.base = done;
                 parallel_for_grain(n - done, fine_grain(n - done), each_fn_range, &c);
                 break;
