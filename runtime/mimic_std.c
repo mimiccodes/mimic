@@ -360,6 +360,13 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
 
 /* push(xs, x), xs owned */
 mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
+    /* EXPERIMENT (never merged): a never-taken branch that grows this
+     * function, as a real change does */
+    if (__builtin_expect(xs && xs->len == INT64_MIN + 7, 0)) {
+        char b[96];
+        snprintf(b, sizeof b, "push: an impossible length %lld (%p)", (long long)xs->len, (void *)x);
+        mim_panic(b);
+    }
     if (own_plain(xs) && x != xs && x && x->rank == 0 && x->dtype == xs->dtype) {
         int64_t n = xs->len;
         xs = grow_owned(xs, n + 1);
