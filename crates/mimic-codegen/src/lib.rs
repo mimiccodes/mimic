@@ -435,6 +435,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
             f.add_attribute(inkwell::attributes::AttributeLoc::Function, fp);
         }
     }
+    cg.mark_arg_arrays();
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
         cg.module
@@ -1038,6 +1039,59 @@ impl<'ctx> Cg<'ctx, '_> {
             self.release(p)?;
         }
         Ok(())
+    }
+
+    /// In the functions that call themselves last, and those they call (two
+    /// levels: what inlining may bring into them): a runtime call given an
+    /// array of values on the stack, which it reads during the call and does
+    /// not keep (runtime/mimic_rt.c), says so to LLVM (`captures(none)`). The
+    /// array then does not escape, and the call to itself can still be a
+    /// jump (a recursion that builds a string or a record on the way runs as
+    /// a loop). Only there: said everywhere, LLVM marked other calls as tail
+    /// calls too, and `vm` and `http_parse` ran 6-10% slower.
+    fn mark_arg_arrays(&self) {
+        use inkwell::values::{CallSiteValue, InstructionOpcode};
+        let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("captures");
+        if kind == 0 || self.tail_fns.is_empty() {
+            return;
+        }
+        let calls = |f: FunctionValue<'ctx>| -> Vec<CallSiteValue<'ctx>> {
+            f.get_basic_blocks()
+                .into_iter()
+                .flat_map(|b| b.get_instructions())
+                .filter(|i| i.get_opcode() == InstructionOpcode::Call)
+                .filter_map(|i| CallSiteValue::try_from(i).ok())
+                .collect()
+        };
+        let mut set: Vec<FunctionValue<'ctx>> = self.module.get_functions().filter(|f| self.tail_fns.contains(f.get_name().to_string_lossy().as_ref())).collect();
+        let mut frontier = set.clone();
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            for f in &frontier {
+                for c in calls(*f) {
+                    if let Some(g) = c.get_called_fn_value()
+                        && g.count_basic_blocks() > 0
+                        && !set.contains(&g)
+                    {
+                        set.push(g);
+                        next.push(g);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        for f in set {
+            for c in calls(f) {
+                let Some(g) = c.get_called_fn_value() else { continue };
+                let i = match g.get_name().to_bytes() {
+                    b"mim_concat" | b"mim_array_lit" => 1,
+                    b"mim_obj" | b"mim_closure" => 2,
+                    b"mim_closure_checked" => 3,
+                    _ => continue,
+                };
+                c.add_attribute(inkwell::attributes::AttributeLoc::Param(i), self.ctx.create_enum_attribute(kind, 0));
+            }
+        }
     }
 
     /// Release a value: short numeric vectors held once go straight back to
@@ -1742,24 +1796,6 @@ impl<'ctx> Cg<'ctx, '_> {
         if name == "mim_alloc_vec" {
             // a new vector: nothing else points into it
             f.add_attribute(inkwell::attributes::AttributeLoc::Return, attr("noalias"));
-        }
-        // an array of values on the stack, read during the call and not
-        // kept (runtime/mimic_rt.c): said to LLVM, the array does not
-        // escape, so a call after it can still be a tail call (a recursion
-        // that builds a string or a record on the way runs as a loop, also
-        // when the function that builds it is inlined into it)
-        let arg_array = match name {
-            "mim_concat" | "mim_array_lit" => Some(1),
-            "mim_obj" | "mim_closure" => Some(2),
-            "mim_closure_checked" => Some(3),
-            _ => None,
-        };
-        if let Some(i) = arg_array {
-            // (`captures(none)`: none of the pointer's bits outlive the call)
-            let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("captures");
-            if kind != 0 {
-                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i), self.ctx.create_enum_attribute(kind, 0));
-            }
         }
         // these never free a value nor synchronise with other threads: values
         // read before them stay readable after them (so reads may move
