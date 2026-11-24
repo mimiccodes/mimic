@@ -838,7 +838,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 let _ = std::io::stdout().flush();
                 let _ = std::io::stderr().flush();
                 let e = child.exec();
-                return Err(format!("cannot run {}: {e}", a.path.display()));
+                Err(format!("cannot run {}: {e}", a.path.display()))
             }
             #[cfg(not(unix))]
             {
