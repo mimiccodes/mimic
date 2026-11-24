@@ -4,7 +4,11 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Added
+- **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
+
 ### Fixed
+- **A primitive's word is refused wherever a name is declared (E0214):** a parameter or a typed `let` named `shape` (the word of `⍴`) was accepted, then every use of it was the primitive, with a misleading parse error (`expected an expression, found '=='`). Functions, parameters, `let`s and lambda parameters now all give E0214 naming the primitive. Reported by a user.
 - **A function named like a built-in primitive is refused (E0214):** `fn matmul(…)` compiled, but every `matmul(…)` elsewhere is the primitive `⊠`, so the function could never be called and nothing said so. It is now an error where the function is declared, naming the primitive. (C functions keep such names under `c::`.)
 - **Stopping `mimic run` stops the program:** on macOS and Linux the program now takes the place of `mimic run` instead of running as its child, so `kill`, a time limit or a closed terminal ends the program itself (before, only `mimic` stopped and the program kept running, holding its memory), and the shell sees the program's own exit status.
 

@@ -89,6 +89,43 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 |---|---|---|
 | The prelude is parsed, resolved and checked again for every build, and the runtime linked from its parts: a one-line program takes about 0.35 s to build (warm, macOS arm64, release): front end 70 ms (prelude parse 25, resolve 15 to 20, check 17 to 21), code generation 100 ms (purity and net plans 25, emitting 14, LLVM passes 42, object 19), link 80 ms | Planned for 0.4.1, moved: saving the parsed prelude needs the whole syntax tree serializable, for 15 to 20% of a build; limiting the purity analysis to reachable functions risks code the generator calls implicitly being taken as impure (slower) for 20 ms | 0.4.9 |
 
+## Found by a user's machine-learning project
+
+Reported from a real project (tensors as a flat `[f64]` plus their dimensions, automatic differentiation, optimizers, training loops), with reproductions and profiles; each is a gap here with the step that closes it.
+
+| Gap | Workaround now | Version |
+|---|---|---|
+| A function named like a primitive's word (`fn matmul`, `fn transpose`) compiled, and `⊠`/`⍉` or the word then meant different things | ✅ E0214 where the function is declared | 0.4.3 |
+| Most numeric library code stays outside the IR: records holding lists (`Tensor`), unions (`Op`), lists of records (`[Tensor]`), function-typed parameters (`fn([Tensor]) -> Tape`), and small wrappers that only call others | none | 0.4.3 (records holding lists, lists of records, unions); 0.4.10 (function values, as the old code generator retires) |
+| A parameter declared `[i64]`/`[f64]` reported as `[?]` or `dynamic` and left out of the IR | ✅ compiled for the declared type, the call converts (as in the held-out row above) | 0.4.3 |
+| A tail-recursive training loop returning a tuple that holds lists (`(Adam, [Tensor])`) kept every step's dead tape alive: 4.4–8.9 GB, against 36–69 MB as an `evolve` over a record | `evolve` or `settle` over a record | 0.4.3 (tail calls become loops; tuples holding lists) |
+| `xs ¨ f` with `f` a function parameter is about 14× slower than the same lambda written inline (8,192 floats: 93.8 ms against 6.8 ms) | write the lambda inline | 0.4.3 (a function applying a function parameter specialised for a known lambda at its call) |
+| Chains of operations on small arrays (2k–33k floats) never use more than one core: each is below the parallel threshold | none | 0.4.10 (one cost model), 0.4.11 (independent updates at once) |
+| Primitive words behave differently by where they appear: a variable gets E0214, a function took over the glyph, a parameter named `shape` gave a parse error later (`expected an expression, found '=='`) | ✅ E0214 wherever a name is declared: functions, parameters, typed `let`s, lambda parameters | 0.4.3 |
+| No assignment to existing `mut` variables from a tuple: `(t, x) = f(t)` (E0208) | return a record and read its fields | 0.4.5 |
+| A field cannot be read off a call's result: `f(x).field` (E0201) | `let r = f(x)` first | 0.4.5 |
+| No whole-value equality: `a == b` on lists is element by element (`[bool]`) and stops the program on different lengths | `(≢ a) == (≢ b) and all(a == b)` | 0.4.5 (`≡`, same) |
+| Indexing with a list of indices, `xs[[3 0]]`, passes the checker and stops the program | `ids ¨ (i => xs[i])` | 0.4.5 (`⊇`, select; a list index refused at compile time until then) |
+| `math` had no `tanh`, `sinh`, `cosh`, `log1p`, `expm1`, `sigmoid` | ✅ added (libm calls that fuse into kernels; `sigmoid` without overflow) | 0.4.3 |
+| No direct `bool` → number conversion (one-hot vectors, masks) | `¨ (b => if b { 1.0 } else { 0.0 })` | 0.4.5 |
+| No fallback for an `Option`: `parse_int(s) ▷ or_else(300)` | ✅ `unwrap_or` for `Option`; for `Result`, a name still to choose | 0.4.3; 0.4.5 (`Result`) |
+| `[u8]` from `fs::read_bytes` needs a map to be used as `[i64]` | `b ¨ (x => x * 1)` | 0.4.7 (bits, bytes and sized integers) |
+| A local cannot share a name with any function of its module (`let steps` next to `fn steps`: E0301) | another name | 0.4.5 |
+| Matrices are typed only at run time: a function cannot declare that it takes one | keep a flat list and its dimensions | 0.4.6 (shapes) |
+| `mimic audit` does not run on a workspace, as `check`, `build`, `test` and `fmt` do | run it in each member | 0.4.13 |
+| Audit rule Q05 counts a `match` over a union's variants as many branches, though its own help recommends that form | none | 0.4.13 |
+| Audit rule Q06 calls two functions duplicates when their bodies match but their parameter types differ | none | 0.4.13 |
+| Releases ship the toolchain for Linux x86-64, macOS arm64 and Windows x86-64 only: none for Linux arm64, macOS x86-64 or Windows arm64 | build from source | 0.4.9 (Linux arm64); 0.10 (the rest) |
+| `mimic fmt --glyphs` leaves code in comments (between backticks) in word form | none | 0.4.5 |
+| The generated `mod.mim` writes signatures in word form in a project formatted with glyphs | none | 0.4.5 |
+| `mimic fmt --glyphs` does not convert the syntax glyphs (`§ ƒ ← ↩ ⍝`), and `mimic fmt` turns `§ ƒ` back but not `← ↩ ⍝`; `--check` passes on mixed files | none | 0.4.5 |
+| `←` binds only a plain name: `b: [i64] ← …` and `(q, r) ← …` need `let` | `let` | 0.4.5 |
+| `⥊` and `⍉` always copy: about 1 GB allocated per training step of a 173k-parameter model | none | 0.4.8 (a reshape or transpose a view over the same storage; one used once reuses its buffer) |
+| No matrix product with a transposed operand (`Aᵀ ⊠ B`): each backward product transposes a full copy first | `⍉` then `⊠` | 0.4.6 (to the kernel's and BLAS's transpose flags) |
+| `⊠` on mid-size float products keeps about 1.5 of 4 cores busy | none | 0.4.6 |
+| `mimic why` sees no arrays behind record fields ("nothing to decide" for a function that is one matrix product of fields) | none | 0.4.4 |
+| The profiler puts 18–34% of the time in an unnamed runtime frame `end` | none | 0.4.9 (the runtime's symbols named, or the region said) |
+
 ## Found by the held-out set
 
 The held-out set (`bench/heldout/`) is 40 programs written plainly from the tutorial alone, never used for tuning (BENCHMARK.md has its numbers). Its first measurement (2026-11-24, 0.4.3-dev): 15 of the 40 run in Mimic, all with the right output, at 8.5–10× C on one core (geometric mean); 25 fail. Each slow spot here gets a corpus program of its own to tune on; the held-out programs are never changed for speed.
