@@ -317,7 +317,11 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
                 if matches!(a.kind, ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) || !quiet(a) {
                     continue;
                 }
-                let earlier: Vec<String> = args[..j].iter().flat_map(names).collect();
+                // (only beside an earlier argument that may take the
+                // variable over, a call such as `push(h, v)`: plain
+                // arithmetic on numbers, `f(zr * zr - zi * zi, 2.0 * zr * zi)`,
+                // gains nothing and its order is better left alone)
+                let earlier: Vec<String> = args[..j].iter().filter(|x| !quiet(x)).flat_map(names).collect();
                 if !names(a).iter().any(|x| earlier.contains(x)) {
                     continue;
                 }
