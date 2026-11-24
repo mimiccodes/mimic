@@ -26,6 +26,10 @@ and writes results.md with each time as a ratio to C.
                                  # noise each benchmark's tolerance allows
                                  # (bench/noise/<platform>.json)
     bench/run.py --machine       # measure this machine's limits again
+    bench/run.py --heldout       # the held-out set (bench/heldout/):
+                                 # programs nobody tunes on, Mimic and C
+                                 # only, into results-heldout.md, kept out
+                                 # of the history
     bench/run.py --gate OLD      # the speed gate: Mimic as built here
                                  # against the mimic at OLD (the code it
                                  # changes), on this machine, in turns
@@ -193,13 +197,15 @@ def main() -> int:
     ap.add_argument("--gate", default="", metavar="OLD", help="the speed gate: compare Mimic as built here with the mimic at OLD, on this machine, in turns")
     ap.add_argument("--inject", action="store_true", help="with --gate: build the new side without LLVM's optimizer (the gate must fail)")
     ap.add_argument("--shard", default="", metavar="I/N", help="only every N-th benchmark, starting with the I-th (from 0): CI splits the gate across machines")
+    ap.add_argument("--heldout", action="store_true", help="the held-out set (bench/heldout/) instead of the corpus: never used for tuning, measured at every 0.4 release")
     a = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     if a.machine:
         limits(fresh=True)
         if not a.names:
             return 0
-    benches = sorted(p for p in HERE.iterdir() if (p / "expected.txt").exists())
+    root = HERE / "heldout" if a.heldout else HERE
+    benches = sorted(p for p in root.iterdir() if (p / "expected.txt").exists())
     if a.names:
         benches = [b for b in benches if b.name in a.names]
     if a.shard:
@@ -211,7 +217,11 @@ def main() -> int:
     if a.gate:
         return gate(benches, Path(a.gate), a.runs, a.inject)
     rows = measure(benches, a.runs)
-    report(rows, a.runs, a.history, a.json)
+    if a.heldout:
+        # (names shared with the corpus: kept out of its history and results)
+        report(rows, a.runs, "", a.json, "results-heldout.md", heldout=True)
+    else:
+        report(rows, a.runs, a.history, a.json)
     return 0
 
 
@@ -349,7 +359,7 @@ def shares(rows) -> list:
     return out
 
 
-def report(rows, runs: int, history: str, json_out: str) -> None:
+def report(rows, runs: int, history: str, json_out: str, out: str = "results.md", heldout: bool = False) -> None:
     """results.md, the table on the terminal, the history, and JSON if asked."""
     c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
     cpu, load = machine()
@@ -367,7 +377,13 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
         cc = f"{t['c']:.3f} s" if "c" in t else "—"  # (ui: Mimic only)
         lines.append(f"| {name} | {cc} | {c(t, 'rust')} | {c(t, 'mimic')} | {c(t, 'rayon')} | {c(t, 'mimic-all')} |")
     table = len(lines)
-    sh = shares(rows)
+    if heldout:
+        # the stage's measure: Mimic on one core against C, geometric mean and worst
+        rs = sorted(((t["mimic"] / t["c"], n) for n, t in rows if "mimic" in t and "c" in t), reverse=True)
+        if rs:
+            gm = math.exp(sum(math.log(r) for r, _ in rs) / len(rs))
+            lines += ["", f"Held-out set, Mimic on one core against C: geometric mean {gm:.2f}× over {len(rs)} programs; slowest {', '.join(f'{n} {r:.2f}×' for r, n in rs[:5])}."]
+    sh = [] if heldout else shares(rows)
     if sh:
         m = limits()
         pct = lambda d, k: f"{d[k] * 100:.0f}%" if k in d else "—"
@@ -382,7 +398,7 @@ def report(rows, runs: int, history: str, json_out: str) -> None:
         ]
         for name, bound, d in sh:
             lines.append(f"| {name} | {bound} | {pct(d, 'c')} | {pct(d, 'rust')} | {pct(d, 'mimic')} | {pct(d, 'rayon')} | {pct(d, 'mimic-all')} |")
-    (HERE / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (HERE / out).write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines[6:]))
     if json_out:
         Path(json_out).write_text(json.dumps({"platform": platform_id(), "cpu": cpu, "cores": os.cpu_count(), "runs": runs, "results": {n: t for n, t in rows}, "machine": limits() if sh else None, "shares": {n: {"bound": b, **d} for n, b, d in sh}}, indent=1) + "\n", encoding="utf-8")
