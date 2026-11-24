@@ -14,7 +14,7 @@ use crate::{type_path, FileDiag, FnId, FnKind, ModId, Program, Resolved};
 use mimic_syntax::ast::*;
 use mimic_syntax::codes as C;
 use mimic_syntax::glyphs::Prim;
-use mimic_syntax::Diag;
+use mimic_syntax::{Diag, Span};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -396,6 +396,68 @@ impl std::fmt::Display for Ty {
 pub type Key = (FnId, Vec<Ty>);
 
 /// Pointer identity of an AST node (the AST is immutable while compiling).
+/// The expressions whose value is a function's result (their ids and
+/// places): block tails, the branches of `if` and `match`, and `return`
+/// statements along the way
+fn results_block(b: &Block, out: &mut Vec<(usize, Span)>) {
+    for st in &b.stmts {
+        if let Stmt::Return(Some(e), _) = st {
+            results(e, out);
+        }
+    }
+    if let Some(t) = &b.tail {
+        results(t, out);
+    }
+}
+
+fn results(e: &Expr, out: &mut Vec<(usize, Span)>) {
+    match &e.kind {
+        ExprKind::If { then, els, .. } => {
+            results_block(then, out);
+            if let Some(x) = els {
+                results(x, out);
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => results_block(b, out),
+        ExprKind::Match { arms, .. } => arms.iter().for_each(|a| results(&a.body, out)),
+        _ => out.push((id(e), e.span)),
+    }
+}
+
+/// The values of `return` statements anywhere in a function's body (in a
+/// loop, a branch taken as a statement), not in its lambdas: a lambda's
+/// `return` is the lambda's
+fn returns_anywhere(body: &Block, out: &mut Vec<(usize, Span)>) {
+    let mut inside = std::collections::HashSet::new();
+    body.walk(&mut |e| match &e.kind {
+        ExprKind::Lambda { body, .. } => body.walk(&mut |x| {
+            inside.insert(id(x));
+        }),
+        ExprKind::Arms { body, .. } => body.walk(&mut |x| {
+            inside.insert(id(x));
+        }),
+        _ => {}
+    });
+    let scan = |b: &Block, out: &mut Vec<(usize, Span)>| {
+        for st in &b.stmts {
+            if let Stmt::Return(Some(e), _) = st {
+                results(e, out);
+            }
+        }
+    };
+    scan(body, out);
+    body.walk(&mut |e| {
+        if inside.contains(&id(e)) {
+            return;
+        }
+        match &e.kind {
+            ExprKind::If { then, .. } => scan(then, out),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => scan(b, out),
+            _ => {}
+        }
+    });
+}
+
 pub fn id<T>(x: &T) -> usize {
     x as *const T as usize
 }
@@ -419,6 +481,10 @@ pub struct Spec {
     pub tuple_lets: HashMap<(usize, usize), Ty>,
     /// Route-pattern capture types, by (pattern id, capture index).
     pub route_binds: HashMap<(usize, usize), Ty>,
+    /// Arguments converted to their parameter's declared list type, by (call
+    /// id, argument index): a list of unknown type passed for `xs: [i64]`
+    /// (the callee is compiled for `[i64]`, the call converts it).
+    pub converts: std::collections::HashSet<(usize, usize)>,
 }
 
 pub struct TypeInfo {
@@ -715,6 +781,7 @@ impl Infer<'_> {
                 out: Spec { params: Vec::new(), ret: Ty::Never, lets: prev.lets.clone(), ..Default::default() },
                 scopes: vec![HashMap::new()],
                 ret: Ty::Never,
+                fn_vals: HashMap::new(),
             };
             // type parameters: bound from the argument types of this specialisation
             let mut env: Vec<(String, Ty)> = Vec::new();
@@ -748,6 +815,27 @@ impl Infer<'_> {
             }
             let body = w.block(&d.body);
             let mut ret = body.join(w.ret);
+            // a function named where the declared result is a value: `run`
+            // where `now` was meant, in `-> R { if k == 0 { run } else { now } }`.
+            // A function value is not typed yet (it is dynamic), so the check
+            // below would let it through and the program fail when it runs
+            if let Some(rt) = &d.ret
+                && !matches!(rt, Type::Fn(..))
+                && !matches!(rt, Type::Named(n, _) if d.type_params.contains(n))
+                && matches!(ann_env(p, module, rt, &env), Some(t) if t != Ty::Dyn)
+            {
+                let mut res = Vec::new();
+                results_block(&d.body, &mut res);
+                returns_anywhere(&d.body, &mut res);
+                res.sort_by_key(|r| r.0);
+                res.dedup_by_key(|r| r.0);
+                for (e, span) in res {
+                    if let Some(&f) = w.fn_vals.get(&e) {
+                        let name = p.fns[f].name.clone();
+                        w.err(Diag::new(&C::TYPE_MISMATCH, format!("`{name}` is a function, but `{path}` returns `{rt}`: call it (`{name}(…)`) or name the value meant"), span));
+                    }
+                }
+            }
             if let Some(rt) = &d.ret {
                 match coerce_env(p, module, Some(rt), ret, &env) {
                     Ok(t) => ret = t,
@@ -783,6 +871,9 @@ struct Walk<'a, 'p> {
     scopes: Vec<HashMap<String, (usize, Ty)>>,
     /// join of `return` statements
     ret: Ty,
+    /// expressions that name a function as a value (`run`, not `run(x)`):
+    /// expression id → the function
+    fn_vals: HashMap<usize, FnId>,
 }
 
 impl Walk<'_, '_> {
@@ -1037,6 +1128,25 @@ impl Walk<'_, '_> {
         if args.contains(&Ty::Never) {
             return Ty::Never; // argument types not known yet
         }
+        // a list of unknown type (`[]`, a `flatten`, a value of unknown type)
+        // for a parameter declared a typed list (`xs: [i64]`): the function
+        // is compiled for the declared type, and this call converts the list
+        // (before, the declaration was only checked: the function ran on
+        // the generic path for that call)
+        let mut args = args;
+        if let FnKind::User(d) = &self.inf.p.fns[fid].kind {
+            let m = self.inf.p.fns[fid].module;
+            for (i, prm) in d.params.iter().enumerate() {
+                if i < args.len()
+                    && matches!(args[i], Ty::Dyn | Ty::Arr(El::Dyn, _))
+                    && let Some(t) = prm.ty.as_ref().and_then(|t| ann_in(self.inf.p, m, t))
+                    && matches!(t, Ty::Arr(El::I64 | El::F64, 0))
+                {
+                    args[i] = t;
+                    self.out.converts.insert((at, i));
+                }
+            }
+        }
         let k: Key = (fid, args);
         self.inf.ensure(k.clone());
         self.out.calls.insert(at, k.clone());
@@ -1150,6 +1260,7 @@ impl Walk<'_, '_> {
                     Some(Resolved::Variant(t, _)) => obj(t, &vec![Ty::Never; self.inf.p.types[t].decl.params.len()]),
                     Some(Resolved::Fn(f)) => {
                         self.fn_value(f);
+                        self.fn_vals.insert(id(e), f);
                         Ty::Dyn
                     }
                     _ => Ty::Dyn,

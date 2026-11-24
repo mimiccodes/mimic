@@ -1,0 +1,20 @@
+// expect-error: E0401 `run` is a function, but
+module main
+
+// the same through `return` inside a branch (a lambda's own `return` is
+// its own, and a function returning a function is fine: see run/closures)
+
+type R = { x: i64 }
+
+fn run(a: i64) -> i64 { a }
+
+fn pick(k: i64, now: R) -> R {
+    if k == 0 {
+        return run
+    }
+    now
+}
+
+fn main() {
+    print("{pick(1, R { x: 1 }).x}")
+}

@@ -4057,6 +4057,26 @@ mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
         }
         return r;
     }
+    /* a list of boxed numbers (a `flatten`, a list grown from `[]` the
+     * generic way): the typed list its declaration asks for, when every
+     * element is a number of that kind (an empty list included) */
+    if (v && v->rank == 1 && v->dtype == MIM_BOXED && (dtype == MIM_I64 || dtype == MIM_F64)) {
+        mim_val **xs = (mim_val **)v->data;
+        int64_t n = v->len;
+        int ok = 1;
+        for (int64_t k = 0; k < n && ok; k++) {
+            mim_val *x = xs[k];
+            ok = x && x->rank == 0 && (x->dtype == MIM_I64 || x->dtype == MIM_BOOL || x->dtype == MIM_I32 || (dtype == MIM_F64 && (x->dtype == MIM_F64 || x->dtype == MIM_F32)));
+        }
+        if (ok) {
+            mim_val *r = alloc(dtype, 1, n);
+            for (int64_t k = 0; k < n; k++) {
+                if (dtype == MIM_F64) ((double *)r->data)[k] = getf(xs[k], 0);
+                else ((int64_t *)r->data)[k] = geti(xs[k], 0);
+            }
+            return r;
+        }
+    }
     if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL && v->dtype != MIM_I32 && v->dtype != MIM_F32)) {
         mim_retain(v);
         return v;

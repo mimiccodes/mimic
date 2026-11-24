@@ -1,0 +1,34 @@
+module main
+
+// A parameter declared a typed list (`[i64]`, `[f64]`) given a list of
+// unknown type (`[]`, a `flatten`, a list grown from `[]`): the function is
+// compiled for the declared type and the call converts the list.
+
+fn total(xs: [i64]) -> i64 { xs ▷ +/ }
+
+fn mean(xs: [f64]) -> f64 { (xs ▷ +/) / ≢ xs }
+
+// digits × k, carrying, into `out` (given as `[]`)
+fn times(digits: [i64], k: i64, i: i64, carry: i64, out: [i64]) -> [i64] {
+    if i < ≢ digits {
+        let v = digits[i] * k + carry
+        times(digits, k, i + 1, v div 10, push(out, v % 10))
+    } else if carry > 0 {
+        times(digits, k, i, carry div 10, push(out, carry % 10))
+    } else {
+        out
+    }
+}
+
+fn factorial(n: i64, k: i64, digits: [i64]) -> [i64] {
+    if k > n { digits } else { factorial(n, k + 1, times(digits, k, 0, 0, [])) }
+}
+
+fn main() {
+    print(total(⍳ 5))
+    print(total(flatten([[1 2] [3 4 5]])))
+    print(total([]))
+    print(mean(flatten([[1.5 2.5] [3.0]])))
+    let digits = factorial(100, 2, [1])
+    print("{digits ▷ +/} {≢ digits}")
+}
