@@ -542,7 +542,30 @@ pub(crate) fn last_use_sites(name: &str, body: &Block) -> Vec<usize> {
     if order.in_closure {
         return Vec::new();
     }
-    order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false)).collect()
+    // (only where the order is the walk's: the nearest expression holding
+    // this use and another is a block, an `if` or a `match`. In
+    // `xs ⌿ (xs ¨ f)` the mask runs first, so moving the last `xs` written
+    // into `¨` released the list before `⌿` read it; in `f(xs, g(xs))` the
+    // first argument is read before `g` takes it)
+    let mut span: HashMap<usize, (usize, usize, bool)> = HashMap::new();
+    let mut n = 0;
+    body.walk(&mut |x| {
+        let mut len = 0;
+        x.walk(&mut |_| len += 1);
+        let seq = matches!(x.kind, ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::If { .. } | ExprKind::Match { .. });
+        span.insert(id(x), (n, n + len, seq));
+        n += 1;
+    });
+    let ordered = |site: usize| {
+        let Some(&(at, _, _)) = span.get(&site) else { return false };
+        // the smallest expression holding the site and another use
+        let holder = span
+            .values()
+            .filter(|(a, b, _)| *a <= at && at < *b && order.uses.iter().any(|(u, _)| *u != site && span.get(u).is_some_and(|&(p, _, _)| *a <= p && p < *b)))
+            .min_by_key(|(a, b, _)| b - a);
+        holder.is_none_or(|&(_, _, seq)| seq)
+    };
+    order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false) && ordered(*i)).collect()
 }
 
 /// The uses of a name in a body, in the order they run (the walk's order:

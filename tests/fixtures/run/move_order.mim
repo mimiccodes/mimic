@@ -1,0 +1,49 @@
+module main
+
+// a list a function takes, read twice in one expression whose right side
+// runs first: `clients ⌿ (clients ¨ f)` (the mask first) and
+// `f(xs, g(xs))` (the first argument read before `g` takes the list). The
+// use written last is not the last to run, so it is not where the list
+// moves: moving it there released the list before `⌿` read it, once the
+// list was held only here (as after a `push` changed it in place)
+
+type Out = { id: i64 }
+type Event = Join(i64, Out) | Say(str) | Leave(i64)
+
+fn pick(evs: [Event], i: i64) -> Option[Event] {
+    if i < ≢ evs { Some(evs[i]) } else { None }
+}
+
+fn show(cs: [(i64, Out)], t: str) -> [bool] {
+    cs ¨ (c => c.1.id + ≢ t > 0)
+}
+
+fn hub(evs: [Event], i: i64, clients: [(i64, Out)]) -> i64 {
+    match pick(evs, i) {
+        Some(Join(id, out)) => {
+            let now = push(clients, (id, out))
+            show(now, "{≢ now} online")
+            hub(evs, i + 1, now)
+        }
+        Some(Leave(id)) => {
+            hub(evs, i + 1, clients ⌿ (clients ¨ (c => c.0 != id)))
+        }
+        Some(Say(t)) => {
+            show(clients, t)
+            hub(evs, i + 1, clients)
+        }
+        None => ≢ clients + (clients ¨ (c => c.1.id) ▷ +/)
+    }
+}
+
+fn first_and_sum(xs: [i64], total: i64) -> i64 { xs[0] * 1000 + total }
+
+fn twice(xs: [i64]) -> i64 {
+    first_and_sum(xs, push(xs, 5) ▷ +/)
+}
+
+fn main() {
+    let evs = ⍳ 3000 ¨ (k => if k % 5 == 4 { Leave(k - 2) } else if k % 3 == 0 { Say("hi {k}") } else { Join(k, Out { id: k + 1 }) })
+    print(hub(evs, 0, []))
+    print(twice(⍳ 4 ¨ (i => i + 7)))
+}

@@ -359,6 +359,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         building_literal: false,
         body_exit: None,
         tail_calls: HashMap::new(),
+        tail_fns: std::collections::HashSet::new(),
         ir_exit_top: 0,
         lazy_deep: None,
         cur_kind: Kind::Plain,
@@ -440,6 +441,17 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
             .run_passes(&format!("default<O{}>", settings.opt_level.min(3)), &tm, PassBuilderOptions::create())
             .s()?;
     } else {
+        // (every other function is left as written: `optnone`, which these
+        // passes skip, so the debugger finds its variables where they are)
+        let optnone = inkwell::attributes::Attribute::get_named_enum_kind_id("optnone");
+        let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            let always = f.get_enum_attribute(inkwell::attributes::AttributeLoc::Function, inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline")).is_some();
+            if !always && !cg.tail_fns.contains(f.get_name().to_string_lossy().as_ref()) {
+                f.add_attribute(inkwell::attributes::AttributeLoc::Function, cg.ctx.create_enum_attribute(optnone, 0));
+                f.add_attribute(inkwell::attributes::AttributeLoc::Function, cg.ctx.create_enum_attribute(noinline, 0));
+            }
+        }
         // debug builds: no optimisation, but a function that calls itself
         // last still runs as a loop, as in a release build, so a program
         // that works there does not overflow the stack here (variables
@@ -635,6 +647,10 @@ struct Cg<'ctx, 'p> {
     /// The function's calls to itself that are its result, and the locals
     /// each one's arguments may still use (see owned::tail_self_calls)
     tail_calls: HashMap<usize, Vec<owned::TailArg>>,
+    /// The functions that call themselves last (their LLVM names): in debug
+    /// builds only these are optimised (into loops), the rest stay as written
+    /// for the debugger
+    tail_fns: std::collections::HashSet<String>,
     /// The IR region of `main`'s body while it is compiled (its address):
     /// what an expression there is handed is not released after it either,
     /// as main's own values are not (the process exits next)
@@ -1036,7 +1052,10 @@ impl<'ctx> Cg<'ctx, '_> {
                     None => self.b.build_call(self.release_fn(false), &[p.into()], "").s()?,
                 };
             }
-            false => self.release_out(p)?,
+            false if !self.tail_calls.is_empty() => self.release_out(p)?,
+            false => {
+                self.call_rt("mim_release", &[p.into()])?;
+            }
         }
         Ok(())
     }
@@ -1727,7 +1746,8 @@ impl<'ctx> Cg<'ctx, '_> {
         // an array of values on the stack, read during the call and not
         // kept (runtime/mimic_rt.c): said to LLVM, the array does not
         // escape, so a call after it can still be a tail call (a recursion
-        // that builds a string or a record on the way runs as a loop)
+        // that builds a string or a record on the way runs as a loop, also
+        // when the function that builds it is inlined into it)
         let arg_array = match name {
             "mim_concat" | "mim_array_lit" => Some(1),
             "mim_obj" | "mim_closure" => Some(2),
@@ -2056,6 +2076,9 @@ impl<'ctx> Cg<'ctx, '_> {
         // (the IR's embedded expressions too: one that is the function's
         // result ends with the call as well)
         self.tail_calls = if self.heap_ok_target() { owned::tail_self_calls(p, p.fns[k.0].module, k.0, &decl.body) } else { HashMap::new() };
+        if !self.tail_calls.is_empty() {
+            self.tail_fns.insert(fv.get_name().to_string_lossy().into_owned());
+        }
         // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
         let (use_ir, print_ir) = ir::wanted();
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
@@ -2083,11 +2106,12 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             None => self.block(&decl.body)?,
         };
-        self.tail_calls.clear();
         self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
         }
+        // (after the return: its releases check for null too)
+        self.tail_calls.clear();
         self.scopes.clear();
         self.native_frame = false;
         self.cur_depth = None;
@@ -2661,8 +2685,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     // (inline: a value that moved away left a null, which
                     // LLVM sees and drops the release entirely)
                     self.release(cur.into_pointer_value())?;
-                } else {
+                } else if !self.tail_calls.is_empty() {
+                    // (a function that calls itself last: checked for the
+                    // null an early release left, see release_out)
                     self.release_out(cur.into_pointer_value())?;
+                } else {
+                    self.call_rt("mim_release", &[cur.into()])?;
                 }
             }
         }
@@ -2891,6 +2919,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         // not handed to the runtime, so it stays a register
                         // and a call after it can still be a tail call, as
                         // `run(k - 1, bump(cells, i))` with `bump` inlined)
+                        // (everywhere: a function that does this may be
+                        // inlined into one that calls itself last)
                         let cur = self.b.build_load(self.ptr, slot, "").s()?;
                         let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(iv).into(), self.basic(v).into()])?;
                         self.b.build_store(slot, self.basic(out)).s()?;
@@ -4809,7 +4839,18 @@ impl<'ctx> Cg<'ctx, '_> {
                 .filter(|(j, a)| !(a.direct.is_some() && consumed.get(*j).copied().unwrap_or(false)))
                 .flat_map(|(_, a)| a.roots.iter().cloned())
                 .collect();
-            let early: Vec<(PointerValue<'ctx>, bool)> = self.scopes.iter().flatten().filter(|l| l.owned && !keep.contains(&l.name)).map(|l| (l.slot, l.moves)).collect();
+            // a kept name that borrows from another local (a `match`
+            // binding points into the value matched, which a local of its
+            // own holds): what it borrows from is not known here, so
+            // nothing is released early (a parameter is the caller's)
+            let params: Vec<String> = match &self.p.fns[fid].kind {
+                FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+                _ => Vec::new(),
+            };
+            // (a number held in a register borrows nothing)
+            let borrows = keep.iter().any(|n| !params.contains(n) && self.lookup(n).is_some_and(|l| !l.owned && self.repr(l.ty).is_pointer_type()));
+            let early: Vec<(PointerValue<'ctx>, bool)> =
+                if borrows { Vec::new() } else { self.scopes.iter().flatten().filter(|l| l.owned && !keep.contains(&l.name)).map(|l| (l.slot, l.moves)).collect() };
             for (slot, moves) in early {
                 let cur = self.b.build_load(self.ptr, slot, "").s()?;
                 if moves {
