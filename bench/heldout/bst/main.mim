@@ -1,0 +1,65 @@
+module main
+
+// Insert 300,000 generated keys into a binary search tree (duplicates
+// ignored), then count the keys in 10,000 generated ranges [lo, lo + width)
+// by walking the tree; print the number of keys, the total and the height.
+
+type Tree = Leaf | Node(Tree, i64, Tree)
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn insert(t: Tree, key: i64) -> Tree {
+    match t {
+        Leaf => Node(Leaf, key, Leaf),
+        Node(l, v, r) if key < v => Node(insert(l, key), v, r),
+        Node(l, v, r) if key > v => Node(l, v, insert(r, key)),
+        _ => t,
+    }
+}
+
+fn build(t: Tree, k: i64, x: i64) -> (Tree, i64) {
+    if k == 0 { (t, x) } else {
+        let y = next(x)
+        build(insert(t, y % 10000019), k - 1, y)
+    }
+}
+
+fn make_ranges(k: i64, x: i64, acc: [(i64, i64)]) -> [(i64, i64)] {
+    if k == 0 { acc } else {
+        let a = next(x)
+        let b = next(a)
+        let lo = a % 10000019
+        make_ranges(k - 1, b, push(acc, (lo, lo + b % 20011)))
+    }
+}
+
+fn count_range(t: Tree, lo: i64, hi: i64) -> i64 {
+    match t {
+        Leaf => 0,
+        Node(_, v, r) if v < lo => count_range(r, lo, hi),
+        Node(l, v, _) if v >= hi => count_range(l, lo, hi),
+        Node(l, _, r) => 1 + count_range(l, lo, hi) + count_range(r, lo, hi),
+    }
+}
+
+fn size(t: Tree) -> i64 {
+    match t {
+        Leaf => 0,
+        Node(l, _, r) => 1 + size(l) + size(r),
+    }
+}
+
+fn height(t: Tree) -> i64 {
+    match t {
+        Leaf => 0,
+        Node(l, _, r) => 1 + max(height(l), height(r)),
+    }
+}
+
+fn main() {
+    let (tree, x) = build(Leaf, 300000, 42)
+    let ranges = make_ranges(10000, x, [])
+    print(size(tree))
+    print(ranges ¨ (r => count_range(tree, r.0, r.1)) ▷ +/)
+    print(height(tree))
+}

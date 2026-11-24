@@ -1,0 +1,37 @@
+module main
+
+// Build a text of 1,000,000 words drawn from a list of 50, count how often
+// each word occurs, and print the 10 most frequent with their counts.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn pick_words(vocab: [str], n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let y = next(x)
+        pick_words(vocab, n - 1, y, push(acc, vocab[(y div 65536) % 50]))
+    }
+}
+
+fn tally(ws: [str], i: i64, counts: [str: i64]) -> [str: i64] {
+    if i == ≢ ws { counts } else {
+        let w = ws[i]
+        let c = match get(counts, w) {
+            Some(n) => n + 1,
+            None => 1,
+        }
+        tally(ws, i + 1, put(counts, w, c))
+    }
+}
+
+fn main() {
+    let vocab = ["the" "of" "and" "to" "in" "is" "you" "that" "it" "he"
+                 "was" "for" "on" "are" "as" "with" "his" "they" "at" "be"
+                 "this" "have" "from" "or" "one" "had" "by" "word" "but" "not"
+                 "what" "all" "were" "we" "when" "your" "can" "said" "there" "use"
+                 "an" "each" "which" "she" "do" "how" "their" "if" "will" "up"]
+    let text = pick_words(vocab, 1000000, 42, []) ▷ join(" ")
+    let counts = tally(split(text, " "), 0, [:])
+    // most frequent first; equal counts keep the order words first appeared in
+    let ranked = sort_by(zip(keys(counts), values(counts)), p => 0 - p.1)
+    ranked ↑ 10 ¨ (p => print("{p.0} {p.1}"))
+}

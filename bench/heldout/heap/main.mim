@@ -1,0 +1,65 @@
+module main
+
+// A binary min-heap written by hand: push 1,000,000 generated numbers, pop
+// them all, and print a checksum of the popped order (the sum of
+// value × (i % 1000 + 1) for the i-th value popped) and whether it is sorted.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn swap(h: [i64], i: i64, j: i64) -> [i64] {
+    let mut s = h
+    s[i] = h[j]
+    s[j] = h[i]
+    s
+}
+
+fn sift_up(h: [i64], i: i64) -> [i64] {
+    if i == 0 { h } else {
+        let p = (i - 1) div 2
+        if h[p] > h[i] { sift_up(swap(h, p, i), p) } else { h }
+    }
+}
+
+fn sift_down(h: [i64], i: i64) -> [i64] {
+    let n = ≢ h
+    let l = 2 * i + 1
+    let r = 2 * i + 2
+    let m1 = if l < n and h[l] < h[i] { l } else { i }
+    let m = if r < n and h[r] < h[m1] { r } else { m1 }
+    if m == i { h } else { sift_down(swap(h, i, m), m) }
+}
+
+fn heap_push(h: [i64], v: i64) -> [i64] { sift_up(push(h, v), ≢ h) }
+
+// the smallest value, and the heap without it
+fn heap_pop(h: [i64]) -> (i64, [i64]) {
+    let n = ≢ h
+    let top = h[0]
+    let mut rest = h ↑ (n - 1)
+    if n > 1 {
+        rest[0] = h[n - 1]
+    }
+    (top, sift_down(rest, 0))
+}
+
+fn fill(h: [i64], k: i64, x: i64) -> [i64] {
+    if k == 0 { h } else {
+        let y = next(x)
+        fill(heap_push(h, y % 1000000007), k - 1, y)
+    }
+}
+
+// (checksum, still sorted?)
+fn drain(h: [i64], i: i64, last: i64, checksum: i64, sorted: bool) -> (i64, bool) {
+    if ≢ h == 0 { (checksum, sorted) } else {
+        let (v, rest) = heap_pop(h)
+        drain(rest, i + 1, v, checksum + v * (i % 1000 + 1), sorted and v >= last)
+    }
+}
+
+fn main() {
+    let h = fill([], 1000000, 42)
+    let (checksum, sorted) = drain(h, 0, ¯1, 0, true)
+    print(checksum)
+    print(sorted)
+}
