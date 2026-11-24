@@ -568,23 +568,52 @@ static void each_cost_put(void *key, int64_t ns) {
     __atomic_store_n(&g_each_cost[i].key, key, __ATOMIC_RELAXED);
 }
 
+/* The first chunk the calling thread runs of a `¨` shared out for the
+ * first time, timed: what the function costs per element. */
+typedef struct {
+    void (*f)(void *, int64_t, int64_t);
+    void *ctx;
+    int64_t ns; /* per element, once timed */
+} probe_ctx;
+
+static _Thread_local int t_probe; /* this thread called the `¨` being probed */
+
+static void probe_range(void *c, int64_t lo, int64_t hi) {
+    probe_ctx *p = (probe_ctx *)c;
+    if (!t_probe || p->ns) {
+        p->f(p->ctx, lo, hi);
+        return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    p->f(p->ctx, lo, hi);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+    p->ns = hi > lo ? (spent / (hi - lo) > 0 ? spent / (hi - lo) : 1) : 0;
+}
+
 /* A pure `¨` of the function `key` over n elements. A long list goes in
- * fine chunks over every core, as always. A short one (up to a chunk,
- * 16,384) is shared out only when that is worth waking the pool for: at
- * once when the function has been costly before, else after timing the
- * first elements (1, 2, 4, … at a time) at this call. (Sent straight to the
- * pool, the 9-element `¨`s of a sudoku check woke every thread 27,000 times
- * in 20,000 grids, and ran 6x slower on 12 cores than on one; timed alone,
- * a few costly elements, such as 8 searches, would run the first before
- * sharing the rest at every call.) */
+ * fine chunks over every core, as always, and so does a short one the
+ * first time (up to a chunk, 16,384), while its cost per element is timed.
+ * After that a short list is shared out only when that is worth waking the
+ * pool for at the cost seen, else it runs here, timed as it goes (1, 2, 4,
+ * … elements, and shared out if it turns out costly after all). (Sent
+ * straight to the pool every time, the 9-element `¨`s of a sudoku check
+ * woke every thread 27,000 times in 20,000 grids, and ran 6x slower on 12
+ * cores than on one. Timed before sharing every time instead, a few costly
+ * elements, such as 25 searches done once, ran the first alone.) */
 static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx, void *key) {
     if (n > mim_grain || n == 1 || g_nthreads <= 1 || t_in_parallel) {
         parallel_for_grain(n, fine_grain(n), range, ctx);
         return;
     }
     int64_t per = each_cost(key);
-    if (per > 0 && worth_sharing(per, 1, n)) {
-        parallel_for_grain(n, fine_grain(n), range, ctx);
+    if (per == 0 || worth_sharing(per, 1, n)) {
+        probe_ctx p = {range, ctx, 0};
+        t_probe = 1;
+        parallel_for_grain(n, fine_grain(n), probe_range, &p);
+        t_probe = 0;
+        if (p.ns) each_cost_put(key, p.ns);
         return;
     }
     struct timespec a, b;
