@@ -438,11 +438,21 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
             .run_passes(&format!("default<O{}>", settings.opt_level.min(3)), &tm, PassBuilderOptions::create())
             .s()?;
     }
+    // every function at a 64-byte boundary (the runtime's too, driver.rs):
+    // a change to one function then cannot move another relative to the
+    // cache line, the instruction fetch window and the branch predictor's
+    // sets, which made programs whose code was unchanged measure 5-10%
+    // faster or slower on some machines when an unrelated function grew
+    let tstr = triple.as_str().to_string_lossy().to_string();
+    if !(tstr.starts_with("wasm") || tstr.starts_with("nvptx") || tstr.starts_with("amdgcn") || tstr.starts_with("spirv") || tstr.starts_with("bpf")) {
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            f.as_global_value().set_alignment(64);
+        }
+    }
     if let Some(ir) = ir {
         cg.module.print_to_file(ir).s()?;
     }
     // backends that only write assembly
-    let tstr = triple.as_str().to_string_lossy().to_string();
     if tstr.starts_with("nvptx") || tstr.starts_with("xcore") {
         let asm = obj.with_extension(if tstr.starts_with("nvptx") { "ptx" } else { "s" });
         tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;

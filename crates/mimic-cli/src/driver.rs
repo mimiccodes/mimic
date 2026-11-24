@@ -1113,6 +1113,13 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     if frame_pointers {
         flags.push("-fno-omit-frame-pointer".into());
     }
+    // every function at a 64-byte boundary, as the program's (codegen): a
+    // function that grows then cannot move the others relative to the
+    // cache line and the fetch window, which shifted unrelated programs'
+    // speed by 5-10% on some machines
+    if !target.name().starts_with("wasm") {
+        flags.push("-falign-functions=64".into());
+    }
     if !target.is_apple() {
         // a section per function, so the linker drops what a program does not
         // use (Mach-O linkers do this by symbol without being asked)
