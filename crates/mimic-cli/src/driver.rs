@@ -117,6 +117,15 @@ pub type Option[T] = Some(T) | None
 // Results of operations that can fail: `else` unwraps Ok.
 pub type Result[T, E] = Ok(T) | Err(E)
 
+// The value inside, or `default` when there is none:
+// `parse_int(s) ▷ unwrap_or(300)`, `get(counts, w) ▷ unwrap_or(0)`.
+pub fn unwrap_or[T](o: Option[T], default: T) -> T {
+    match o {
+        Some(x) => x,
+        None => default,
+    }
+}
+
 // Tests: `expect(…)` in a `test \"…\" { }` block becomes one of these (the
 // compiler adds the expression's text and line; runtime/mimic_std.c).
 pub extern \"mimic\" ordered {

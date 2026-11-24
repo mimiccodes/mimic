@@ -119,6 +119,9 @@ math::atan2(1.0, 1.0) * 4.0        // π
 | `math::sin(x)`, `math::cos(x)`, `math::tan(x)` | trigonometry, in radians |
 | `math::asin(x)`, `math::acos(x)`, `math::atan(x)`, `math::atan2(y, x)` | inverse trigonometry |
 | `math::exp(x)`, `math::ln(x)`, `math::log2(x)`, `math::log10(x)` | exponential and logarithms |
+| `math::tanh(x)`, `math::sinh(x)`, `math::cosh(x)` | hyperbolic functions |
+| `math::log1p(x)`, `math::expm1(x)` | ln(1 + x) and eˣ − 1, exact near zero (stable losses) |
+| `math::sigmoid(x)` | the logistic function 1 / (1 + e⁻ˣ), without overflow for large negative `x` |
 | `math::floor(x)`, `math::ceil(x)`, `math::round(x)` | rounding (to an `f64`) |
 | `math::to_int(x)` | the integer part as an `i64`, towards zero: `math::to_int(¯2.7)` is `-2`; `math::to_int(math::round(x))` rounds. NaN, or a number no `i64` holds, stops the program. (An integer becomes a float with `n * 1.0`.) |
 | `math::pi()`, `math::e()` | the constants |
