@@ -69,18 +69,35 @@ mim_val *mim_set_index_v(mim_val *xs, mim_val *i, mim_val *v) {
 /* What a `¨`'s function has cost per element (ns), by the function: a
  * small table, written without locks (a torn or lost entry only means one
  * more timing). */
-static struct { void *key; int64_t ns; } g_each_cost[256];
+typedef struct { void *key; int64_t ns; } each_cost_slot;
+/* allocated at the first short `¨` (as a 4 KB static array it moved every
+ * global after it by a page, and `fib`, which never maps, measured 20%
+ * slower on one core on one machine) */
+static each_cost_slot *g_each_cost;
 
 static int64_t each_cost(void *key) {
+    each_cost_slot *t = __atomic_load_n(&g_each_cost, __ATOMIC_ACQUIRE);
+    if (!t) return 0;
     unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
-    if (__atomic_load_n(&g_each_cost[i].key, __ATOMIC_RELAXED) != key) return 0;
-    return __atomic_load_n(&g_each_cost[i].ns, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&t[i].key, __ATOMIC_RELAXED) != key) return 0;
+    return __atomic_load_n(&t[i].ns, __ATOMIC_RELAXED);
 }
 
 static void each_cost_put(void *key, int64_t ns) {
+    each_cost_slot *t = __atomic_load_n(&g_each_cost, __ATOMIC_ACQUIRE);
+    if (!t) {
+        each_cost_slot *n = (each_cost_slot *)calloc(256, sizeof(each_cost_slot));
+        if (!n) return;
+        each_cost_slot *expected = NULL;
+        if (__atomic_compare_exchange_n(&g_each_cost, &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) t = n;
+        else {
+            free(n);
+            t = expected;
+        }
+    }
     unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
-    __atomic_store_n(&g_each_cost[i].ns, ns < 1 ? 1 : ns, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_each_cost[i].key, key, __ATOMIC_RELAXED);
+    __atomic_store_n(&t[i].ns, ns < 1 ? 1 : ns, __ATOMIC_RELAXED);
+    __atomic_store_n(&t[i].key, key, __ATOMIC_RELAXED);
 }
 
 /* The first chunk (from element 0) of a `¨` shared out for the first time,
