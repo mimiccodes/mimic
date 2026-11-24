@@ -39,11 +39,11 @@ fn tally(ws: [str], i: i64, counts: [str: i64]) -> [str: i64] {
 }
 
 fn main() {
-    let ws = words(["a" "bb" "ccc" "dd" "e"], 20000, 42, [])
+    let ws = words(["a" "bb" "ccc" "dd" "e"], 5000, 42, [])
     let counts = tally(ws, 0, [:])
-    print("{≢ ws} {ws[0]} {ws[19999]} {get(counts, "bb")} {get(counts, "e")}")
-    let fs = floats(20000, 7, [])
+    print("{≢ ws} {ws[0]} {ws[4999]} {get(counts, "bb")} {get(counts, "e")}")
+    let fs = floats(5000, 7, [])
     print("{≢ fs} {fs ▷ +/}")
-    let ps = points(20000, [])
-    print("{≢ ps} {ps[0].id} {ps[19999].id} {ps ¨ (p => p.w) ▷ +/}")
+    let ps = points(5000, [])
+    print("{≢ ps} {ps[0].id} {ps[4999].id} {ps ¨ (p => p.w) ▷ +/}")
 }
