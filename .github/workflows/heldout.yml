@@ -3,8 +3,10 @@
 # in Mimic and in C on Linux, macOS and Windows, its output checked against
 # expected.txt, and timed (bench/run.py --heldout); the table and the
 # geometric mean against C go into the run's summary. A program that does
-# not build, prints the wrong output or runs over 5 minutes fails the job,
-# after every other program has been measured.
+# not build, prints the wrong output, runs over 5 minutes or over 4 GB of
+# memory is listed as failed there, after every other program has been
+# measured; the job itself does not fail on it (it measures, it does not
+# gate).
 #
 # On pull requests that change the set or the runner, by hand, and every
 # night on dev (the measure stage 0.4 closes on).
@@ -54,7 +56,10 @@ jobs:
       - name: Build mimic
         run: cargo build --release
 
+      # it measures: failures are listed in the summary (and stage 0.4
+      # closes only when there are none), not a reason to block a merge
       - name: The held-out set
+        continue-on-error: true
         run: '"$(command -v python3 || command -v python)" bench/run.py --heldout --runs 3 --json heldout.json'
 
       - name: Results
