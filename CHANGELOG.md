@@ -5,6 +5,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Fixed
+- **A function named like a built-in primitive is refused (E0214):** `fn matmul(…)` compiled, but every `matmul(…)` elsewhere is the primitive `⊠`, so the function could never be called and nothing said so. It is now an error where the function is declared, naming the primitive. (C functions keep such names under `c::`.)
 - **Stopping `mimic run` stops the program:** on macOS and Linux the program now takes the place of `mimic run` instead of running as its child, so `kill`, a time limit or a closed terminal ends the program itself (before, only `mimic` stopped and the program kept running, holding its memory), and the shell sees the program's own exit status.
 
 ## 0.4.2 — 2026-11-24

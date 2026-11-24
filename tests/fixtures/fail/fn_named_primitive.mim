@@ -1,0 +1,11 @@
+// expect-error: E0214 `matmul` is a built-in primitive (⊠): a function with this name could never be called
+module main
+
+// `matmul(…)` anywhere else is ⊠: a function of that name could never be
+// called, so it is refused where it is declared
+
+fn matmul(a: i64, b: i64) -> i64 { a * 1000 + b }
+
+fn main() {
+    print(matmul(3, 4))
+}

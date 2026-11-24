@@ -102,6 +102,9 @@ The held-out set (`bench/heldout/`) is 40 programs written plainly from the tuto
 | `g[r][c] = v`: an element of a list of lists cannot be assigned (E0208); the whole row is replaced with `put` instead | `put(g, r, put(g[r], c, v))` | 0.4.5 (the array core) |
 | `{ s with … }` on a value read from a map with no declared type needs `let s: T = …` first (E0408) | annotate the `let` | 0.4.4 (types everywhere) |
 | `sort_by(xs, key, descending: true)` reverses the order of equal keys; the manual promises a stable order only ascending | sort by the negated key, ascending | 0.4.3 |
+| A function named like a built-in primitive's word (`fn matmul(…)`, the word of `⊠`) compiled without a word, but every `matmul(…)` is the primitive: the function could never be called (reported by a user) | ✅ refused where it is declared (E0214) | 0.4.3 |
+| A parameter declared `[i64]` given a list of unknown type (from `flatten`, a list of lists, a value of unknown type) is compiled for that unknown type (`[?]`), not converted: the function misses the IR and its in-place changes, as in the row on lists of unknown type below (reported by a user, `bytes: [i64]`) | pass a list built with `¨` or a literal | 0.4.3, 0.4.4 (types everywhere) |
+| A function taking a list of records (`ts: [Tensor]`) stays outside the IR (a list of records is not one of its types), so it gets none of 0.4.2's release-at-last-use (reported by a user) | none | 0.4.3 |
 | Stopping `mimic run` (a time limit, `kill`, a closed terminal) left the compiled program running, holding its memory | ✅ the program takes `mimic run`'s place on macOS and Linux (#139) | 0.4.3 |
 
 ## Found by the 0.4.0 corpus
