@@ -1,0 +1,40 @@
+module main
+
+// reads of a list moved before the writes that follow its copy, so the
+// list changes in place (each step copied it before): a swap
+// (`let mut s = h; s[i] = h[j]; s[j] = h[i]`, including i == j) and a
+// length read beside a push (`sift_up(push(h, v), ≢ h)`), in a heap of
+// 50,000 numbers
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn swap(h: [i64], i: i64, j: i64) -> [i64] {
+    let mut s = h
+    s[i] = h[j]
+    s[j] = h[i]
+    s
+}
+
+fn sift_up(h: [i64], i: i64) -> [i64] {
+    if i == 0 { h } else {
+        let p = (i - 1) div 2
+        if h[p] > h[i] { sift_up(swap(h, p, i), p) } else { h }
+    }
+}
+
+fn heap_push(h: [i64], v: i64) -> [i64] { sift_up(push(h, v), ≢ h) }
+
+fn fill(h: [i64], k: i64, x: i64) -> [i64] {
+    if k == 0 { h } else {
+        let y = next(x)
+        fill(heap_push(h, y % 1000003), k - 1, y)
+    }
+}
+
+fn main() {
+    print(swap([1 2 3 4], 0, 3))
+    print(swap([1 2 3 4], 2, 2))
+    let h = fill([], 50000, 7)
+    print("{≢ h} {h[0]} {h ▷ +/}")
+    print(⍳ (≢ h - 1) ¨ (i => h[(i) div 2] <= h[i + 1]) ▷ ∧/)
+}

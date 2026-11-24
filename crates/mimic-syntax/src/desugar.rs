@@ -139,7 +139,200 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         }
     }
     items.extend(hidden.into_iter().map(Item::Fn));
+    for item in items.iter_mut() {
+        if let Item::Fn(f) = item {
+            let mut n = 0;
+            blocks_mut(&mut f.body, &mut |b| hoist_copy_reads(b, &mut n));
+        }
+    }
     Ok(())
+}
+
+/// Every block in `b` (itself included, inner ones first).
+fn blocks_mut(b: &mut Block, f: &mut dyn FnMut(&mut Block)) {
+    fn expr(e: &mut Expr, f: &mut dyn FnMut(&mut Block)) {
+        match &mut e.kind {
+            ExprKind::If { cond, then, els } => {
+                expr(cond, f);
+                blocks_mut(then, f);
+                if let Some(x) = els {
+                    expr(x, f);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks_mut(b, f),
+            ExprKind::Match { scrut, arms } => {
+                expr(scrut, f);
+                for a in arms {
+                    expr(&mut a.body, f);
+                }
+            }
+            ExprKind::Lambda { body, .. } => expr(body, f),
+            ExprKind::Call { callee, args } => {
+                expr(callee, f);
+                args.iter_mut().for_each(|a| expr(a, f));
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            ExprKind::Unary { expr: x, .. } => expr(x, f),
+            _ => {}
+        }
+    }
+    for st in &mut b.stmts {
+        match st {
+            Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } => expr(value, f),
+            Stmt::Return(Some(e), _) => expr(e, f),
+            Stmt::LetElse { value, els, .. } => {
+                expr(value, f);
+                blocks_mut(els, f);
+            }
+            Stmt::Return(None, _) => {}
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        expr(t, f);
+    }
+    f(b);
+}
+
+/// `let mut s = h` followed straight away by `s[i] = h[j]` `s[j] = h[i]`:
+/// the indices and values are computed first, into hidden `let`s, then the
+/// copy is made and changed. The values are the same (they read `h`, never
+/// `s`), but `h` is now used last where it is copied, so a list `h` held
+/// once is changed in place instead of copied at every swap (a hand-written
+/// heap swapped a million-element list at every step). Only when every
+/// index and value is plain (names, numbers, indexing, fields, arithmetic:
+/// nothing a reordering could make observable) and reads `h`.
+fn hoist_copy_reads(b: &mut Block, n: &mut usize) {
+    fn plain(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Index { base, index } => plain(base) && plain(index),
+            ExprKind::Field { base, .. } => plain(base),
+            ExprKind::Binary { lhs, rhs, .. } => plain(lhs) && plain(rhs),
+            ExprKind::Unary { expr, .. } => plain(expr),
+            _ => false,
+        }
+    }
+    fn mentions(e: &Expr, name: &str) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| {
+            if matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) {
+                found = true;
+            }
+        });
+        found
+    }
+    let mut i = 0;
+    while i < b.stmts.len() {
+        let (copy, from) = match &b.stmts[i] {
+            Stmt::Let { name, mutable: true, ty: None, value, .. } => match &value.kind {
+                ExprKind::Path(p) if p.len() == 1 && p[0] != *name => (name.clone(), p[0].clone()),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let mut end = i + 1;
+        while let Some(Stmt::Assign { name, index: Some(idx), value, .. }) = b.stmts.get(end)
+            && *name == copy
+            && plain(idx)
+            && plain(value)
+            && !mentions(idx, &copy)
+            && !mentions(value, &copy)
+        {
+            end += 1;
+        }
+        let reads = b.stmts[i + 1..end].iter().any(|st| matches!(st, Stmt::Assign { index: Some(idx), value, .. } if mentions(idx, &from) || mentions(value, &from)));
+        if end == i + 1 || !reads {
+            i = end.max(i + 1);
+            continue;
+        }
+        let mut hoisted = Vec::new();
+        for st in &mut b.stmts[i + 1..end] {
+            let Stmt::Assign { index: Some(idx), value, span, .. } = st else { unreachable!() };
+            for e in [idx, value] {
+                let t = format!("\0read{n}");
+                *n += 1;
+                let sp = e.span;
+                let old = std::mem::replace(e, Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+                hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: *span });
+            }
+        }
+        let k = hoisted.len();
+        b.stmts.splice(i..i, hoisted);
+        i = end + k;
+    }
+    hoist_call_reads(b, n);
+}
+
+/// `sift_up(push(h, v), ≢ h)`: a later argument that only measures a
+/// variable an earlier one uses is computed first, into a hidden `let`, so
+/// the earlier one is the variable's last use (`push` then grows `h` in
+/// place instead of copying it at every push). Only arguments that cannot
+/// fail or do anything (names, numbers, fields, `≢`, `+ - ×` of those), in a
+/// call that is a statement's value or a block's result.
+fn hoist_call_reads(b: &mut Block, n: &mut usize) {
+    fn quiet(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Field { base, .. } => quiet(base),
+            ExprKind::Prim { prim: crate::glyphs::Prim::Len, args } => args.iter().all(quiet),
+            ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, lhs, rhs } => quiet(lhs) && quiet(rhs),
+            _ => false,
+        }
+    }
+    fn names(e: &Expr) -> Vec<String> {
+        let mut out = Vec::new();
+        e.walk(&mut |x| {
+            if let ExprKind::Path(p) = &x.kind
+                && p.len() == 1
+            {
+                out.push(p[0].clone());
+            }
+        });
+        out
+    }
+    // (the call and where its hidden `let`s go)
+    let mut i = 0;
+    while i <= b.stmts.len() {
+        let call = if i < b.stmts.len() {
+            match &mut b.stmts[i] {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => Some(value),
+                _ => None,
+            }
+        } else {
+            b.tail.as_deref_mut()
+        };
+        let mut hoisted = Vec::new();
+        if let Some(Expr { kind: ExprKind::Call { args, .. }, .. }) = call {
+            for j in 1..args.len() {
+                let a = &args[j];
+                if matches!(a.kind, ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) || !quiet(a) {
+                    continue;
+                }
+                let earlier: Vec<String> = args[..j].iter().flat_map(names).collect();
+                if !names(a).iter().any(|x| earlier.contains(x)) {
+                    continue;
+                }
+                let t = format!("\0read{n}");
+                *n += 1;
+                let sp = args[j].span;
+                let old = std::mem::replace(&mut args[j], Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+                hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: sp });
+            }
+        }
+        let k = hoisted.len();
+        let at = i.min(b.stmts.len());
+        b.stmts.splice(at..at, hoisted);
+        i += k + 1;
+    }
 }
 
 /// `let f = (a, b) => body` that the rest of its block only calls, `f(x, y)`,
