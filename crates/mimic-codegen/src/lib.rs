@@ -358,6 +358,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         exit_fid: None,
         building_literal: false,
         body_exit: None,
+        tail_calls: HashMap::new(),
         ir_exit_top: 0,
         lazy_deep: None,
         cur_kind: Kind::Plain,
@@ -438,6 +439,13 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         cg.module
             .run_passes(&format!("default<O{}>", settings.opt_level.min(3)), &tm, PassBuilderOptions::create())
             .s()?;
+    } else {
+        // debug builds: no optimisation, but a function that calls itself
+        // last still runs as a loop, as in a release build, so a program
+        // that works there does not overflow the stack here (variables
+        // become registers first, which the debugger still follows, so a
+        // release of a value moved before the call folds away)
+        cg.module.run_passes("function(mem2reg,instsimplify,simplifycfg,tailcallelim)", &tm, PassBuilderOptions::create()).s()?;
     }
     if let Some(ir) = ir {
         cg.module.print_to_file(ir).s()?;
@@ -624,6 +632,9 @@ struct Cg<'ctx, 'p> {
     building_literal: bool,
     /// The scope depth of that function's body while it is compiled.
     body_exit: Option<usize>,
+    /// The function's calls to itself that are its result, and the locals
+    /// each one's arguments may still use (see owned::tail_self_calls)
+    tail_calls: HashMap<usize, Vec<owned::TailArg>>,
     /// The IR region of `main`'s body while it is compiled (its address):
     /// what an expression there is handed is not released after it either,
     /// as main's own values are not (the process exits next)
@@ -1025,10 +1036,25 @@ impl<'ctx> Cg<'ctx, '_> {
                     None => self.b.build_call(self.release_fn(false), &[p.into()], "").s()?,
                 };
             }
-            false => {
-                self.call_rt("mim_release", &[p.into()])?;
-            }
+            false => self.release_out(p)?,
         }
+        Ok(())
+    }
+
+    /// `mim_release`, out of line, after a check for null (a value moved
+    /// away): once the variable is a register, a release after a moved
+    /// value folds away, and a call before it can still be the function's
+    /// last act (a recursion that runs as a loop)
+    fn release_out(&self, p: PointerValue<'ctx>) -> R<()> {
+        let f = self.b.get_insert_block().and_then(|b| b.get_parent()).ok_or("internal compiler error: release outside a function")?;
+        let go = self.ctx.append_basic_block(f, "rel");
+        let done = self.ctx.append_basic_block(f, "rel_done");
+        let null = self.b.build_is_null(p, "").s()?;
+        self.b.build_conditional_branch(null, done, go).s()?;
+        self.b.position_at_end(go);
+        self.call_rt("mim_release", &[p.into()])?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
         Ok(())
     }
 
@@ -1633,6 +1659,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_memo" => ptr.fn_type(&[p, p, i32t, p], false),
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
+            "mim_set_index_v" => ptr.fn_type(&[p, p, p], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -1696,6 +1723,23 @@ impl<'ctx> Cg<'ctx, '_> {
         if name == "mim_alloc_vec" {
             // a new vector: nothing else points into it
             f.add_attribute(inkwell::attributes::AttributeLoc::Return, attr("noalias"));
+        }
+        // an array of values on the stack, read during the call and not
+        // kept (runtime/mimic_rt.c): said to LLVM, the array does not
+        // escape, so a call after it can still be a tail call (a recursion
+        // that builds a string or a record on the way runs as a loop)
+        let arg_array = match name {
+            "mim_concat" | "mim_array_lit" => Some(1),
+            "mim_obj" | "mim_closure" => Some(2),
+            "mim_closure_checked" => Some(3),
+            _ => None,
+        };
+        if let Some(i) = arg_array {
+            // (`captures(none)`: none of the pointer's bits outlive the call)
+            let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("captures");
+            if kind != 0 {
+                f.add_attribute(inkwell::attributes::AttributeLoc::Param(i), self.ctx.create_enum_attribute(kind, 0));
+            }
         }
         // these never free a value nor synchronise with other threads: values
         // read before them stay readable after them (so reads may move
@@ -2009,6 +2053,9 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Plain | Kind::Seq => {}
         }
         self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
+        // (the IR's embedded expressions too: one that is the function's
+        // result ends with the call as well)
+        self.tail_calls = if self.heap_ok_target() { owned::tail_self_calls(p, p.fns[k.0].module, k.0, &decl.body) } else { HashMap::new() };
         // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
         let (use_ir, print_ir) = ir::wanted();
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
@@ -2036,6 +2083,7 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             None => self.block(&decl.body)?,
         };
+        self.tail_calls.clear();
         self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
@@ -2614,7 +2662,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     // LLVM sees and drops the release entirely)
                     self.release(cur.into_pointer_value())?;
                 } else {
-                    self.call_rt("mim_release", &[cur.into()])?;
+                    self.release_out(cur.into_pointer_value())?;
                 }
             }
         }
@@ -2839,7 +2887,13 @@ impl<'ctx> Cg<'ctx, '_> {
                         let iv = self.boxed(iv)?;
                         let v = self.expr(value)?;
                         let v = self.boxed(v)?;
-                        self.call_rt("mim_set_index", &[slot.into(), self.basic(iv).into(), self.basic(v).into()])?;
+                        // (the list in, the list out: the variable's slot is
+                        // not handed to the runtime, so it stays a register
+                        // and a call after it can still be a tail call, as
+                        // `run(k - 1, bump(cells, i))` with `bump` inlined)
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                        let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(iv).into(), self.basic(v).into()])?;
+                        self.b.build_store(slot, self.basic(out)).s()?;
                         self.drop_tmp(iv)?;
                         self.drop_tmp(v)?;
                     }
@@ -4736,6 +4790,35 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
             };
             argv.push(d1.into());
+        }
+        // a call to itself that is the function's result: every local its
+        // arguments do not use is released first (and its slot emptied, so
+        // the release at the end of its scope folds away), leaving the call
+        // the last thing done: the recursion runs as a loop, deep or not
+        if Some(fid) == self.cur_fid
+            && self.body_exit.is_none()
+            && self.futures.iter().all(|f| f.is_empty())
+            && let Some(per_arg) = self.tail_calls.get(&site).cloned()
+        {
+            // (a variable passed as it is to a parameter the callee takes
+            // has been handed its own reference: the variable's goes too,
+            // and the callee holds the only one, changing it in place)
+            let keep: std::collections::HashSet<String> = per_arg
+                .iter()
+                .enumerate()
+                .filter(|(j, a)| !(a.direct.is_some() && consumed.get(*j).copied().unwrap_or(false)))
+                .flat_map(|(_, a)| a.roots.iter().cloned())
+                .collect();
+            let early: Vec<(PointerValue<'ctx>, bool)> = self.scopes.iter().flatten().filter(|l| l.owned && !keep.contains(&l.name)).map(|l| (l.slot, l.moves)).collect();
+            for (slot, moves) in early {
+                let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                if moves {
+                    self.release(cur.into_pointer_value())?;
+                } else {
+                    self.release_out(cur.into_pointer_value())?;
+                }
+                self.b.build_store(slot, self.ptr.const_null()).s()?;
+            }
         }
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
         for c in conv {

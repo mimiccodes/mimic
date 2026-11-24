@@ -154,7 +154,7 @@ The glyph form is `⋔`.
 
 ## Recursion
 
-For anything the words don't cover, write a recursive function. Mimic turns tail calls into jumps, so deep recursion doesn't use up the stack:
+For anything the words don't cover, write a recursive function. When a function's last act is calling itself (a tail call), Mimic turns the call into a jump, in debug and release builds alike, so the recursion doesn't use up the stack however deep it goes. That holds when the function carries lists, strings or records too: whatever the call no longer needs is released or handed over before it. A call whose result is still worked on (`n * fact(n - 1)`) is not a tail call, and very deep recursion of that kind is better written with `evolve` or `settle`:
 
 ```mimic run
 module main

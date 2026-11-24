@@ -1,0 +1,62 @@
+module main
+
+// recursions a million calls deep whose last act is the call to itself:
+// what the frame holds (a list changed through a `let mut` copy, a string
+// built on the way, a tuple's parts, a record list) is released or handed
+// over before the call, so the recursion runs as a loop, in debug builds
+// too; each overflowed the stack before
+
+type Cell = { id: i64, n: i64 }
+
+fn bump(cells: [Cell], i: i64) -> [Cell] {
+    let mut c = cells
+    c[i] = { c[i] with n: c[i].n + 1 }
+    c
+}
+
+fn run(k: i64, cells: [Cell], skipped: i64) -> ([Cell], i64) {
+    if k == 0 {
+        (cells, skipped)
+    } else if k % 7 == 0 {
+        run(k - 1, cells, skipped + 1)
+    } else {
+        run(k - 1, bump(cells, k % 10), skipped)
+    }
+}
+
+// a `let mut` copy changed and handed on
+fn fill(k: i64, counts: [i64]) -> [i64] {
+    if k == 0 { counts } else {
+        let mut c = counts
+        c[k % 4] = c[k % 4] + 1
+        fill(k - 1, c)
+    }
+}
+
+// a string made on the way, pushed
+fn rows(k: i64, acc: [str]) -> [str] {
+    if k == 0 { acc } else {
+        let row = "{k % 10},{k % 7}"
+        rows(k - 1, push(acc, row))
+    }
+}
+
+fn pair(k: i64) -> (str, i64) { ("x{k % 3}", k * 2) }
+
+// a tuple's parts, released before the call
+fn tally(k: i64, total: i64) -> i64 {
+    if k == 0 { total } else {
+        let (s, d) = pair(k)
+        tally(k - 1, total + ≢ s + d % 2)
+    }
+}
+
+fn main() {
+    let (cells, skipped) = run(1000000, ⍳ 10 ¨ (i => Cell { id: i, n: 0 }), 0)
+    print(cells ¨ (c => c.n))
+    print(skipped)
+    print(fill(1000000, [0 0 0 0]))
+    let r = rows(1000000, [])
+    print("{≢ r} {r[0]} {r[999999]}")
+    print(tally(1000000, 0))
+}
