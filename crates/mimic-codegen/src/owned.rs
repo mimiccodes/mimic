@@ -533,7 +533,11 @@ impl<'ctx> Cg<'ctx, '_> {
             // it, a binary search handing `xs` down, taking it would cost
             // every caller a retain and a release per call, all threads of
             // a `¨` on one count: `bellman`, `diff`, `hashmap` 1.2-3.5x)
-            || (changes_a_list(body) && self_handed(k, pos, name, body, spec).into_iter().any(|v| order.last_id(v)))
+            // (and handed down only by a function that also gives it back:
+            // `find` returns its `parent`, which the caller then changes;
+            // lists only read and passed along, `neighbours(b, keys, first,
+            // j + 1)`, stay borrowed: `bipartite` 1.2-1.5x otherwise)
+            || (changes_a_list(body) && !result_uses(name, body).is_empty() && self_handed(k, pos, name, body, spec).into_iter().any(|v| order.last_id(v)))
             || (changes_a_list(body) && result_uses(name, body).into_iter().any(|v| order.last_id(v)))
     }
 
