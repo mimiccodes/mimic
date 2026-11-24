@@ -83,19 +83,19 @@ static void each_cost_put(void *key, int64_t ns) {
     __atomic_store_n(&g_each_cost[i].key, key, __ATOMIC_RELAXED);
 }
 
-/* The first chunk the calling thread runs of a `¨` shared out for the
- * first time, timed: what the function costs per element. */
+/* The first chunk (from element 0) of a `¨` shared out for the first time,
+ * timed, whichever thread runs it: what the function costs per element.
+ * (No thread-local flag: adding one moved the scheduler's thread-locals,
+ * and `fib`, which never maps, measured 20% slower on one machine.) */
 typedef struct {
     void (*f)(void *, int64_t, int64_t);
     void *ctx;
     int64_t ns; /* per element, once timed */
 } probe_ctx;
 
-static _Thread_local int t_probe; /* this thread called the `¨` being probed */
-
 static void probe_range(void *c, int64_t lo, int64_t hi) {
     probe_ctx *p = (probe_ctx *)c;
-    if (!t_probe || p->ns) {
+    if (lo != 0) {
         p->f(p->ctx, lo, hi);
         return;
     }
@@ -125,9 +125,7 @@ static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *c
     int64_t per = each_cost(key);
     if (per == 0 || worth_sharing(per, 1, n)) {
         probe_ctx p = {range, ctx, 0};
-        t_probe = 1;
         parallel_for_grain(n, fine_grain(n), probe_range, &p);
-        t_probe = 0;
         if (p.ns) each_cost_put(key, p.ns);
         return;
     }
