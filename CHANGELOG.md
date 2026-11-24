@@ -5,6 +5,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **`∧/` and `∨/`, the and and or reductions** (`all` and `any` written as glyphs, as in APL): `same ▷ ∧/`, `∨/ flags`.
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
 
 ### Changed
@@ -12,6 +13,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed
+- `mimic fmt` (and formatting from an editor or the MCP server) leaves a file that does not parse untouched and reports the parse error; `fmt --glyphs` had rewritten `∧/` into `∧÷`.
 - **A primitive's word is refused wherever a name is declared (E0214):** a parameter or a typed `let` named `shape` (the word of `⍴`) was accepted, then every use of it was the primitive, with a misleading parse error (`expected an expression, found '=='`). Functions, parameters, `let`s and lambda parameters now all give E0214 naming the primitive. Reported by a user.
 - **A function named like a built-in primitive is refused (E0214):** `fn matmul(…)` compiled, but every `matmul(…)` elsewhere is the primitive `⊠`, so the function could never be called and nothing said so. It is now an error where the function is declared, naming the primitive. (C functions keep such names under `c::`.)
 - **Stopping `mimic run` stops the program:** on macOS and Linux the program now takes the place of `mimic run` instead of running as its child, so `kill`, a time limit or a closed terminal ends the program itself (before, only `mimic` stopped and the program kept running, holding its memory), and the shell sees the program's own exit status.
