@@ -229,6 +229,36 @@ pub(crate) fn last_in_call(name: &str, body: &Block, call: usize, arg: usize) ->
     })
 }
 
+/// Whether the body changes a list: a `let mut` copy changed by index, an
+/// index assignment, or `push`/`put`/`concat` (by name).
+fn changes_a_list(body: &Block) -> bool {
+    let mut found = false;
+    let mut stmts = |b: &Block| {
+        for st in &b.stmts {
+            if matches!(st, Stmt::Assign { index: Some(_), .. }) {
+                found = true;
+            }
+        }
+    };
+    stmts(body);
+    body.walk(&mut |e| match &e.kind {
+        ExprKind::If { then, .. } => stmts(then),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => stmts(b),
+        _ => {}
+    });
+    if found {
+        return true;
+    }
+    body.walk(&mut |e| {
+        if let ExprKind::Call { callee, .. } = &e.kind
+            && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && matches!(p[0].as_str(), "push" | "put" | "concat"))
+        {
+            found = true;
+        }
+    });
+    found
+}
+
 /// The ids of `name` where it is passed to the function `k` itself (its
 /// specialisation) in the same place as the parameter `name`.
 fn self_handed(k: &Key, i: Option<usize>, name: &str, body: &Block, spec: &Spec) -> Vec<usize> {
@@ -499,8 +529,12 @@ impl<'ctx> Cg<'ctx, '_> {
             // it saves the reference the caller would keep, so a change
             // further down (`compressed[i] = root` in a `find` returning
             // `(parents, root)`) is made in place rather than to a copy
-            || self_handed(k, pos, name, body, spec).into_iter().any(|v| order.last_id(v))
-            || result_uses(name, body).into_iter().any(|v| order.last_id(v))
+            // (only in a function that changes a list: one that only reads
+            // it, a binary search handing `xs` down, taking it would cost
+            // every caller a retain and a release per call, all threads of
+            // a `¨` on one count: `bellman`, `diff`, `hashmap` 1.2-3.5x)
+            || (changes_a_list(body) && self_handed(k, pos, name, body, spec).into_iter().any(|v| order.last_id(v)))
+            || (changes_a_list(body) && result_uses(name, body).into_iter().any(|v| order.last_id(v)))
     }
 
     /// Whether the record parameter `name` of `k` ends, at a last use, as the
