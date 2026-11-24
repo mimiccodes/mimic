@@ -1,0 +1,47 @@
+module main
+
+// lists handed over without a copy, and the places they must not move:
+// - a tuple `let`'s names move at their one use (`let mut c = p` changes p's
+//   list in place); a list handed back to the function itself, or returned
+//   in its result, is taken (a union-find `find`, 20,000 deep paths)
+// - `find(parent, parent[i])`: released once both arguments are read
+// - `m ⊠ power(m, n - 1)`: the right side runs first, so `m` stays for the left
+// - a `match` guard runs on the way to the later arms, so a value it reads
+//   does not move there
+
+fn find(parent: [i64], i: i64) -> ([i64], i64) {
+    if parent[i] == i { (parent, i) } else {
+        let (p, root) = find(parent, parent[i])
+        let mut compressed = p
+        compressed[i] = root
+        (compressed, root)
+    }
+}
+
+fn chain(n: i64) -> [i64] { ⍳ n ¨ (i => if i == 0 { 0 } else { i - 1 }) }
+
+fn power(m, n: i64) {
+    if n == 1 { m }
+    else if n % 2 == 0 { let h = power(m, n div 2); h ⊠ h }
+    else { m ⊠ power(m, n - 1) }
+}
+
+type Attr = Prop(str, str) | Flag(str)
+
+fn prop(attrs: [Attr], name: str) -> Option[str] {
+    if ≢ attrs == 0 { None } else {
+        match attrs[0] {
+            Prop(k, v) if k == name => Some(v),
+            _ => prop(attrs ↓ 1, name),
+        }
+    }
+}
+
+fn main() {
+    let (p, root) = find(chain(20000), 19999)
+    print("{root} {p[19999]} {p[10000]} {p[1]}")
+    print(power([1 1 1 0] ⥊ [2 2], 30)[0, 1])
+    let attrs = [Flag("a"), Prop("x", "1"), Prop("style", "bold"), Prop("y", "2")]
+    print(prop(attrs, "style"))
+    print(prop(attrs, "missing"))
+}
