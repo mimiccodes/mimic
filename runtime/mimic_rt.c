@@ -276,6 +276,7 @@ typedef CONDITION_VARIABLE mim_cond;
 #define cond_init(c) InitializeConditionVariable(c)
 #define cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, 0)
 #define cond_broadcast(c) WakeAllConditionVariable(c)
+#define cond_signal(c) WakeConditionVariable(c)
 #else
 typedef pthread_mutex_t mim_mutex;
 typedef pthread_cond_t mim_cond;
@@ -286,6 +287,7 @@ typedef pthread_cond_t mim_cond;
 #define cond_init(c) pthread_cond_init(c, NULL)
 #define cond_wait(c, m) pthread_cond_wait(c, m)
 #define cond_broadcast(c) pthread_cond_broadcast(c)
+#define cond_signal(c) pthread_cond_signal(c)
 #endif
 
 /* One job at a time, published by the main thread. Workers that pick it up
@@ -393,7 +395,15 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED); /* no regions inside */
         g_job = &j;
         g_gen++;
-        cond_broadcast(&g_work);
+        /* as many workers as there are chunks besides this thread's: waking
+         * all of them for a few chunks left most with nothing to do but
+         * fight over the lock (a 9-element `¨` ran 6x slower on 12 threads
+         * than on one, mostly in the kernel) */
+        if (nchunks - 1 >= g_nthreads - 1) {
+            cond_broadcast(&g_work);
+        } else {
+            for (int64_t w = 0; w < nchunks - 1; w++) cond_signal(&g_work);
+        }
         mutex_unlock(&g_mu);
         t_in_parallel = 1;
         run_chunks(&j);
@@ -493,6 +503,17 @@ static void timed_range(void *c, int64_t lo, int64_t hi) {
     t->f(t->ctx, lo + t->from, hi + t->from);
 }
 
+/* After timing the first `done` elements (`spent` ns): is the rest, `left`
+ * elements at that pace, worth sharing out? Waking the pool costs tens of
+ * microseconds, and more the more threads it wakes (each one it wakes takes
+ * the lock): at least 50 us of work, and 20 us for each thread that would
+ * get some. */
+static int worth_sharing(int64_t spent, int64_t done, int64_t left) {
+    int64_t rest = spent / done * left;
+    int64_t k = left < g_nthreads ? left : g_nthreads;
+    return rest > 50000 && rest > 20000 * k;
+}
+
 void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
     if (n <= 0) return;
     if (n == 1 || g_nthreads <= 1 || t_in_parallel) {
@@ -521,8 +542,67 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
         if (done == n) return;
         clock_gettime(CLOCK_MONOTONIC, &b);
         int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-        if (spent / done * (n - done) > 50000) {
+        if (worth_sharing(spent, done, n - done)) {
             timed_ctx c = {f, ctx, done};
+            parallel_for_grain(n - done, fine_grain(n - done), timed_range, &c);
+            return;
+        }
+        step *= 2;
+    }
+}
+
+/* What a `¨`'s function has cost per element (ns), by the function: a
+ * small table, written without locks (a torn or lost entry only means one
+ * more timing). */
+static struct { void *key; int64_t ns; } g_each_cost[256];
+
+static int64_t each_cost(void *key) {
+    unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
+    if (__atomic_load_n(&g_each_cost[i].key, __ATOMIC_RELAXED) != key) return 0;
+    return __atomic_load_n(&g_each_cost[i].ns, __ATOMIC_RELAXED);
+}
+
+static void each_cost_put(void *key, int64_t ns) {
+    unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
+    __atomic_store_n(&g_each_cost[i].ns, ns < 1 ? 1 : ns, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_each_cost[i].key, key, __ATOMIC_RELAXED);
+}
+
+/* A pure `¨` of the function `key` over n elements. A long list goes in
+ * fine chunks over every core, as always. A short one (up to a chunk,
+ * 16,384) is shared out only when that is worth waking the pool for: at
+ * once when the function has been costly before, else after timing the
+ * first elements (1, 2, 4, … at a time) at this call. (Sent straight to the
+ * pool, the 9-element `¨`s of a sudoku check woke every thread 27,000 times
+ * in 20,000 grids, and ran 6x slower on 12 cores than on one; timed alone,
+ * a few costly elements, such as 8 searches, would run the first before
+ * sharing the rest at every call.) */
+static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx, void *key) {
+    if (n > mim_grain || n == 1 || g_nthreads <= 1 || t_in_parallel) {
+        parallel_for_grain(n, fine_grain(n), range, ctx);
+        return;
+    }
+    int64_t per = each_cost(key);
+    if (per > 0 && worth_sharing(per, 1, n)) {
+        parallel_for_grain(n, fine_grain(n), range, ctx);
+        return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    int64_t done = 0, step = 1;
+    while (done < n) {
+        int64_t hi = done + step < n ? done + step : n;
+        range(ctx, done, hi);
+        done = hi;
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+        if (done == n) {
+            each_cost_put(key, spent / n);
+            return;
+        }
+        if (worth_sharing(spent, done, n - done)) {
+            each_cost_put(key, spent / done);
+            timed_ctx c = {range, ctx, done};
             parallel_for_grain(n - done, fine_grain(n - done), timed_range, &c);
             return;
         }
@@ -3309,7 +3389,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_ctx c = {xs, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
+    } else if (pure) each_par(n, each_range, &c, (void *)f);
     else each_range(&c, 0, n);
     /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
     int64_t units = 0;
@@ -3512,7 +3592,7 @@ mim_val *mim_each_raw(mim_val *xs, mim_fn_raw f, int32_t dt, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_raw_ctx c = {(const int64_t *)xs->data, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_raw_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
+    } else if (pure) each_par(n, each_raw_range, &c, (void *)f);
     else each_raw_range(&c, 0, n);
     int64_t units = 0;
     for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
@@ -3555,7 +3635,7 @@ mim_val *mim_each_own(mim_val *xs, mim_fn1 f, int32_t pure) {
     each_ctx c = {xs, f, tmp};
     mim_task run = take ? each_own_range : each_lend_range;
     if (pure == 2 && n > 1 && run_on_loop(n, run, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
+    } else if (pure) each_par(n, run, &c, (void *)f);
     else run(&c, 0, n);
     if (take) {
         free_block(&t_heap, xs); /* the block only: its elements were given away */
@@ -3618,7 +3698,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
             if (done == n) break;
             clock_gettime(CLOCK_MONOTONIC, &b);
             int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-            if (spent / done * (n - done) > 50000) {
+            if (worth_sharing(spent, done, n - done)) {
                 c.base = done;
                 parallel_for_grain(n - done, fine_grain(n - done), each_fn_range, &c);
                 break;

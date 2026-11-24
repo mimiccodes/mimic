@@ -14,7 +14,7 @@ Mimic has no threads, no `async`, no locks and no `parallel` keyword. The compil
 |---|---|
 | `xs + ys`, `xs * 2`, `xs > 0`, `+/`, `⌈/`, … | the arrays are large enough to be worth splitting |
 | chains like `(xs * 2 + 1) ▷ +/` | always fused into **one** pass over memory, then split across cores |
-| `xs ¨ f` | `f` is pure |
+| `xs ¨ f` | `f` is pure, and the work is worth sharing: a short list runs on one core unless its elements are costly (the runtime times the first ones, and remembers what `f` cost before) |
 | `gather`, `trail`, `arms` | the function or body is pure |
 | `f(a) + g(b)`, `Node(make(d - 1), make(d - 1))`, `let a = f(x)` `let b = f(y)` | `f` and `g` are pure and can recurse: independent calls run at the same time |
 | `let x = f(…)` where `f` only reads, sleeps or fetches | always: `f` starts at once and the program waits only where `x` is used |
