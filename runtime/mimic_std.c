@@ -318,6 +318,12 @@ static int own_plain(const mim_val *xs) {
     return xs && xs->rank == 1 && !IS_HANDLES(xs) && xs->dtype != MIM_MAP && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
 }
 
+/* a list of values held by reference (strings, records, lists, …), held
+ * once: its slots can change in place, each holding a reference of its own */
+static int own_handles(const mim_val *xs) {
+    return xs && xs->rank == 1 && xs->dtype == MIM_BOXED && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1;
+}
+
 /* xs (held once, plain elements) with room for n elements, len set to n;
  * may move */
 /* A list grown here remembers its room (payload bytes) in `desc`, which a
@@ -360,6 +366,15 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
 
 /* push(xs, x), xs owned */
 mim_val *mim_std_push_own(mim_val *xs, mim_val *x) {
+    /* a value onto a list of references held once: grown in place (before,
+     * a list of strings or records was copied at every push) */
+    if (own_handles(xs) && x && x != xs) {
+        int64_t n = xs->len;
+        xs = grow_owned(xs, n + 1);
+        mim_retain(x);
+        ((mim_val **)xs->data)[n] = x;
+        return xs;
+    }
     if (own_plain(xs) && x != xs && x && x->rank == 0 && x->dtype == xs->dtype) {
         int64_t n = xs->len;
         xs = grow_owned(xs, n + 1);
@@ -499,7 +514,8 @@ mim_val *mim_put_u8_own(mim_val *xs, int64_t i, int64_t v) {
  * store converts it exactly as the copying path does, in place when it can.
  * (Out of line, so the fast path stays small enough to inline.) */
 static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_val *k, mim_val *v) {
-    if (own_plain(xs) && v != xs) {
+    /* a map held once: changed in place too (as `m[k] = v` changes one) */
+    if ((own_plain(xs) || (xs && xs->dtype == MIM_MAP && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1)) && v != xs) {
         mim_val *slot = xs;
         mim_set_index(&slot, k, v);
         return slot;
@@ -511,6 +527,18 @@ static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_va
 
 /* put(xs, i, v) on a list, xs owned */
 mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
+    /* a list of references held once: the slot changes in place */
+    if (own_handles(xs) && v && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32)) {
+        int64_t i = geti(k, 0);
+        if (i >= 0 && i < xs->len) {
+            mim_val **slot = (mim_val **)xs->data + i;
+            mim_val *old = *slot;
+            mim_retain(v);
+            *slot = v;
+            mim_release(old);
+            return xs;
+        }
+    }
     if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
         int64_t i = geti(k, 0);
         if (i >= 0 && i < xs->len) {

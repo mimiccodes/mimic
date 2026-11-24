@@ -4,6 +4,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ## Unreleased
 
+### Changed
+- **A list of any element type grown by `push` (or changed by `put` or `concat`) where it is used for the last time is changed in place**, strings, floats, records and maps included: `gen(n - 1, y, push(acc, v))` hands the same list down the recursion instead of copying it at every step (before, only lists of `i64` were, so building a list of strings this way took time and memory growing with the square of its length). A map threaded through a recursion with `put` is changed in place too. Found by the held-out set (BENCHMARK.md): most of its programs build their input this way.
+
 ### Fixed
 - **Stopping `mimic run` stops the program:** on macOS and Linux the program now takes the place of `mimic run` instead of running as its child, so `kill`, a time limit or a closed terminal ends the program itself (before, only `mimic` stopped and the program kept running, holding its memory), and the shell sees the program's own exit status.
 

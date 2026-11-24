@@ -1907,7 +1907,17 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
             self.dbg_var(&prm.name, slot, t, decl.span.line, Some(i as u32 + 1));
             let c = consumed.get(i).copied().unwrap_or(false);
-            let m = sites.get(i).is_some_and(|s| !s.is_empty());
+            let mut m = sites.get(i).is_some_and(|s| !s.is_empty());
+            // a list (or a value of unknown type) taken over: it moves on at
+            // its last use in each branch (into the `push` that grows it in
+            // place, into the call that takes it)
+            if c && !m && matches!(t, Ty::Arr(_, 0) | Ty::Dyn) {
+                let at = owned::last_use_sites(&prm.name, &decl.body);
+                if !at.is_empty() {
+                    self.move_at.extend(at);
+                    m = true;
+                }
+            }
             self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: m });
         }
         if self.opt_level >= 2 {
@@ -5604,7 +5614,19 @@ impl<'ctx> Cg<'ctx, '_> {
                 {
                     // `tcp::send` → mim_std_tcp_send; prelude functions → mim_std_<name>
                     let m = &self.p.mods[self.p.fns[fid].module];
-                    let name = if m.name == "prelude" { format!("mim_std_{}", decl.name) } else { format!("mim_std_{}_{}", m.name, decl.name) };
+                    // `push`, `put` or `concat` of a list this code owns here
+                    // (a value at its last use, a temporary): handed over to
+                    // the runtime's owning version, which changes it in
+                    // place when nothing else holds it (else copies it and
+                    // releases it, as lending it would)
+                    let own_first = m.name == "prelude" && matches!(decl.name.as_str(), "push" | "put" | "concat") && matches!(vals.first(), Some(V::P(_, true)));
+                    let name = if own_first {
+                        format!("mim_std_{}_own", decl.name)
+                    } else if m.name == "prelude" {
+                        format!("mim_std_{}", decl.name)
+                    } else {
+                        format!("mim_std_{}_{}", m.name, decl.name)
+                    };
                     let f = match self.module.get_function(&name) {
                         Some(f) => f,
                         None => {
@@ -5618,7 +5640,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let argv: Vec<BasicMetadataValueEnum> = boxed.iter().map(|b| self.basic(*b).into()).collect();
                     let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
-                    for b in boxed {
+                    // (the list handed over is the runtime's now)
+                    for b in boxed.into_iter().skip(usize::from(own_first)) {
                         self.drop_tmp(b)?;
                     }
                     return self.as_ty(V::P(r.into_pointer_value(), true), ty, &format!("result of `{}`", decl.name));

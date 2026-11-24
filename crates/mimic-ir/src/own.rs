@@ -148,8 +148,11 @@ fn take(op: &mut Op, v: Val) -> bool {
         // a record an embedded expression reads last: the old path moves it
         // on where it can (`start ▷ evolve(…)` changes it in place), else
         // releases it after the expression
+        // (a list too, of any element type but text: `push(acc, x)` at the
+        // list's last use grows it in place. Text stays lent: moving it into
+        // the old path made `roman`, `semver` and `url` slower)
         Op::Embed { uses, moves, .. } => match uses.iter().position(|u| u.1 == v) {
-            Some(k) if matches!(uses[k].2, Ty::Rec(_)) => {
+            Some(k) if matches!(uses[k].2, Ty::Rec(_)) || matches!(uses[k].2, Ty::List(t) if !matches!(t, mimic_check::types::Ty::Arr(mimic_check::types::El::Char, _))) => {
                 moves[k] = true;
                 true
             }
