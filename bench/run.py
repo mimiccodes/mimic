@@ -66,6 +66,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -127,21 +128,72 @@ def platform_id() -> str:
     return f"{system}-{arch}"
 
 
-def time_runs(exe: Path, env: dict, runs: int, expected: str, limit: float | None = None) -> float:
-    """Best wall-clock time in seconds, after one warm-up that also checks
-    the output; infinite when a run takes longer than `limit` seconds."""
+def rss_mb(pid: int) -> float:
+    """The resident memory of a running process, in MB (0 when unknown)."""
     try:
-        warm = run([str(exe)], env={**os.environ, **env}, timeout=limit)
+        if sys.platform.startswith("linux"):
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) / 1024
+            return 0.0
+        if WINDOWS:
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout
+            field = out.strip().split('","')[-1].strip('"').replace(",", "").replace(".", "").split()[0]
+            return int(field) / 1024
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        return int(out) / 1024 if out else 0.0
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+# the held-out set: a run over this much memory is stopped (a runner that
+# runs out of memory is shut down, losing every result)
+MAX_MB = 4096
+
+
+def run_capped(cmd, env: dict, timeout: float | None, max_mb: float) -> str:
+    """Runs `cmd` and returns what it printed; stops it past `timeout`
+    seconds (TimeoutExpired) or `max_mb` of memory (RuntimeError)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    out: list[str] = []
+    reader = threading.Thread(target=lambda: out.append(p.communicate()[0]), daemon=True)
+    reader.start()
+    t0 = time.perf_counter()
+    every = 0.1 if sys.platform.startswith("linux") else 0.5
+    while reader.is_alive():
+        reader.join(every)
+        if not reader.is_alive():
+            break
+        if rss_mb(p.pid) > max_mb:
+            p.kill()
+            reader.join()
+            raise RuntimeError(f"{Path(cmd[0]).name}: used over {max_mb} MB of memory")
+        if timeout is not None and time.perf_counter() - t0 > timeout:
+            p.kill()
+            reader.join()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+    if p.returncode != 0:
+        raise RuntimeError(f"{Path(cmd[0]).name} failed (exit status {p.returncode})")
+    return out[0] if out else ""
+
+
+def time_runs(exe: Path, env: dict, runs: int, expected: str, limit: float | None = None, max_mb: float | None = None) -> float:
+    """Best wall-clock time in seconds, after one warm-up that also checks
+    the output; infinite when a run takes longer than `limit` seconds. With
+    `max_mb`, a run over that much memory is stopped (RuntimeError)."""
+    go = (lambda: run_capped([str(exe)], {**os.environ, **env}, limit, max_mb)) if max_mb else (lambda: run([str(exe)], env={**os.environ, **env}, timeout=limit).stdout)
+    try:
+        got = go().strip()
     except subprocess.TimeoutExpired:
         return float("inf")
-    got = warm.stdout.strip()
     if got != expected:
         raise RuntimeError(f"{exe.name}: printed {got!r}, expected {expected!r}")
     best = float("inf")
     for _ in range(runs):
         t0 = time.perf_counter()
         try:
-            run([str(exe)], env={**os.environ, **env}, timeout=limit)
+            go()
         except subprocess.TimeoutExpired:
             continue
         best = min(best, time.perf_counter() - t0)
@@ -245,7 +297,8 @@ def measure(benches, runs: int, failures: list | None = None):
             load = OUT / f"{b.name}-load{EXE}"
             run(["rustc", "-C", "opt-level=3", "--edition", "2024", str(b / "load" / "main.rs"), "-o", str(load)])
         limit = 300 if failures is not None else None
-        timed = (lambda exe, env: time_server(exe, load, env, runs, expected)) if load else (lambda exe, env: time_runs(exe, env, runs, expected, limit))
+        cap = MAX_MB if failures is not None else None
+        timed = (lambda exe, env: time_server(exe, load, env, runs, expected)) if load else (lambda exe, env: time_runs(exe, env, runs, expected, limit, cap))
         for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("rayon", "rayon"), ("mimic", "main.mim")]:
             src = b / file
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
