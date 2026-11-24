@@ -1,0 +1,43 @@
+module main
+
+// Union-find with path compression over 1,000,003 elements and 2,000,000
+// generated unions; print the number of sets and the size of the largest.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+// the root of i, and the parents with i's path pointing straight at it
+fn find(parent: [i64], i: i64) -> ([i64], i64) {
+    if parent[i] == i { (parent, i) } else {
+        let (p, root) = find(parent, parent[i])
+        let mut compressed = p
+        compressed[i] = root
+        (compressed, root)
+    }
+}
+
+fn union_all(parent: [i64], n: i64, k: i64, x: i64) -> [i64] {
+    if k == 0 { parent } else {
+        let a = next(x)
+        let b = next(a)
+        let (p1, ra) = find(parent, a % n)
+        let (p2, rb) = find(p1, b % n)
+        let mut joined = p2
+        if ra != rb {
+            joined[ra] = rb
+        }
+        union_all(joined, n, k - 1, b)
+    }
+}
+
+fn root_of(parent: [i64], i: i64) -> i64 {
+    if parent[i] == i { i } else { root_of(parent, parent[i]) }
+}
+
+fn main() {
+    let n = 1000003
+    let parent = union_all(⍳ n, n, 2000000, 42)
+    let roots = ⍳ n ¨ (i => root_of(parent, i))
+    let sets = group_by(roots, r => r)
+    print(≢ sets)
+    print(values(sets) ¨ (members => ≢ members) ▷ ⌈/)
+}

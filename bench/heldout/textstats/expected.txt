@@ -1,0 +1,5 @@
+lines 285665
+words 1428572
+characters 10000002
+longest line 398
+most common letter t (330550)

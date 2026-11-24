@@ -1,0 +1,43 @@
+module main
+
+// Sorts 20,000 generated numbers with a hand-written insertion sort
+// and prints a checksum of the sorted list.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn generate(n: i64, x: i64, acc: [i64]) -> [i64] {
+    if n == 0 {
+        acc
+    } else {
+        let y = next(x)
+        generate(n - 1, y, push(acc, y % 1000000))
+    }
+}
+
+// shift the larger elements one place right until v's spot is found
+fn insert(xs: [i64], j: i64, v: i64) -> [i64] {
+    if j >= 0 and xs[j] > v {
+        insert(put(xs, j + 1, xs[j]), j - 1, v)
+    } else {
+        put(xs, j + 1, v)
+    }
+}
+
+fn insertion_sort(xs: [i64], i: i64) -> [i64] {
+    if i >= ≢ xs {
+        xs
+    } else {
+        insertion_sort(insert(xs, i - 1, xs[i]), i + 1)
+    }
+}
+
+fn checksum(xs: [i64]) -> i64 {
+    let idx = ⍳ (≢ xs)
+    xs * (idx % 1000 + 1) ▷ +/
+}
+
+fn main() {
+    let xs = generate(20000, 42, [])
+    let sorted = insertion_sort(xs, 1)
+    print(checksum(sorted))
+}

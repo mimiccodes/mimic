@@ -1,0 +1,140 @@
+module main
+
+// Generates 200,000 arithmetic expressions with + - * / and parentheses
+// and evaluates them by recursive descent (division truncates toward
+// zero); prints the sum of the results.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+// generating
+
+fn number(x: i64) -> (str, i64) {
+    let y = next(x)
+    ("{y % 20}", y)
+}
+
+fn gen_factor(depth: i64, x: i64) -> (str, i64) {
+    if depth > 0 {
+        let x1 = next(x)
+        if x1 % 4 == 0 {
+            let (inner, x2) = gen_expr(depth - 1, x1)
+            ("(" + inner + ")", x2)
+        } else {
+            number(x1)
+        }
+    } else {
+        number(x)
+    }
+}
+
+fn gen_term(depth: i64, x: i64) -> (str, i64) {
+    let (f, x1) = gen_factor(depth, x)
+    let x2 = next(x1)
+    let c = x2 % 3
+    if c == 0 {
+        let x3 = next(x2)
+        (f + "/" + "{x3 % 19 + 1}", x3)
+    } else if c == 1 {
+        let (g, x3) = gen_factor(depth, x2)
+        (f + "*" + g, x3)
+    } else {
+        (f, x2)
+    }
+}
+
+fn more_terms(depth: i64, left: i64, x: i64, text: str) -> (str, i64) {
+    if left == 0 {
+        (text, x)
+    } else {
+        let x1 = next(x)
+        let op = if x1 % 3 == 2 { "-" } else { "+" }
+        let (t, x2) = gen_term(depth, x1)
+        more_terms(depth, left - 1, x2, text + op + t)
+    }
+}
+
+fn gen_expr(depth: i64, x: i64) -> (str, i64) {
+    let x1 = next(x)
+    let terms = x1 % 3 + 1
+    let (t, x2) = gen_term(depth, x1)
+    more_terms(depth, terms - 1, x2, t)
+}
+
+fn make_all(n: i64, x: i64, exprs: [str]) -> [str] {
+    if n == 0 {
+        exprs
+    } else {
+        let (e, y) = gen_expr(2, x)
+        make_all(n - 1, y, push(exprs, e))
+    }
+}
+
+// evaluating: each parse function returns the value and the next position
+
+fn trunc_div(a: i64, b: i64) -> i64 {
+    let q = abs(a) div abs(b)
+    if (a < 0 and b > 0) or (a > 0 and b < 0) { -q } else { q }
+}
+
+fn is_digit(c: str) -> bool { c >= "0" and c <= "9" }
+
+fn parse_number(cs: [str], i: i64, value: i64) -> (i64, i64) {
+    if i < ≢ cs and is_digit(cs[i]) {
+        parse_number(cs, i + 1, value * 10 + char_code(cs[i]) - 48)
+    } else {
+        (value, i)
+    }
+}
+
+fn parse_factor(cs: [str], i: i64) -> (i64, i64) {
+    if cs[i] == "(" {
+        let (v, j) = parse_expr(cs, i + 1)
+        (v, j + 1)
+    } else {
+        parse_number(cs, i, 0)
+    }
+}
+
+fn term_rest(cs: [str], i: i64, acc: i64) -> (i64, i64) {
+    if i < ≢ cs and cs[i] == "*" {
+        let (v, j) = parse_factor(cs, i + 1)
+        term_rest(cs, j, acc * v)
+    } else if i < ≢ cs and cs[i] == "/" {
+        let (v, j) = parse_factor(cs, i + 1)
+        term_rest(cs, j, trunc_div(acc, v))
+    } else {
+        (acc, i)
+    }
+}
+
+fn parse_term(cs: [str], i: i64) -> (i64, i64) {
+    let (v, j) = parse_factor(cs, i)
+    term_rest(cs, j, v)
+}
+
+fn expr_rest(cs: [str], i: i64, acc: i64) -> (i64, i64) {
+    if i < ≢ cs and cs[i] == "+" {
+        let (v, j) = parse_term(cs, i + 1)
+        expr_rest(cs, j, acc + v)
+    } else if i < ≢ cs and cs[i] == "-" {
+        let (v, j) = parse_term(cs, i + 1)
+        expr_rest(cs, j, acc - v)
+    } else {
+        (acc, i)
+    }
+}
+
+fn parse_expr(cs: [str], i: i64) -> (i64, i64) {
+    let (v, j) = parse_term(cs, i)
+    expr_rest(cs, j, v)
+}
+
+fn evaluate(e: str) -> i64 {
+    let (v, _) = parse_expr(chars(e), 0)
+    v
+}
+
+fn main() {
+    let exprs = make_all(200000, 42, [])
+    print(exprs ¨ evaluate ▷ +/)
+}

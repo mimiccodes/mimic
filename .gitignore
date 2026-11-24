@@ -13,6 +13,7 @@
 
 # Benchmark results and this machine's history (bench/run.py)
 /bench/results.md
+/bench/results-heldout.md
 /bench/history.jsonl
 
 # Archives

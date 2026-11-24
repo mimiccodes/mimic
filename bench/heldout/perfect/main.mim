@@ -1,0 +1,26 @@
+module main
+
+// Sum the proper divisors of every n below 300,000 by trial division up
+// to √n; print the perfect numbers and how many numbers are abundant.
+
+fn divisor_sum(n: i64) -> i64 {
+    if n == 1 { 0 } else { add_divisors(n, 2, 1) }
+}
+
+fn add_divisors(n: i64, d: i64, s: i64) -> i64 {
+    if d * d > n { s }
+    else if n % d == 0 {
+        let e = n div d
+        if e == d { add_divisors(n, d + 1, s + d) } else { add_divisors(n, d + 1, s + d + e) }
+    }
+    else { add_divisors(n, d + 1, s) }
+}
+
+fn main() {
+    let limit = 300000
+    let ns = 1 ‥ limit
+    let sums = ns ¨ divisor_sum
+    let perfect = ns ⌿ (sums == ns)
+    perfect ¨ (p => print("perfect {p}"))
+    print("abundant {≢ (ns ⌿ (sums > ns))}")
+}

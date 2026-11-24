@@ -1,0 +1,59 @@
+module main
+
+// Breadth-first search on a generated 1500 × 1500 grid with walls, from the
+// top left corner; print the shortest path length to the bottom right
+// corner (-1 if there is none) and how many cells can be reached.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn make_walls(k: i64, x: i64, acc: [bool]) -> [bool] {
+    if k == 0 { acc } else {
+        let y = next(x)
+        make_walls(k - 1, y, push(acc, y % 7 < 2))
+    }
+}
+
+// step onto (r, c) at distance d if it is open and not seen yet
+fn visit(walls: [bool], n: i64, dist: [i64], queue: [i64], r: i64, c: i64, d: i64) -> ([i64], [i64]) {
+    if r < 0 or r >= n or c < 0 or c >= n {
+        (dist, queue)
+    } else {
+        let i = r * n + c
+        if walls[i] or dist[i] != ¯1 {
+            (dist, queue)
+        } else {
+            let mut seen = dist
+            seen[i] = d
+            (seen, push(queue, i))
+        }
+    }
+}
+
+fn bfs(walls: [bool], n: i64, dist: [i64], queue: [i64], head: i64) -> ([i64], i64) {
+    if head == ≢ queue {
+        (dist, ≢ queue)
+    } else {
+        let cell = queue[head]
+        let r = cell div n
+        let c = cell % n
+        let d = dist[cell] + 1
+        let (d1, q1) = visit(walls, n, dist, queue, r - 1, c, d)
+        let (d2, q2) = visit(walls, n, d1, q1, r + 1, c, d)
+        let (d3, q3) = visit(walls, n, d2, q2, r, c - 1, d)
+        let (d4, q4) = visit(walls, n, d3, q3, r, c + 1, d)
+        bfs(walls, n, d4, q4, head + 1)
+    }
+}
+
+fn main() {
+    let n = 1500
+    let total = n * n
+    let mut walls = make_walls(total, 42, [])
+    walls[0] = false
+    walls[total - 1] = false
+    let mut dist = ¯1 ⥊ [total]
+    dist[0] = 0
+    let (done, reached) = bfs(walls, n, dist, [0], 0)
+    print(done[total - 1])
+    print(reached)
+}

@@ -1,0 +1,39 @@
+module main
+
+// Reverse the order of the words in each of 300,000 generated sentences and
+// print a checksum: for each sentence the sum of byte × (position + 1),
+// added up over all sentences.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn pick_words(vocab: [str], k: i64, x: i64, acc: [str]) -> ([str], i64) {
+    if k == 0 { (acc, x) } else {
+        let y = next(x)
+        pick_words(vocab, k - 1, y, push(acc, vocab[y % 25]))
+    }
+}
+
+fn make_sentences(vocab: [str], n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let a = next(x)
+        let (ws, b) = pick_words(vocab, 3 + a % 9, a, [])
+        make_sentences(vocab, n - 1, b, push(acc, join(ws, " ")))
+    }
+}
+
+fn reverse_words(s: str) -> str { split(s, " ") ▷ reverse ▷ join(" ") }
+
+fn checksum(s: str) -> i64 {
+    let b = bytes::of_text(s)
+    b * ((⍳ (≢ b)) + 1) ▷ +/
+}
+
+fn main() {
+    let vocab = ["time" "year" "people" "way" "day" "man" "thing" "woman" "life" "child"
+                 "world" "school" "state" "family" "student" "group" "country" "problem" "hand" "part"
+                 "place" "case" "week" "company" "system"]
+    let sentences = make_sentences(vocab, 300000, 42, [])
+    let reversed = sentences ¨ reverse_words
+    print(reversed ¨ (s => ≢ s) ▷ +/)
+    print(reversed ¨ checksum ▷ +/)
+}

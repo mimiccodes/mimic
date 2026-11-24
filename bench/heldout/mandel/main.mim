@@ -1,0 +1,22 @@
+module main
+
+// Count the points of a 1200 × 800 grid over [-2, 1] × [-1, 1] that stay
+// in the Mandelbrot set for 200 iterations.
+
+fn inside(cr: f64, ci: f64) -> bool { iterate(0.0, 0.0, cr, ci, 0) }
+
+fn iterate(zr: f64, zi: f64, cr: f64, ci: f64, k: i64) -> bool {
+    if k == 200 { true }
+    else if zr * zr + zi * zi > 4.0 { false }
+    else { iterate(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, k + 1) }
+}
+
+fn main() {
+    let w = 1200
+    let h = 800
+    let rows = ⍳ h ¨ (j => {
+        let ci = ¯1.0 + 2.0 * j / h
+        count(⍳ w, i => inside(¯2.0 + 3.0 * i / w, ci))
+    })
+    print(rows ▷ +/)
+}

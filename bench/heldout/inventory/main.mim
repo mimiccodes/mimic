@@ -1,0 +1,58 @@
+module main
+
+// An inventory: a map from item name to a record of count and price.
+// Applies 1,000,000 generated orders (refused when the stock is short)
+// and restocks, then prints the stock value and the 5 lowest counts.
+
+type Stock = { count: i64, price: i64 }
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn fill(k: i64, n: i64, x: i64, inventory) {
+    if k == n {
+        (inventory, x)
+    } else {
+        let x1 = next(x)
+        let x2 = next(x1)
+        let mut inv = inventory
+        inv["item{k}"] = Stock { count: x1 % 100 + 1, price: x2 % 500 + 1 }
+        fill(k + 1, n, x2, inv)
+    }
+}
+
+fn apply(n: i64, x: i64, inventory, refused: i64) {
+    if n == 0 {
+        (inventory, refused)
+    } else {
+        let x1 = next(x)
+        let x2 = next(x1)
+        let x3 = next(x2)
+        let kind = x1 % 3
+        let name = "item{x2 % 1000}"
+        let qty = x3 % 20 + 1
+        let stock: Stock = inventory[name]
+        if kind < 2 {
+            if stock.count >= qty {
+                let mut inv = inventory
+                inv[name] = { stock with count: stock.count - qty }
+                apply(n - 1, x3, inv, refused)
+            } else {
+                apply(n - 1, x3, inventory, refused + 1)
+            }
+        } else {
+            let mut inv = inventory
+            inv[name] = { stock with count: stock.count + 2 * qty }
+            apply(n - 1, x3, inv, refused)
+        }
+    }
+}
+
+fn main() {
+    let (start, x) = fill(0, 1000, 42, [:])
+    let (inventory, refused) = apply(1000000, x, start, 0)
+    let value = values(inventory) ¨ (s => s.count * s.price) ▷ +/
+    print("stock value {value}")
+    print("refused {refused}")
+    let lowest = sort_by(keys(inventory), name => inventory[name].count) ↑ 5
+    lowest ¨ (name => print("{name} {inventory[name].count}"))
+}

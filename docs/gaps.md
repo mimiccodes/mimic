@@ -89,6 +89,21 @@ Closed: `panic`, `assert`, `os::env_all`, `fs::walk`, `fs::modified`, `time::for
 |---|---|---|
 | The prelude is parsed, resolved and checked again for every build, and the runtime linked from its parts: a one-line program takes about 0.35 s to build (warm, macOS arm64, release): front end 70 ms (prelude parse 25, resolve 15 to 20, check 17 to 21), code generation 100 ms (purity and net plans 25, emitting 14, LLVM passes 42, object 19), link 80 ms | Planned for 0.4.1, moved: saving the parsed prelude needs the whole syntax tree serializable, for 15 to 20% of a build; limiting the purity analysis to reachable functions risks code the generator calls implicitly being taken as impure (slower) for 20 ms | 0.4.9 |
 
+## Found by the held-out set
+
+The held-out set (`bench/heldout/`) is 40 programs written plainly from the tutorial alone, never used for tuning (BENCHMARK.md has its numbers). Its first measurement (2026-11-24, 0.4.3-dev): 15 of the 40 run in Mimic, all with the right output, at 8.5–10× C on one core (geometric mean); 25 fail. Each slow spot here gets a corpus program of its own to tune on; the held-out programs are never changed for speed.
+
+| Gap | Workaround now | Version |
+|---|---|---|
+| A list built by `push` in a function that calls itself, its elements not `i64` (strings, floats, records): `gen(n - 1, y, push(acc, v))`, the way every held-out program makes its input. Only a list of `i64` is taken over by such a function, so every `push` copies the list, and each copy stays alive in its call's frame: time and memory grow with the square of the length (20 of the 40 held-out programs use over 4 GB on Linux; `wordfreq`'s million words) | build the list with `¨` (`⍳ n ¨ (i => …)`) when each element can be computed from its index | 0.4.3 (a list of any element type taken over and grown in place; the recursion a loop) |
+| Deep recursion that carries a list or a map crashes with a segmentation fault and no message (`bank`, `histogram`, `inventory`, `sudokucheck` at 1,000,000 to 4,000,000 calls), as in the row on deep recursion below | `evolve` or `settle` | 0.4.3 (tail recursion becomes loops); a message instead of the bare crash sooner |
+| A map threaded through a function that calls itself (`tally(ws, i + 1, put(counts, w, c))`) has a dynamic type: the function stays on the generic path, outside the IR | none | 0.4.4 (types everywhere) |
+| `bigfactorial` (a list of digits, schoolbook multiplication) 508–3,242× C, `life` (a grid as a list of rows) 117–360×, `nqueens` (backtracking) 116–263×, `dijkstra` (adjacency lists) 47–143×: each still to be traced to its cause | none | 0.4.3 (traced first, then each cause given its step) |
+| `g[r][c] = v`: an element of a list of lists cannot be assigned (E0208); the whole row is replaced with `put` instead | `put(g, r, put(g[r], c, v))` | 0.4.5 (the array core) |
+| `{ s with … }` on a value read from a map with no declared type needs `let s: T = …` first (E0408) | annotate the `let` | 0.4.4 (types everywhere) |
+| `sort_by(xs, key, descending: true)` reverses the order of equal keys; the manual promises a stable order only ascending | sort by the negated key, ascending | 0.4.3 |
+| Stopping `mimic run` (a time limit, `kill`, a closed terminal) left the compiled program running, holding its memory | ✅ the program takes `mimic run`'s place on macOS and Linux (#139) | 0.4.3 |
+
 ## Found by the 0.4.0 corpus
 
 Each everyday algorithm in the benchmark corpus (`bench/`, in Mimic, C and Rust) that is awkward to write in Mimic, or slow, is a gap here, with the step of stage 0.4 that closes it. Times are on one core, as a ratio to C; where a line says 0.4.0, the ratio is the geometric mean over Linux x86-64, macOS arm64 and Windows x86-64 as released.
