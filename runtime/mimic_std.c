@@ -1147,6 +1147,11 @@ MATH2(pow, pow(x, y))
 MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
+MATH1(tanh, tanh(x))
+MATH1(sinh, sinh(x))
+MATH1(cosh, cosh(x))
+MATH1(log1p, log1p(x))
+MATH1(expm1, expm1(x))
 
 /* math::mulmod(a, b, m): a × b modulo m for any m > 0 an i64 holds, the
  * result in 0 … m - 1 (a 128-bit product where the target has one, else
