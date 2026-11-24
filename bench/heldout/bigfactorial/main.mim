@@ -1,0 +1,26 @@
+module main
+
+// 3000! held as a list of decimal digits (lowest first), built by
+// schoolbook multiplication; print its digit sum and number of digits.
+
+// digits × k, carrying as we go
+fn times(digits: [i64], k: i64, i: i64, carry: i64, out: [i64]) -> [i64] {
+    if i < ≢ digits {
+        let v = digits[i] * k + carry
+        times(digits, k, i + 1, v div 10, push(out, v % 10))
+    } else if carry > 0 {
+        times(digits, k, i, carry div 10, push(out, carry % 10))
+    } else {
+        out
+    }
+}
+
+fn factorial(n: i64, k: i64, digits: [i64]) -> [i64] {
+    if k > n { digits } else { factorial(n, k + 1, times(digits, k, 0, 0, [])) }
+}
+
+fn main() {
+    let digits = factorial(3000, 2, [1])
+    print(digits ▷ +/)
+    print(≢ digits)
+}

@@ -1,0 +1,3 @@
+total 13000887
+richest 487 with 121163
+refused 37993

@@ -1,0 +1,22 @@
+module main
+
+// Counts the ways to place 11 queens on an 11 x 11 board so that none
+// attack each other, by backtracking row by row.
+
+// can a queen go in column c of the next row?
+fn safe(placed: [i64], c: i64) -> bool {
+    let row = ≢ placed
+    all(⍳ row ¨ (r => placed[r] != c and abs(placed[r] - c) != row - r))
+}
+
+fn solve(n: i64, placed: [i64]) -> i64 {
+    if ≢ placed == n {
+        1
+    } else {
+        ⍳ n ¨ (c => if safe(placed, c) { solve(n, push(placed, c)) } else { 0 }) ▷ +/
+    }
+}
+
+fn main() {
+    print(solve(11, []))
+}

@@ -1,0 +1,27 @@
+module main
+
+// Multiply two 400 × 400 matrices of floats, held as lists of rows, and
+// print the trace and the sum of all entries of the product.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn generate(n: i64, x: i64, acc: [f64]) -> ([f64], i64) {
+    if n == 0 { (acc, x) } else {
+        let y = next(x)
+        generate(n - 1, y, push(acc, (y % 100) * 1.0))
+    }
+}
+
+fn main() {
+    let n = 400
+    let (av, x1) = generate(n * n, 42, [])
+    let (bv, _) = generate(n * n, x1, [])
+    let a = ⍳ n ¨ (i => av ↓ (i * n) ↑ n)
+    let b = ⍳ n ¨ (i => bv ↓ (i * n) ↑ n)
+    let cols = ⍳ n ¨ (j => b ¨ (row => row[j]))
+    let c = a ¨ (row => cols ¨ (col => row * col ▷ +/))
+    let trace = ⍳ n ¨ (i => c[i][i]) ▷ +/
+    let total = c ¨ (row => row ▷ +/) ▷ +/
+    print("{trace:.6}")
+    print("{total:.6}")
+}

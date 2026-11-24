@@ -1,0 +1,29 @@
+module main
+
+// Edit distance between 2,000 pairs of generated 100-letter strings over
+// the letters a-e; prints the total of the distances.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn random_word(n: i64, x: i64, letters: [str]) -> (str, i64) {
+    if n == 0 {
+        (join(letters, ""), x)
+    } else {
+        let y = next(x)
+        random_word(n - 1, y, push(letters, char_of(97 + y % 5)))
+    }
+}
+
+fn total(pairs: i64, x: i64, so_far: i64) -> i64 {
+    if pairs == 0 {
+        so_far
+    } else {
+        let (a, x1) = random_word(100, x, [])
+        let (b, x2) = random_word(100, x1, [])
+        total(pairs - 1, x2, so_far + text::distance(a, b))
+    }
+}
+
+fn main() {
+    print(total(2000, 42, 0))
+}

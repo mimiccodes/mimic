@@ -1,0 +1,52 @@
+module main
+
+// Sorts 2,000,000 generated numbers with a hand-written recursive merge
+// sort, then prints a checksum and whether the result is sorted.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn generate(n: i64, x: i64, acc: [i64]) -> [i64] {
+    if n == 0 {
+        acc
+    } else {
+        let y = next(x)
+        generate(n - 1, y, push(acc, y % 1000000))
+    }
+}
+
+fn merge(a: [i64], b: [i64], i: i64, j: i64, out: [i64]) -> [i64] {
+    if i == ≢ a {
+        concat(out, b ↓ j)
+    } else if j == ≢ b {
+        concat(out, a ↓ i)
+    } else if a[i] <= b[j] {
+        merge(a, b, i + 1, j, push(out, a[i]))
+    } else {
+        merge(a, b, i, j + 1, push(out, b[j]))
+    }
+}
+
+fn merge_sort(xs: [i64]) -> [i64] {
+    let n = ≢ xs
+    if n <= 1 {
+        xs
+    } else {
+        let mid = n div 2
+        let left = merge_sort(xs ↑ mid)
+        let right = merge_sort(xs ↓ mid)
+        merge(left, right, 0, 0, [])
+    }
+}
+
+fn checksum(xs: [i64]) -> i64 {
+    let idx = ⍳ (≢ xs)
+    xs * (idx % 1000 + 1) ▷ +/
+}
+
+fn main() {
+    let xs = generate(2000000, 42, [])
+    let sorted = merge_sort(xs)
+    print(checksum(sorted))
+    let n = ≢ sorted
+    print(all((sorted ↑ (n - 1)) <= (sorted ↓ 1)))
+}

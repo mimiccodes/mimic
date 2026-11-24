@@ -216,17 +216,22 @@ def main() -> int:
         return noise(benches, a.runs, a.noise)
     if a.gate:
         return gate(benches, Path(a.gate), a.runs, a.inject)
-    rows = measure(benches, a.runs)
     if a.heldout:
+        failures: list = []
+        rows = measure(benches, a.runs, failures)
         # (names shared with the corpus: kept out of its history and results)
-        report(rows, a.runs, "", a.json, "results-heldout.md", heldout=True)
-    else:
-        report(rows, a.runs, a.history, a.json)
+        report(rows, a.runs, "", a.json, "results-heldout.md", heldout=True, failures=failures)
+        return 1 if failures else 0
+    rows = measure(benches, a.runs)
+    report(rows, a.runs, a.history, a.json)
     return 0
 
 
-def measure(benches, runs: int):
-    """Build, check and time every version of each benchmark: [(name, {lang: seconds})]."""
+def measure(benches, runs: int, failures: list | None = None):
+    """Build, check and time every version of each benchmark: [(name, {lang: seconds})].
+    With `failures` (the held-out set), a version that does not build, prints
+    the wrong output or runs over 5 minutes is listed there and the run goes
+    on; otherwise it stops the run."""
     one = {"MIMIC_THREADS": "1", "TOKIO_WORKER_THREADS": "1"}
     rows = []
     for b in benches:
@@ -239,7 +244,8 @@ def measure(benches, runs: int):
                 continue
             load = OUT / f"{b.name}-load{EXE}"
             run(["rustc", "-C", "opt-level=3", "--edition", "2024", str(b / "load" / "main.rs"), "-o", str(load)])
-        timed = (lambda exe, env: time_server(exe, load, env, runs, expected)) if load else (lambda exe, env: time_runs(exe, env, runs, expected))
+        limit = 300 if failures is not None else None
+        timed = (lambda exe, env: time_server(exe, load, env, runs, expected)) if load else (lambda exe, env: time_runs(exe, env, runs, expected, limit))
         for lang, file in [("c", "main.c"), ("rust", "main.rs"), ("rayon", "rayon"), ("mimic", "main.mim")]:
             src = b / file
             if lang == "rust" and (b / "rust" / "Cargo.toml").exists():
@@ -249,19 +255,28 @@ def measure(benches, runs: int):
             # the C HTTP server is written for epoll and kqueue
             if WINDOWS and lang == "c" and load:
                 continue
-            exe = build(lang, src, b.name)
-            if exe is None:
-                continue
-            print(f"  {b.name:<16} {lang:<6}", end="", flush=True)
-            # Rayon is the parallel version: all cores
-            times[lang] = timed(exe, {} if lang == "rayon" else one)
-            if lang == "mimic":
-                times["mimic-all"] = timed(exe, {})
-                print(f" {times['mimic']:.3f} s (1 core), {times['mimic-all']:.3f} s (all cores)")
-            elif lang == "rayon":
-                print(f" {times[lang]:.3f} s (all cores)")
-            else:
-                print(f" {times[lang]:.3f} s")
+            try:
+                exe = build(lang, src, b.name)
+                if exe is None:
+                    continue
+                print(f"  {b.name:<16} {lang:<6}", end="", flush=True)
+                # Rayon is the parallel version: all cores
+                times[lang] = timed(exe, {} if lang == "rayon" else one)
+                if lang == "mimic":
+                    times["mimic-all"] = timed(exe, {})
+                    print(f" {times['mimic']:.3f} s (1 core), {times['mimic-all']:.3f} s (all cores)")
+                elif lang == "rayon":
+                    print(f" {times[lang]:.3f} s (all cores)")
+                else:
+                    print(f" {times[lang]:.3f} s")
+                if failures is not None and any(t == float("inf") for t in times.values()):
+                    raise RuntimeError(f"{b.name} ({lang}): a run took over {limit} s")
+            except RuntimeError as e:
+                if failures is None:
+                    raise
+                print(f"  {b.name:<16} {lang:<6} FAILED")
+                failures.append((b.name, lang, str(e).strip().splitlines()[0][:300]))
+                times = {k: v for k, v in times.items() if v != float("inf") and not k.startswith(lang)}
         rows.append((b.name, times))
     return rows
 
@@ -359,7 +374,7 @@ def shares(rows) -> list:
     return out
 
 
-def report(rows, runs: int, history: str, json_out: str, out: str = "results.md", heldout: bool = False) -> None:
+def report(rows, runs: int, history: str, json_out: str, out: str = "results.md", heldout: bool = False, failures: list | None = None) -> None:
     """results.md, the table on the terminal, the history, and JSON if asked."""
     c = lambda t, k: f"{t[k]:.3f} s ({t[k] / t['c']:.2f}×)" if k in t and "c" in t else (f"{t[k]:.3f} s" if k in t else "—")
     cpu, load = machine()
@@ -383,6 +398,8 @@ def report(rows, runs: int, history: str, json_out: str, out: str = "results.md"
         if rs:
             gm = math.exp(sum(math.log(r) for r, _ in rs) / len(rs))
             lines += ["", f"Held-out set, Mimic on one core against C: geometric mean {gm:.2f}× over {len(rs)} programs; slowest {', '.join(f'{n} {r:.2f}×' for r, n in rs[:5])}."]
+        if failures:
+            lines += ["", f"Failed ({len(failures)}):", ""] + [f"* `{n}` ({lang}): {why}" for n, lang, why in failures]
     sh = [] if heldout else shares(rows)
     if sh:
         m = limits()

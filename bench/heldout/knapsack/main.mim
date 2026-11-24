@@ -1,0 +1,41 @@
+module main
+
+// 0/1 knapsack of 1,000 generated items with capacity 100,000, by dynamic
+// programming: each item turns the table row of best values into the next
+// one. Prints the best total value.
+
+type Item = { weight: i64, value: i64 }
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn make_items(n: i64, x: i64, items: [Item]) -> [Item] {
+    if n == 0 {
+        items
+    } else {
+        let x1 = next(x)
+        let x2 = next(x1)
+        make_items(n - 1, x2, push(items, Item { weight: x1 % 1000 + 1, value: x2 % 1000 + 1 }))
+    }
+}
+
+fn add_item(prev: [i64], item: Item) -> [i64] {
+    ⍳ (≢ prev) ¨ (c => {
+        if item.weight <= c {
+            max(prev[c], prev[c - item.weight] + item.value)
+        } else {
+            prev[c]
+        }
+    })
+}
+
+fn fill(items: [Item], i: i64, row: [i64]) -> [i64] {
+    if i == ≢ items { row } else { fill(items, i + 1, add_item(row, items[i])) }
+}
+
+fn main() {
+    let capacity = 100000
+    let items = make_items(1000, 42, [])
+    let empty = 0 ⥊ [capacity + 1]
+    let best = fill(items, 0, empty)
+    print(best[capacity])
+}
