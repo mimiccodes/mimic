@@ -4666,12 +4666,23 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut conv = Vec::new();
         let consumed = self.consumed(&k);
         let converts: Vec<bool> = (0..vals.len()).map(|i| self.cur_spec.as_ref().is_some_and(|s| s.converts.contains(&(site, i)))).collect();
+        // (converted copies of lent lists, released after the call)
+        let mut copies = Vec::new();
         for (i, v) in vals.into_iter().enumerate() {
             // a list of unknown type for a parameter declared a typed list:
             // converted here (the callee is compiled for the declared type)
             let what = format!("argument `{}` of `{path_s}`", pnames[i]);
-            let c = if converts[i] { self.convert_slot(v, Ty::Dyn, spec.params[i], &what)? } else { self.as_ty(v, spec.params[i], &what)? };
-            if consumed.get(i).copied().unwrap_or(false) {
+            let takes = consumed.get(i).copied().unwrap_or(false);
+            let c = if converts[i] && !takes {
+                let (c, copy) = self.convert_arg(v, spec.params[i], &what)?;
+                copies.extend(copy);
+                c
+            } else if converts[i] {
+                self.convert_slot(v, Ty::Dyn, spec.params[i], &what)?
+            } else {
+                self.as_ty(v, spec.params[i], &what)?
+            };
+            if takes {
                 let c = self.hand_over(c)?; // the callee takes it
                 argv.push(self.basic(c).into());
                 continue;
@@ -4714,6 +4725,16 @@ impl<'ctx> Cg<'ctx, '_> {
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
         for c in conv {
             self.drop_tmp(c)?;
+        }
+        for (p, copied) in copies {
+            let fun = self.cur_fn.unwrap();
+            let free = self.ctx.append_basic_block(fun, "conv_free");
+            let after = self.ctx.append_basic_block(fun, "conv_after");
+            self.b.build_conditional_branch(copied, free, after).s()?;
+            self.b.position_at_end(free);
+            self.release(p)?;
+            self.b.build_unconditional_branch(after).s()?;
+            self.b.position_at_end(after);
         }
         Ok(self.val_of(r, spec.ret, true))
     }
@@ -4777,6 +4798,54 @@ impl<'ctx> Cg<'ctx, '_> {
     /// says how it is stored, so a list of integers (or booleans) going where
     /// a list of floats (or integers) is declared is converted here, once;
     /// a list whose type is not known statically is checked.
+    /// A list of unknown type passed for a parameter declared `[i64]` or
+    /// `[f64]` (a lent one): passed as it is when it is already that kind
+    /// of list, which one load and compare shows (the common case: a call
+    /// in a loop pays nothing more); else converted by the runtime. The
+    /// second part, when given, is the value passed and whether it is a
+    /// converted copy, to release after the call.
+    #[allow(clippy::type_complexity)]
+    fn convert_arg(&mut self, v: V<'ctx>, to: Ty, what: &str) -> R<(V<'ctx>, Option<(PointerValue<'ctx>, IntValue<'ctx>)>)> {
+        let dt: u64 = match to {
+            Ty::Arr(El::I64, _) => 0,
+            Ty::Arr(El::F64, _) => 1,
+            _ => return Ok((self.as_ty(v, to, what)?, None)),
+        };
+        // (a list in registers, or one this call owns: the simple way)
+        let V::P(p, false) = v else { return Ok((self.convert_slot(v, Ty::Dyn, to, what)?, None)) };
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let f = self.cur_fn.ok_or("internal compiler error: an argument outside a function")?;
+        let check = self.ctx.append_basic_block(f, "conv_check");
+        let slow = self.ctx.append_basic_block(f, "conv_slow");
+        let done = self.ctx.append_basic_block(f, "conv_done");
+        let null = self.b.build_is_null(p, "").s()?;
+        self.b.build_conditional_branch(null, slow, check).s()?;
+        // dtype and rank side by side: one 64-bit load and compare
+        self.b.position_at_end(check);
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
+        let kind = self.b.build_load(i64t, kind_p, "kind").s()?.into_int_value();
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want = if little { (1u64 << 32) | dt } else { (dt << 32) | 1 };
+        let ok = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        self.b.build_conditional_branch(ok, done, slow).s()?;
+        self.b.position_at_end(slow);
+        let r = self.call_rt_ptr("mim_vec_as", &[p.into(), self.i32c(dt as i32)])?;
+        let r = self.basic(r).into_pointer_value();
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let ptr = self.b.build_phi(self.ptr, "conv").s()?;
+        ptr.add_incoming(&[(&p, check), (&r, slow_end)]);
+        let flag = self.b.build_phi(self.ctx.bool_type(), "conv_owned").s()?;
+        let (no, yes) = (self.ctx.bool_type().const_zero(), self.ctx.bool_type().const_int(1, false));
+        flag.add_incoming(&[(&no, check), (&yes, slow_end)]);
+        let ptr = ptr.as_basic_value().into_pointer_value();
+        let c = self.as_ty(V::P(ptr, false), to, what)?;
+        Ok((c, Some((ptr, flag.as_basic_value().into_int_value()))))
+    }
+
     fn convert_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
         let want = match to {
             Ty::Arr(El::F64, _) => Some(1),
