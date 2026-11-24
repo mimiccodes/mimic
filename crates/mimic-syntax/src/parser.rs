@@ -574,7 +574,17 @@ impl Parser {
 
     fn fn_decl(&mut self, is_pub: bool, start: Span) -> PResult<FnDecl> {
         self.expect(&Tok::Fn)?;
-        let (name, _) = self.ident()?;
+        let (name, name_span) = self.ident()?;
+        // (after `fn` any word is a name, so this one has to be refused here:
+        // everywhere else the word is the primitive, so the function could
+        // never be called. C functions keep such names under `c::`.)
+        if let Some(p) = Prim::from_word(&name) {
+            return Err(Diag::new(
+                &C::PRIMITIVE_AS_NAME,
+                format!("`{name}` is a built-in primitive ({}): a function with this name could never be called, since `{name}(…)` is always the primitive; rename the function", p.info().glyph),
+                name_span,
+            ));
+        }
         let type_params = self.type_params()?;
         self.expect(&Tok::LParen)?;
         self.nl_ignore += 1;
