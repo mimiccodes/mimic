@@ -24,6 +24,13 @@ pub module math {
         fn floor(x: f64) -> f64
         fn ceil(x: f64) -> f64
         fn round(x: f64) -> f64
+        // hyperbolic functions, and ln(1 + x) and eˣ − 1 exact near zero
+        // (for losses and activations that must stay accurate there)
+        fn tanh(x: f64) -> f64
+        fn sinh(x: f64) -> f64
+        fn cosh(x: f64) -> f64
+        fn log1p(x: f64) -> f64
+        fn expm1(x: f64) -> f64
         // the integer part, towards zero: math::to_int(¯2.7) is -2 (a NaN,
         // or a number no i64 holds, stops the program)
         fn to_int(x: f64) -> i64
@@ -40,6 +47,12 @@ pub module math {
 
     // e, the base of natural logarithms
     pub fn e() -> f64 { 2.718281828459045 }
+
+    // the logistic function 1 / (1 + e⁻ˣ), without overflow for large
+    // negative x
+    pub fn sigmoid(x: f64) -> f64 {
+        if x >= 0.0 { 1.0 / (1.0 + exp(0.0 - x)) } else { exp(x) / (1.0 + exp(x)) }
+    }
 
     // ---- whole numbers ----
 

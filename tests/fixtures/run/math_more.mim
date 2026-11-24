@@ -1,0 +1,13 @@
+module main
+
+// tanh, sinh, cosh, log1p, expm1 and sigmoid; unwrap_or on Option
+
+fn r6(x: f64) -> i64 { math::to_int(math::round(x * 1000000.0)) }
+
+fn main() {
+    print("{r6(math::tanh(0.5))} {r6(math::sinh(1.0))} {r6(math::cosh(1.0))}")
+    print("{r6(math::log1p(0.001) * 1000.0)} {r6(math::expm1(0.001) * 1000.0)}")
+    print("{r6(math::sigmoid(0.0))} {r6(math::sigmoid(2.0))} {r6(math::sigmoid(¯800.0))} {r6(math::sigmoid(800.0))}")
+    print(([0.0 0.5 1.0] ¨ math::tanh ¨ r6))
+    print("{parse_int("42") ▷ unwrap_or(300)} {parse_int("x") ▷ unwrap_or(300)}")
+}

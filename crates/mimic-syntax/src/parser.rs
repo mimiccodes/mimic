@@ -265,6 +265,17 @@ impl Parser {
             other => Err(Diag::new(&C::UNEXPECTED_TOKEN, format!("expected identifier, found {}", other.describe()), t.span)),
         }
     }
+    /// A name being declared (a parameter, a `let`): a primitive's word is
+    /// refused here too, though before a `:` the lexer reads any word as a
+    /// name (`shape: [i64]`): every later use of it would be the primitive.
+    fn decl_ident(&mut self) -> PResult<(String, Span)> {
+        let (name, span) = self.ident()?;
+        if let Some(p) = Prim::from_word(&name) {
+            return Err(Diag::new(&C::PRIMITIVE_AS_NAME, format!("`{name}` is a built-in primitive ({}) and cannot be used as a name", p.info().glyph), span));
+        }
+        Ok((name, span))
+    }
+
     /// A name where built-in words are allowed too: C function names in
     /// `extern` blocks (`fn abs(…)`) and path segments after `::`.
     fn name_or_word(&mut self) -> PResult<(String, Span)> {
@@ -595,7 +606,7 @@ impl Parser {
                 self.nl_ignore -= 1;
                 return Err(Diag::new(&C::PARAM_RULES, "parameters are immutable; bind a `let mut` copy inside the body", s));
             }
-            let (pn, ps) = self.ident()?;
+            let (pn, ps) = self.decl_ident()?;
             let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
             let default = if self.eat(&Tok::Assign) { Some(self.expr()?) } else { None };
             if default.is_none() && params.iter().any(|p: &Param| p.default.is_some()) {
@@ -798,7 +809,7 @@ impl Parser {
                     return Ok(Stmt::LetTuple { names, value, span: start });
                 }
                 let mutable = self.eat(&Tok::Mut);
-                let (name, _) = self.ident()?;
+                let (name, _) = self.decl_ident()?;
                 let ty = if self.eat(&Tok::Colon) { Some(self.ty()?) } else { None };
                 if !self.eat(&Tok::Assign) && !self.eat(&Tok::Bind) {
                     let s = self.span();
@@ -1332,7 +1343,7 @@ impl Parser {
                 let mut params = Vec::new();
                 let mut typed = Vec::new();
                 while !self.at(&Tok::RParen) {
-                    let (name, nspan) = self.ident()?;
+                    let (name, nspan) = self.decl_ident()?;
                     if self.eat(&Tok::Colon) {
                         // a typed parameter: the lambda takes `name·k` and
                         // its body starts `let name: Type = name·k`, which
