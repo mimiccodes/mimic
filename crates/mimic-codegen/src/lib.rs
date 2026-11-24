@@ -4665,8 +4665,12 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut argv = Vec::new();
         let mut conv = Vec::new();
         let consumed = self.consumed(&k);
+        let converts: Vec<bool> = (0..vals.len()).map(|i| self.cur_spec.as_ref().is_some_and(|s| s.converts.contains(&(site, i)))).collect();
         for (i, v) in vals.into_iter().enumerate() {
-            let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
+            // a list of unknown type for a parameter declared a typed list:
+            // converted here (the callee is compiled for the declared type)
+            let what = format!("argument `{}` of `{path_s}`", pnames[i]);
+            let c = if converts[i] { self.convert_slot(v, Ty::Dyn, spec.params[i], &what)? } else { self.as_ty(v, spec.params[i], &what)? };
             if consumed.get(i).copied().unwrap_or(false) {
                 let c = self.hand_over(c)?; // the callee takes it
                 argv.push(self.basic(c).into());
