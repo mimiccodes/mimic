@@ -1402,6 +1402,13 @@ static void free_block(heap_state *h, mim_val *v) {
     __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
     int c = size_class(bytes);
     if (c < SIZE_CLASSES) {
+        /* a list grown in place (grow_owned) is a malloc'd block whose room
+         * is in desc, whatever its length: freed, not put on a pool's free
+         * list (where its kilobytes were lost to 64-byte slots) */
+        if (v->desc && v->rank == 1 && dt != MIM_OBJ && dt != MIM_FN && dt != MIM_MAP) {
+            free(v);
+            return;
+        }
         if (h->free_len[c] >= FREE_LIST_CAP) pool_give(h, c);
         *(mim_val **)v = h->free[c];
         h->free[c] = v;

@@ -5864,7 +5864,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     let own_first = m.name == "prelude"
                         && matches!(decl.name.as_str(), "push" | "put" | "concat")
                         && matches!(vals.first(), Some(V::P(_, true)))
-                        && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)));
+                        && (matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)))
+                            // (or a list another `push` just gave back:
+                            // `push(push(pieces, word), sep)` held nowhere else;
+                            // copied, a text built by such a recursion took
+                            // time growing with the square of its length)
+                            || (decl.name == "push"
+                                && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Call { callee, .. })
+                                    if matches!(&callee.kind, ExprKind::Path(p) if p.last().is_some_and(|l| l == "push")))));
                     let name = if own_first {
                         format!("mim_take_{}", decl.name)
                     } else if m.name == "prelude" {
