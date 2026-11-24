@@ -5615,11 +5615,18 @@ impl<'ctx> Cg<'ctx, '_> {
                     // `tcp::send` → mim_std_tcp_send; prelude functions → mim_std_<name>
                     let m = &self.p.mods[self.p.fns[fid].module];
                     // `push`, `put` or `concat` of a list this code owns here
-                    // (a value at its last use, a temporary): handed over to
+                    // (a variable at its last use): handed over to
                     // the runtime's owning version, which changes it in
                     // place when nothing else holds it (else copies it and
                     // releases it, as lending it would)
-                    let own_first = m.name == "prelude" && matches!(decl.name.as_str(), "push" | "put" | "concat") && matches!(vals.first(), Some(V::P(_, true)));
+                    // (a variable at its last use: `push(acc, x)` handed down a
+                    // recursion. Not a temporary, `put(put(t, i, x), j, y)`:
+                    // changing one in place left it where an earlier step made
+                    // it, which measured slower on some machines than the copy)
+                    let own_first = m.name == "prelude"
+                        && matches!(decl.name.as_str(), "push" | "put" | "concat")
+                        && matches!(vals.first(), Some(V::P(_, true)))
+                        && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)));
                     let name = if own_first {
                         format!("mim_take_{}", decl.name)
                     } else if m.name == "prelude" {
