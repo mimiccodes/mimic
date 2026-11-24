@@ -189,6 +189,114 @@ fn passed_through(fname: &str, i: usize, name: &str, body: &Block, sites: &[usiz
     sites.iter().all(|s| through.contains(s))
 }
 
+/// The ids of `name` where it is the whole value of a `let mut v = name`,
+/// anywhere in `body`.
+fn mut_copies(name: &str, body: &Block) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut of = |b: &Block| {
+        for st in &b.stmts {
+            if let Stmt::Let { mutable: true, value, .. } = st
+                && matches!(&value.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)
+            {
+                out.push(id(value));
+            }
+        }
+    };
+    of(body);
+    body.walk(&mut |e| match &e.kind {
+        ExprKind::If { then, .. } => of(then),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => of(b),
+        _ => {}
+    });
+    out
+}
+
+/// One argument of a tail call to the function itself.
+#[derive(Clone)]
+pub(crate) struct TailArg {
+    /// the variable, when the argument is one passed as it is
+    pub direct: Option<String>,
+    /// the names the argument's value may point into
+    pub roots: HashSet<String>,
+}
+
+/// The calls of the function `fid` to itself that are its result (a block's
+/// tail, a branch of an `if` or `match` there, a `return` outside lambdas),
+/// each with, per argument, the names it may still be using when the call
+/// is made (a variable passed as it is: just that name): every other local
+/// can be released before the call, which is then the function's last act,
+/// and the recursion runs as a loop.
+pub(crate) fn tail_self_calls(p: &Program, module: ModId, fid: usize, body: &Block) -> HashMap<usize, Vec<TailArg>> {
+    fn results<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &e.kind {
+            ExprKind::If { then, els, .. } => {
+                tails(then, out);
+                if let Some(x) = els {
+                    results(x, out);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => tails(b, out),
+            ExprKind::Match { arms, .. } => arms.iter().for_each(|a| results(&a.body, out)),
+            _ => out.push(e),
+        }
+    }
+    fn tails<'a>(b: &'a Block, out: &mut Vec<&'a Expr>) {
+        for st in &b.stmts {
+            if let Stmt::Return(Some(e), _) = st {
+                results(e, out);
+            }
+        }
+        if let Some(t) = &b.tail {
+            results(t, out);
+        }
+    }
+    // the names an argument's value may point into (borrowed): the
+    // variable itself, the list or record it is read from; anything else
+    // but a call, arithmetic or a literal (which make new values): every
+    // name in it
+    fn roots(e: &Expr, out: &mut HashSet<String>) {
+        match &e.kind {
+            ExprKind::Path(p) if p.len() == 1 => {
+                out.insert(p[0].clone());
+            }
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => roots(base, out),
+            ExprKind::Call { .. } | ExprKind::Binary { .. } | ExprKind::Unary { .. } => {}
+            _ => e.walk(&mut |x| {
+                if let ExprKind::Path(p) = &x.kind
+                    && p.len() == 1
+                {
+                    out.insert(p[0].clone());
+                }
+            }),
+        }
+    }
+    let mut res = Vec::new();
+    tails(body, &mut res);
+    let mut out = HashMap::new();
+    for e in res {
+        if let ExprKind::Call { callee, args } = &e.kind
+            && let ExprKind::Path(path) = &callee.kind
+            && matches!(p.lookup(module, path), Some(Resolved::Fn(f)) if f == fid)
+        {
+            let keep = args
+                .iter()
+                .map(|a| {
+                    let mut roots_of = HashSet::new();
+                    roots(a, &mut roots_of);
+                    let direct = match &a.kind {
+                        ExprKind::Path(p) if p.len() == 1 => Some(p[0].clone()),
+                        _ => None,
+                    };
+                    TailArg { direct, roots: roots_of }
+                })
+                .collect();
+            out.insert(id(e), keep);
+        }
+    }
+    out
+}
+
 /// Every expression of a block's statements and tail, as roots to walk.
 pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
     for s in stmts {
@@ -287,7 +395,9 @@ impl<'ctx> Cg<'ctx, '_> {
                 && is_name(&args[0])
                 && order.last(&args[0]);
         });
-        found
+        // `let mut v = xs` at its last use: a copy to change (`v[i] = …`,
+        // `push`), which taking the list makes the list itself
+        found || mut_copies(name, body).into_iter().any(|v| order.last_id(v))
     }
 
     /// Whether the record parameter `name` of `k` ends, at a last use, as the
@@ -403,7 +513,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// Where values move and parameters are taken over (so `with` updates in
     /// place): every build, debug included, on targets with the atomic loads
     /// this needs (not eBPF).
-    fn heap_ok_target(&self) -> bool {
+    pub(crate) fn heap_ok_target(&self) -> bool {
         !self.module.get_triple().as_str().to_string_lossy().starts_with("bpf")
     }
 
@@ -432,7 +542,30 @@ pub(crate) fn last_use_sites(name: &str, body: &Block) -> Vec<usize> {
     if order.in_closure {
         return Vec::new();
     }
-    order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false)).collect()
+    // (only where the order is the walk's: the nearest expression holding
+    // this use and another is a block, an `if` or a `match`. In
+    // `xs ⌿ (xs ¨ f)` the mask runs first, so moving the last `xs` written
+    // into `¨` released the list before `⌿` read it; in `f(xs, g(xs))` the
+    // first argument is read before `g` takes it)
+    let mut span: HashMap<usize, (usize, usize, bool)> = HashMap::new();
+    let mut n = 0;
+    body.walk(&mut |x| {
+        let mut len = 0;
+        x.walk(&mut |_| len += 1);
+        let seq = matches!(x.kind, ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::If { .. } | ExprKind::Match { .. });
+        span.insert(id(x), (n, n + len, seq));
+        n += 1;
+    });
+    let ordered = |site: usize| {
+        let Some(&(at, _, _)) = span.get(&site) else { return false };
+        // the smallest expression holding the site and another use
+        let holder = span
+            .values()
+            .filter(|(a, b, _)| *a <= at && at < *b && order.uses.iter().any(|(u, _)| *u != site && span.get(u).is_some_and(|&(p, _, _)| *a <= p && p < *b)))
+            .min_by_key(|(a, b, _)| b - a);
+        holder.is_none_or(|&(_, _, seq)| seq)
+    };
+    order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false) && ordered(*i)).collect()
 }
 
 /// The uses of a name in a body, in the order they run (the walk's order:
@@ -509,7 +642,11 @@ impl UseOrder {
     /// Whether the use `e` is a last use: every use after it is in another
     /// branch of an `if`/`match` that holds both.
     fn last(&self, e: &Expr) -> bool {
-        let Some(&(_, u)) = self.uses.iter().find(|(i, _)| *i == id(e)) else { return false };
+        self.last_id(id(e))
+    }
+
+    fn last_id(&self, e: usize) -> bool {
+        let Some(&(_, u)) = self.uses.iter().find(|(i, _)| *i == e) else { return false };
         self.uses.iter().filter(|(_, w)| *w > u).all(|(_, w)| {
             self.branches.iter().any(|bs| {
                 let at = |p: usize| bs.iter().position(|(s, t)| p >= *s && p < *t);

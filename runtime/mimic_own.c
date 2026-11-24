@@ -51,3 +51,12 @@ mim_val *mim_take_put(mim_val *xs, mim_val *k, mim_val *v) {
 mim_val *mim_take_concat(mim_val *xs, mim_val *ys) {
     return mim_std_concat_own(xs, ys);
 }
+
+/* xs[i] = v on a variable's list: the list (owned) in, the list out (a
+ * copy when it was shared), so the compiled code keeps the variable in a
+ * register instead of handing the runtime its address */
+mim_val *mim_set_index_v(mim_val *xs, mim_val *i, mim_val *v) {
+    mim_val *slot = xs;
+    mim_set_index(&slot, i, v);
+    return slot;
+}
