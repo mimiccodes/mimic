@@ -168,3 +168,29 @@ static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *c
         step *= 2;
     }
 }
+
+/* Wake the pool for a job of `nchunks` chunks: as many workers as there are
+ * chunks besides the caller's. Waking all of them for a few chunks left
+ * most with nothing to do but fight over the lock (a 9-element `¨` ran 6x
+ * slower on 12 threads than on one, mostly in the kernel). (Called with
+ * g_mu held. Here at the end: in the middle of the runtime, this and
+ * worth_sharing moved the fork-join code after them, and `fib`, which uses
+ * nothing else of this change, measured 20% slower on one machine.) */
+static void pool_wake(int64_t nchunks) {
+    if (nchunks - 1 >= g_nthreads - 1) {
+        cond_broadcast(&g_work);
+    } else {
+        for (int64_t w = 0; w < nchunks - 1; w++) cond_signal(&g_work);
+    }
+}
+
+/* After timing the first `done` elements (`spent` ns): is the rest, `left`
+ * elements at that pace, worth sharing out? Waking the pool costs tens of
+ * microseconds, and more the more threads it wakes (each one it wakes takes
+ * the lock): at least 50 us of work, and 20 us for each thread that would
+ * get some. */
+static int worth_sharing(int64_t spent, int64_t done, int64_t left) {
+    int64_t rest = spent / done * left;
+    int64_t k = left < g_nthreads ? left : g_nthreads;
+    return rest > 50000 && rest > 20000 * k;
+}

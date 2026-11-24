@@ -382,6 +382,10 @@ typedef int mim_mutex;
 
 /* Run fn over [0, n) in chunks of `grain`, in parallel when worthwhile.
  * Nested calls (from inside a parallel task) run sequentially. */
+/* (mimic_own.c) */
+static void pool_wake(int64_t nchunks);
+static int worth_sharing(int64_t spent, int64_t done, int64_t left);
+
 static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx) {
     if (n <= 0) return;
     if (grain < 1) grain = 1;
@@ -395,15 +399,7 @@ static void parallel_for_grain(int64_t n, int64_t grain, mim_task fn, void *ctx)
         __atomic_store_n(&mim_fj_open, 0, __ATOMIC_RELAXED); /* no regions inside */
         g_job = &j;
         g_gen++;
-        /* as many workers as there are chunks besides this thread's: waking
-         * all of them for a few chunks left most with nothing to do but
-         * fight over the lock (a 9-element `¨` ran 6x slower on 12 threads
-         * than on one, mostly in the kernel) */
-        if (nchunks - 1 >= g_nthreads - 1) {
-            cond_broadcast(&g_work);
-        } else {
-            for (int64_t w = 0; w < nchunks - 1; w++) cond_signal(&g_work);
-        }
+        pool_wake(nchunks);
         mutex_unlock(&g_mu);
         t_in_parallel = 1;
         run_chunks(&j);
@@ -503,16 +499,6 @@ static void timed_range(void *c, int64_t lo, int64_t hi) {
     t->f(t->ctx, lo + t->from, hi + t->from);
 }
 
-/* After timing the first `done` elements (`spent` ns): is the rest, `left`
- * elements at that pace, worth sharing out? Waking the pool costs tens of
- * microseconds, and more the more threads it wakes (each one it wakes takes
- * the lock): at least 50 us of work, and 20 us for each thread that would
- * get some. */
-static int worth_sharing(int64_t spent, int64_t done, int64_t left) {
-    int64_t rest = spent / done * left;
-    int64_t k = left < g_nthreads ? left : g_nthreads;
-    return rest > 50000 && rest > 20000 * k;
-}
 
 void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
     if (n <= 0) return;
