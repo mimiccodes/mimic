@@ -60,3 +60,96 @@ mim_val *mim_set_index_v(mim_val *xs, mim_val *i, mim_val *v) {
     mim_set_index(&slot, i, v);
     return slot;
 }
+
+/* ==== short `¨`s: on one core unless worth sharing ======================
+ * (here at the end of the runtime: added in the middle of it, these moved
+ * the scheduler's code, and `fib`, which never maps, measured 20% slower on
+ * one machine) */
+
+/* What a `¨`'s function has cost per element (ns), by the function: a
+ * small table, written without locks (a torn or lost entry only means one
+ * more timing). */
+static struct { void *key; int64_t ns; } g_each_cost[256];
+
+static int64_t each_cost(void *key) {
+    unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
+    if (__atomic_load_n(&g_each_cost[i].key, __ATOMIC_RELAXED) != key) return 0;
+    return __atomic_load_n(&g_each_cost[i].ns, __ATOMIC_RELAXED);
+}
+
+static void each_cost_put(void *key, int64_t ns) {
+    unsigned i = (unsigned)(((uintptr_t)key >> 4) * 2654435761u) & 255;
+    __atomic_store_n(&g_each_cost[i].ns, ns < 1 ? 1 : ns, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_each_cost[i].key, key, __ATOMIC_RELAXED);
+}
+
+/* The first chunk the calling thread runs of a `¨` shared out for the
+ * first time, timed: what the function costs per element. */
+typedef struct {
+    void (*f)(void *, int64_t, int64_t);
+    void *ctx;
+    int64_t ns; /* per element, once timed */
+} probe_ctx;
+
+static _Thread_local int t_probe; /* this thread called the `¨` being probed */
+
+static void probe_range(void *c, int64_t lo, int64_t hi) {
+    probe_ctx *p = (probe_ctx *)c;
+    if (!t_probe || p->ns) {
+        p->f(p->ctx, lo, hi);
+        return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    p->f(p->ctx, lo, hi);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+    p->ns = hi > lo ? (spent / (hi - lo) > 0 ? spent / (hi - lo) : 1) : 0;
+}
+
+/* A pure `¨` of the function `key` over n elements. A long list goes in
+ * fine chunks over every core, as always, and so does a short one the
+ * first time (up to a chunk, 16,384), while its cost per element is timed.
+ * After that a short list is shared out only when that is worth waking the
+ * pool for at the cost seen, else it runs here, timed as it goes (1, 2, 4,
+ * … elements, and shared out if it turns out costly after all). (Sent
+ * straight to the pool every time, the 9-element `¨`s of a sudoku check
+ * woke every thread 27,000 times in 20,000 grids, and ran 6x slower on 12
+ * cores than on one. Timed before sharing every time instead, a few costly
+ * elements, such as 25 searches done once, ran the first alone.) */
+static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx, void *key) {
+    if (n > mim_grain || n == 1 || g_nthreads <= 1 || t_in_parallel) {
+        parallel_for_grain(n, fine_grain(n), range, ctx);
+        return;
+    }
+    int64_t per = each_cost(key);
+    if (per == 0 || worth_sharing(per, 1, n)) {
+        probe_ctx p = {range, ctx, 0};
+        t_probe = 1;
+        parallel_for_grain(n, fine_grain(n), probe_range, &p);
+        t_probe = 0;
+        if (p.ns) each_cost_put(key, p.ns);
+        return;
+    }
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    int64_t done = 0, step = 1;
+    while (done < n) {
+        int64_t hi = done + step < n ? done + step : n;
+        range(ctx, done, hi);
+        done = hi;
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
+        if (done == n) {
+            each_cost_put(key, spent / n);
+            return;
+        }
+        if (worth_sharing(spent, done, n - done)) {
+            each_cost_put(key, spent / done);
+            timed_ctx c = {range, ctx, done};
+            parallel_for_grain(n - done, fine_grain(n - done), timed_range, &c);
+            return;
+        }
+        step *= 2;
+    }
+}
