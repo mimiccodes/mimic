@@ -112,7 +112,10 @@ impl<'ctx> Cg<'ctx, '_> {
             // branches stay.
             let mut body = f.body.clone();
             body.insts.retain(|i| !matches!(i.op, Op::Drop(_)));
-            return self.ir_region(f, &body, &mut vals);
+            self.ir_exit_top = &body as *const mimic_ir::Region as usize;
+            let r = self.ir_region(f, &body, &mut vals);
+            self.ir_exit_top = 0;
+            return r;
         }
         self.ir_region(f, &f.body, &mut vals)
     }
@@ -244,7 +247,12 @@ impl<'ctx> Cg<'ctx, '_> {
                     if self.terminated() {
                         self.dead_block();
                     }
-                    self.release_scope(&moved)?;
+                    // (in main's body: the process exits next, as for main's
+                    // own values; `ls`, 1.6 million strings in http_parse,
+                    // was freed one by one just before the exit)
+                    if r as *const mimic_ir::Region as usize != self.ir_exit_top {
+                        self.release_scope(&moved)?;
+                    }
                     self.as_ty(out, ty, "value")?
                 }
                 // a list's length, from its header (a list passed in: never

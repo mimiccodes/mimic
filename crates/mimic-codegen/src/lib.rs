@@ -358,6 +358,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         exit_fid: None,
         building_literal: false,
         body_exit: None,
+        ir_exit_top: 0,
         lazy_deep: None,
         cur_kind: Kind::Plain,
         borrow_binds: false,
@@ -623,6 +624,10 @@ struct Cg<'ctx, 'p> {
     building_literal: bool,
     /// The scope depth of that function's body while it is compiled.
     body_exit: Option<usize>,
+    /// The IR region of `main`'s body while it is compiled (its address):
+    /// what an expression there is handed is not released after it either,
+    /// as main's own values are not (the process exits next)
+    ir_exit_top: usize,
     /// In a native function of plain numbers: its key (the depth is checked
     /// before each call it makes; see `scalars_only`).
     lazy_deep: Option<Key>,
