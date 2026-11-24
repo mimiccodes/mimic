@@ -1195,7 +1195,8 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
     let (mut changed, mut failed) = (Vec::new(), 0);
     for f in &files {
         let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
-        match mimic_syntax::format::format(&src, glyphs) {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match mimic_syntax::format::format_file(&name, &src, glyphs) {
             Ok(text) if text != src => {
                 if !check {
                     std::fs::write(f, &text).map_err(|e| format!("cannot write {}: {e}", f.display()))?;
@@ -1204,8 +1205,9 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
             }
             Ok(_) => {}
             Err(d) => {
+                // (left untouched: it does not parse)
                 failed += 1;
-                eprintln!("{}:{}:{}: {}", f.display(), d.span.line, d.span.col, d.msg);
+                eprintln!("{}:{}:{}: {} (not formatted: the file does not parse)", f.display(), d.span.line, d.span.col, d.msg);
             }
         }
     }

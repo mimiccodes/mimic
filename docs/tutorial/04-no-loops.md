@@ -13,7 +13,7 @@ Mimic has no `for` or `while`. That is deliberate:
 | You want to… | Use |
 |---|---|
 | transform every element | `xs ¨ f` (each) |
-| combine all elements into one | `xs ▷ gather(f)`, or `+/` `×/` `⌈/` `⌊/` |
+| combine all elements into one | `xs ▷ gather(f)`, or `+/` `×/` `⌈/` `⌊/` `∧/` `∨/` |
 | keep the running result | `xs ▷ trail(f)` |
 | repeat a step *n* times | `x ▷ evolve(n, step)` |
 | repeat until a condition holds | `x ▷ settle(step, done)` |

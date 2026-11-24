@@ -374,6 +374,12 @@ impl<'a> Lexer<'a> {
             '≠' => Tok::Ne,
             '≤' => Tok::Le,
             '≥' => Tok::Ge,
+            // `∧/` and `∨/`, the and and or reductions: `all` and `any`
+            // (`same ▷ ∧/`: are all of these true?)
+            '∧' | '∨' if self.peek() == Some('/') => {
+                self.bump();
+                Tok::Ident(if c == '∧' { "all" } else { "any" }.into())
+            }
             '∧' => Tok::And,
             '∨' => Tok::Or,
             '¬' => Tok::Not,

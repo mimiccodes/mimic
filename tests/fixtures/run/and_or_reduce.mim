@@ -1,0 +1,14 @@
+module main
+
+// the and and or reductions, as in APL: `∧/` is `all`, `∨/` is `any`,
+// after `▷` and in front of their list like `+/`
+
+fn main() {
+    let xs = [true true false]
+    print(xs ▷ ∧/)
+    print(xs ▷ ∨/)
+    print(∧/ [true true])
+    print(∨/ [false false])
+    print([1 2 3] ¨ (x => x > 0) ▷ ∧/)
+    print(all(xs) == (xs ▷ ∧/))
+}

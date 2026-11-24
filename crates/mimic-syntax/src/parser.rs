@@ -1167,6 +1167,21 @@ impl Parser {
             let span = start.to(operand.span);
             return Ok(prim_expr(p, vec![operand], span));
         }
+        // `∧/ xs`, `∨/ xs`: the and and or reductions written as glyphs (the
+        // lexer reads them as `all` and `any`), applied like `+/ xs`
+        if let Tok::Ident(n) = self.peek().clone()
+            && matches!(n.as_str(), "all" | "any")
+            && start.end - start.start != n.len()
+        {
+            self.next();
+            if !(self.at(&Tok::LParen) && self.adjacent()) {
+                let operand = self.prefix()?;
+                let span = start.to(operand.span);
+                let callee = Expr { kind: ExprKind::Path(vec![n]), span: start };
+                return Ok(Expr { kind: ExprKind::Call { callee: Box::new(callee), args: vec![operand] }, span });
+            }
+            self.pos -= 1;
+        }
         self.postfix()
     }
 
