@@ -8,6 +8,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
 
 ### Changed
+- **A list of any element type grown by `push` (or changed by `put` or `concat`) where it is used for the last time is changed in place**, strings, floats, records and maps included: `gen(n - 1, y, push(acc, v))` hands the same list down the recursion instead of copying it at every step (before, only lists of `i64` were, so building a list of strings this way took time and memory growing with the square of its length). A map threaded through a recursion with `put` is changed in place too. Found by the held-out set (BENCHMARK.md): most of its programs build their input this way.
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed

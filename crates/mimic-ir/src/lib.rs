@@ -307,8 +307,9 @@ pub enum Op {
     /// `lazies`: `let`s of lists used only inside array expressions, never
     /// built: the old path fuses each into where it is read (in order:
     /// one may read an earlier one). `moves[k]`: the expression is the last
-    /// use of record `uses[k]`, which the old path may move on there (into a
-    /// loop that changes it in place) or release after it.
+    /// use of `uses[k]`, a record or a list (not text), which the old path
+    /// may move on there (into a loop that changes it in place, a `push`
+    /// that grows it in place) or release after it.
     Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)>, moves: Vec<bool> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its

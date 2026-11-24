@@ -1,0 +1,49 @@
+module main
+
+// Lists of any element type grown by `push` in a function that calls
+// itself, and a map changed by `put` the same way: each handed down the
+// recursion and changed in place (it was copied at every step, so time and
+// memory grew with the square of the length).
+
+type P = { id: i64, w: f64 }
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn words(vocab: [str], n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let y = next(x)
+        words(vocab, n - 1, y, push(acc, vocab[(y div 65536) % 5]))
+    }
+}
+
+fn floats(n: i64, x: i64, acc: [f64]) -> [f64] {
+    if n == 0 { acc } else {
+        let y = next(x)
+        floats(n - 1, y, push(acc, 0.125 * (y % 1000)))
+    }
+}
+
+fn points(n: i64, acc: [P]) -> [P] {
+    if n == 0 { acc } else { points(n - 1, push(acc, P { id: n, w: 0.5 * (n % 7) })) }
+}
+
+fn tally(ws: [str], i: i64, counts: [str: i64]) -> [str: i64] {
+    if i == ≢ ws { counts } else {
+        let w = ws[i]
+        let c = match get(counts, w) {
+            Some(k) => k + 1,
+            None => 1,
+        }
+        tally(ws, i + 1, put(counts, w, c))
+    }
+}
+
+fn main() {
+    let ws = words(["a" "bb" "ccc" "dd" "e"], 5000, 42, [])
+    let counts = tally(ws, 0, [:])
+    print("{≢ ws} {ws[0]} {ws[4999]} {get(counts, "bb")} {get(counts, "e")}")
+    let fs = floats(5000, 7, [])
+    print("{≢ fs} {fs ▷ +/}")
+    let ps = points(5000, [])
+    print("{≢ ps} {ps[0].id} {ps[4999].id} {ps ¨ (p => p.w) ▷ +/}")
+}

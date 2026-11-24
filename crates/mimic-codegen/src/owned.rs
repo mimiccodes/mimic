@@ -238,7 +238,8 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         stack.push(k.clone());
         for (i, prm) in d.params.iter().enumerate() {
-            if !out[i] && spec.params[i] == Ty::Arr(El::I64, 0) {
+            // (a list of any kind, or a value of unknown type: a map, a list)
+            if !out[i] && matches!(spec.params[i], Ty::Arr(_, 0) | Ty::Dyn) {
                 out[i] = self.list_taken(k, &prm.name, &d.body, &spec, stack);
             }
             if !out[i] && matches!(spec.params[i], Ty::Obj(_)) && self.flat(spec.params[i]).is_none() {
@@ -250,7 +251,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// Whether the list parameter `name` of `k` reaches, at a last use, the
-    /// list of a `put`/`push` on i64s or a parameter another function takes:
+    /// list of a `put`/`push`/`concat` (of any element type; a map's `put`
+    /// too) or a parameter another function takes:
     /// only then can taking it save a copy (a list still read after its
     /// change is copied anyway, and taking it would cost a retain per call).
     fn list_taken(&self, k: &Key, name: &str, body: &Block, spec: &Spec, stack: &mut Vec<Key>) -> bool {
@@ -260,7 +262,6 @@ impl<'ctx> Cg<'ctx, '_> {
             return false;
         }
         let module = self.p.fns[k.0].module;
-        let list = Ty::Arr(El::I64, 0);
         let mut found = false;
         body.walk(&mut |x| {
             let ExprKind::Call { callee, args } = &x.kind else { return };
@@ -278,14 +279,13 @@ impl<'ctx> Cg<'ctx, '_> {
             let ExprKind::Path(path) = &callee.kind else { return };
             let Some(Resolved::Fn(f)) = self.p.lookup(module, path) else { return };
             let FnKind::Extern { decl, .. } = &self.p.fns[f].kind else { return };
-            let ty = |e: &Expr| spec.exprs.get(&id(e)).copied();
+            // (of any type: `acc` passed as `[]` arrives untyped, and the
+            // `push` gives back a typed list)
             found = decl.intrinsic
                 && self.p.mods[self.p.fns[f].module].name == "prelude"
-                && matches!((decl.name.as_str(), args.len()), ("put", 3) | ("push", 2))
+                && matches!((decl.name.as_str(), args.len()), ("put", 3) | ("push", 2) | ("concat", 2))
                 && is_name(&args[0])
-                && order.last(&args[0])
-                && ty(x) == Some(list)
-                && args[1..].iter().all(|a| ty(a) == Some(Ty::I64));
+                && order.last(&args[0]);
         });
         found
     }
@@ -422,6 +422,17 @@ impl<'ctx> Cg<'ctx, '_> {
     pub(crate) fn hand_over(&mut self, v: V<'ctx>) -> R<V<'ctx>> {
         self.own(v)
     }
+}
+
+/// Every use of `name` in `body` that is a last use (one in each branch
+/// that ends with it), or none when a use is inside a lambda: where a
+/// parameter the function takes over can move on.
+pub(crate) fn last_use_sites(name: &str, body: &Block) -> Vec<usize> {
+    let order = UseOrder::new(name, body);
+    if order.in_closure {
+        return Vec::new();
+    }
+    order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false)).collect()
 }
 
 /// The uses of a name in a body, in the order they run (the walk's order:

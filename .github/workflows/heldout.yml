@@ -8,14 +8,16 @@
 # measured; the job itself does not fail on it (it measures, it does not
 # gate).
 #
-# On pull requests that change the set or the runner, by hand, and every
-# night on dev (the measure stage 0.4 closes on).
+# On pull requests that change the set, the runner, the compiler or the
+# runtime, by hand, and every night on dev (the measure stage 0.4 closes on).
 name: heldout
 
 on:
   pull_request:
     branches: [dev, main]
-    paths: ["bench/heldout/**", "bench/run.py", ".github/workflows/heldout.yml"]
+    # (the compiler and the runtime too: during stage 0.4 every change shows
+    # what it does to the set)
+    paths: ["bench/heldout/**", "bench/run.py", ".github/workflows/heldout.yml", "crates/**", "runtime/**"]
   workflow_dispatch:
   schedule:
     - cron: "30 5 * * *"
