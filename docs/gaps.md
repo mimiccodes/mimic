@@ -125,6 +125,7 @@ Reported from a real project (tensors as a flat `[f64]` plus their dimensions, a
 | `⊠` on mid-size float products keeps about 1.5 of 4 cores busy | none | 0.4.6 |
 | `mimic why` sees no arrays behind record fields ("nothing to decide" for a function that is one matrix product of fields) | none | 0.4.4 |
 | The profiler puts 18–34% of the time in an unnamed runtime frame `end` | none | 0.4.9 (the runtime's symbols named, or the region said) |
+| A function's name where a record was meant (`if k == 0 { run } else { now }` in a function returning `R`) passed `mimic check` and stopped the program when it ran, under `mimic test` with only `index: got unit value ()` | ✅ E0401 at the name: a function where the declared result is a value, as a branch, a `match` arm or a `return` | 0.4.3 |
 
 ## Found by the held-out set
 
