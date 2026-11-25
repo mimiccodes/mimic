@@ -541,7 +541,10 @@ impl<'ctx> Cg<'ctx, '_> {
             // `xs ↑ k` / `xs ↓ k` at its last use: a list held once shrinks
             // in place (a heap's pop, `h ↑ (n - 1)`, copied a million
             // elements each time)
-            || shrink_sites(name, body).into_iter().any(|v| order.last_id(v))
+            // (in a function that changes a list too: `ui::prop(attrs ↓ 1,
+            // name)` only reads a node's list, which the node keeps, and
+            // taking it cost every call a retain and a release)
+            || (changes_a_list(body) && shrink_sites(name, body).into_iter().any(|v| order.last_id(v)))
             // handed to the function itself in the same place, or given back
             // (alone, or in the tuple or record that is the result): taking
             // it saves the reference the caller would keep, so a change
