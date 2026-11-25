@@ -1901,13 +1901,13 @@ fn c_callbacks() {
     std::fs::write(
         proj.join("src/main.mim"),
         "module main\n\nextern \"C\" include \"cb.h\"\n\nfn square(x: f64) -> f64 { x × x }\n\nfn main() {\n\
-         \x20   print(unsafe { c::integrate(x => 2.0 × x, 0.0, 1.0, 10) })\n    let k = 10\n    print(unsafe { c::apply_twice(x => x + k, 1) })\n\
+         \x20   let area = unsafe { c::integrate(x => 2.0 × x, 0.0, 1.0, 10) }\n    print(\"{area:.6}\")\n    let k = 10\n    print(unsafe { c::apply_twice(x => x + k, 1) })\n\
          \x20   unsafe { c::count_up(3, (i, ud) => print(\"visit {i}\"), 0) }\n    print(unsafe { c::sum_mapped(4, i => unsafe { c::apply_twice(j => j × 2, i) }) })\n\
          \x20   print(unsafe { c::integrate(square, 0.0, 1.0, 4) })\n}\n",
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1.0\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1.000000\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
