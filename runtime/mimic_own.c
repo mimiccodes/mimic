@@ -462,3 +462,34 @@ static mim_val *memcheck_hold(mim_val *v, size_t bytes, size_t *out_bytes) {
     return out.v;
 }
 #endif
+/* ==== one-character ASCII strings, made once ==============================
+ * `chars(s)` and `char_of(c)` gave a new string for every character (a
+ * Caesar cipher over 10 MB made 20 million and freed them again); the 128
+ * ASCII ones are made once, never freed, and shared. */
+/* (the table allocated at first use: a static one would move the globals
+ * after it, which once measured as a slowdown elsewhere) */
+static mim_val **g_ascii1;
+
+static mim_val *ascii1(unsigned char c) {
+    mim_val **t = __atomic_load_n(&g_ascii1, __ATOMIC_ACQUIRE);
+    if (!t) {
+        mim_val **n = (mim_val **)calloc(128, sizeof(mim_val *));
+        if (!n) {
+            char b = (char)c;
+            return mim_str(&b, 1);
+        }
+        mim_val **expected = NULL;
+        if (__atomic_compare_exchange_n(&g_ascii1, &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) t = n;
+        else {
+            free(n);
+            t = expected;
+        }
+    }
+    mim_val *v = __atomic_load_n(&t[c], __ATOMIC_ACQUIRE);
+    if (v) return v;
+    char b = (char)c;
+    mim_val *n = immortal(mim_str(&b, 1));
+    mim_val *expected = NULL;
+    if (__atomic_compare_exchange_n(&t[c], &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return n;
+    return expected; /* another thread made it first (this one stays, immortal, unused) */
+}

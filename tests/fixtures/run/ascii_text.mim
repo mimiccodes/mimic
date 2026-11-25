@@ -1,0 +1,30 @@
+module main
+
+// text one character at a time: `chars` and `char_of` share one string per
+// ASCII character, `char_code` of ASCII text reads its first byte in place
+// (of a literal it is known when compiling); other characters, and empty
+// text, as before
+
+fn rot(c: str, k: i64) -> str {
+    let code = char_code(c)
+    if code >= char_code("a") and code <= char_code("z") {
+        char_of(char_code("a") + (code - char_code("a") + k) % 26)
+    } else {
+        c
+    }
+}
+
+fn main() {
+    print(char_code("é"))
+    print(char_code("Z"))
+    let s = "日本"
+    print(char_code(s))
+    print(chars("aé日b") ¨ (c => char_code(c)))
+    print(char_of(97) == "a")
+    print(chars("héllo") ▷ join("-"))
+    let text = "hello, wörld"
+    let once = chars(text) ¨ (c => rot(c, 13)) ▷ join("")
+    print(once)
+    print(chars(once) ¨ (c => rot(c, 13)) ▷ join("") == text)
+    print(⍳ 1000 ¨ (i => char_of(32 + i % 95)) ▷ join("") ▷ chars ▷ ≢)
+}
