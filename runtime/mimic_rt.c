@@ -113,6 +113,21 @@ typedef struct mim_val {
 
 #define MIM_IMMORTAL ((int64_t)1 << 62)
 
+/* Debug builds' memory check (-DMIM_MEMCHECK=1, mimic_own.c): a freed value
+ * is marked (its count MIM_FREED_RC, its type MIM_FREED_DT, so the compiled
+ * code's checks of a type never pass and it reaches the runtime), filled with
+ * junk, and kept a while before its memory is used again; a retain, a release
+ * or a read of it stops the program. Release builds: nothing. */
+#ifdef MIM_MEMCHECK
+#define MIM_FREED_RC ((int64_t)-0x5EED0DEAD)
+#define MIM_FREED_DT 0x7EED
+static void memcheck_hit(const mim_val *v, const char *what);
+static mim_val *memcheck_hold(mim_val *v, size_t bytes, size_t *out_bytes);
+#define MEMCHECK(v, what) do { if ((v) && (v)->rc == MIM_FREED_RC) memcheck_hit((v), (what)); } while (0)
+#else
+#define MEMCHECK(v, what) ((void)0)
+#endif
+
 typedef mim_val *(*mim_fn1)(mim_val *);
 
 enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_IDIV, OP_MAX2, OP_MIN2,
@@ -1380,6 +1395,7 @@ static void rc_report(void) {
  * thread can see the value, so no atomic update. */
 static inline void release_in(heap_state *h, mim_val *v) {
     if (!v) return;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1) dealloc_in(h, v);
@@ -1391,6 +1407,7 @@ static inline int holds_values(int dt) { return dt == MIM_BOXED || dt == MIM_OBJ
 /* Drop a reference: 1 when it was the last. */
 static inline int drop_ref(mim_val *v) {
     if (!v) return 0;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     return rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0);
@@ -1404,6 +1421,11 @@ static void free_block(heap_state *h, mim_val *v) {
     size_t bytes = payload_bytes(dt, v->len);
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
+#ifdef MIM_MEMCHECK
+    /* kept, marked, a while; what comes back is an older one to free now */
+    v = memcheck_hold(v, bytes, &bytes);
+    if (!v) return;
+#endif
     int c = size_class(bytes);
     if (c < SIZE_CLASSES) {
         if (h->free_len[c] >= FREE_LIST_CAP) pool_give(h, c);
@@ -1517,12 +1539,14 @@ static void free_list_drain(void) {
 mim_val *mim_alloc_vec(int32_t dtype, int64_t n) { return alloc(dtype, 1, n); }
 
 void mim_retain(mim_val *v) {
+    MEMCHECK(v, "retained");
     if (v) RC_COUNT(g_rc_retains);
     if (v && __atomic_load_n(&v->rc, __ATOMIC_RELAXED) < MIM_IMMORTAL) __atomic_fetch_add(&v->rc, 1, __ATOMIC_RELAXED);
 }
 
 void mim_release(mim_val *v) {
     if (!v) return;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0)) dealloc_in(&t_heap, v);
@@ -1752,6 +1776,7 @@ static const char *dtname(const mim_val *v) {
     static const char *s[] = {"i64", "f64", "bool", "char"};
     static const char *vs[] = {"[i64]", "[f64]", "[bool]", "str"};
     if (!v) return "()";
+    MEMCHECK(v, "read");
     if (v->dtype == MIM_OBJ) return v->desc && v->desc->type_name ? v->desc->type_name : "record";
     if (v->dtype == MIM_BOXED) return "list";
     if (v->dtype == MIM_FN) return "function";
@@ -1763,6 +1788,7 @@ static const char *dtname(const mim_val *v) {
 }
 
 static void need(const mim_val *v, const char *what) {
+    MEMCHECK(v, "read");
     if (!v) {
         char buf[160];
         snprintf(buf, sizeof buf, "%s: got unit value `()`", what);
@@ -3267,6 +3293,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
 /* ==== each =============================================================== */
 
 static mim_val *scalar_at(const mim_val *xs, int64_t i) {
+    MEMCHECK(xs, "read");
     switch (xs->dtype) {
     case MIM_OBJ: return slot_get(xs, i);
     case MIM_BOXED: {
@@ -4156,6 +4183,8 @@ mim_val *mim_fixed_in(mim_val *v, int32_t dtype, int64_t n, const char *what) {
 }
 
 mim_val *mim_index(mim_val *xs, mim_val *i) {
+    MEMCHECK(xs, "read");
+    MEMCHECK(i, "read");
     if (xs && xs->dtype == MIM_MAP) return map_get(xs, i);
     if (is_tuple(i)) {
         int n;
@@ -4294,6 +4323,7 @@ static int type_ok(mim_val *v, int32_t ty);
 int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
 
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
+    MEMCHECK(v, "read");
     if (type_ok(v, ty)) return;
     static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function", "[u8]", "f32 scalar", "i32 scalar", "[f32]", "[i32]"};
     char buf[256];

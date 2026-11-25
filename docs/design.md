@@ -46,6 +46,7 @@ M1 is a vertical slice: source → parse → check → **LLVM** → native objec
   * Every value is a `mim_val*` handle into the array layer.
   * Codegen inserts retain/release according to one contract. Runtime calls and Mimic functions **borrow** their arguments and return an **owned** value. `let` bindings own their value until scope exit.
   * In debug builds the program checks at exit that no array is still alive. The golden tests run every fixture under that leak check.
+  * Debug builds also run the memory check (`-DMIM_MEMCHECK=1` for the runtime; compiled code then sends every release to it). A freed value's header is marked (its count `MIM_FREED_RC`, its type `MIM_FREED_DT`, so no type check in compiled code passes and every use reaches the runtime), its elements are filled with `0xDB`, and it is kept in a queue (up to 65,536 values and 64 MB) before its memory is used again. A retain, a release or a read of a marked value stops the program in `mim_memcheck_failed`, where `mimic lldb` sets a breakpoint. Release builds compile none of it: their runtime object is the same.
 * **Runtime** (`runtime/mimic_rt.c`). This is the array layer in portable C. It is embedded in the `mimic` binary, then compiled and cached per target by the Clang built into `mimic`.
 * **Type annotations** (`x: i64`, `xs: [f64]`, `-> f64`) are optional. When present they are enforced at function boundaries at runtime. Static inference is planned for M4.
 

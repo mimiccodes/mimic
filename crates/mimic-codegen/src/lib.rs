@@ -59,6 +59,10 @@ pub struct Settings {
     pub opt_level: u8,
     /// Emit the runtime leak check at exit (debug builds).
     pub leak_check: bool,
+    /// The memory check (debug builds, with a runtime built for it): every
+    /// release goes to the runtime, which marks what it frees, so no value
+    /// is freed by compiled code out of its sight.
+    pub memcheck: bool,
     /// Emit a C `main` that calls `<root>::main::main`.
     pub emit_main: bool,
     /// Keep `pub` functions externally visible (library builds).
@@ -350,6 +354,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         futures: Vec::new(),
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
+        memcheck: settings.memcheck,
         profiling: settings.frame_pointers,
         cov: settings.coverage.then(HashMap::new),
         cov_order: Vec::new(),
@@ -635,6 +640,7 @@ struct Cg<'ctx, 'p> {
     lazies: Vec<(String, *const Expr)>,
     /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
     opt_level: u8,
+    memcheck: bool,
     /// A profiling build (Settings::frame_pointers): every allocation goes
     /// through the runtime's allocator, which counts them.
     profiling: bool,
@@ -1312,6 +1318,15 @@ impl<'ctx> Cg<'ctx, '_> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
         let params: Vec<BasicMetadataTypeEnum> = if with_heap { vec![self.ptr.into(), self.ptr.into()] } else { vec![self.ptr.into()] };
         let f = self.module.add_function(name, self.ctx.void_type().fn_type(&params, false), Some(Linkage::Internal));
+        // (the memory check: the runtime frees everything, and marks it)
+        if self.memcheck {
+            let b = self.ctx.create_builder();
+            b.position_at_end(self.ctx.append_basic_block(f, "entry"));
+            let v = f.get_nth_param(if with_heap { 1 } else { 0 }).unwrap();
+            b.build_call(self.rt("mim_release"), &[v.into()], "").expect("building _mimic_release");
+            b.build_return(None).expect("building _mimic_release");
+            return f;
+        }
         let build = || -> R<()> {
             let (vt, ht) = (self.val_ty(), self.heap_ty());
             let b = self.ctx.create_builder();

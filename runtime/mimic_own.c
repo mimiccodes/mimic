@@ -364,3 +364,101 @@ static void fmt_f64(char *buf, size_t n, double x) {
         if (!isfinite(x) || strtod(buf, NULL) == x) return;
     }
 }
+
+/* ==== the memory check (debug builds) =====================================
+ * free_block hands each freed value to memcheck_hold: its header is marked
+ * (count MIM_FREED_RC; type MIM_FREED_DT, so no check of a type in compiled
+ * code passes and every use reaches the runtime; length 0), its elements
+ * filled with 0xDB, and it is kept in a queue (up to MC_KEEP values and
+ * MC_BYTES bytes) before its memory goes back to be used again. A retain, a
+ * release or a read of a marked value calls mim_memcheck_failed, which names
+ * what was done and what the value was; `mimic lldb` stops there, with the
+ * program's own stack above it. (A list freed before its last read went
+ * unseen while its memory stayed as it was.) */
+#ifdef MIM_MEMCHECK
+#define MC_KEEP 65536
+#define MC_BYTES ((size_t)64 << 20)
+#define MC_BIG ((size_t)16 << 20)
+typedef struct {
+    mim_val *v;
+    size_t bytes;
+    int32_t dtype, rank;
+    int64_t len;
+    const mim_desc *desc;
+} mc_entry;
+static mc_entry *g_mc;
+static int64_t g_mc_head, g_mc_n;
+static size_t g_mc_bytes;
+static int g_mc_lock;
+
+static void mc_lock(void) {
+    while (__atomic_test_and_set(&g_mc_lock, __ATOMIC_ACQUIRE)) {
+    }
+}
+static void mc_unlock(void) { __atomic_clear(&g_mc_lock, __ATOMIC_RELEASE); }
+
+/* (not static, never inlined: `mimic lldb` sets a breakpoint here) */
+__attribute__((noinline)) void mim_memcheck_failed(const char *msg) {
+    fflush(stdout);
+    fprintf(stderr, "mimic panic: memory check: %s\n", msg);
+    fprintf(stderr, "  (a debug build's check; `mimic lldb` stops at the place, with the stack)\n");
+    exit(101);
+}
+
+static void memcheck_hit(const mim_val *v, const char *what) {
+    mim_val was = {1, MIM_I64, 0, 0, NULL};
+    int found = 0;
+    mc_lock();
+    for (int64_t k = 0; k < g_mc_n && !found; k++) {
+        mc_entry *e = &g_mc[(g_mc_head + k) % MC_KEEP];
+        if (e->v == v) {
+            was.dtype = e->dtype;
+            was.rank = e->rank;
+            was.len = e->len;
+            was.desc = e->dtype == MIM_OBJ ? e->desc : NULL;
+            found = 1;
+        }
+    }
+    mc_unlock();
+    char buf[256];
+    if (!found) snprintf(buf, sizeof buf, "a value was %s after it was freed", what);
+    else if (was.rank == 0 && was.dtype != MIM_OBJ) snprintf(buf, sizeof buf, "a value (%s) was %s after it was freed", dtname(&was), what);
+    else snprintf(buf, sizeof buf, "a value (%s, %lld element%s) was %s after it was freed", dtname(&was), (long long)was.len, was.len == 1 ? "" : "s", what);
+    mim_memcheck_failed(buf);
+}
+
+static mim_val *memcheck_hold(mim_val *v, size_t bytes, size_t *out_bytes) {
+    mc_entry e = {v, bytes, v->dtype, v->rank, v->len, v->desc};
+    size_t size = sizeof(mim_val) + bytes;
+    memset(v->data, 0xDB, bytes < MC_BIG ? bytes : MC_BIG);
+    v->rc = MIM_FREED_RC;
+    v->dtype = MIM_FREED_DT;
+    v->rank = 1;
+    v->len = 0;
+    if (size > MC_BIG) {
+        /* (a very large block is not kept: its memory goes back at once) */
+        *out_bytes = bytes;
+        return v;
+    }
+    mc_entry out = {0};
+    mc_lock();
+    if (!g_mc) g_mc = (mc_entry *)calloc(MC_KEEP, sizeof(mc_entry));
+    if (!g_mc) {
+        mc_unlock();
+        *out_bytes = bytes;
+        return v;
+    }
+    if (g_mc_n == MC_KEEP || g_mc_bytes + size > MC_BYTES) {
+        out = g_mc[g_mc_head];
+        g_mc_head = (g_mc_head + 1) % MC_KEEP;
+        g_mc_n--;
+        g_mc_bytes -= sizeof(mim_val) + out.bytes;
+    }
+    g_mc[(g_mc_head + g_mc_n) % MC_KEEP] = e;
+    g_mc_n++;
+    g_mc_bytes += size;
+    mc_unlock();
+    *out_bytes = out.bytes;
+    return out.v;
+}
+#endif

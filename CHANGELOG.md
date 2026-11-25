@@ -5,6 +5,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **A memory check in debug builds.** A freed value is marked, filled with junk and kept a while before its memory is used again; retaining, releasing or reading it afterwards stops the program at once, naming what was done and what the value was (`memory check: a value ([i64], 4 elements) was read after it was freed`). `mimic lldb` stops right there, with the stack. Release builds are unchanged.
 - **`math::to_bits`, `math::from_bits` (and `to_bits32`/`from_bits32` for `f32`), `bytes::of_f64s` and `bytes::to_f64s`:** a float's bits as an integer, and floats as little-endian bytes, both exact (weights saved and read back bit for bit).
 - **`∧/` and `∨/`, the and and or reductions** (`all` and `any` written as glyphs, as in APL): `same ▷ ∧/`, `∨/ flags`.
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
