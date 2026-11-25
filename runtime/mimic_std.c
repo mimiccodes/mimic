@@ -340,7 +340,9 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
          * (Given a 4 KB block of its own instead, a list of a few elements
          * kept a pool length, and went back to a pool's free list when
          * released: a word built letter by letter in a recursion left 4 KB
-         * behind each time, 1 GB for 180,000 words.) */
+         * behind each time, 1 GB for 180,000 words. A block of its own is
+         * now only for a list past the pools, and nothing shrinks a list in
+         * place, so free_block, which picks by length, always frees it.) */
         mim_val *r = alloc(dt, xs->rank, n);
         memcpy(r->data, xs->data, old);
         r->rc = xs->rc;
