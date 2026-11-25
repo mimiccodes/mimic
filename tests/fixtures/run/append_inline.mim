@@ -1,0 +1,27 @@
+module main
+
+// `push`, `put` and `concat` of a short list on a record's list of numbers
+// held once: done in place without a runtime call once the list has room;
+// a list another name still holds is copied first (the copy keeps its
+// numbers), a list that runs out of room grows, and the results are the
+// same as before at every size
+
+type S = { n: i64, xs: [i64] }
+
+fn step(s: S) -> S {
+    if s.n % 3 == 0 { { s with n: s.n + 1, xs: push(s.xs, s.n) } }
+    else if s.n % 3 == 1 { { s with n: s.n + 1, xs: concat(s.xs, [s.n, 0 - s.n, 7]) } }
+    else { { s with n: s.n + 1, xs: put(s.xs, s.n % (≢ s.xs), s.n) } }
+}
+
+fn main() {
+    let start = S { n: 0, xs: [] }
+    let a = start ▷ evolve(30, step)
+    // `a` is kept: `b`'s steps copy its list once, then grow their own
+    let b = a ▷ evolve(30000, step)
+    let c = a ▷ evolve(5, step)
+    print("{≢ a.xs} {a.xs ▷ +/}")
+    print("{≢ b.xs} {b.xs ▷ +/} {b.xs[12345]}")
+    print("{≢ c.xs} {c.xs ▷ +/}")
+    print(8 ↑ a.xs)
+}

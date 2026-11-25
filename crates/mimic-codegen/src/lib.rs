@@ -6809,11 +6809,27 @@ impl<'ctx> Cg<'ctx, '_> {
                         _ => None,
                     };
                     if let Some((name, argv)) = typed {
-                        let f = self.module.get_function(name).unwrap_or_else(|| {
-                            let ps: Vec<BasicMetadataTypeEnum> = argv.iter().enumerate().map(|(j, _)| if j == 0 || (name == "mim_concat_i64_own" && j == 1) { self.ptr.into() } else { i64t.into() }).collect();
-                            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
-                        });
-                        list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                        let call = move |cg: &mut Self| -> R<PointerValue<'ctx>> {
+                            let f = cg.module.get_function(name).unwrap_or_else(|| {
+                                let ps: Vec<BasicMetadataTypeEnum> = argv.iter().enumerate().map(|(j, _)| if j == 0 || (name == "mim_concat_i64_own" && j == 1) { cg.ptr.into() } else { i64t.into() }).collect();
+                                cg.module.add_function(name, cg.ptr.fn_type(&ps, false), Some(Linkage::External))
+                            });
+                            Ok(cg.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+                        };
+                        // the common case, a list held once with room (or an
+                        // index in range), done here; the runtime otherwise
+                        list = match (op, rest.as_slice()) {
+                            ("push", [V::I(x)]) if i64_list && self.opt_level >= 2 => self.append_i64_inline(list, &[*x], &mut { call })?,
+                            ("put", [V::I(i), V::I(x)]) if i64_list && self.opt_level >= 2 => self.put_i64_inline_or(list, *i, *x, &mut { call })?,
+                            ("concat", [V::A(a, El::I64)]) if i64_list && self.opt_level >= 2 && a.get_type().len() <= 8 => {
+                                let mut xs = Vec::new();
+                                for j in 0..a.get_type().len() {
+                                    xs.push(self.b.build_extract_value(*a, j, "").s()?.into_int_value());
+                                }
+                                self.append_i64_inline(list, &xs, &mut { call })?
+                            }
+                            _ => call(self)?,
+                        };
                         continue;
                     }
                     let mut boxed_rest = Vec::new();
