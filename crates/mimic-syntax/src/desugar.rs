@@ -346,7 +346,7 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
     // (the call and where its hidden `let`s go)
     let mut i = 0;
     while i <= b.stmts.len() {
-        let call = if i < b.stmts.len() {
+        let mut call = if i < b.stmts.len() {
             match &mut b.stmts[i] {
                 Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => Some(value),
                 _ => None,
@@ -355,6 +355,9 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
             b.tail.as_deref_mut()
         };
         let mut hoisted = Vec::new();
+        if let Some(c) = call.as_deref_mut() {
+            first_arg_reads(c, &mut hoisted, n);
+        }
         if let Some(Expr { kind: ExprKind::Call { args, .. }, .. }) = call {
             for j in 1..args.len() {
                 let a = &args[j];
@@ -380,6 +383,51 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
         let at = i.min(b.stmts.len());
         b.stmts.splice(at..at, hoisted);
         i += k + 1;
+    }
+}
+
+/// `put(xs, j + 1, xs[j])`, also as the first argument of a call
+/// (`insert(put(xs, j + 1, xs[j]), j - 1, v)`): an element of the list given
+/// first, read by a later argument, is read first into a hidden `let`, so
+/// the list is handed over and changed in place instead of copied at every
+/// call (a hand-written insertion sort copied its list at every shift).
+/// Only `name[i]` with `i` and the arguments between quiet, so what runs
+/// before it is unchanged: nothing that can fail or do anything.
+fn first_arg_reads(e: &mut Expr, hoisted: &mut Vec<Stmt>, n: &mut usize) {
+    fn quiet(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Field { base, .. } => quiet(base),
+            ExprKind::Prim { prim: crate::glyphs::Prim::Len, args } => args.iter().all(quiet),
+            ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, lhs, rhs } => quiet(lhs) && quiet(rhs),
+            _ => false,
+        }
+    }
+    let ExprKind::Call { args, .. } = &mut e.kind else { return };
+    let Some(first) = args.first_mut() else { return };
+    if matches!(first.kind, ExprKind::Call { .. }) {
+        first_arg_reads(first, hoisted, n);
+        return;
+    }
+    let ExprKind::Path(p) = &first.kind else { return };
+    if p.len() != 1 {
+        return;
+    }
+    let name = p[0].clone();
+    for j in 1..args.len() {
+        let read = match &args[j].kind {
+            ExprKind::Index { base, index } => matches!(&base.kind, ExprKind::Path(q) if q.len() == 1 && q[0] == name) && quiet(index),
+            _ => false,
+        };
+        if read {
+            let t = format!("\0read{n}");
+            *n += 1;
+            let sp = args[j].span;
+            let old = std::mem::replace(&mut args[j], Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+            hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: sp });
+        } else if !quiet(&args[j]) {
+            return;
+        }
     }
 }
 
