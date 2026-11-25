@@ -189,6 +189,127 @@ fn passed_through(fname: &str, i: usize, name: &str, body: &Block, sites: &[usiz
     sites.iter().all(|s| through.contains(s))
 }
 
+/// Whether no use of `name` runs after the call `call` (one of whose
+/// arguments, `arg`, is `name`): uses inside the call's own arguments run
+/// before it.
+pub(crate) fn last_in_call(name: &str, body: &Block, call: usize, arg: usize) -> bool {
+    let order = UseOrder::new(name, body);
+    if order.in_closure {
+        return false;
+    }
+    let mut range = None;
+    let mut n = 0;
+    body.walk(&mut |x| {
+        if id(x) == call {
+            let mut len = 0;
+            x.walk(&mut |_| len += 1);
+            range = Some((n, n + len));
+        }
+        n += 1;
+    });
+    let Some((a, b)) = range else { return false };
+    if !order.last_but(arg, |_, w| a <= w && w < b) {
+        return false;
+    }
+    // a use outside the call runs before it only where the order is the
+    // walk's: the nearest expression holding both is a block, an `if` or a
+    // `match` (in `m ⊠ power(m, n - 1)` the right operand runs first, so the
+    // `m` on the left is read after the call)
+    let mut nodes: Vec<(usize, usize, bool)> = Vec::new();
+    let mut k = 0;
+    body.walk(&mut |x| {
+        let mut len = 0;
+        x.walk(&mut |_| len += 1);
+        nodes.push((k, k + len, matches!(x.kind, ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::If { .. } | ExprKind::Match { .. })));
+        k += 1;
+    });
+    order.uses.iter().filter(|(_, w)| !(a <= *w && *w < b)).all(|(_, w)| {
+        let holder = nodes.iter().filter(|(s, e, _)| *s <= a && b <= *e && *s <= *w && *w < *e).min_by_key(|(s, e, _)| e - s);
+        holder.is_none_or(|&(_, _, seq)| seq)
+    })
+}
+
+/// Whether the body changes a list: a `let mut` copy changed by index, an
+/// index assignment, or `push`/`put`/`concat` (by name).
+fn changes_a_list(body: &Block) -> bool {
+    let mut found = false;
+    let mut stmts = |b: &Block| {
+        for st in &b.stmts {
+            if matches!(st, Stmt::Assign { index: Some(_), .. }) {
+                found = true;
+            }
+        }
+    };
+    stmts(body);
+    body.walk(&mut |e| match &e.kind {
+        ExprKind::If { then, .. } => stmts(then),
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => stmts(b),
+        _ => {}
+    });
+    if found {
+        return true;
+    }
+    body.walk(&mut |e| {
+        if let ExprKind::Call { callee, .. } = &e.kind
+            && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && matches!(p[0].as_str(), "push" | "put" | "concat"))
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+/// The ids of `name` where it is passed to the function `k` itself (its
+/// specialisation) in the same place as the parameter `name`.
+fn self_handed(k: &Key, i: Option<usize>, name: &str, body: &Block, spec: &Spec) -> Vec<usize> {
+    let Some(i) = i else { return Vec::new() };
+    let mut out = Vec::new();
+    body.walk(&mut |x| {
+        if let ExprKind::Call { args, .. } = &x.kind
+            && spec.calls.get(&id(x)) == Some(k)
+            && let Some(a) = args.get(i)
+            && matches!(&a.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)
+        {
+            out.push(id(a));
+        }
+    });
+    out
+}
+
+/// The ids of `name` where it is the function's result, or a part of the
+/// tuple or record that is (a block's tail, the branches of `if` and
+/// `match`, a `return`).
+fn result_uses(name: &str, body: &Block) -> Vec<usize> {
+    fn results<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &e.kind {
+            ExprKind::If { then, els, .. } => {
+                tails(then, out);
+                if let Some(x) = els {
+                    results(x, out);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => tails(b, out),
+            ExprKind::Match { arms, .. } => arms.iter().for_each(|a| results(&a.body, out)),
+            ExprKind::Tuple(xs) => xs.iter().for_each(|x| out.push(x)),
+            ExprKind::Record { fields, .. } => fields.iter().for_each(|(_, x, _)| out.push(x)),
+            _ => out.push(e),
+        }
+    }
+    fn tails<'a>(b: &'a Block, out: &mut Vec<&'a Expr>) {
+        for st in &b.stmts {
+            if let Stmt::Return(Some(e), _) = st {
+                results(e, out);
+            }
+        }
+        if let Some(t) = &b.tail {
+            results(t, out);
+        }
+    }
+    let mut res = Vec::new();
+    tails(body, &mut res);
+    res.into_iter().filter(|e| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)).map(id).collect()
+}
+
 /// The ids of `name` where it is the whole value of a `let mut v = name`,
 /// anywhere in `body`.
 fn mut_copies(name: &str, body: &Block) -> Vec<usize> {
@@ -370,6 +491,10 @@ impl<'ctx> Cg<'ctx, '_> {
             return false;
         }
         let module = self.p.fns[k.0].module;
+        let pos = match &self.p.fns[k.0].kind {
+            FnKind::User(d) => d.params.iter().position(|p| p.name == name),
+            _ => None,
+        };
         let mut found = false;
         body.walk(&mut |x| {
             let ExprKind::Call { callee, args } = &x.kind else { return };
@@ -397,7 +522,23 @@ impl<'ctx> Cg<'ctx, '_> {
         });
         // `let mut v = xs` at its last use: a copy to change (`v[i] = …`,
         // `push`), which taking the list makes the list itself
-        found || mut_copies(name, body).into_iter().any(|v| order.last_id(v))
+        found
+            || mut_copies(name, body).into_iter().any(|v| order.last_id(v))
+            // handed to the function itself in the same place, or given back
+            // (alone, or in the tuple or record that is the result): taking
+            // it saves the reference the caller would keep, so a change
+            // further down (`compressed[i] = root` in a `find` returning
+            // `(parents, root)`) is made in place rather than to a copy
+            // (only in a function that changes a list: one that only reads
+            // it, a binary search handing `xs` down, taking it would cost
+            // every caller a retain and a release per call, all threads of
+            // a `¨` on one count: `bellman`, `diff`, `hashmap` 1.2-3.5x)
+            // (and handed down only by a function that also gives it back:
+            // `find` returns its `parent`, which the caller then changes;
+            // lists only read and passed along, `neighbours(b, keys, first,
+            // j + 1)`, stay borrowed: `bipartite` 1.2-1.5x otherwise)
+            || (changes_a_list(body) && !result_uses(name, body).is_empty() && self_handed(k, pos, name, body, spec).into_iter().any(|v| order.last_id(v)))
+            || (changes_a_list(body) && result_uses(name, body).into_iter().any(|v| order.last_id(v)))
     }
 
     /// Whether the record parameter `name` of `k` ends, at a last use, as the
@@ -612,8 +753,14 @@ impl UseOrder {
                     let mut at = n + 1 + size(scrut);
                     let mut r = Vec::new();
                     for arm in arms {
-                        let len = arm.guard.as_ref().map_or(0, size) + size(&arm.body);
-                        r.push((at, at + len));
+                        // (only the body is the arm's own: its guard runs on
+                        // the way to every later arm too, so a use there is
+                        // not a last use when a later arm uses the value:
+                        // `Prop(k, v) if k == name => …, _ => prop(…, name)`
+                        // moved `name` into the comparison)
+                        let g = arm.guard.as_ref().map_or(0, size);
+                        let len = g + size(&arm.body);
+                        r.push((at + g, at + len));
                         at += len;
                     }
                     branches.push(r);
