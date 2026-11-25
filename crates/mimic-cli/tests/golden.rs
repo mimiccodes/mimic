@@ -1911,6 +1911,45 @@ fn c_callbacks() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The memory check of debug builds: a value released, retained or read
+/// after it was freed stops the program with what was done and what the
+/// value was (here C code does it through the runtime's own functions: a
+/// Mimic program cannot, unless the compiler is wrong).
+#[test]
+fn memory_check() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-memcheck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "mcp"]).status().unwrap().success());
+    let proj = dir.join("mcp");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(proj.join("c/uaf.h"), "int freed_then(int how);\n").unwrap();
+    std::fs::write(
+        proj.join("c/uaf.c"),
+        "#include \"uaf.h\"\nvoid *mim_alloc_vec(int dtype, long long n);\nvoid mim_release(void *v);\nvoid mim_retain(void *v);\n\
+         void *mim_int(long long x);\nvoid *mim_index(void *xs, void *i);\n\
+         int freed_then(int how) { void *v = mim_alloc_vec(0, 4); mim_release(v);\n\
+         if (how == 0) mim_release(v); else if (how == 1) mim_retain(v); else mim_index(v, mim_int(0));\n\
+         return 0; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/uaf.c\"]\n    include = [\"c\"]")).unwrap();
+    for (how, done) in [(0, "released"), (1, "retained"), (2, "read")] {
+        std::fs::write(
+            proj.join("src/main.mim"),
+            format!("module main\n\nextern \"C\" include \"uaf.h\"\n\nfn main() {{\n    print(\"before\")\n    print(unsafe {{ c::freed_then({how}) }})\n}}\n"),
+        )
+        .unwrap();
+        let out = mimic().current_dir(&proj).args(["run", "--debug"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "before\n", "{err}");
+        assert!(!out.status.success(), "{err}");
+        assert!(err.contains(&format!("memory check: a value ([i64], 4 elements) was {done} after it was freed")), "{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `mimic build --web`: the page's own loader (taken from its index.html)
 /// starts the program in node, then each line of `<name>.events` is sent as
 /// the page would send it; what comes back must match `<name>.out`.
