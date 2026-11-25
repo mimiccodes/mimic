@@ -1,0 +1,26 @@
+module main
+
+// `↑`/`↓` on a list of records, the count on either side (it stopped with
+// "the count must be an integer"); `_` binds nothing, so it can take a
+// dropped value any number of times (it was E0302 the second time); and
+// fs::temp_dir() is a directory that exists, on Windows too (it was /tmp)
+
+type P = { name: str, n: i64 }
+
+fn main() {
+    let xs = ⍳ 5 ¨ (i => P { name: "p{i}", n: i * 10 })
+    print(2 ↑ xs ¨ (p => p.name))
+    print(xs ↑ 2 ¨ (p => p.n))
+    print(2 ↓ xs ¨ (p => p.n))
+    print(¯2 ↑ xs ¨ (p => p.name))
+    print(≢ (9 ↑ xs))
+    let dir = fs::temp_dir()
+    print(fs::is_dir(dir))
+    let f = path::join(dir, "mimic-small-gaps.txt")
+    _ ← fs::write(f, "kept")
+    print(fs::read(f))
+    _ ← fs::remove(f)
+    let _ = fs::write(f, "again")
+    let _ = fs::remove(f)
+    print(fs::exists(f))
+}

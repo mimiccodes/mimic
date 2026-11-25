@@ -3208,7 +3208,15 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     switch (prim) {
     case P_TAKE:
     case P_DROP: {
-        if (b->rank != 0 || IS_FLOAT(b->dtype)) mim_panic("take/drop count must be an integer scalar");
+        /* the count on either side, as the compiled forms take it: `2 ↑ xs`
+         * (a list of records came here with its count on the left and
+         * stopped with "the count must be an integer") */
+        if (a->rank == 0 && b->rank != 0) {
+            mim_val *t = a;
+            a = b;
+            b = t;
+        }
+        if (b->rank != 0 || IS_FLOAT(b->dtype) || IS_HANDLES(b)) mim_panic("take/drop: the count must be an integer");
         if (a->rank == 0) mim_panic("take/drop expects a vector on the left");
         int64_t n = geti(b, 0), len = dim_of(a, 0);
         int64_t k = n < 0 ? -n : n;

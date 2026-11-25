@@ -162,12 +162,14 @@ Failures come back as values, never as crashes. Error messages name the operatio
 | `fs::walk(path)` | `Result[[str], str]`: every file below `path`, its subdirectories too, as sorted paths relative to it with `/` | concurrent |
 | `fs::modified(path)` | `Result[i64, str]`: when the file last changed, in ns since 1970 (like `time::now()`) | concurrent |
 | `fs::exists(path)`, `fs::is_file(path)`, `fs::is_dir(path)` | `bool` | concurrent |
-| `fs::current_dir()`, `fs::temp_dir()` | `str` | concurrent |
+| `fs::current_dir()`, `fs::temp_dir()` | `str` (the temporary directory: `TMPDIR` or `/tmp`; on Windows the user's, from `TMP`/`TEMP`) | concurrent |
 | `fs::write(path, text)`, `fs::append(path, text)` | `Result[i64, str]`: bytes written | sync |
 | `fs::write_bytes(path, data)` | `Result[i64, str]` | sync |
 | `fs::copy(from, to)` | `Result[i64, str]` | sync |
 | `fs::rename(from, to)`, `fs::remove(path)` | `Result[bool, str]`; `remove` also removes empty directories | sync |
 | `fs::make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists | sync |
+
+The error text of the `fs` functions already names the path and the reason, `cannot read data.csv: No such file or directory`: show it as it is rather than adding the path again.
 
 ### `chan`: channels between tasks (concurrent)
 
