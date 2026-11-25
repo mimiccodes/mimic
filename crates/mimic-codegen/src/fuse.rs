@@ -32,7 +32,7 @@ pub(crate) fn index_el(t: Ty) -> Option<El> {
 }
 
 /// Runtime dtype code (`MIM_I64`/`MIM_F64`/`MIM_BOOL`).
-fn dtype_of(e: El) -> i32 {
+pub(crate) fn dtype_of(e: El) -> i32 {
     match e {
         El::F64 => 1,
         El::F32 => 9,

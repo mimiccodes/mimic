@@ -1801,6 +1801,22 @@ impl Walk<'_, '_> {
                             self.out.exprs.insert(id(x.as_ref()), nt);
                             u = nt;
                         }
+                        // a branch that is `[]` takes the other's list of
+                        // numbers: `if run > 0 { run_byte(run) } else { [] }`
+                        // is a `[i64]`, not a list of unknown type (which
+                        // sent every use of it the generic way)
+                        if let Some(nt) = empty_branch_as(u)
+                            && let Some(lit) = then.tail.as_deref().filter(|l| then.stmts.is_empty() && is_empty_list(l))
+                        {
+                            self.out.exprs.insert(id(lit), nt);
+                            t = nt;
+                        } else if let Some(nt) = empty_branch_as(t)
+                            && let Some(lit) = tail_empty_list(x)
+                        {
+                            self.out.exprs.insert(id(lit), nt);
+                            self.out.exprs.insert(id(x.as_ref()), nt);
+                            u = nt;
+                        }
                         t.join(u)
                     }
                     None => t.join(Ty::Unit),
@@ -2037,6 +2053,27 @@ fn tail_literal(e: &Expr) -> Option<&Expr> {
     match &e.kind {
         ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_literal(l)),
         _ => is_literal(e).then_some(e),
+    }
+}
+
+fn is_empty_list(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Array(xs) if xs.is_empty())
+}
+
+/// The `[]` an `else` branch is (`else { [] }`), if it is one.
+fn tail_empty_list(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_empty_list(l)),
+        _ => is_empty_list(e).then_some(e),
+    }
+}
+
+/// The type a `[]` branch takes next to a branch of type `other`: a list of
+/// numbers or bytes, of any length.
+fn empty_branch_as(other: Ty) -> Option<Ty> {
+    match other {
+        Ty::Arr(el @ (El::I64 | El::F64 | El::U8), _) => Some(Ty::Arr(el, 0)),
+        _ => None,
     }
 }
 
