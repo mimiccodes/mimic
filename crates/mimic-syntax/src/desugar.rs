@@ -229,6 +229,13 @@ fn hoist_copy_reads(b: &mut Block, n: &mut usize) {
         let (copy, from) = match &b.stmts[i] {
             Stmt::Let { name, mutable: true, ty: None, value, .. } => match &value.kind {
                 ExprKind::Path(p) if p.len() == 1 && p[0] != *name => (name.clone(), p[0].clone()),
+                // (or a part of it: `let mut rest = h ↑ (n - 1)`)
+                ExprKind::Prim { prim: crate::glyphs::Prim::Take | crate::glyphs::Prim::Drop, args }
+                    if args.len() == 2 && plain(&args[1]) && matches!(&args[0].kind, ExprKind::Path(p) if p.len() == 1 && p[0] != *name) =>
+                {
+                    let ExprKind::Path(p) = &args[0].kind else { unreachable!() };
+                    (name.clone(), p[0].clone())
+                }
                 _ => {
                     i += 1;
                     continue;
@@ -239,30 +246,67 @@ fn hoist_copy_reads(b: &mut Block, n: &mut usize) {
                 continue;
             }
         };
+        let assign_ok = |st: &Stmt| {
+            matches!(st, Stmt::Assign { name, index: Some(idx), value, .. }
+                if *name == copy && plain(idx) && plain(value) && !mentions(idx, &copy) && !mentions(value, &copy))
+        };
+        // `if c { s[i] = h[j] }`, c plain and not reading `s`, no else
+        let guarded_ok = |st: &Stmt| {
+            matches!(st, Stmt::Expr(Expr { kind: ExprKind::If { cond, then, els: None }, .. })
+                if plain(cond) && !mentions(cond, &copy) && then.tail.is_none() && !then.stmts.is_empty() && then.stmts.iter().all(assign_ok))
+        };
         let mut end = i + 1;
-        while let Some(Stmt::Assign { name, index: Some(idx), value, .. }) = b.stmts.get(end)
-            && *name == copy
-            && plain(idx)
-            && plain(value)
-            && !mentions(idx, &copy)
-            && !mentions(value, &copy)
+        while let Some(st) = b.stmts.get(end)
+            && (assign_ok(st) || guarded_ok(st))
         {
             end += 1;
         }
-        let reads = b.stmts[i + 1..end].iter().any(|st| matches!(st, Stmt::Assign { index: Some(idx), value, .. } if mentions(idx, &from) || mentions(value, &from)));
+        let reads_of = |st: &Stmt| matches!(st, Stmt::Assign { index: Some(idx), value, .. } if mentions(idx, &from) || mentions(value, &from));
+        let reads = b.stmts[i + 1..end].iter().any(|st| match st {
+            Stmt::Expr(Expr { kind: ExprKind::If { then, .. }, .. }) => then.stmts.iter().any(reads_of),
+            st => reads_of(st),
+        });
         if end == i + 1 || !reads {
             i = end.max(i + 1);
             continue;
         }
         let mut hoisted = Vec::new();
         for st in &mut b.stmts[i + 1..end] {
-            let Stmt::Assign { index: Some(idx), value, span, .. } = st else { unreachable!() };
-            for e in [idx, value] {
-                let t = format!("\0read{n}");
-                *n += 1;
-                let sp = e.span;
-                let old = std::mem::replace(e, Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
-                hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: *span });
+            match st {
+                Stmt::Assign { index: Some(idx), value, span, .. } => {
+                    for e in [idx, value] {
+                        let t = format!("\0read{n}");
+                        *n += 1;
+                        let sp = e.span;
+                        let old = std::mem::replace(e, Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+                        hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: *span });
+                    }
+                }
+                // guarded: read only when the guard holds, as a list of
+                // nothing or the value (`if c { [h[j]] } else { [] }`), and
+                // taken from it inside the same guard: never a read the
+                // program would not have made
+                Stmt::Expr(Expr { kind: ExprKind::If { cond, then, .. }, .. }) => {
+                    for inner in &mut then.stmts {
+                        let Stmt::Assign { index: Some(idx), value, span, .. } = inner else { unreachable!() };
+                        for e in [idx, value] {
+                            // (only what reads the list: a constant index stays)
+                            if !mentions(e, &from) {
+                                continue;
+                            }
+                            let t = format!("\0read{n}");
+                            *n += 1;
+                            let sp = e.span;
+                            let at = |kind| Expr { kind, span: sp };
+                            let old = std::mem::replace(e, at(ExprKind::Index { base: Box::new(at(ExprKind::Path(vec![t.clone()]))), index: Box::new(at(ExprKind::Int(0))) }));
+                            let some = Block { stmts: Vec::new(), tail: Some(Box::new(at(ExprKind::Array(vec![old])))), span: sp };
+                            let none = at(ExprKind::Block(Block { stmts: Vec::new(), tail: Some(Box::new(at(ExprKind::Array(Vec::new())))), span: sp }));
+                            let value = at(ExprKind::If { cond: cond.clone(), then: some, els: Some(Box::new(none)) });
+                            hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value, span: *span });
+                        }
+                    }
+                }
+                _ => unreachable!(),
             }
         }
         let k = hoisted.len();
@@ -302,7 +346,7 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
     // (the call and where its hidden `let`s go)
     let mut i = 0;
     while i <= b.stmts.len() {
-        let call = if i < b.stmts.len() {
+        let mut call = if i < b.stmts.len() {
             match &mut b.stmts[i] {
                 Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => Some(value),
                 _ => None,
@@ -311,6 +355,9 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
             b.tail.as_deref_mut()
         };
         let mut hoisted = Vec::new();
+        if let Some(c) = call.as_deref_mut() {
+            first_arg_reads(c, &mut hoisted, n);
+        }
         if let Some(Expr { kind: ExprKind::Call { args, .. }, .. }) = call {
             for j in 1..args.len() {
                 let a = &args[j];
@@ -336,6 +383,51 @@ fn hoist_call_reads(b: &mut Block, n: &mut usize) {
         let at = i.min(b.stmts.len());
         b.stmts.splice(at..at, hoisted);
         i += k + 1;
+    }
+}
+
+/// `put(xs, j + 1, xs[j])`, also as the first argument of a call
+/// (`insert(put(xs, j + 1, xs[j]), j - 1, v)`): an element of the list given
+/// first, read by a later argument, is read first into a hidden `let`, so
+/// the list is handed over and changed in place instead of copied at every
+/// call (a hand-written insertion sort copied its list at every shift).
+/// Only `name[i]` with `i` and the arguments between quiet, so what runs
+/// before it is unchanged: nothing that can fail or do anything.
+fn first_arg_reads(e: &mut Expr, hoisted: &mut Vec<Stmt>, n: &mut usize) {
+    fn quiet(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Field { base, .. } => quiet(base),
+            ExprKind::Prim { prim: crate::glyphs::Prim::Len, args } => args.iter().all(quiet),
+            ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, lhs, rhs } => quiet(lhs) && quiet(rhs),
+            _ => false,
+        }
+    }
+    let ExprKind::Call { args, .. } = &mut e.kind else { return };
+    let Some(first) = args.first_mut() else { return };
+    if matches!(first.kind, ExprKind::Call { .. }) {
+        first_arg_reads(first, hoisted, n);
+        return;
+    }
+    let ExprKind::Path(p) = &first.kind else { return };
+    if p.len() != 1 {
+        return;
+    }
+    let name = p[0].clone();
+    for j in 1..args.len() {
+        let read = match &args[j].kind {
+            ExprKind::Index { base, index } => matches!(&base.kind, ExprKind::Path(q) if q.len() == 1 && q[0] == name) && quiet(index),
+            _ => false,
+        };
+        if read {
+            let t = format!("\0read{n}");
+            *n += 1;
+            let sp = args[j].span;
+            let old = std::mem::replace(&mut args[j], Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+            hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: sp });
+        } else if !quiet(&args[j]) {
+            return;
+        }
     }
 }
 

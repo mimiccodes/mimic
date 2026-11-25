@@ -242,6 +242,41 @@ static void mim_crash_handlers(void) {
 static void mim_crash_handlers(void) {}
 #endif
 
+/* ==== a list shrunk in place ==============================================
+ * `xs ↑ k` and `xs ↓ k` of a list the compiled code owns at its last use:
+ * held once, it keeps its block and loses its ends (a heap's pop, h ↑ (n -
+ * 1), copied the heap every time). Only while its pool stays the same (or it
+ * stays past the pools): free_block picks the pool by length. Else, and when
+ * it is shared, as ↑ / ↓ always did, the list released. */
+mim_val *mim_shrink_own(mim_val *xs, int64_t k, int32_t drop) {
+    if (xs && xs->rank == 1 && xs->dtype != MIM_MAP && xs->dtype != MIM_OBJ && xs->dtype != MIM_FN &&
+        __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) == 1) {
+        int64_t len = xs->len, n = k < 0 ? -k : k;
+        if (n > len) n = len;
+        int64_t keep = drop ? len - n : n;
+        /* the first element kept */
+        int64_t from = (!drop && k < 0) || (drop && k >= 0) ? len - keep : 0;
+        int dt = xs->dtype;
+        int c_old = size_class(payload_bytes(dt, len)), c_new = size_class(payload_bytes(dt, keep));
+        if (c_old == c_new || (c_old >= SIZE_CLASSES && c_new >= SIZE_CLASSES)) {
+            size_t es = elsize(dt);
+            if (IS_HANDLES(xs)) {
+                mim_val **h = (mim_val **)xs->data;
+                for (int64_t i = 0; i < from; i++) mim_release(h[i]);
+                for (int64_t i = from + keep; i < len; i++) mim_release(h[i]);
+            }
+            if (from) memmove(xs->data, (char *)xs->data + from * es, (size_t)keep * es);
+            xs->len = keep;
+            if (es == 1) ((char *)xs->data)[keep] = 0;
+            return xs;
+        }
+    }
+    mim_val *kv = mim_int(k);
+    mim_val *r = mim_prim2(drop ? P_DROP : P_TAKE, xs, kv);
+    mim_release(kv);
+    mim_release(xs);
+    return r;
+}
 /* ==== a float's bits, and floats as bytes ================================
  * (math::to_bits and the rest, bytes::of_f64s and bytes::to_f64s: weights
  * saved exactly, as 8 bytes each, little-endian on every target) */

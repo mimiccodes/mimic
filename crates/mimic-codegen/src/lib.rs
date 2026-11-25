@@ -460,7 +460,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         // that works there does not overflow the stack here (variables
         // become registers first, which the debugger still follows, so a
         // release of a value moved before the call folds away)
-        cg.module.run_passes("function(mem2reg,instsimplify,simplifycfg,tailcallelim)", &tm, PassBuilderOptions::create()).s()?;
+        cg.module.run_passes("function(mem2reg,instsimplify,simplifycfg,jump-threading,simplifycfg,tailcallelim)", &tm, PassBuilderOptions::create()).s()?;
     }
     // every function of the program at a 64-byte boundary too, as the
     // runtime's (driver.rs): where the runtime's code falls no longer moves
@@ -1751,6 +1751,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_set_index_v" => ptr.fn_type(&[p, p, p], false),
+            "mim_shrink_own" => ptr.fn_type(&[p, i64t, i32t], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -5620,6 +5621,24 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = self.ty_of(e);
         // kernel fusion: whole array expressions become one loop
         match &e.kind {
+            // `xs ↑ k` / `xs ↓ k` at xs's last use (it moves here): a list
+            // held once shrinks in place instead of being copied (a heap's
+            // pop, `h ↑ (n - 1)`, copied the whole heap every time)
+            ExprKind::Prim { prim: p @ (Prim::Take | Prim::Drop), args }
+                if args.len() == 2
+                    && self.move_at.contains(&id(&args[0]))
+                    && matches!(&args[0].kind, ExprKind::Path(q) if q.len() == 1 && self.lookup(&q[0]).is_some_and(|l| l.owned))
+                    && matches!(self.ty_of(&args[0]), Ty::Arr(..))
+                    && self.ty_of(&args[1]) == Ty::I64 =>
+            {
+                let l = self.expr(&args[0])?;
+                let l = self.own(self.boxed(l)?)?;
+                let k = self.expr(&args[1])?;
+                let k = self.to_i64(k)?;
+                let drop = self.i32c((*p == Prim::Drop) as i32);
+                let r = self.call_rt_ptr("mim_shrink_own", &[self.basic(l).into(), k.into(), drop])?;
+                return self.as_ty(r, ty, "take/drop");
+            }
             // `≢ xs` of a list: its length, from the header (or known)
             ExprKind::Prim { prim: Prim::Len, args } if matches!(self.ty_of(&args[0]), Ty::Arr(..)) && !self.is_fae(&args[0]) && !self.keep_fusible(Prim::Len, &args[0]) => {
                 let v = self.expr(&args[0])?;
