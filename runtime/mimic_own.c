@@ -212,8 +212,13 @@ static void crash_signal(int sig) {
     signal(sig, SIG_DFL);
     raise(sig);
 }
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 static void mim_crash_handlers(void) {
-    /* (on a stack of its own: a stack overflow is reported too) */
+    /* (on a stack of its own: a stack overflow is reported too; tvOS and
+     * watchOS have no sigaltstack) */
+#if !(defined(__APPLE__) && (TARGET_OS_TV || TARGET_OS_WATCH))
     static char *alt;
     if (!alt && (alt = (char *)malloc(64 * 1024))) {
         stack_t ss;
@@ -222,6 +227,7 @@ static void mim_crash_handlers(void) {
         ss.ss_size = 64 * 1024;
         sigaltstack(&ss, NULL);
     }
+#endif
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = crash_signal;
