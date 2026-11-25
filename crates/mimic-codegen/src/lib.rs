@@ -6118,7 +6118,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // an element of a list of records, strings or tuples: one bounds
             // check and a load (lent while the list is; else a reference)
             ExprKind::Index { base, index }
-                if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
+                if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
             {
                 let b = self.expr(base)?;
                 let b = self.boxed(b)?;
