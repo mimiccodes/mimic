@@ -44,3 +44,4 @@
 Thumbs.db
 desktop.ini
 /bench/gate.md
+fuzz-found/

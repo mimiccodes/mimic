@@ -5,6 +5,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **Random programs, nightly** (`tools/fuzz.py`, the `fuzz` workflow): valid programs written at random (numbers, lists, functions that call themselves with a list they grow, copies changed in place) run in release and debug, without the Mimic IR, on one thread and on many; all must print the same. A disagreement is kept with each way's output, to become a fixture.
 - **`math::to_bits`, `math::from_bits` (and `to_bits32`/`from_bits32` for `f32`), `bytes::of_f64s` and `bytes::to_f64s`:** a float's bits as an integer, and floats as little-endian bytes, both exact (weights saved and read back bit for bit).
 - **`∧/` and `∨/`, the and and or reductions** (`all` and `any` written as glyphs, as in APL): `same ▷ ∧/`, `∨/ flags`.
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
