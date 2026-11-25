@@ -310,6 +310,20 @@ fn result_uses(name: &str, body: &Block) -> Vec<usize> {
     res.into_iter().filter(|e| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)).map(id).collect()
 }
 
+/// The ids of `name` where it is the list of a `name ↑ k` or `name ↓ k`.
+pub(crate) fn shrink_sites(name: &str, body: &Block) -> Vec<usize> {
+    let mut out = Vec::new();
+    body.walk(&mut |e| {
+        if let ExprKind::Prim { prim: Prim::Take | Prim::Drop, args } = &e.kind
+            && args.len() == 2
+            && matches!(&args[0].kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name)
+        {
+            out.push(id(&args[0]));
+        }
+    });
+    out
+}
+
 /// The ids of `name` where it is the whole value of a `let mut v = name`,
 /// anywhere in `body`.
 fn mut_copies(name: &str, body: &Block) -> Vec<usize> {
@@ -524,6 +538,10 @@ impl<'ctx> Cg<'ctx, '_> {
         // `push`), which taking the list makes the list itself
         found
             || mut_copies(name, body).into_iter().any(|v| order.last_id(v))
+            // `xs ↑ k` / `xs ↓ k` at its last use: a list held once shrinks
+            // in place (a heap's pop, `h ↑ (n - 1)`, copied a million
+            // elements each time)
+            || shrink_sites(name, body).into_iter().any(|v| order.last_id(v))
             // handed to the function itself in the same place, or given back
             // (alone, or in the tuple or record that is the result): taking
             // it saves the reference the caller would keep, so a change
