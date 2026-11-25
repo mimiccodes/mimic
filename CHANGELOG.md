@@ -5,11 +5,13 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **`math::to_bits`, `math::from_bits` (and `to_bits32`/`from_bits32` for `f32`), `bytes::of_f64s` and `bytes::to_f64s`:** a float's bits as an integer, and floats as little-endian bytes, both exact (weights saved and read back bit for bit).
 - **`∧/` and `∨/`, the and and or reductions** (`all` and `any` written as glyphs, as in APL): `same ▷ ∧/`, `∨/ flags`.
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
 
 ### Changed
 - **`xs ↑ k` and `xs ↓ k` shrink the list in place** where it is used for the last time and held nowhere else (a heap's pop, `h ↑ (n - 1)`, copied the heap every time); a read guarded by an `if` after the take (`if n > 1 { rest[0] = h[n - 1] }`) is made before it. A heap of a million numbers used over 4 GB; it uses 11.5 MB.
+- **A float prints as the shortest text that reads back as the same number** (`"{x}"`, `print`): 15 significant digits where those do, as before, and 16 or 17 where they do not, so `parse_float("{x}")` is always `x`. `0.1 + 0.2` now shows as `0.30000000000000004`, as in Rust, Go, JavaScript and Python.
 - **A list returned in a tuple, or handed back to the function that holds it, is changed in place:** `let (p, root) = find(…)` moves `p` at its one use, a list passed to the function itself or returned in its result is handed over, and a variable read by another argument of the same call (`find(parent, parent[i])`) is let go once the arguments are read. A union-find over a million elements used over 4 GB; it now uses 137 MB.
 - **A pure `¨` over a short list runs on one core unless its elements are worth sharing out:** up to 16,384 elements, a function's first such `¨` is shared out as before while its cost per element is timed, and later ones go to the other cores only when that cost pays for waking them (else they run on one core, timed as they go). A sudoku check of 20,000 grids ran 6× slower on 12 cores than on one (about 4 s, mostly in the kernel); it now takes 0.7 s.
 - **`push(push(xs, a), b)` grows `xs` in place:** the outer `push` is given the list the inner one returned, held nowhere else, so it no longer copies it. A text of 10 MB built that way in a recursion took over 300 s; it takes 2.65 s.
@@ -19,6 +21,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed
+- `fs::temp_dir()` was `/tmp` on Windows, which does not exist there; it is the user's temporary directory (`TMP`, `TEMP`).
+- `k ↑ xs` and `k ↓ xs` on a list of records (the count on the left) stopped the program with "take/drop count must be an integer scalar"; the count may be on either side, as for lists of numbers.
+- `_` binds nothing: a value dropped on purpose can go to `_` any number of times in a function (the second `_ ← …` was E0302).
 - A local bound to a field of a borrowed record (`let a = f.opt` where the record holds lists), handed to an expression the IR embeds, was released twice: memory corrupted, a later unrelated call crashed.
 - A program that crashes (a bad memory access, a stack overflow) now flushes what it printed, names the signal on stderr (`mimic: the program crashed: SIGSEGV …`), and keeps the signal's exit status; `mimic test` reports a test that died from a signal as crashed.
 - A value read in a `match` guard and used again by a later arm could be handed over in the guard and be gone in the later arm (`Prop(k, v) if k == name => …, _ => prop(rest, name)`).

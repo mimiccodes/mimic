@@ -361,6 +361,18 @@ static mim_val *impl_current_dir(void) {
 }
 
 static mim_val *impl_temp_dir(void) {
+#ifdef _WIN32
+    /* the user's temporary directory (TMP, TEMP, then the profile's
+     * AppData\Local\Temp): there is no /tmp on Windows */
+    wchar_t w[MAX_PATH + 2];
+    DWORD k = GetTempPathW(MAX_PATH + 1, w);
+    if (k > 0 && k <= MAX_PATH + 1) {
+        while (k > 3 && (w[k - 1] == L'\\' || w[k - 1] == L'/')) k--; /* no trailing separator (but C:\ stays) */
+        char buf[4 * (MAX_PATH + 2)];
+        int n = WideCharToMultiByte(CP_UTF8, 0, w, (int)k, buf, (int)sizeof buf, NULL, NULL);
+        if (n > 0) return mim_str(buf, n);
+    }
+#endif
     const char *t = getenv("TMPDIR");
     if (!t || !*t) t = "/tmp";
     size_t n = strlen(t);

@@ -2290,6 +2290,8 @@ static void sb_i64(sbuf *b, int64_t x) {
     sb_put(b, buf, fmt_i64(buf, x));
 }
 
+static void fmt_f64(char *buf, size_t n, double x); /* (mimic_own.c) */
+
 static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     char buf[64];
     switch (v->dtype) {
@@ -2299,7 +2301,7 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
         double x = getf(v, i);
-        snprintf(buf, sizeof buf, "%.15g", x);
+        fmt_f64(buf, sizeof buf, x);
         sb_str(b, buf);
         if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
         break;
@@ -3208,7 +3210,15 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     switch (prim) {
     case P_TAKE:
     case P_DROP: {
-        if (b->rank != 0 || IS_FLOAT(b->dtype)) mim_panic("take/drop count must be an integer scalar");
+        /* the count on either side, as the compiled forms take it: `2 ↑ xs`
+         * (a list of records came here with its count on the left and
+         * stopped with "the count must be an integer") */
+        if (a->rank == 0 && b->rank != 0) {
+            mim_val *t = a;
+            a = b;
+            b = t;
+        }
+        if (b->rank != 0 || IS_FLOAT(b->dtype) || IS_HANDLES(b)) mim_panic("take/drop: the count must be an integer");
         if (a->rank == 0) mim_panic("take/drop expects a vector on the left");
         int64_t n = geti(b, 0), len = dim_of(a, 0);
         int64_t k = n < 0 ? -n : n;

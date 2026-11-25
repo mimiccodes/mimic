@@ -121,13 +121,13 @@ module main
 trusted extern "C" pure include "math.h"
 
 fn main() {
-    print(c::cbrt(27.0))
+    print(c::sqrt(2.0))
     print(c::hypot(3.0, 4.0))
 }
 ```
 
 ```output
-3.0
+1.4142135623730951
 5.0
 ```
 
