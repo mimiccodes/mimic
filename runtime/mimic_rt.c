@@ -1595,8 +1595,11 @@ static void raise_open_files(void) {
 }
 #endif
 
+static void mim_crash_handlers(void); /* (mimic_own.c) */
+
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+    mim_crash_handlers();
 #ifdef MIM_COUNT_RC
     atexit(rc_report);
 #endif

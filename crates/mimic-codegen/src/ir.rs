@@ -210,8 +210,14 @@ impl<'ctx> Cg<'ctx, '_> {
                         // its last use: owned by the expression's slot, moved
                         // on where the old path can, released after it if not
                         if *m {
+                            // (a value the IR counts as owned may be lent here: a
+                            // field read off a borrowed record, `a = f.opt` of a
+                            // parameter, has no reference of its own; the
+                            // expression is given one, or it would release the
+                            // record's field and the record release it again)
+                            let x = self.own(get(vals, *v)?)?;
                             let slot = self.entry_alloca(ct, name)?;
-                            self.b.build_store(slot, self.basic(get(vals, *v)?)).s()?;
+                            self.b.build_store(slot, self.basic(x)).s()?;
                             if let Some(site) = self.let_move_site(name, &[], Some(e)) {
                                 self.move_at.insert(site);
                             }
