@@ -54,7 +54,7 @@ In a folder whose `mim.mim` declares `workspace { members = [...] }` and no proj
 
 * **Builds that change nothing are skipped.** A build records what its output depends on (every source file, the C declarations imported from headers, C sources, flags, target, the compiler itself) in `<name>.stamp` next to it; when all of that is unchanged, `mimic build` and `mimic run` reuse the program as it is (about 0.2 s). Otherwise large programs get their machine code generated on several threads at once (the optimised module split into parts, one object each).
 * **`mimic build` produces the fastest binary by default** (the release profile). It uses `opt = 3`, the host CPU's full instruction set for both the program and the runtime, and interaction nets for parallelism. Pass `--debug` for a debug build, which also carries debug information (DWARF) for debuggers such as lldb and gdb: breakpoints on `.mim` lines, stepping, numeric parameters and `let`s, backtraces with file and line.
-* **`mimic run` defaults to `--debug`**, for fast compiles and the leak check at exit. Pass `--release` to run the fast build.
+* **`mimic run` defaults to `--debug`**, for fast compiles, the memory check (a freed value used again stops the program) and the leak check at exit. Pass `--release` to run the fast build.
 * **`--debug`** builds at `opt = 0`, includes debug info, and checks for leaks at exit.
 * **`--release`** builds at `opt = 3`.
 

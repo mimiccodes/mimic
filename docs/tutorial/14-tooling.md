@@ -329,6 +329,21 @@ mimic lldb                     # or: mimic lldb app.mim -- program arguments
 Functions appear under their Mimic names (`app::main::area`). Release
 builds have no debug information.
 
+Debug builds also check memory. At exit, every value must have been freed
+(the leak check). While the program runs, a freed value is marked and its
+memory is not used again for a while; if anything keeps, releases or reads
+it after that, the program stops at once and says what happened and what
+the value was:
+
+```text
+mimic panic: memory check: a value ([i64], 4 elements) was read after it was freed
+```
+
+A Mimic program cannot do this by itself: it means a bug in the compiler,
+or in C code your program calls. Run the same program under `mimic lldb`,
+which stops right there, and `bt` shows the place in your files. Release
+builds check neither, and run at full speed.
+
 Editors debug through `mimic dap`, which speaks the Debug Adapter Protocol
 (through LLVM's `lldb-dap`): in VS Code, press F5 or click **Debug** above
 `fn main`; other editors are set up in `mimic man editors`. Breakpoints,

@@ -1059,6 +1059,7 @@ pub fn plan(input: &Input, program: &Program) -> Result<Vec<mimic_codegen::Decis
             native: true,
             opt_level: profile.opt,
             leak_check: false,
+            memcheck: !profile.release,
             emit_main: is_exe,
             export_pub: !is_exe,
             use_net: profile.net,
@@ -1142,6 +1143,11 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
             flags.push(if x86 { format!("-march={cpu}") } else { format!("-mcpu={cpu}") });
         }
         _ => {}
+    }
+    // debug builds: the memory check (a freed value marked, and a use of it
+    // stops the program; mimic_own.c); release builds compile none of it
+    if !release {
+        flags.push("-DMIM_MEMCHECK=1".into());
     }
     // MIMIC_COUNT_RC=1: a runtime that counts its reference-count operations
     // (docs/design/ownership.md)
@@ -1707,6 +1713,7 @@ fn codegen_and_link(
             native: target.name.is_none(),
             opt_level: profile.opt,
             leak_check: profile.leak_check,
+            memcheck: !profile.release,
             emit_main: is_exe,
             export_pub: !is_exe,
             use_net: profile.net,
