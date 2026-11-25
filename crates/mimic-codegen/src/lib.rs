@@ -5765,6 +5765,12 @@ impl<'ctx> Cg<'ctx, '_> {
                 let v = V::P(phi.as_basic_value().into_pointer_value(), false);
                 self.as_ty(v, ty, "list")
             }
+            // `[]` typed by the branch next to it: an empty list of its
+            // numbers (mim_array_lit's is always of i64)
+            ExprKind::Array(xs) if xs.is_empty() && matches!(ty, Ty::Arr(El::I64 | El::F64 | El::U8, 0)) => {
+                let Ty::Arr(el, _) = ty else { unreachable!() };
+                self.alloc_vec(fuse::dtype_of(el), i64t.const_zero())
+            }
             ExprKind::Array(xs) if fixed(ty).is_some() => {
                 let (el, _) = fixed(ty).unwrap();
                 let mut elems = Vec::new();

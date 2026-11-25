@@ -1,0 +1,25 @@
+module main
+
+// `if c { xs } else { [] }`: the `[]` takes the other branch's list type
+// (numbers, floats, bytes), so the result is typed, not a list of unknown
+// type; the values are as before, an empty list included
+
+fn flush(run: i64) -> [i64] { if run > 0 { [192 | run - 1] } else { [] } }
+
+fn scaled(xs: [f64], on: bool) -> [f64] { if on { xs ¨ (x => x * 2.0) } else { [] } }
+
+fn main() {
+    let a = flush(3)
+    let b = flush(0)
+    print("{a} {b} {≢ b} {concat(b, a)} {push(b, 7)}")
+    let c = if ≢ a > 5 { [] } else { a ¨ (x => x + 1) }
+    print(c ▷ +/)
+    let f = scaled([1.5 2.5], true)
+    let g = scaled([1.5], false)
+    print("{f} {g} {≢ g} {push(g, 0.25)} {concat(g, f) ▷ +/}")
+    let bs = bytes::of_text("hi")
+    let e = if ≢ bs > 9 { bs } else { [] }
+    print("{≢ e} {concat(e, bs)}")
+    let parts = ⍳ 4 ¨ (k => flush(k % 2))
+    print(parts)
+}
