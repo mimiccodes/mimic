@@ -2789,7 +2789,13 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             // (each name of a tuple `let` likewise: `let (p, root) = find(…)`
             // then `let mut c = p` changes the list in place, not a copy)
-            if let Stmt::LetTuple { names, .. } = s {
+            // (only a function's result, which nothing else holds: a tuple
+            // a variable still holds, `let (i, open, jump) = s`, keeps its
+            // parts, and moving those of a `settle`'s state gained nothing
+            // but code)
+            if let Stmt::LetTuple { names, value, .. } = s
+                && matches!(value.kind, ExprKind::Call { .. })
+            {
                 for n in names.iter().filter(|n| *n != "_") {
                     if let Some(site) = self.let_move_site(n, &b.stmts[i + 1..], b.tail.as_deref()) {
                         self.move_at.insert(site);
@@ -4887,8 +4893,10 @@ impl<'ctx> Cg<'ctx, '_> {
             if consumed.get(j).copied().unwrap_or(false)
                 && let Some(slot) = self.lookup(&name).filter(|l| l.owned).map(|l| l.slot)
             {
+                // (checked for null: a variable that moved into the call
+                // left one, and the release then folds away)
                 let cur = self.b.build_load(self.ptr, slot, "").s()?;
-                self.call_rt("mim_release", &[cur.into()])?;
+                self.release_out(cur.into_pointer_value())?;
                 self.b.build_store(slot, self.ptr.const_null()).s()?;
             }
         }
@@ -5993,7 +6001,9 @@ impl<'ctx> Cg<'ctx, '_> {
                     for (j, a) in args.iter().enumerate() {
                         if let ExprKind::Path(p) = &a.kind
                             && p.len() == 1
-                            // (one that moved here left a null: releasing it is nothing)
+                            // (not one that moves into this argument itself:
+                            // its slot is empty already)
+                            && !self.move_at.contains(&id(a))
                             && self.lookup(&p[0]).is_some_and(|l| l.owned)
                             && owned::last_in_call(&p[0], body, id(e), id(a))
                         {
