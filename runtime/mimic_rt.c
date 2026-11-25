@@ -2290,6 +2290,8 @@ static void sb_i64(sbuf *b, int64_t x) {
     sb_put(b, buf, fmt_i64(buf, x));
 }
 
+static void fmt_f64(char *buf, size_t n, double x); /* (mimic_own.c) */
+
 static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     char buf[64];
     switch (v->dtype) {
@@ -2299,7 +2301,7 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
         double x = getf(v, i);
-        snprintf(buf, sizeof buf, "%.15g", x);
+        fmt_f64(buf, sizeof buf, x);
         sb_str(b, buf);
         if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
         break;

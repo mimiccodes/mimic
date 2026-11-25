@@ -5853,9 +5853,21 @@ impl<'ctx> Cg<'ctx, '_> {
                     && self.p.mods[self.p.fns[fid].module].name == "math"
                     && self.p.mods[self.p.fns[fid].module].package == "std"
                     && decl.name != "mulmod" && decl.name != "powmod" // whole numbers: the runtime's 128-bit products
+                    && decl.name != "to_bits32" && decl.name != "from_bits32" // f32 values: the runtime's
                     && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
                 {
                     let name = decl.name.clone();
+                    // a float's 64 bits as an integer, and back: the same bits
+                    if name == "to_bits" {
+                        let x = self.to_f64(vals[0])?;
+                        let n = self.b.build_bit_cast(x, self.ctx.i64_type(), "").s()?.into_int_value();
+                        return self.as_ty(V::I(n), ty, "result of `math::to_bits`");
+                    }
+                    if name == "from_bits" {
+                        let n = self.to_i64(vals[0])?;
+                        let x = self.b.build_bit_cast(n, self.ctx.f64_type(), "").s()?.into_float_value();
+                        return self.as_ty(V::F(x), ty, "result of `math::from_bits`");
+                    }
                     if name == "to_int" {
                         // towards zero, as C's cast; NaN and numbers out of
                         // range stop the program instead of wrapping
