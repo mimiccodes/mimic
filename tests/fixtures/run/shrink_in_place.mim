@@ -1,0 +1,67 @@
+module main
+
+// a list held once, taken or dropped at its last use, shrinks in place
+// (each pop of a hand-written heap copied the heap); a read guarded by an
+// `if` after the take is made first, only when the guard holds. Lists of
+// numbers and of strings (the dropped ones released), from either end; a
+// list still used elsewhere is left as it is
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn swap(h: [i64], i: i64, j: i64) -> [i64] {
+    let mut s = h
+    s[i] = h[j]
+    s[j] = h[i]
+    s
+}
+
+fn sift_up(h: [i64], i: i64) -> [i64] {
+    if i == 0 { h } else {
+        let p = (i - 1) div 2
+        if h[p] > h[i] { sift_up(swap(h, p, i), p) } else { h }
+    }
+}
+
+fn sift_down(h: [i64], i: i64) -> [i64] {
+    let n = ≢ h
+    let l = 2 * i + 1
+    let r = 2 * i + 2
+    let m1 = if l < n and h[l] < h[i] { l } else { i }
+    let m = if r < n and h[r] < h[m1] { r } else { m1 }
+    if m == i { h } else { sift_down(swap(h, i, m), m) }
+}
+
+fn heap_pop(h: [i64]) -> (i64, [i64]) {
+    let n = ≢ h
+    let top = h[0]
+    let mut rest = h ↑ (n - 1)
+    if n > 1 {
+        rest[0] = h[n - 1]
+    }
+    (top, sift_down(rest, 0))
+}
+
+fn fill(h: [i64], k: i64, x: i64) -> [i64] {
+    if k == 0 { h } else {
+        let y = next(x)
+        fill(sift_up(push(h, y % 100000), ≢ h), k - 1, y)
+    }
+}
+
+fn drain(h: [i64], last: i64, sorted: bool, total: i64) -> (bool, i64) {
+    if ≢ h == 0 { (sorted, total) } else {
+        let (v, rest) = heap_pop(h)
+        drain(rest, v, sorted and v >= last, total + v)
+    }
+}
+
+fn shrink_words(ws: [str], k: i64) -> [str] { if k == 0 { ws } else { shrink_words(ws ↓ 1, k - 1) } }
+
+fn main() {
+    print(drain(fill([], 50000, 7), ¯1, true, 0))
+    let ws = ⍳ 40 ¨ (i => "w{i}")
+    print(shrink_words(ws ¨ (w => w), 37))
+    let xs = ⍳ 100
+    let ys = xs ↑ 3
+    print("{ys} {≢ xs} {xs ↑ ¯2} {xs ↓ 97} {xs ↓ ¯98}")
+}
