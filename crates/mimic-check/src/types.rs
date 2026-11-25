@@ -34,6 +34,23 @@ pub fn tuple_elems(id: u32) -> Vec<Ty> {
     TUPLES.lock().unwrap()[id as usize].clone()
 }
 
+/// The row types of lists of lists (`[[i64]]`: rows `[i64]`), interned as
+/// tuples are, so `El::Rows` stays a small copyable id.
+static ROWS: Mutex<Vec<Ty>> = Mutex::new(Vec::new());
+
+pub fn rows_id(row: Ty) -> u32 {
+    let mut t = ROWS.lock().unwrap();
+    if let Some(i) = t.iter().position(|e| *e == row) {
+        return i as u32;
+    }
+    t.push(row);
+    (t.len() - 1) as u32
+}
+
+pub fn rows_of(id: u32) -> Ty {
+    ROWS.lock().unwrap()[id as usize]
+}
+
 /// Generic instances (`Option[i64]`), interned so `Ty::Obj` stays a small
 /// copyable id. A type without arguments is `Ty::Obj(type id)`; an instance is
 /// `Ty::Obj(INST | index)`. Values are represented the same whatever the
@@ -223,6 +240,9 @@ pub enum El {
     U8,
     /// tuples (a list of tuples)
     Tup(u32),
+    /// lists of a known type (a list of lists, `[[i64]]`: each element one
+    /// row, the row's type interned, see [`rows_of`])
+    Rows(u32),
     Dyn,
     /// 32-bit floats and integers (`[f32]`, `[i32]`): 4 bytes each; f32
     /// arithmetic rounds to f32, i32 arithmetic wraps
@@ -310,6 +330,9 @@ impl Ty {
             Ty::Arr(El::Char, _) => El::Str,
             Ty::Obj(t) => El::Obj(t),
             Ty::Tup(t) => El::Tup(t),
+            // (a list of known element type: rows of unknown type, and text,
+            // stay as they were)
+            Ty::Arr(e, _) if !matches!(e, El::Char | El::Dyn) => El::Rows(rows_id(Ty::Arr(e, 0))),
             _ => El::Dyn,
         }
     }
@@ -323,6 +346,7 @@ impl Ty {
             El::Obj(t) => Ty::Obj(t),
             El::U8 => Ty::I64,
             El::Tup(t) => Ty::Tup(t),
+            El::Rows(r) => rows_of(r),
             El::Dyn => Ty::Dyn,
             El::F32 => Ty::F32,
             El::I32 => Ty::I32,
@@ -367,6 +391,7 @@ impl std::fmt::Display for Ty {
             El::Obj(_) => "record",
             El::U8 => "u8",
             El::Tup(_) => "tuple",
+            El::Rows(_) => "list",
             El::Dyn => "?",
             El::F32 => "f32",
             El::I32 => "i32",
@@ -381,6 +406,7 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "bool"),
             Ty::Char => write!(f, "char"),
             Ty::Arr(El::Char, _) => write!(f, "str"),
+            Ty::Arr(El::Rows(r), _) => write!(f, "[{}]", rows_of(*r)),
             Ty::Arr(e, _) => write!(f, "[{}]", el(e)),
             Ty::Obj(_) => write!(f, "record"),
             Ty::Tup(id) => {
@@ -587,7 +613,7 @@ pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: 
 pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
     match a {
         Ty::Dyn => Ok(Ty::Dyn),
-        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _) => match got {
+        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
             Ty::Arr(El::Dyn, _) if matches!(a, Ty::Arr(_, _)) => Ok(a),
             g if compatible(a, g) => Ok(refine(a, g)),
@@ -611,6 +637,7 @@ pub fn show(p: &Program, t: Ty) -> String {
         }
         Ty::Arr(El::Obj(id), _) => format!("[{}]", show(p, Ty::Obj(id))),
         Ty::Arr(El::Tup(id), _) => format!("[{}]", show(p, Ty::Tup(id))),
+        Ty::Arr(El::Rows(r), _) => format!("[{}]", show(p, rows_of(r))),
         Ty::Arr(El::Str, _) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),
@@ -1328,6 +1355,23 @@ impl Walk<'_, '_> {
                             // that kind of number gives such a list (the runtime
                             // keeps it typed), so a list grown in a loop stays typed
                             let pushed = self.push_of_numbers(f, &argt);
+                            // the prelude's `flatten` of a list of lists: the one
+                            // copy for lists of unknown type, as before lists of
+                            // lists had a type. Rows of numbers go to the runtime's
+                            // concat either way and the result is typed below, so a
+                            // copy for `[[i64]]` only adds code: inlined into a
+                            // parallel `¨` (the benchmark `diff`) it measured 6%
+                            // slower on Windows on all cores, running the same
+                            // instructions
+                            let p = self.inf.p;
+                            let fm = &p.mods[p.fns[f].module];
+                            if p.fns[f].name == "flatten" && fm.name == "prelude" && fm.package == "std" {
+                                for t in argt.iter_mut() {
+                                    if matches!(t, Ty::Arr(El::Rows(_), _)) {
+                                        *t = Ty::Arr(El::Dyn, 0);
+                                    }
+                                }
+                            }
                             let r = self.call_user(id(e), f, argt);
                             if let Some(t) = pushed {
                                 return t;
