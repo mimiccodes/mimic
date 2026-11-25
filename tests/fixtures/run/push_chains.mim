@@ -1,0 +1,22 @@
+module main
+
+// a list grown by `push(push(xs, a), b)` (the outer push given the list the
+// inner one gave back, held nowhere else) grows in place; and short lists
+// built a few elements at a time, a word letter by letter 100,000 times,
+// give their memory back (a list growing past the smallest pool kept a
+// block of its own that was never returned)
+
+fn word(n: i64, x: i64, letters: [str]) -> str {
+    if n == 0 { join(letters, "") } else { word(n - 1, x, push(letters, char_of(97 + (x + n) % 26))) }
+}
+
+fn build(k: i64, acc: [str]) -> [str] {
+    if k == 0 { acc } else { build(k - 1, push(push(acc, word(1 + k % 6, k, [])), if k % 10 == 0 { "\n" } else { " " })) }
+}
+
+fn main() {
+    let pieces = build(100000, [])
+    let text = join(pieces, "")
+    print("{≢ pieces} {≢ text} {≢ lines(text)}")
+    print(pieces[0] + pieces[2] + pieces[4])
+}

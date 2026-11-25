@@ -335,6 +335,19 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
     } else if ((c_old >= SIZE_CLASSES || xs->desc) && (xs->desc ? ROOM_OF(xs) : block_usable(xs) - sizeof(mim_val)) >= need) {
         /* the malloc'd block has room (a short list grown here earlier has
          * one too: its room is in desc, though its length is a pool size) */
+    } else if (c_old < SIZE_CLASSES && !xs->desc && size_class(need) < SIZE_CLASSES) {
+        /* a pooled list growing into the next pool: a block of that pool.
+         * (Given a 4 KB block of its own instead, a list of a few elements
+         * kept a pool length, and went back to a pool's free list when
+         * released: a word built letter by letter in a recursion left 4 KB
+         * behind each time, 1 GB for 180,000 words. A block of its own is
+         * now only for a list past the pools, and nothing shrinks a list in
+         * place, so free_block, which picks by length, always frees it.) */
+        mim_val *r = alloc(dt, xs->rank, n);
+        memcpy(r->data, xs->data, old);
+        r->rc = xs->rc;
+        free_block(&t_heap, xs);
+        xs = r;
     } else {
         size_t cap = need * 2 < 4096 ? 4096 : need * 2;
         if (c_old >= SIZE_CLASSES || xs->desc) {

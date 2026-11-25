@@ -460,11 +460,20 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         // release of a value moved before the call folds away)
         cg.module.run_passes("function(mem2reg,instsimplify,simplifycfg,tailcallelim)", &tm, PassBuilderOptions::create()).s()?;
     }
+    // every function of the program at a 64-byte boundary too, as the
+    // runtime's (driver.rs): where the runtime's code falls no longer moves
+    // a program's own hot functions within a cache line (fib's recursion,
+    // which calls nothing of the runtime on one core, moved 12% with it)
+    let tstr = triple.as_str().to_string_lossy().to_string();
+    if !(tstr.starts_with("wasm") || tstr.starts_with("nvptx") || tstr.starts_with("amdgcn") || tstr.starts_with("spirv") || tstr.starts_with("bpf")) {
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            f.as_global_value().set_alignment(64);
+        }
+    }
     if let Some(ir) = ir {
         cg.module.print_to_file(ir).s()?;
     }
     // backends that only write assembly
-    let tstr = triple.as_str().to_string_lossy().to_string();
     if tstr.starts_with("nvptx") || tstr.starts_with("xcore") {
         let asm = obj.with_extension(if tstr.starts_with("nvptx") { "ptx" } else { "s" });
         tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
@@ -5876,7 +5885,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     let own_first = m.name == "prelude"
                         && matches!(decl.name.as_str(), "push" | "put" | "concat")
                         && matches!(vals.first(), Some(V::P(_, true)))
-                        && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)));
+                        && (matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)))
+                            // (or a list another `push` just gave back:
+                            // `push(push(pieces, word), sep)` held nowhere else;
+                            // copied, a text built by such a recursion took
+                            // time growing with the square of its length)
+                            || (decl.name == "push"
+                                && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Call { callee, .. })
+                                    if matches!(&callee.kind, ExprKind::Path(p) if p.last().is_some_and(|l| l == "push")))));
                     let name = if own_first {
                         format!("mim_take_{}", decl.name)
                     } else if m.name == "prelude" {
