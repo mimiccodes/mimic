@@ -1114,6 +1114,14 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     if frame_pointers {
         flags.push("-fno-omit-frame-pointer".into());
     }
+    // every function of the runtime at a 64-byte boundary: a change to one
+    // then moves the functions after it by whole cache lines, never within
+    // one, so a benchmark's speed does not change with where its runtime
+    // code happens to fall (unchanged programs measured 5-20% slower on one
+    // machine after runtime changes they never ran: fib, vm, qoi)
+    if !target.name().starts_with("wasm") {
+        flags.push("-falign-functions=64".into());
+    }
     if !target.is_apple() {
         // a section per function, so the linker drops what a program does not
         // use (Mach-O linkers do this by symbol without being asked)
