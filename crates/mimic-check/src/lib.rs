@@ -969,6 +969,11 @@ impl Checker<'_> {
     }
 
     fn declare(&mut self, name: &str, mutable: bool, span: Span) {
+        // `_` binds nothing: a value dropped on purpose, as often as wanted
+        // (`_ ← fs::remove(a)` then `_ ← fs::remove(b)`)
+        if name == "_" {
+            return;
+        }
         if self.lookup(name).is_some() {
             self.err(Diag::new(&C::SHADOWING, format!("`{name}` is already defined; Mimic does not allow shadowing"), span)
                 .note("use `let mut` and reassign it, or pick a different name"));

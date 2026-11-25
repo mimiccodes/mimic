@@ -17,6 +17,9 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed
+- `fs::temp_dir()` was `/tmp` on Windows, which does not exist there; it is the user's temporary directory (`TMP`, `TEMP`).
+- `k ↑ xs` and `k ↓ xs` on a list of records (the count on the left) stopped the program with "take/drop count must be an integer scalar"; the count may be on either side, as for lists of numbers.
+- `_` binds nothing: a value dropped on purpose can go to `_` any number of times in a function (the second `_ ← …` was E0302).
 - A short list grown past the smallest memory pool (a word built letter by letter) kept a 4 KB block that was never given back when it was freed: 180,000 such words held about 1 GB until the program ended. It now moves to the next pool.
 - `mimic fmt` (and formatting from an editor or the MCP server) leaves a file that does not parse untouched and reports the parse error; `fmt --glyphs` had rewritten `∧/` into `∧÷`.
 - **A primitive's word is refused wherever a name is declared (E0214):** a parameter or a typed `let` named `shape` (the word of `⍴`) was accepted, then every use of it was the primitive, with a misleading parse error (`expected an expression, found '=='`). Functions, parameters, `let`s and lambda parameters now all give E0214 naming the primitive. Reported by a user.
