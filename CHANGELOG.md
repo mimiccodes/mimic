@@ -18,6 +18,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed
+- A local bound to a field of a borrowed record (`let a = f.opt` where the record holds lists), handed to an expression the IR embeds, was released twice: memory corrupted, a later unrelated call crashed.
+- A program that crashes (a bad memory access, a stack overflow) now flushes what it printed, names the signal on stderr (`mimic: the program crashed: SIGSEGV …`), and keeps the signal's exit status; `mimic test` reports a test that died from a signal as crashed.
 - A value read in a `match` guard and used again by a later arm could be handed over in the guard and be gone in the later arm (`Prop(k, v) if k == name => …, _ => prop(rest, name)`).
 - A short list grown past the smallest memory pool (a word built letter by letter) kept a 4 KB block that was never given back when it was freed: 180,000 such words held about 1 GB until the program ended. It now moves to the next pool.
 - `mimic fmt` (and formatting from an editor or the MCP server) leaves a file that does not parse untouched and reports the parse error; `fmt --glyphs` had rewritten `∧/` into `∧÷`.

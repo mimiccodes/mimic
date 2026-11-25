@@ -1,0 +1,36 @@
+module main
+
+// a local bound to a field of a borrowed record (`a = f.opt`, f a
+// parameter, Adam holding lists) and handed to an expression the old code
+// generator compiles: it has no reference of its own, so the expression is
+// given one; it was released there and again with `f` (memory corrupted, a
+// later unrelated call crashed)
+
+type Tensor = { data: [f64], shape: [i64] }
+type Adam = { m: [Tensor], v: [Tensor], steps: i64, lr: f64 }
+type Fit = { opt: Adam, params: [Tensor] }
+
+fn vec(xs: [f64]) -> Tensor { Tensor { data: xs, shape: [≢ xs] } }
+
+fn fit(ps: [Tensor], lr: f64) -> Fit {
+    Fit { opt: Adam { m: ps ¨ (p => vec(p.data × 0.0)), v: ps ¨ (p => vec(p.data × 0.0 + 1.0)), steps: 3, lr: lr }, params: ps }
+}
+
+fn text(note: str, ts: [Tensor]) -> str {
+    "{note}: " + join(ts ¨ (t => "{t.data}"), "; ")
+}
+
+fn fit_text(note: str, f: Fit) -> str {
+    let a = f.opt
+    let head = vec([a.steps * 1.0, a.lr])
+    text(note, concat(concat(concat(f.params, a.m), a.v), [head]))
+}
+
+fn parse(s: str) -> i64 { ≢ words(s) }
+
+fn main() {
+    let ps = ⍳ 3 ¨ (i => vec(⍳ 2 ¨ (j => (i * 2 + j) * 1.0)))
+    print(fit_text("x", fit(ps, 0.01)))
+    print(⍳ 2000 ¨ (k => parse("a b c {k}")) ▷ +/)
+    print(⍳ 200 ¨ (k => ≢ fit_text("y", fit(ps, 0.02))) ▷ +/)
+}

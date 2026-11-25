@@ -180,3 +180,64 @@ static int each_worth_sharing(int64_t spent, int64_t done, int64_t left) {
     int64_t k = left < g_nthreads ? left : g_nthreads;
     return rest > 50000 && rest > 20000 * k;
 }
+
+/* ==== a crash said, and the output so far kept ===========================
+ * A program that crashes (a bad memory access, a stack overflow) used to
+ * lose what it had printed but not yet flushed, so the crash looked as if it
+ * came earlier than it did. The handler flushes, names the signal, and
+ * raises it again (the exit status stays the signal's). An alarm first: a
+ * crash inside printf holds stdout's lock, and the flush must not hang. */
+#if defined(_WIN32)
+static LONG WINAPI crash_filter(EXCEPTION_POINTERS *e) {
+    DWORD c = e && e->ExceptionRecord ? e->ExceptionRecord->ExceptionCode : 0;
+    fflush(stdout);
+    const char *what = c == EXCEPTION_ACCESS_VIOLATION ? "an access violation (a bad memory access)"
+                     : c == EXCEPTION_STACK_OVERFLOW   ? "a stack overflow"
+                                                       : "an exception";
+    fprintf(stderr, "mimic: the program crashed: %s (0x%08lX)\n", what, (unsigned long)c);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static void mim_crash_handlers(void) { SetUnhandledExceptionFilter(crash_filter); }
+#elif !defined(__wasi__)
+static void crash_signal(int sig) {
+    alarm(2);
+    fflush(stdout);
+    const char *m = sig == SIGSEGV ? "mimic: the program crashed: SIGSEGV (a bad memory access, or the stack ran out)\n"
+                  : sig == SIGBUS  ? "mimic: the program crashed: SIGBUS (a bad memory access)\n"
+                  : sig == SIGILL  ? "mimic: the program crashed: SIGILL (an illegal instruction)\n"
+                                   : "mimic: the program crashed: SIGFPE (an arithmetic fault)\n";
+    ssize_t w = write(2, m, strlen(m));
+    (void)w;
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+static void mim_crash_handlers(void) {
+    /* (on a stack of its own: a stack overflow is reported too; tvOS and
+     * watchOS have no sigaltstack) */
+#if !(defined(__APPLE__) && (TARGET_OS_TV || TARGET_OS_WATCH))
+    static char *alt;
+    if (!alt && (alt = (char *)malloc(64 * 1024))) {
+        stack_t ss;
+        memset(&ss, 0, sizeof ss);
+        ss.ss_sp = alt;
+        ss.ss_size = 64 * 1024;
+        sigaltstack(&ss, NULL);
+    }
+#endif
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = crash_signal;
+    sa.sa_flags = SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+}
+#else
+static void mim_crash_handlers(void) {}
+#endif

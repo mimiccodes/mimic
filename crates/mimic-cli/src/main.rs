@@ -1401,6 +1401,12 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs, coverage: bool) -> Result<E
                     Ok(o) => {
                         let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
                         text.push_str(&String::from_utf8_lossy(&o.stderr));
+                        // (a test that died from a signal: said, not an ordinary failure)
+                        if let Some(c) = crash_of(&o.status)
+                            && !text.contains("the program crashed")
+                        {
+                            text.push_str(&format!("crashed ({c})\n"));
+                        }
                         (o.status.success(), text, t.elapsed().as_secs_f64())
                     }
                     Err(e) => (false, format!("cannot run the test: {e}"), 0.0),
@@ -1431,6 +1437,39 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs, coverage: bool) -> Result<E
         coverage_report(&a.path.with_extension("covmap"), d)?;
     }
     Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// A process that died from a signal (Unix) or an exception (Windows):
+/// its name.
+fn crash_of(st: &std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // (SIGBUS is 10 on macOS and the BSDs, 7 on Linux)
+        let sigbus = if cfg!(target_os = "linux") { 7 } else { 10 };
+        if let Some(sig) = st.signal() {
+            return Some(match sig {
+                11 => "SIGSEGV".to_string(),
+                s if s == sigbus => "SIGBUS".to_string(),
+                4 => "SIGILL".to_string(),
+                8 => "SIGFPE".to_string(),
+                6 => "SIGABRT".to_string(),
+                9 => "SIGKILL".to_string(),
+                s => format!("signal {s}"),
+            });
+        }
+    }
+    #[cfg(windows)]
+    if let Some(c) = st.code() {
+        let c = c as u32;
+        return match c {
+            0xC0000005 => Some("an access violation".into()),
+            0xC00000FD => Some("a stack overflow".into()),
+            0xC0000000..=0xCFFFFFFF => Some(format!("exception 0x{c:08X}")),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Add up the counts of every test process: a summary per file, and
