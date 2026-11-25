@@ -1785,7 +1785,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
             "mim_lit_list" => ptr.fn_type(&[p, p], false),
             "mim_obj_unique" => ptr.fn_type(&[p], false),
-            "mim_format" => ptr.fn_type(&[p], false),
+            "mim_format" | "mim_std_char_code" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
@@ -5427,6 +5427,49 @@ impl<'ctx> Cg<'ctx, '_> {
         ((1..=64).contains(&n) && self.is_fae(a)).then_some((a, el, n as u32))
     }
 
+    /// `char_code(s)`: the first byte when `s` is text whose first character
+    /// is ASCII; else (empty, other characters) `mim_std_char_code`.
+    fn char_code_inline(&mut self, s: V<'ctx>) -> R<IntValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let i8t = self.ctx.i8_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let p = self.basic(s).into_pointer_value();
+        let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
+        let kind = self.b.build_load(i64t, kind_p, "").s()?.into_int_value();
+        let len_p = self.b.build_struct_gep(hdr, p, 3, "").s()?;
+        let len = self.b.build_load(i64t, len_p, "").s()?.into_int_value();
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want: u64 = if little { (1u64 << 32) | 3 } else { (3u64 << 32) | 1 };
+        let ok_k = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        let ok_n = self.b.build_int_compare(IntPredicate::SGT, len, i64t.const_zero(), "").s()?;
+        let go = self.b.build_and(ok_k, ok_n, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let read = self.ctx.append_basic_block(f, "cc_read");
+        let fast = self.ctx.append_basic_block(f, "cc_fast");
+        let slow = self.ctx.append_basic_block(f, "cc_slow");
+        let done = self.ctx.append_basic_block(f, "cc_done");
+        self.b.build_conditional_branch(go, read, slow).s()?;
+        self.b.position_at_end(read);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "data").s()? };
+        let byte = self.b.build_load(i8t, data, "").s()?.into_int_value();
+        let ascii = self.b.build_int_compare(IntPredicate::SGE, byte, i8t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(ascii, fast, slow).s()?;
+        self.b.position_at_end(fast);
+        let quick = self.b.build_int_z_extend(byte, i64t, "").s()?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow);
+        let r = self.call_rt_ptr("mim_std_char_code", &[p.into()])?;
+        let full = self.to_i64(r)?;
+        self.drop_tmp(r)?;
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(i64t, "").s()?;
+        phi.add_incoming(&[(&quick, fast), (&full, slow_end)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
     fn index_fast(&mut self, arr: V<'ctx>, i: IntValue<'ctx>, el: El, ty: Ty) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
@@ -5806,6 +5849,28 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // char_code of text starting with an ASCII character: its
+                // first byte, read in place (a call, a type check and a boxed
+                // result per character otherwise); other text: the runtime's
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "char_code"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 1
+                    && self.ty_of(&args[0]) == Ty::Arr(El::Char, 0)
+                {
+                    // (of a literal, `char_code("a")`: known now)
+                    if let ExprKind::Str(t) = &args[0].kind
+                        && let Some(c) = t.chars().next()
+                    {
+                        return self.as_ty(V::I(self.ctx.i64_type().const_int(c as u64, false)), ty, "result of `char_code`");
+                    }
+                    let v = self.expr(&args[0])?;
+                    let b = self.boxed(v)?;
+                    let r = self.char_code_inline(b)?;
+                    self.drop_tmp(b)?;
+                    return self.as_ty(V::I(r), ty, "result of `char_code`");
+                }
                 // sort of a list kept in registers (a 3×3 neighbourhood):
                 // sorted on the stack, back in registers, no heap list
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
