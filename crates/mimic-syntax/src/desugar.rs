@@ -143,9 +143,133 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         if let Item::Fn(f) = item {
             let mut n = 0;
             blocks_mut(&mut f.body, &mut |b| hoist_copy_reads(b, &mut n));
+            sink_with(&mut f.body);
+            f.body.walk_mut(&mut |e| {
+                if let ExprKind::Block(b) | ExprKind::Unsafe(b) = &mut e.kind {
+                    sink_with(b);
+                }
+                if let ExprKind::If { then, .. } = &mut e.kind {
+                    sink_with(then);
+                }
+            });
         }
     }
     Ok(())
+}
+
+/// `let out = if c { push(s.out, x) } else { concat(s.out, ys) }` followed
+/// by `{ s with k: s.k + 2, out: out }` as the block's result: the update
+/// moves into each branch, `if c { { s with k: s.k + 2, out: push(s.out, x) } }
+/// else { … }`, where a record held once has its list taken out and changed
+/// in place (codegen's steals) instead of copied at every step (a list
+/// grown in a loop's state took time growing with the square of its
+/// length). The same values in the same order: the branch's value first,
+/// then the other fields (it is listed first). Only when `out` is used nowhere else, no branch
+/// binds a name the other fields read, and some branch reads `s.out`.
+fn sink_with(b: &mut Block) {
+    let Some(tail) = &b.tail else { return };
+    let ExprKind::With { base, fields } = &tail.kind else { return };
+    let ExprKind::Path(bp) = &base.kind else { return };
+    if bp.len() != 1 {
+        return;
+    }
+    let Some(Stmt::Let { name: v, mutable: false, ty: None, value, .. }) = b.stmts.last() else { return };
+    if !matches!(value.kind, ExprKind::If { .. }) || bp[0] == *v {
+        return;
+    }
+    let is_v = |e: &Expr| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == *v);
+    let at: Vec<usize> = fields.iter().enumerate().filter(|(_, (_, x, _))| is_v(x)).map(|(i, _)| i).collect();
+    let [k] = at[..] else { return };
+    let field = fields[k].0.clone();
+    // `v` read nowhere else (the other fields, or inside the branches)
+    let mut names = vec![bp[0].clone()];
+    for (i, (_, x, _)) in fields.iter().enumerate() {
+        if i == k {
+            continue;
+        }
+        x.walk(&mut |e| {
+            if let ExprKind::Path(p) = &e.kind
+                && p.len() == 1
+            {
+                names.push(p[0].clone());
+            }
+        });
+    }
+    if names.contains(v) {
+        return;
+    }
+    // the branches: each a block with a result, the last an `else`
+    let mut branches: Vec<&Block> = Vec::new();
+    let mut cur = value;
+    loop {
+        let ExprKind::If { then, els, .. } = &cur.kind else { return };
+        branches.push(then);
+        match els.as_deref() {
+            Some(e) if matches!(e.kind, ExprKind::If { .. }) => cur = e,
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => {
+                branches.push(eb);
+                break;
+            }
+            _ => return,
+        }
+    }
+    if branches.len() > 4 {
+        return;
+    }
+    let mut reads_field = false;
+    for br in &branches {
+        let Some(t) = &br.tail else { return };
+        let mut bound = Vec::new();
+        br.bound_names(&mut bound);
+        t.walk(&mut |e| match &e.kind {
+            ExprKind::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+            ExprKind::Field { base, name } if *name == field && matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == bp[0]) => reads_field = true,
+            _ => {}
+        });
+        if bound.iter().any(|n| names.contains(n) || n == v) {
+            return;
+        }
+        let mut uses_v = false;
+        t.walk(&mut |e| uses_v |= is_v(e));
+        for st in &br.stmts {
+            if let Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } = st {
+                value.walk(&mut |e| uses_v |= is_v(e));
+            }
+        }
+        if uses_v {
+            return;
+        }
+    }
+    if !reads_field {
+        return;
+    }
+    // rewrite: each branch's result becomes the record update
+    let Some(Stmt::Let { value, .. }) = b.stmts.pop() else { unreachable!() };
+    let tail = b.tail.take().unwrap();
+    let ExprKind::With { base, fields } = tail.kind else { unreachable!() };
+    let span = tail.span;
+    fn put(e: &mut Expr, base: &Expr, fields: &[(String, Expr, crate::Span)], k: usize, span: crate::Span) {
+        let ExprKind::If { then, els, .. } = &mut e.kind else { return };
+        let wrap = |bl: &mut Block| {
+            let r = bl.tail.take().unwrap();
+            // (the branch's value listed first: the fields are computed in
+            // their order, and it came first as written)
+            let mut fs = fields.to_vec();
+            let mut f = fs.remove(k);
+            f.1 = *r;
+            fs.insert(0, f);
+            bl.tail = Some(Box::new(Expr { kind: ExprKind::With { base: Box::new(base.clone()), fields: fs }, span }));
+        };
+        wrap(then);
+        match els.as_deref_mut() {
+            Some(x) if matches!(x.kind, ExprKind::If { .. }) => put(x, base, fields, k, span),
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => wrap(eb),
+            _ => {}
+        }
+    }
+    let mut value = value;
+    put(&mut value, &base, &fields, k, span);
+    b.tail = Some(Box::new(value));
 }
 
 /// Every block in `b` (itself included, inner ones first).
