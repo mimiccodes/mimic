@@ -1,0 +1,40 @@
+module main
+
+// `put(xs, i, xs[j])`, also inside another call's first argument: the read
+// of `xs[j]` happens first, so `xs` is handed to `put` and changed in place
+// (an insertion sort copied its list at every shift); the results are as
+// before, a read of another list stays where it is
+
+fn insert(xs: [i64], j: i64, v: i64) -> [i64] {
+    if j >= 0 and xs[j] > v {
+        insert(put(xs, j + 1, xs[j]), j - 1, v)
+    } else {
+        put(xs, j + 1, v)
+    }
+}
+
+fn sort(xs: [i64], i: i64) -> [i64] {
+    if i >= ≢ xs { xs } else { sort(insert(xs, i - 1, xs[i]), i + 1) }
+}
+
+fn swap(xs: [i64], i: i64, j: i64) -> [i64] {
+    let a = xs[i]
+    put(put(xs, i, xs[j]), j, a)
+}
+
+fn shift_all(xs: [i64], ys: [i64], k: i64) -> [i64] {
+    if k == 0 { xs } else { shift_all(put(xs, k, ys[k - 1] + xs[k - 1]), ys, k - 1) }
+}
+
+fn main() {
+    let xs = ⍳ 3000 ¨ (i => (i * 7919) % 3001)
+    let s = sort(xs, 1)
+    print(s ▷ +/)
+    print("{s[0]} {s[1]} {s[2999]}")
+    print(5 ↑ xs)
+    print(swap([1 2 3 4], 0, 3))
+    print(shift_all([1 1 1 1], [10 20 30], 3))
+    let ys = [5 6 7]
+    print(put(ys, 0, ys[2]))
+    print(ys)
+}
