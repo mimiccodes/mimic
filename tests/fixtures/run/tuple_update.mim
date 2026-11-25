@@ -1,0 +1,54 @@
+module main
+
+// `let (bytes, op) = chunk(…)` then `{ s with out: concat(s.out, bytes),
+// ops: put(s.ops, op, …) }`: the helper inlined and the update made in each
+// branch, so the record's lists change in place. The values and the order
+// of their effects are as written; the helper still works as a function
+
+type E = { i: i64, out: [i64], ops: [i64] }
+
+fn noted(tag: str, v: i64) -> i64 {
+    print("{tag} {v}")
+    v
+}
+
+// a small helper: a tuple chosen by `if`s, with locals of its own
+fn chunk(p: i64, prev: i64) -> ([i64], i64) {
+    let d = p - prev
+    if d == 0 {
+        ([0], 0)
+    } else if d > 0 and d < 4 {
+        let small = 64 | d
+        ([small], 1)
+    } else {
+        let hi = p >> 8
+        if hi > 0 { ([255, hi, p & 255], 3) } else { ([254, p], 2) }
+    }
+}
+
+fn step(s: E, px: [i64]) -> E {
+    let p = px[s.i]
+    let prev = if s.i == 0 { 0 } else { px[s.i - 1] }
+    let flush = if p % 7 == 0 { [7] } else { [] }
+    let (bytes, op) = chunk(p, prev)
+    { s with i: s.i + 1, out: concat(s.out, concat(flush, bytes)), ops: put(s.ops, op, s.ops[op] + 1) }
+}
+
+// the order of effects: the arguments, the helper's branch, then the update
+fn ordered(s: E, p: i64) -> E {
+    let (bytes, _) = chunk(noted("arg", p), 0)
+    { s with i: noted("field", s.i + 1), out: concat(s.out, bytes) }
+}
+
+fn main() {
+    let px = ⍳ 2000 ¨ (i => (i * i * 37) % 700)
+    let start = E { i: 0, out: [], ops: 0 ⥊ [4] }
+    let e = start ▷ settle(s => step(s, px), s => s.i == ≢ px)
+    print("{≢ e.out} {e.out ▷ +/} {e.ops}")
+    print(12 ↑ e.out)
+    let (b, o) = chunk(300, 1)
+    print("{b} {o} {chunk(5, 3)}")
+    let a = E { i: 0, out: [1], ops: [] }
+    let c = ordered(a, 2)
+    print("{a.out} {c.out} {c.i}")
+}
