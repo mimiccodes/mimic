@@ -21,6 +21,8 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - `fs::temp_dir()` was `/tmp` on Windows, which does not exist there; it is the user's temporary directory (`TMP`, `TEMP`).
 - `k ↑ xs` and `k ↓ xs` on a list of records (the count on the left) stopped the program with "take/drop count must be an integer scalar"; the count may be on either side, as for lists of numbers.
 - `_` binds nothing: a value dropped on purpose can go to `_` any number of times in a function (the second `_ ← …` was E0302).
+- A local bound to a field of a borrowed record (`let a = f.opt` where the record holds lists), handed to an expression the IR embeds, was released twice: memory corrupted, a later unrelated call crashed.
+- A program that crashes (a bad memory access, a stack overflow) now flushes what it printed, names the signal on stderr (`mimic: the program crashed: SIGSEGV …`), and keeps the signal's exit status; `mimic test` reports a test that died from a signal as crashed.
 - A value read in a `match` guard and used again by a later arm could be handed over in the guard and be gone in the later arm (`Prop(k, v) if k == name => …, _ => prop(rest, name)`).
 - A short list grown past the smallest memory pool (a word built letter by letter) kept a 4 KB block that was never given back when it was freed: 180,000 such words held about 1 GB until the program ended. It now moves to the next pool.
 - `mimic fmt` (and formatting from an editor or the MCP server) leaves a file that does not parse untouched and reports the parse error; `fmt --glyphs` had rewritten `∧/` into `∧÷`.
