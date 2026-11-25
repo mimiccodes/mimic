@@ -5,10 +5,12 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 ## Unreleased
 
 ### Added
+- **`math::to_bits`, `math::from_bits` (and `to_bits32`/`from_bits32` for `f32`), `bytes::of_f64s` and `bytes::to_f64s`:** a float's bits as an integer, and floats as little-endian bytes, both exact (weights saved and read back bit for bit).
 - **`∧/` and `∨/`, the and and or reductions** (`all` and `any` written as glyphs, as in APL): `same ▷ ∧/`, `∨/ flags`.
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
 
 ### Changed
+- **A float prints as the shortest text that reads back as the same number** (`"{x}"`, `print`): 15 significant digits where those do, as before, and 16 or 17 where they do not, so `parse_float("{x}")` is always `x`. `0.1 + 0.2` now shows as `0.30000000000000004`, as in Rust, Go, JavaScript and Python.
 - **Reads of a list are made before the changes that follow its copy:** `let mut s = h` then `s[i] = h[j]` `s[j] = h[i]` (a swap), and `f(push(h, v), ≢ h)`, now change `h` in place instead of copying it at every step; a heap's 20,000 pushes took 1.75 GB, now 2 MB.
 - **A function whose last act is calling itself runs as a loop, however deep, in release and debug builds:** what the call no longer needs (its locals, a string built on the way, a tuple's parts, a list copied with `let mut v = xs` and changed) is released or handed over before the call, so the call becomes a jump. Recursions a million calls deep over lists, strings and records used to overflow the stack and stop with a segmentation fault; 11 of the 12 held-out programs that did now finish (`sudokucheck` no longer crashes but is slow).
 - **A list of any element type grown by `push` (or changed by `put` or `concat`) where it is used for the last time is changed in place**, strings, floats, records and maps included: `gen(n - 1, y, push(acc, v))` hands the same list down the recursion instead of copying it at every step (before, only lists of `i64` were, so building a list of strings this way took time and memory growing with the square of its length). A map threaded through a recursion with `put` is changed in place too. Found by the held-out set (BENCHMARK.md): most of its programs build their input this way.

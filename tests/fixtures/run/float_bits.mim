@@ -1,0 +1,24 @@
+module main
+
+// a float's bits and floats as bytes, exactly; and "{x}", the shortest
+// text that reads back as the same number (100,000 values both ways)
+
+fn next(x: i64) -> i64 { (x * 6364136223846793005 + 1442695040888963407) }
+
+fn main() {
+    let xs = ⍳ 100000 ¨ (i => math::from_bits(next(i) >>> 2 | 0x3F00000000000000) - 1.5)
+    print(all(xs ¨ (x => parse_float("{x}") == Some(x))))
+    print(math::from_bits(math::to_bits(0.1)) == 0.1)
+    print(math::to_bits(1.0))
+    print(math::to_bits(-0.0))
+    print(math::from_bits(4607182418800017408))
+    print(math::to_bits32(1.0))
+    let b = bytes::of_f64s([1.0, -2.5, 0.1])
+    print(b)
+    print(bytes::to_f64s(b))
+    print(bytes::to_f64s(bytes::of_f64s(xs)) == xs ▷ ∧/)
+    print(0.1 + 0.2)
+    print(1.0 / 3.0)
+    print([0.5 2.0 100.0])
+    print(-0.00167486618395042)
+}

@@ -431,6 +431,9 @@ pub module bytes {
         fn from_hex(text: str) -> Result[[u8], str]
         fn base64(data: [u8]) -> str
         fn from_base64(text: str) -> Result[[u8], str]
+        // floats as 8 bytes each, little-endian, and back (exact)
+        fn of_f64s(values: [f64]) -> [u8]
+        fn to_f64s(data: [u8]) -> [f64]
     }
 }
 
