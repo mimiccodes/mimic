@@ -493,6 +493,7 @@ static void timed_range(void *c, int64_t lo, int64_t hi) {
     t->f(t->ctx, lo + t->from, hi + t->from);
 }
 
+
 void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
     if (n <= 0) return;
     if (n == 1 || g_nthreads <= 1 || t_in_parallel) {
@@ -529,6 +530,9 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
         step *= 2;
     }
 }
+
+/* a pure `¨` over n elements, shared out when worth it (mimic_own.c) */
+static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx, void *key);
 int64_t mim_par_grain(void);
 
 /* ==== fork-join ===========================================================
@@ -1591,8 +1595,11 @@ static void raise_open_files(void) {
 }
 #endif
 
+static void mim_crash_handlers(void); /* (mimic_own.c) */
+
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+    mim_crash_handlers();
 #ifdef MIM_COUNT_RC
     atexit(rc_report);
 #endif
@@ -3311,7 +3318,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_ctx c = {xs, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
+    } else if (pure) each_par(n, each_range, &c, (void *)f);
     else each_range(&c, 0, n);
     /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
     int64_t units = 0;
@@ -3429,6 +3436,9 @@ static int memo_same_closure(const memo_tab *old, const mim_val *f) {
 }
 
 static mim_val *each_memo_run(mim_val *xs, mim_fn1 f, mim_val *closure, int32_t pure, void **site);
+/* (mimic_own.c) */
+static int each_worth_sharing(int64_t spent, int64_t done, int64_t left);
+
 mim_val *mim_each_fn(mim_val *xs, mim_val *f);
 
 mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
@@ -3514,7 +3524,7 @@ mim_val *mim_each_raw(mim_val *xs, mim_fn_raw f, int32_t dt, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_raw_ctx c = {(const int64_t *)xs->data, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_raw_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
+    } else if (pure) each_par(n, each_raw_range, &c, (void *)f);
     else each_raw_range(&c, 0, n);
     int64_t units = 0;
     for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
@@ -3557,7 +3567,7 @@ mim_val *mim_each_own(mim_val *xs, mim_fn1 f, int32_t pure) {
     each_ctx c = {xs, f, tmp};
     mim_task run = take ? each_own_range : each_lend_range;
     if (pure == 2 && n > 1 && run_on_loop(n, run, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
+    } else if (pure) each_par(n, run, &c, (void *)f);
     else run(&c, 0, n);
     if (take) {
         free_block(&t_heap, xs); /* the block only: its elements were given away */
@@ -3620,7 +3630,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
             if (done == n) break;
             clock_gettime(CLOCK_MONOTONIC, &b);
             int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-            if (spent / done * (n - done) > 50000) {
+            if (each_worth_sharing(spent, done, n - done)) {
                 c.base = done;
                 parallel_for_grain(n - done, fine_grain(n - done), each_fn_range, &c);
                 break;

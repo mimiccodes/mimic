@@ -365,6 +365,8 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         cur_kind: Kind::Plain,
         borrow_binds: false,
         let_moves: false,
+        tuple_moves: Vec::new(),
+        after_args: Vec::new(),
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -677,6 +679,13 @@ struct Cg<'ctx, 'p> {
     borrow_binds: bool,
     /// The `let` about to be compiled may move (owned.rs).
     let_moves: bool,
+    /// The names of the `let (a, b) = …` being compiled that move at their
+    /// one use (as a `let`'s, see let_move_site)
+    tuple_moves: Vec<String>,
+    /// For the call being compiled: its arguments that are a variable at its
+    /// last use (argument index, name), released once every argument is
+    /// evaluated when the callee takes them (see call_user)
+    after_args: Vec<(usize, String)>,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -2787,8 +2796,25 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.let_moves = true;
                 self.move_at.insert(site);
             }
+            // (each name of a tuple `let` likewise: `let (p, root) = find(…)`
+            // then `let mut c = p` changes the list in place, not a copy)
+            // (only a function's result, which nothing else holds: a tuple
+            // a variable still holds, `let (i, open, jump) = s`, keeps its
+            // parts, and moving those of a `settle`'s state gained nothing
+            // but code)
+            if let Stmt::LetTuple { names, value, .. } = s
+                && matches!(value.kind, ExprKind::Call { .. })
+            {
+                for n in names.iter().filter(|n| *n != "_") {
+                    if let Some(site) = self.let_move_site(n, &b.stmts[i + 1..], b.tail.as_deref()) {
+                        self.move_at.insert(site);
+                        self.tuple_moves.push(n.clone());
+                    }
+                }
+            }
             self.stmt(s)?;
             self.let_moves = false;
+            self.tuple_moves.clear();
         }
         if !pending.is_empty() && !self.terminated() {
             match &b.tail {
@@ -3022,7 +3048,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     let slot = self.entry_alloca(t, n)?;
                     self.b.build_store(slot, self.basic(fv)).s()?;
                     let owned = matches!(fv, V::P(..));
-                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves: false });
+                    let moves = owned && self.tuple_moves.contains(n);
+                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves });
                 }
                 self.drop_tmp(b)?;
             }
@@ -4866,6 +4893,22 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             argv.push(d1.into());
         }
+        // a variable handed to a parameter the callee takes, at its last
+        // use: the callee holds its own reference now (hand_over), so the
+        // variable's goes before the call, not after it, and the callee holds
+        // the only one (`compressed[i] = root` further down changes the list
+        // in place instead of copying it at every level of a `find`)
+        for (j, name) in std::mem::take(&mut self.after_args) {
+            if consumed.get(j).copied().unwrap_or(false)
+                && let Some(slot) = self.lookup(&name).filter(|l| l.owned).map(|l| l.slot)
+            {
+                // (checked for null: a variable that moved into the call
+                // left one, and the release then folds away)
+                let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                self.release_out(cur.into_pointer_value())?;
+                self.b.build_store(slot, self.ptr.const_null()).s()?;
+            }
+        }
         // a call to itself that is the function's result: every local its
         // arguments do not use is released first (and its slot emptied, so
         // the release at the end of its scope folds away), leaving the call
@@ -5976,6 +6019,27 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     return Ok(out);
                 }
+                // (a variable whose last use is this call, also read by
+                // another argument: `find(parent, parent[i])`)
+                let mut after = Vec::new();
+                if let Some(body) = self.cur_fid.and_then(|f| match &self.p.fns[f].kind {
+                    FnKind::User(d) => Some(&d.body),
+                    _ => None,
+                }) {
+                    for (j, a) in args.iter().enumerate() {
+                        if let ExprKind::Path(p) = &a.kind
+                            && p.len() == 1
+                            // (not one that moves into this argument itself:
+                            // its slot is empty already)
+                            && !self.move_at.contains(&id(a))
+                            && self.lookup(&p[0]).is_some_and(|l| l.owned)
+                            && owned::last_in_call(&p[0], body, id(e), id(a))
+                        {
+                            after.push((j, p[0].clone()));
+                        }
+                    }
+                }
+                self.after_args = after;
                 self.call_user(id(e), fid, vals)
             }
             // an element of a list in registers
