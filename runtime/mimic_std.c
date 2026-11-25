@@ -49,6 +49,8 @@ static mim_val *list_take(int64_t n, mim_val **xs) {
 
 /* ==== strings ============================================================== */
 
+static mim_val *ascii1(unsigned char c); /* (mimic_own.c) */
+
 mim_val *mim_std_split(mim_val *s, mim_val *sep) {
     const char *a = str_arg(s, "split"), *d = str_arg(sep, "split");
     int64_t n = s->len, m = sep->len;
@@ -64,7 +66,7 @@ mim_val *mim_std_split(mim_val *s, mim_val *sep) {
             if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
             if (i + len > n) len = n - i;
             if (k == cap) parts = (mim_val **)realloc(parts, sizeof(mim_val *) * (size_t)(cap *= 2));
-            parts[k++] = mim_str(a + i, len);
+            parts[k++] = len == 1 && c < 0x80 ? ascii1(c) : mim_str(a + i, len);
             i += len - 1;
             continue;
         }
@@ -1352,6 +1354,7 @@ mim_val *mim_std_char_of(mim_val *code) {
         snprintf(buf, sizeof buf, "char_of: %lld is not a Unicode character", (long long)c);
         mim_panic(buf);
     }
+    if (c < 0x80) return ascii1((unsigned char)c);
     char b[4];
     int n;
     if (c < 0x80) { b[0] = (char)c; n = 1; }
