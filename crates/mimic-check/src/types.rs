@@ -1355,6 +1355,23 @@ impl Walk<'_, '_> {
                             // that kind of number gives such a list (the runtime
                             // keeps it typed), so a list grown in a loop stays typed
                             let pushed = self.push_of_numbers(f, &argt);
+                            // the prelude's `flatten` of a list of lists: the one
+                            // copy for lists of unknown type, as before lists of
+                            // lists had a type. Rows of numbers go to the runtime's
+                            // concat either way and the result is typed below, so a
+                            // copy for `[[i64]]` only adds code: inlined into a
+                            // parallel `¨` (the benchmark `diff`) it measured 6%
+                            // slower on Windows on all cores, running the same
+                            // instructions
+                            let p = self.inf.p;
+                            let fm = &p.mods[p.fns[f].module];
+                            if p.fns[f].name == "flatten" && fm.name == "prelude" && fm.package == "std" {
+                                for t in argt.iter_mut() {
+                                    if matches!(t, Ty::Arr(El::Rows(_), _)) {
+                                        *t = Ty::Arr(El::Dyn, 0);
+                                    }
+                                }
+                            }
                             let r = self.call_user(id(e), f, argt);
                             if let Some(t) = pushed {
                                 return t;
