@@ -202,8 +202,14 @@ impl<'ctx> Cg<'ctx, '_> {
             // (rows of a screen keep their own path: reused when unchanged)
             && !self.screen_rows(self.ty_of(e))
             && args.len() == 2
-            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]) || self.ty_of(&args[0]) == Ty::Arr(El::Str, 0))
+            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]) || self.ty_of(&args[0]) == Ty::Arr(El::Str, 0) || self.rows_in(self.ty_of(&args[0])))
             && self.each_fusible_to(e, args, true)
+    }
+
+    /// A list of lists whose rows are lists of numbers on the heap (each
+    /// row lent to the element's function as it is).
+    fn rows_in(&self, t: Ty) -> bool {
+        matches!(t, Ty::Arr(El::Rows(id), _) if matches!(types::rows_of(id), Ty::Arr(El::I64 | El::F64 | El::U8 | El::Bool, 0)))
     }
 
     /// A list of flat records (each read into registers as it is used).
@@ -225,19 +231,21 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// (`records`: `f` may return a record)
     fn each_fusible_to(&self, e: &Expr, args: &[Expr], records: bool) -> bool {
-        if args.len() != 2 || !(self.is_fae(&args[0]) || index_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_) | El::Str, _))) {
+        if args.len() != 2 || !(self.is_fae(&args[0]) || index_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_) | El::Str, _)) || self.rows_in(self.ty_of(&args[0]))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
             return false;
         }
         let simple_num = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
-        // (a string: a handle, as a record on the heap is)
+        // (a string: a handle, as a record on the heap is; a row of a list
+        // of lists too)
         let text = |t: Ty| t == Ty::Arr(El::Char, 0);
+        let heap_row = |t: Ty| matches!(t, Ty::Arr(El::I64 | El::F64 | El::U8 | El::Bool, 0));
         let simple = |t: Ty| simple_num(t) || (records && (matches!(t, Ty::Obj(_)) || text(t)));
         // a record on the heap (or a string) comes in lent, as a pointer; a
         // flat one is read into registers first
-        let simple_in = |t: Ty| simple_num(t) || matches!(t, Ty::Obj(_)) || text(t);
+        let simple_in = |t: Ty| simple_num(t) || matches!(t, Ty::Obj(_)) || text(t) || heap_row(t);
         match &args[1].kind {
             ExprKind::Lambda { params, body } => {
                 let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
@@ -437,7 +445,9 @@ impl<'ctx> Cg<'ctx, '_> {
             return self.build(x, plan);
         }
         let t = self.ty_of(x);
-        if let Ty::Arr(el @ (El::Obj(_) | El::Str), _) = t {
+        if let Ty::Arr(el @ (El::Obj(_) | El::Str | El::Rows(_)), _) = t
+            && (!matches!(el, El::Rows(_)) || self.rows_in(t))
+        {
             let v = self.expr(x)?;
             let v = self.boxed(v)?;
             let (len, data) = self.vec_header(v, el)?;
@@ -654,7 +664,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let r = self.as_flat_in(x, *pt, &fs, "argument", false)?;
                         self.basic(r).into()
                     }
-                    Ty::Obj(_) | Ty::Arr(El::Char, 0) => self.basic(x).into(), // a record or a string, lent
+                    // a record, a string or a row of a list of lists, lent
+                    Ty::Obj(_) | Ty::Arr(El::Char | El::I64 | El::F64 | El::U8 | El::Bool, 0) => self.basic(x).into(),
                     _ => self.to_i64(x)?.into(),
                 };
                 let mut args = vec![x];
@@ -1906,7 +1917,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let dtype = load(self, 1, i32t.into())?.into_int_value();
         let rank = load(self, 2, i32t.into())?.into_int_value();
         // a list of records holds handles (an empty list has no elements to read)
-        let want = if matches!(el, El::Obj(_) | El::Str) { 4 } else { dtype_of(el) };
+        let want = if matches!(el, El::Obj(_) | El::Str | El::Rows(_)) { 4 } else { dtype_of(el) };
         let mut ok_t = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want as u64, false), "").s()?;
         if want == 4 {
             let n = load(self, 3, i64t.into())?.into_int_value();
