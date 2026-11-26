@@ -5080,6 +5080,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let dt: u64 = match to {
             Ty::Arr(El::I64, _) => 0,
             Ty::Arr(El::F64, _) => 1,
+            Ty::Arr(El::Bool, _) => 2,
             _ => return Ok((self.as_ty(v, to, what)?, None)),
         };
         // (a list in registers, or one this call owns: the simple way)
@@ -5121,16 +5122,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let want = match to {
             Ty::Arr(El::F64, _) => Some(1),
             Ty::Arr(El::I64, _) => Some(0),
+            Ty::Arr(El::Bool, _) => Some(2),
             _ => None,
         };
         let differs = matches!(
             (from, to),
-            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) | (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64, _))
+            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) | (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64 | El::Bool, _))
         );
         let v = match (want, differs, v) {
             // a list in registers: convert its elements, then store it
             (Some(w), true, V::A(a, _)) => {
-                let el = if w == 1 { El::F64 } else { El::I64 };
+                let el = match w {
+                    1 => El::F64,
+                    2 => El::Bool,
+                    _ => El::I64,
+                };
                 let c = self.as_fixed(v, el, a.get_type().len(), what)?;
                 self.boxed(c)?
             }

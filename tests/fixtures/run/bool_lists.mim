@@ -1,0 +1,30 @@
+module main
+
+// lists of truth values typed as such: a `[bool]` parameter given `[]`
+// (or a list of unknown type) is compiled for `[bool]`, the list converted
+// at the call; a function declared `-> [bool]` gives one back
+
+fn grow(k: i64, acc: [bool]) -> [bool] {
+    if k == 0 { acc } else { grow(k - 1, push(acc, k % 3 == 0)) }
+}
+
+fn trues(xs: [bool]) -> i64 { xs ¨ (b => if b { 1 } else { 0 }) ▷ +/ }
+
+fn at(xs: [bool], i: i64) -> bool { xs[i] }
+
+fn main() {
+    let w = grow(10, [])
+    print(w)
+    print("{trues(w)} {at(w, 0)} {at(w, 1)}")
+    // none at all
+    let none = grow(0, [])
+    print("{≢ none} {trues(none)} {trues([])}")
+    // from a map whose type is not known here
+    let m = [1 2 3 4 5 6] ¨ (x => x % 2 == 0)
+    print("{trues(m)} {at(m, 1)}")
+    // changed in place, then read
+    let mut v = grow(6, [])
+    v[0] = true
+    v[5] = false
+    print("{v} {trues(v)}")
+}

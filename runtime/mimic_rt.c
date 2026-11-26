@@ -4124,6 +4124,20 @@ mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
             return r;
         }
     }
+    /* a list of truth values: an empty list of numbers (`[]`), or a list
+     * of boxed truth values, made one; anything else as it is */
+    if (v && dtype == MIM_BOOL && v->rank == 1 && v->dtype != MIM_BOOL) {
+        int ok = v->len == 0 ? IS_NUMDT(v->dtype) || v->dtype == MIM_BOXED : v->dtype == MIM_BOXED;
+        mim_val **xs = (mim_val **)v->data;
+        for (int64_t k = 0; ok && k < v->len; k++) ok = xs[k] && xs[k]->rank == 0 && xs[k]->dtype == MIM_BOOL;
+        if (ok) {
+            mim_val *r = alloc(MIM_BOOL, 1, v->len);
+            for (int64_t k = 0; k < v->len; k++) ((uint8_t *)r->data)[k] = ((uint8_t *)xs[k]->data)[0] != 0;
+            return r;
+        }
+        mim_retain(v);
+        return v;
+    }
     if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL && v->dtype != MIM_I32 && v->dtype != MIM_F32)) {
         mim_retain(v);
         return v;
