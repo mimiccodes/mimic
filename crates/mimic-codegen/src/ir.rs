@@ -549,10 +549,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let i64t = self.ctx.i64_type();
         match c {
             Ch::Put(i, x) => self.put_i64_inline(list, i, x),
-            Ch::Push(x) => {
-                let f = self.module.get_function("mim_push_i64_own").unwrap_or_else(|| self.module.add_function("mim_push_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
-                Ok(self.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
-            }
+            Ch::Push(x) => self.append_i64_inline(list, &[x], &mut |cg| {
+                let f = cg.module.get_function("mim_push_i64_own").unwrap_or_else(|| cg.module.add_function("mim_push_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(cg.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }),
             Ch::Concat(ys) => {
                 let f = self.module.get_function("mim_std_concat_own").unwrap_or_else(|| self.module.add_function("mim_std_concat_own", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(inkwell::module::Linkage::External)));
                 Ok(self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
@@ -565,6 +565,15 @@ impl<'ctx> Cg<'ctx, '_> {
     /// anything else is mim_put_i64_own's (which copies, converts or stops
     /// with the message).
     fn put_i64_inline(&mut self, list: PointerValue<'ctx>, i: IntValue<'ctx>, x: IntValue<'ctx>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        self.put_i64_inline_or(list, i, x, &mut |cg| {
+            let rf = cg.module.get_function("mim_put_i64_own").unwrap_or_else(|| cg.module.add_function("mim_put_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+            Ok(cg.b.build_call(rf, &[list.into(), i.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+        })
+    }
+
+    /// [`Self::put_i64_inline`] with the runtime's call given (`slow`).
+    pub(crate) fn put_i64_inline_or(&mut self, list: PointerValue<'ctx>, i: IntValue<'ctx>, x: IntValue<'ctx>, slow: &mut dyn FnMut(&mut Self) -> R<PointerValue<'ctx>>) -> R<PointerValue<'ctx>> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
@@ -580,18 +589,68 @@ impl<'ctx> Cg<'ctx, '_> {
         let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, inside, "").s()?, "").s()?;
         let f = self.cur_fn.ok_or("internal compiler error: put outside a function")?;
         let here = self.ctx.append_basic_block(f, "put_here");
-        let slow = self.ctx.append_basic_block(f, "put_slow");
+        let slow_bb = self.ctx.append_basic_block(f, "put_slow");
         let done = self.ctx.append_basic_block(f, "put_done");
-        self.b.build_conditional_branch(ok, here, slow).s()?;
+        self.b.build_conditional_branch(ok, here, slow_bb).s()?;
         self.b.position_at_end(here);
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
         let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
         self.b.build_store(at, x).s()?;
         let here_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
-        self.b.position_at_end(slow);
-        let rf = self.module.get_function("mim_put_i64_own").unwrap_or_else(|| self.module.add_function("mim_put_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
-        let r = self.b.build_call(rf, &[list.into(), i.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        self.b.position_at_end(slow_bb);
+        let r = slow(self)?;
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(self.ptr, "list").s()?;
+        phi.add_incoming(&[(&list, here_end), (&r, slow_end)]);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
+    /// `push(xs, x)` / `concat(xs, [a b …])` on the owned list `xs`: held
+    /// once, of i64, one dimension, with room already for the new numbers
+    /// (a list grown in place keeps its room in `desc`), they are stored
+    /// here and the length raised; anything else (a short list in a pool,
+    /// one that must grow, shared or of another type) is `slow`'s, the
+    /// runtime's mim_push_i64_own or mim_concat_i64_own.
+    pub(crate) fn append_i64_inline(&mut self, list: PointerValue<'ctx>, xs: &[IntValue<'ctx>], slow: &mut dyn FnMut(&mut Self) -> R<PointerValue<'ctx>>) -> R<PointerValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
+        inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let lenp = self.b.build_struct_gep(hdr, list, 3, "").s()?;
+        let len = self.b.build_load(i64t, lenp, "len").s()?.into_int_value();
+        let room = self.b.build_load(self.ptr, self.b.build_struct_gep(hdr, list, 4, "").s()?, "room").s()?.into_pointer_value();
+        let room = self.b.build_ptr_to_int(room, i64t, "").s()?;
+        let n = self.b.build_int_add(len, i64t.const_int(xs.len() as u64, false), "").s()?;
+        let need = self.b.build_int_mul(n, i64t.const_int(8, false), "").s()?;
+        let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
+        let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
+        let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
+        // (room 0: not known, the runtime asks the allocator)
+        let fits = self.b.build_int_compare(inkwell::IntPredicate::ULE, need, room, "").s()?;
+        let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, fits, "").s()?, "").s()?;
+        let f = self.cur_fn.ok_or("internal compiler error: push outside a function")?;
+        let here = self.ctx.append_basic_block(f, "append_here");
+        let slow_bb = self.ctx.append_basic_block(f, "append_slow");
+        let done = self.ctx.append_basic_block(f, "append_done");
+        self.b.build_conditional_branch(ok, here, slow_bb).s()?;
+        self.b.position_at_end(here);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
+        for (k, x) in xs.iter().enumerate() {
+            let at = self.b.build_int_add(len, i64t.const_int(k as u64, false), "").s()?;
+            let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[at], "").s()? };
+            self.b.build_store(at, *x).s()?;
+        }
+        self.b.build_store(lenp, n).s()?;
+        let here_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow_bb);
+        let r = slow(self)?;
         let slow_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(done);

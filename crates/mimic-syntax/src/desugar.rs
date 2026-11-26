@@ -131,6 +131,7 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         i += 1;
     }
     items.extend(lifted.into_iter().map(Item::Fn));
+    tuple_updates(items);
     // `let f = (a, b) => …` called only as `f(x, y)`: a hidden function too
     let mut hidden = Vec::new();
     for item in items.iter_mut() {
@@ -143,9 +144,133 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         if let Item::Fn(f) = item {
             let mut n = 0;
             blocks_mut(&mut f.body, &mut |b| hoist_copy_reads(b, &mut n));
+            sink_with(&mut f.body);
+            f.body.walk_mut(&mut |e| {
+                if let ExprKind::Block(b) | ExprKind::Unsafe(b) = &mut e.kind {
+                    sink_with(b);
+                }
+                if let ExprKind::If { then, .. } = &mut e.kind {
+                    sink_with(then);
+                }
+            });
         }
     }
     Ok(())
+}
+
+/// `let out = if c { push(s.out, x) } else { concat(s.out, ys) }` followed
+/// by `{ s with k: s.k + 2, out: out }` as the block's result: the update
+/// moves into each branch, `if c { { s with k: s.k + 2, out: push(s.out, x) } }
+/// else { … }`, where a record held once has its list taken out and changed
+/// in place (codegen's steals) instead of copied at every step (a list
+/// grown in a loop's state took time growing with the square of its
+/// length). The same values in the same order: the branch's value first,
+/// then the other fields (it is listed first). Only when `out` is used nowhere else, no branch
+/// binds a name the other fields read, and some branch reads `s.out`.
+fn sink_with(b: &mut Block) {
+    let Some(tail) = &b.tail else { return };
+    let ExprKind::With { base, fields } = &tail.kind else { return };
+    let ExprKind::Path(bp) = &base.kind else { return };
+    if bp.len() != 1 {
+        return;
+    }
+    let Some(Stmt::Let { name: v, mutable: false, ty: None, value, .. }) = b.stmts.last() else { return };
+    if !matches!(value.kind, ExprKind::If { .. }) || bp[0] == *v {
+        return;
+    }
+    let is_v = |e: &Expr| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == *v);
+    let at: Vec<usize> = fields.iter().enumerate().filter(|(_, (_, x, _))| is_v(x)).map(|(i, _)| i).collect();
+    let [k] = at[..] else { return };
+    let field = fields[k].0.clone();
+    // `v` read nowhere else (the other fields, or inside the branches)
+    let mut names = vec![bp[0].clone()];
+    for (i, (_, x, _)) in fields.iter().enumerate() {
+        if i == k {
+            continue;
+        }
+        x.walk(&mut |e| {
+            if let ExprKind::Path(p) = &e.kind
+                && p.len() == 1
+            {
+                names.push(p[0].clone());
+            }
+        });
+    }
+    if names.contains(v) {
+        return;
+    }
+    // the branches: each a block with a result, the last an `else`
+    let mut branches: Vec<&Block> = Vec::new();
+    let mut cur = value;
+    loop {
+        let ExprKind::If { then, els, .. } = &cur.kind else { return };
+        branches.push(then);
+        match els.as_deref() {
+            Some(e) if matches!(e.kind, ExprKind::If { .. }) => cur = e,
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => {
+                branches.push(eb);
+                break;
+            }
+            _ => return,
+        }
+    }
+    if branches.len() > 4 {
+        return;
+    }
+    let mut reads_field = false;
+    for br in &branches {
+        let Some(t) = &br.tail else { return };
+        let mut bound = Vec::new();
+        br.bound_names(&mut bound);
+        t.walk(&mut |e| match &e.kind {
+            ExprKind::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+            ExprKind::Field { base, name } if *name == field && matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == bp[0]) => reads_field = true,
+            _ => {}
+        });
+        if bound.iter().any(|n| names.contains(n) || n == v) {
+            return;
+        }
+        let mut uses_v = false;
+        t.walk(&mut |e| uses_v |= is_v(e));
+        for st in &br.stmts {
+            if let Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } = st {
+                value.walk(&mut |e| uses_v |= is_v(e));
+            }
+        }
+        if uses_v {
+            return;
+        }
+    }
+    if !reads_field {
+        return;
+    }
+    // rewrite: each branch's result becomes the record update
+    let Some(Stmt::Let { value, .. }) = b.stmts.pop() else { unreachable!() };
+    let tail = b.tail.take().unwrap();
+    let ExprKind::With { base, fields } = tail.kind else { unreachable!() };
+    let span = tail.span;
+    fn put(e: &mut Expr, base: &Expr, fields: &[(String, Expr, crate::Span)], k: usize, span: crate::Span) {
+        let ExprKind::If { then, els, .. } = &mut e.kind else { return };
+        let wrap = |bl: &mut Block| {
+            let r = bl.tail.take().unwrap();
+            // (the branch's value listed first: the fields are computed in
+            // their order, and it came first as written)
+            let mut fs = fields.to_vec();
+            let mut f = fs.remove(k);
+            f.1 = *r;
+            fs.insert(0, f);
+            bl.tail = Some(Box::new(Expr { kind: ExprKind::With { base: Box::new(base.clone()), fields: fs }, span }));
+        };
+        wrap(then);
+        match els.as_deref_mut() {
+            Some(x) if matches!(x.kind, ExprKind::If { .. }) => put(x, base, fields, k, span),
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => wrap(eb),
+            _ => {}
+        }
+    }
+    let mut value = value;
+    put(&mut value, &base, &fields, k, span);
+    b.tail = Some(Box::new(value));
 }
 
 /// Every block in `b` (itself included, inner ones first).
@@ -829,4 +954,311 @@ fn {run_fn}() {{\n    random::seed({seed})\n    expect_quiet(true)\n    let star
     let mut out = vec![Item::Fn(body)];
     out.extend(generated.module.items);
     Ok(out)
+}
+
+// ---- a record update after a tuple chosen by an `if` -------------------------
+
+/// `let (bytes, op) = chunk(p, prev)` (a small helper of this module whose
+/// result is a tuple chosen by `if`s) followed by `{ s with out: concat(s.out,
+/// bytes), ops: put(s.ops, op, …) }` as the block's result: the helper is
+/// inlined and the update moved into each branch, after `let bytes = …`
+/// `let op = …` there. Each branch then appends a list of known length (in
+/// registers) to the record's own list, changed in place, where the tuple
+/// and its list were allocated and freed at every step (a QOI encoder's
+/// pixel). The same values in the same order: the arguments, the helper's
+/// statements, its branch, then the update.
+fn tuple_updates(items: &mut [Item]) {
+    let defines_concat = items.iter().any(|it| matches!(it, Item::Fn(f) if matches!(f.name.as_str(), "concat" | "push" | "put")));
+    let helpers: Vec<FnDecl> = items.iter().filter_map(|it| if let Item::Fn(f) = it { tuple_helper(f).then(|| f.clone()) } else { None }).collect();
+    let mut n = 0usize;
+    for it in items.iter_mut() {
+        let Item::Fn(f) = it else { continue };
+        let mut blocks: Vec<*mut Block> = vec![&mut f.body as *mut Block];
+        f.body.walk_mut(&mut |e| match &mut e.kind {
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b as *mut Block),
+            ExprKind::If { then, .. } => blocks.push(then as *mut Block),
+            _ => {}
+        });
+        // innermost first: rewriting a block replaces what it holds, so the
+        // blocks inside it are done by then and never reached again
+        for b in blocks.into_iter().rev() {
+            // SAFETY: the pointers come from one walk of `f.body`, which
+            // nothing else touches meanwhile; each block is still where the
+            // walk found it, as only blocks inside it (done before) or
+            // outside it (done after) have been rewritten
+            let b = unsafe { &mut *b };
+            if !defines_concat {
+                regroup_concats(b);
+            }
+            let mut c = b.clone();
+            if inline_tuple_call(&mut c, &helpers, &mut n) && sink_tuple(&mut c) {
+                if !defines_concat {
+                    regroup_concats_in_tail(&mut c);
+                }
+                *b = c;
+            } else if sink_tuple(b) && !defines_concat {
+                regroup_concats_in_tail(b);
+            }
+        }
+    }
+}
+
+/// A helper worth inlining: not generic, every parameter plain, a body of at
+/// most 200 nodes without `return`, `match`, lambdas or a call of itself,
+/// whose result is a tuple chosen by `if`s.
+fn tuple_helper(f: &FnDecl) -> bool {
+    if !f.type_params.is_empty() || f.export_c || !f.requires.is_empty() || !f.ensures.is_empty() || f.params.iter().any(|p| p.default.is_some()) {
+        return false;
+    }
+    let Some(t) = &f.body.tail else { return false };
+    if tuple_arity(t).is_none() {
+        return false;
+    }
+    let mut ok = true;
+    let mut size = 0;
+    for st in &f.body.stmts {
+        if !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. }) {
+            ok = false;
+        }
+    }
+    f.body.walk(&mut |e| {
+        size += 1;
+        match &e.kind {
+            ExprKind::Match { .. } | ExprKind::Lambda { .. } | ExprKind::Arms { .. } | ExprKind::Named { .. } => ok = false,
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => {
+                if b.stmts.iter().any(|st| !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. })) {
+                    ok = false;
+                }
+            }
+            ExprKind::If { then, .. } => {
+                if then.stmts.iter().any(|st| !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. })) {
+                    ok = false;
+                }
+            }
+            ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == f.name) => ok = false,
+            _ => {}
+        }
+    });
+    ok && size <= 200
+}
+
+/// The number of elements of the tuples an expression's branches all end in.
+fn tuple_arity(e: &Expr) -> Option<usize> {
+    match &e.kind {
+        ExprKind::Tuple(xs) => Some(xs.len()),
+        ExprKind::Block(b) => tuple_arity(b.tail.as_deref()?),
+        ExprKind::If { then, els: Some(els), .. } => {
+            let a = tuple_arity(then.tail.as_deref()?)?;
+            (tuple_arity(els)? == a).then_some(a)
+        }
+        _ => None,
+    }
+}
+
+/// How many tuples an expression's branches end in.
+fn tuple_leaves(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Block(b) => b.tail.as_deref().map_or(0, tuple_leaves),
+        ExprKind::If { then, els: Some(els), .. } => then.tail.as_deref().map_or(0, tuple_leaves) + tuple_leaves(els),
+        _ => 1,
+    }
+}
+
+/// A record update of a variable that changes one of its lists in place:
+/// `{ s with out: concat(s.out, …) }` (or `push`, `put`).
+fn in_place_update(e: &Expr) -> Option<&str> {
+    let ExprKind::With { base, fields } = &e.kind else { return None };
+    let ExprKind::Path(bp) = &base.kind else { return None };
+    if bp.len() != 1 {
+        return None;
+    }
+    let changes = fields.iter().any(|(_, x, _)| {
+        let mut x = x;
+        loop {
+            let ExprKind::Call { callee, args } = &x.kind else { return false };
+            if !matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && matches!(p[0].as_str(), "concat" | "push" | "put")) {
+                return false;
+            }
+            let Some(a) = args.first() else { return false };
+            match &a.kind {
+                ExprKind::Field { base, .. } => return matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == bp[0]),
+                _ => x = a,
+            }
+        }
+    });
+    changes.then_some(bp[0].as_str())
+}
+
+/// `let (a, b) = helper(x, y)` as the last statement before an in-place
+/// update: the helper's body in its place, its parameters and locals renamed
+/// (hidden names), the arguments bound first.
+fn inline_tuple_call(b: &mut Block, helpers: &[FnDecl], n: &mut usize) -> bool {
+    if b.tail.as_deref().and_then(in_place_update).is_none() {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, .. }) = b.stmts.last() else { return false };
+    let ExprKind::Call { callee, args } = &value.kind else { return false };
+    let ExprKind::Path(p) = &callee.kind else { return false };
+    if p.len() != 1 {
+        return false;
+    }
+    let Some(h) = helpers.iter().find(|h| h.name == p[0]) else { return false };
+    if h.params.len() != args.len() || args.iter().any(|a| matches!(a.kind, ExprKind::Named { .. })) {
+        return false;
+    }
+    if tuple_arity(h.body.tail.as_deref().unwrap()) != Some(names.len()) || tuple_leaves(h.body.tail.as_deref().unwrap()) > 6 {
+        return false;
+    }
+    *n += 1;
+    let k = *n;
+    let mut bound: Vec<String> = h.params.iter().map(|p| p.name.clone()).collect();
+    h.body.bound_names(&mut bound);
+    let rename = |x: &str| format!("\0in{k}_{x}");
+    let mut body = h.body.clone();
+    rename_block(&mut body, &bound, &rename);
+    let Some(Stmt::LetTuple { names, value, span }) = b.stmts.pop() else { unreachable!() };
+    let ExprKind::Call { args, .. } = value.kind else { unreachable!() };
+    for (prm, a) in h.params.iter().zip(args) {
+        b.stmts.push(Stmt::Let { name: rename(&prm.name), mutable: false, ty: prm.ty.clone(), value: a, span });
+    }
+    b.stmts.extend(body.stmts);
+    b.stmts.push(Stmt::LetTuple { names, value: *body.tail.unwrap(), span });
+    true
+}
+
+/// Every name of `names` bound or used in `b` renamed.
+fn rename_block(b: &mut Block, names: &[String], rename: &dyn Fn(&str) -> String) {
+    fn stmts(b: &mut Block, names: &[String], rename: &dyn Fn(&str) -> String) {
+        for st in &mut b.stmts {
+            match st {
+                Stmt::Let { name, .. } | Stmt::Assign { name, .. } | Stmt::LetElse { name, .. } if names.contains(name) => *name = rename(name),
+                Stmt::LetTuple { names: ns, .. } => {
+                    for x in ns.iter_mut() {
+                        if names.contains(x) {
+                            *x = rename(x);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    stmts(b, names, rename);
+    b.walk_mut(&mut |e| match &mut e.kind {
+        ExprKind::Path(p) if p.len() == 1 && names.contains(&p[0]) => p[0] = rename(&p[0]),
+        ExprKind::Block(x) | ExprKind::Unsafe(x) => stmts(x, names, rename),
+        ExprKind::If { then, .. } => stmts(then, names, rename),
+        _ => {}
+    });
+}
+
+/// `let (a, b) = if c { …; (x, y) } else { … }` then `{ s with … }` (an
+/// in-place update) as the block's result: each branch ends in `let a = x`
+/// `let b = y` and the update. At most 6 branches; no branch binds a name
+/// the update reads.
+fn sink_tuple(b: &mut Block) -> bool {
+    let Some(tail) = b.tail.as_deref() else { return false };
+    if in_place_update(tail).is_none() {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, .. }) = b.stmts.last() else { return false };
+    if !matches!(value.kind, ExprKind::If { .. }) || tuple_arity(value) != Some(names.len()) || tuple_leaves(value) > 6 {
+        return false;
+    }
+    // the update's names, other than the tuple's, are bound by no branch
+    let mut reads = Vec::new();
+    tail.walk(&mut |e| {
+        if let ExprKind::Path(p) = &e.kind
+            && p.len() == 1
+            && !names.contains(&p[0])
+        {
+            reads.push(p[0].clone());
+        }
+    });
+    let mut bound = Vec::new();
+    value.walk(&mut |e| match &e.kind {
+        ExprKind::Block(x) | ExprKind::Unsafe(x) => x.bound_names(&mut bound),
+        ExprKind::If { then, .. } => then.bound_names(&mut bound),
+        ExprKind::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+        _ => {}
+    });
+    if bound.iter().any(|x| reads.contains(x) || names.contains(x)) {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, span }) = b.stmts.pop() else { unreachable!() };
+    let update = *b.tail.take().unwrap();
+    fn place(e: Expr, names: &[String], update: &Expr, span: crate::Span) -> Expr {
+        let sp = e.span;
+        match e.kind {
+            ExprKind::Tuple(xs) => {
+                let stmts = names
+                    .iter()
+                    .zip(xs)
+                    .map(|(n, x)| if n == "_" { Stmt::Expr(x) } else { Stmt::Let { name: n.clone(), mutable: false, ty: None, value: x, span } })
+                    .collect();
+                Expr { kind: ExprKind::Block(Block { stmts, tail: Some(Box::new(update.clone())), span: sp }), span: sp }
+            }
+            ExprKind::Block(bl) => Expr { kind: ExprKind::Block(place_block(bl, names, update, span)), span: sp },
+            ExprKind::If { cond, then, els } => Expr {
+                kind: ExprKind::If { cond, then: place_block(then, names, update, span), els: els.map(|x| Box::new(place(*x, names, update, span))) },
+                span: sp,
+            },
+            _ => unreachable!("checked by tuple_arity"),
+        }
+    }
+    fn place_block(mut bl: Block, names: &[String], update: &Expr, span: crate::Span) -> Block {
+        let t = *bl.tail.take().unwrap();
+        bl.tail = Some(Box::new(place(t, names, update, span)));
+        bl
+    }
+    b.tail = Some(Box::new(place(value, &names, &update, span)));
+    true
+}
+
+/// `concat(s.out, concat(flush, bytes))` in a record update's fields as
+/// `concat(concat(s.out, flush), bytes)`: the same list (concatenation
+/// groups either way) with the same values in the same order, but built by
+/// growing `s.out` in place rather than by a new list for the inner part.
+fn regroup_concats(b: &mut Block) {
+    if let Some(t) = b.tail.as_deref_mut() {
+        regroup_update(t);
+    }
+}
+
+fn regroup_concats_in_tail(b: &mut Block) {
+    if let Some(t) = b.tail.as_deref_mut() {
+        t.walk_mut(&mut |e| regroup_update(e));
+    }
+}
+
+fn regroup_update(e: &mut Expr) {
+    if in_place_update(e).is_none() && !matches!(&e.kind, ExprKind::With { base, .. } if matches!(&base.kind, ExprKind::Path(p) if p.len() == 1)) {
+        return;
+    }
+    let ExprKind::With { base, fields } = &mut e.kind else { return };
+    let ExprKind::Path(bp) = &base.kind else { return };
+    let s = bp[0].clone();
+    let is_concat = |x: &Expr| matches!(&x.kind, ExprKind::Call { callee, args } if args.len() == 2 && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "concat"));
+    for (name, x, _) in fields.iter_mut() {
+        // concat(s.f, concat(y, z)) → concat(concat(s.f, y), z), repeatedly
+        loop {
+            if !is_concat(x) {
+                break;
+            }
+            let ExprKind::Call { args, .. } = &x.kind else { unreachable!() };
+            let own = matches!(&args[0].kind, ExprKind::Field { base, name: f } if f == name && matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == s))
+                || is_concat(&args[0]);
+            if !own || !is_concat(&args[1]) {
+                break;
+            }
+            let ExprKind::Call { callee, mut args } = std::mem::replace(&mut x.kind, ExprKind::Bool(false)) else { unreachable!() };
+            let inner = args.pop().unwrap();
+            let a = args.pop().unwrap();
+            let ExprKind::Call { callee: c2, args: mut yz } = inner.kind else { unreachable!() };
+            let z = yz.pop().unwrap();
+            let y = yz.pop().unwrap();
+            let left = Expr { kind: ExprKind::Call { callee: c2, args: vec![a, y] }, span: inner.span };
+            x.kind = ExprKind::Call { callee, args: vec![left, z] };
+        }
+    }
 }
