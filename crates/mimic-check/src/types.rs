@@ -14,7 +14,7 @@ use crate::{type_path, FileDiag, FnId, FnKind, ModId, Program, Resolved};
 use mimic_syntax::ast::*;
 use mimic_syntax::codes as C;
 use mimic_syntax::glyphs::Prim;
-use mimic_syntax::Diag;
+use mimic_syntax::{Diag, Span};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -32,6 +32,23 @@ pub fn tuple_id(elems: &[Ty]) -> u32 {
 
 pub fn tuple_elems(id: u32) -> Vec<Ty> {
     TUPLES.lock().unwrap()[id as usize].clone()
+}
+
+/// The row types of lists of lists (`[[i64]]`: rows `[i64]`), interned as
+/// tuples are, so `El::Rows` stays a small copyable id.
+static ROWS: Mutex<Vec<Ty>> = Mutex::new(Vec::new());
+
+pub fn rows_id(row: Ty) -> u32 {
+    let mut t = ROWS.lock().unwrap();
+    if let Some(i) = t.iter().position(|e| *e == row) {
+        return i as u32;
+    }
+    t.push(row);
+    (t.len() - 1) as u32
+}
+
+pub fn rows_of(id: u32) -> Ty {
+    ROWS.lock().unwrap()[id as usize]
 }
 
 /// Generic instances (`Option[i64]`), interned so `Ty::Obj` stays a small
@@ -223,6 +240,9 @@ pub enum El {
     U8,
     /// tuples (a list of tuples)
     Tup(u32),
+    /// lists of a known type (a list of lists, `[[i64]]`: each element one
+    /// row, the row's type interned, see [`rows_of`])
+    Rows(u32),
     Dyn,
     /// 32-bit floats and integers (`[f32]`, `[i32]`): 4 bytes each; f32
     /// arithmetic rounds to f32, i32 arithmetic wraps
@@ -310,6 +330,9 @@ impl Ty {
             Ty::Arr(El::Char, _) => El::Str,
             Ty::Obj(t) => El::Obj(t),
             Ty::Tup(t) => El::Tup(t),
+            // (a list of known element type: rows of unknown type, and text,
+            // stay as they were)
+            Ty::Arr(e, _) if !matches!(e, El::Char | El::Dyn) => El::Rows(rows_id(Ty::Arr(e, 0))),
             _ => El::Dyn,
         }
     }
@@ -323,6 +346,7 @@ impl Ty {
             El::Obj(t) => Ty::Obj(t),
             El::U8 => Ty::I64,
             El::Tup(t) => Ty::Tup(t),
+            El::Rows(r) => rows_of(r),
             El::Dyn => Ty::Dyn,
             El::F32 => Ty::F32,
             El::I32 => Ty::I32,
@@ -367,6 +391,7 @@ impl std::fmt::Display for Ty {
             El::Obj(_) => "record",
             El::U8 => "u8",
             El::Tup(_) => "tuple",
+            El::Rows(_) => "list",
             El::Dyn => "?",
             El::F32 => "f32",
             El::I32 => "i32",
@@ -381,6 +406,7 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "bool"),
             Ty::Char => write!(f, "char"),
             Ty::Arr(El::Char, _) => write!(f, "str"),
+            Ty::Arr(El::Rows(r), _) => write!(f, "[{}]", rows_of(*r)),
             Ty::Arr(e, _) => write!(f, "[{}]", el(e)),
             Ty::Obj(_) => write!(f, "record"),
             Ty::Tup(id) => {
@@ -396,6 +422,68 @@ impl std::fmt::Display for Ty {
 pub type Key = (FnId, Vec<Ty>);
 
 /// Pointer identity of an AST node (the AST is immutable while compiling).
+/// The expressions whose value is a function's result (their ids and
+/// places): block tails, the branches of `if` and `match`, and `return`
+/// statements along the way
+fn results_block(b: &Block, out: &mut Vec<(usize, Span)>) {
+    for st in &b.stmts {
+        if let Stmt::Return(Some(e), _) = st {
+            results(e, out);
+        }
+    }
+    if let Some(t) = &b.tail {
+        results(t, out);
+    }
+}
+
+fn results(e: &Expr, out: &mut Vec<(usize, Span)>) {
+    match &e.kind {
+        ExprKind::If { then, els, .. } => {
+            results_block(then, out);
+            if let Some(x) = els {
+                results(x, out);
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => results_block(b, out),
+        ExprKind::Match { arms, .. } => arms.iter().for_each(|a| results(&a.body, out)),
+        _ => out.push((id(e), e.span)),
+    }
+}
+
+/// The values of `return` statements anywhere in a function's body (in a
+/// loop, a branch taken as a statement), not in its lambdas: a lambda's
+/// `return` is the lambda's
+fn returns_anywhere(body: &Block, out: &mut Vec<(usize, Span)>) {
+    let mut inside = std::collections::HashSet::new();
+    body.walk(&mut |e| match &e.kind {
+        ExprKind::Lambda { body, .. } => body.walk(&mut |x| {
+            inside.insert(id(x));
+        }),
+        ExprKind::Arms { body, .. } => body.walk(&mut |x| {
+            inside.insert(id(x));
+        }),
+        _ => {}
+    });
+    let scan = |b: &Block, out: &mut Vec<(usize, Span)>| {
+        for st in &b.stmts {
+            if let Stmt::Return(Some(e), _) = st {
+                results(e, out);
+            }
+        }
+    };
+    scan(body, out);
+    body.walk(&mut |e| {
+        if inside.contains(&id(e)) {
+            return;
+        }
+        match &e.kind {
+            ExprKind::If { then, .. } => scan(then, out),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => scan(b, out),
+            _ => {}
+        }
+    });
+}
+
 pub fn id<T>(x: &T) -> usize {
     x as *const T as usize
 }
@@ -419,6 +507,10 @@ pub struct Spec {
     pub tuple_lets: HashMap<(usize, usize), Ty>,
     /// Route-pattern capture types, by (pattern id, capture index).
     pub route_binds: HashMap<(usize, usize), Ty>,
+    /// Arguments converted to their parameter's declared list type, by (call
+    /// id, argument index): a list of unknown type passed for `xs: [i64]`
+    /// (the callee is compiled for `[i64]`, the call converts it).
+    pub converts: std::collections::HashSet<(usize, usize)>,
 }
 
 pub struct TypeInfo {
@@ -521,7 +613,7 @@ pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: 
 pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
     match a {
         Ty::Dyn => Ok(Ty::Dyn),
-        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _) => match got {
+        Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
             Ty::Arr(El::Dyn, _) if matches!(a, Ty::Arr(_, _)) => Ok(a),
             g if compatible(a, g) => Ok(refine(a, g)),
@@ -545,6 +637,7 @@ pub fn show(p: &Program, t: Ty) -> String {
         }
         Ty::Arr(El::Obj(id), _) => format!("[{}]", show(p, Ty::Obj(id))),
         Ty::Arr(El::Tup(id), _) => format!("[{}]", show(p, Ty::Tup(id))),
+        Ty::Arr(El::Rows(r), _) => format!("[{}]", show(p, rows_of(r))),
         Ty::Arr(El::Str, _) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
         other => other.to_string(),
@@ -715,6 +808,7 @@ impl Infer<'_> {
                 out: Spec { params: Vec::new(), ret: Ty::Never, lets: prev.lets.clone(), ..Default::default() },
                 scopes: vec![HashMap::new()],
                 ret: Ty::Never,
+                fn_vals: HashMap::new(),
             };
             // type parameters: bound from the argument types of this specialisation
             let mut env: Vec<(String, Ty)> = Vec::new();
@@ -748,6 +842,27 @@ impl Infer<'_> {
             }
             let body = w.block(&d.body);
             let mut ret = body.join(w.ret);
+            // a function named where the declared result is a value: `run`
+            // where `now` was meant, in `-> R { if k == 0 { run } else { now } }`.
+            // A function value is not typed yet (it is dynamic), so the check
+            // below would let it through and the program fail when it runs
+            if let Some(rt) = &d.ret
+                && !matches!(rt, Type::Fn(..))
+                && !matches!(rt, Type::Named(n, _) if d.type_params.contains(n))
+                && matches!(ann_env(p, module, rt, &env), Some(t) if t != Ty::Dyn)
+            {
+                let mut res = Vec::new();
+                results_block(&d.body, &mut res);
+                returns_anywhere(&d.body, &mut res);
+                res.sort_by_key(|r| r.0);
+                res.dedup_by_key(|r| r.0);
+                for (e, span) in res {
+                    if let Some(&f) = w.fn_vals.get(&e) {
+                        let name = p.fns[f].name.clone();
+                        w.err(Diag::new(&C::TYPE_MISMATCH, format!("`{name}` is a function, but `{path}` returns `{rt}`: call it (`{name}(…)`) or name the value meant"), span));
+                    }
+                }
+            }
             if let Some(rt) = &d.ret {
                 match coerce_env(p, module, Some(rt), ret, &env) {
                     Ok(t) => ret = t,
@@ -757,8 +872,10 @@ impl Infer<'_> {
                 // type (`if … { [] } else { [x] }`): the declared list, the
                 // value made typed (checked) once as it is returned, so a
                 // caller's `flatten`, indexing and arithmetic on it run typed
+                // (`-> [bool]` too: a list of truth values grown from `[]`
+                // by `push` is stored as truth values from its first one)
                 if let Ty::Arr(El::Dyn, _) = ret
-                    && let Some(Ty::Arr(el @ (El::I64 | El::F64), _)) = ann_env(p, module, rt, &env)
+                    && let Some(Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _)) = ann_env(p, module, rt, &env)
                 {
                     ret = Ty::Arr(el, 0);
                 }
@@ -783,6 +900,9 @@ struct Walk<'a, 'p> {
     scopes: Vec<HashMap<String, (usize, Ty)>>,
     /// join of `return` statements
     ret: Ty,
+    /// expressions that name a function as a value (`run`, not `run(x)`):
+    /// expression id → the function
+    fn_vals: HashMap<usize, FnId>,
 }
 
 impl Walk<'_, '_> {
@@ -1037,6 +1157,25 @@ impl Walk<'_, '_> {
         if args.contains(&Ty::Never) {
             return Ty::Never; // argument types not known yet
         }
+        // a list of unknown type (`[]`, a `flatten`, a value of unknown type)
+        // for a parameter declared a typed list (`xs: [i64]`): the function
+        // is compiled for the declared type, and this call converts the list
+        // (before, the declaration was only checked: the function ran on
+        // the generic path for that call)
+        let mut args = args;
+        if let FnKind::User(d) = &self.inf.p.fns[fid].kind {
+            let m = self.inf.p.fns[fid].module;
+            for (i, prm) in d.params.iter().enumerate() {
+                if i < args.len()
+                    && matches!(args[i], Ty::Dyn | Ty::Arr(El::Dyn, _))
+                    && let Some(t) = prm.ty.as_ref().and_then(|t| ann_in(self.inf.p, m, t))
+                    && matches!(t, Ty::Arr(El::I64 | El::F64 | El::Bool, 0))
+                {
+                    args[i] = t;
+                    self.out.converts.insert((at, i));
+                }
+            }
+        }
         let k: Key = (fid, args);
         self.inf.ensure(k.clone());
         self.out.calls.insert(at, k.clone());
@@ -1150,6 +1289,7 @@ impl Walk<'_, '_> {
                     Some(Resolved::Variant(t, _)) => obj(t, &vec![Ty::Never; self.inf.p.types[t].decl.params.len()]),
                     Some(Resolved::Fn(f)) => {
                         self.fn_value(f);
+                        self.fn_vals.insert(id(e), f);
                         Ty::Dyn
                     }
                     _ => Ty::Dyn,
@@ -1217,6 +1357,23 @@ impl Walk<'_, '_> {
                             // that kind of number gives such a list (the runtime
                             // keeps it typed), so a list grown in a loop stays typed
                             let pushed = self.push_of_numbers(f, &argt);
+                            // the prelude's `flatten` of a list of lists: the one
+                            // copy for lists of unknown type, as before lists of
+                            // lists had a type. Rows of numbers go to the runtime's
+                            // concat either way and the result is typed below, so a
+                            // copy for `[[i64]]` only adds code: inlined into a
+                            // parallel `¨` (the benchmark `diff`) it measured 6%
+                            // slower on Windows on all cores, running the same
+                            // instructions
+                            let p = self.inf.p;
+                            let fm = &p.mods[p.fns[f].module];
+                            if p.fns[f].name == "flatten" && fm.name == "prelude" && fm.package == "std" {
+                                for t in argt.iter_mut() {
+                                    if matches!(t, Ty::Arr(El::Rows(_), _)) {
+                                        *t = Ty::Arr(El::Dyn, 0);
+                                    }
+                                }
+                            }
                             let r = self.call_user(id(e), f, argt);
                             if let Some(t) = pushed {
                                 return t;
@@ -1646,6 +1803,22 @@ impl Walk<'_, '_> {
                             self.out.exprs.insert(id(x.as_ref()), nt);
                             u = nt;
                         }
+                        // a branch that is `[]` takes the other's list of
+                        // numbers: `if run > 0 { run_byte(run) } else { [] }`
+                        // is a `[i64]`, not a list of unknown type (which
+                        // sent every use of it the generic way)
+                        if let Some(nt) = empty_branch_as(u)
+                            && let Some(lit) = then.tail.as_deref().filter(|l| then.stmts.is_empty() && is_empty_list(l))
+                        {
+                            self.out.exprs.insert(id(lit), nt);
+                            t = nt;
+                        } else if let Some(nt) = empty_branch_as(t)
+                            && let Some(lit) = tail_empty_list(x)
+                        {
+                            self.out.exprs.insert(id(lit), nt);
+                            self.out.exprs.insert(id(x.as_ref()), nt);
+                            u = nt;
+                        }
                         t.join(u)
                     }
                     None => t.join(Ty::Unit),
@@ -1882,6 +2055,27 @@ fn tail_literal(e: &Expr) -> Option<&Expr> {
     match &e.kind {
         ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_literal(l)),
         _ => is_literal(e).then_some(e),
+    }
+}
+
+fn is_empty_list(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Array(xs) if xs.is_empty())
+}
+
+/// The `[]` an `else` branch is (`else { [] }`), if it is one.
+fn tail_empty_list(e: &Expr) -> Option<&Expr> {
+    match &e.kind {
+        ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_empty_list(l)),
+        _ => is_empty_list(e).then_some(e),
+    }
+}
+
+/// The type a `[]` branch takes next to a branch of type `other`: a list of
+/// numbers or bytes, of any length.
+fn empty_branch_as(other: Ty) -> Option<Ty> {
+    match other {
+        Ty::Arr(el @ (El::I64 | El::F64 | El::U8), _) => Some(Ty::Arr(el, 0)),
+        _ => None,
     }
 }
 

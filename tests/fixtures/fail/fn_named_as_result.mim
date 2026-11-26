@@ -1,0 +1,19 @@
+// expect-error: E0401 `run` is a function, but
+module main
+
+// a function's name where its declared result (a record) was meant: a
+// function value is not typed yet, so this passed the checker and stopped
+// the program when it ran; refused where the name is
+
+type R = { x: i64 }
+
+fn run(a: i64) { print("hi") }
+
+fn pick(k: i64, now: R) -> R {
+    if k == 0 { run } else { now }
+}
+
+fn main() {
+    let r = pick(0, R { x: 1 })
+    print("{r.x}")
+}

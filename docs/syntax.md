@@ -169,6 +169,8 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 | `×/` | `product` | 1 | product |
 | `⌈/` | `maximum` | 1 | maximum |
 | `⌊/` | `minimum` | 1 | minimum |
+| `∧/` | `all` | 1 | all true (and reduction) |
+| `∨/` | `any` | 1 | any true (or reduction) |
 | `≢` | `len` | 1 | length |
 | `⎕` | `print` | 1 | print with newline |
 | `↑` | `take` | 2 | first n (last n if negative) |
@@ -183,7 +185,7 @@ fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }   // a function type
 | `⍉` | `transpose` | 1 | reverse the axes: rows ↔ columns |
 | `⊠` | `matmul` | 2 | matrix product; a vector acts as a row (left) or a column (right) |
 
-`⌈` and `⌊` on their own are max and min. Followed by `/` (`⌈/`, `⌊/`), they are the reductions.
+`⌈` and `⌊` on their own are max and min. Followed by `/` (`⌈/`, `⌊/`), they are the reductions. Likewise `∧` and `∨` are and and or, and `∧/` and `∨/` reduce a list of booleans (the glyph spellings of `all` and `any`).
 
 Arithmetic and comparison broadcast a scalar against a vector, and work elementwise on two vectors of equal length.
 

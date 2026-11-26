@@ -1,0 +1,7 @@
+stock value 108463730
+refused 29190
+item254 0
+item286 0
+item522 0
+item547 0
+item561 0

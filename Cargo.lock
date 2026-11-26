@@ -988,14 +988,14 @@ dependencies = [
 
 [[package]]
 name = "mimic-check"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-cli"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "clap",
  "crossterm",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "mimic-codegen"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "inkwell",
  "mimic-check",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "mimic-ir"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "mimic-check",
  "mimic-syntax",
@@ -1037,25 +1037,25 @@ dependencies = [
 
 [[package]]
 name = "mimic-net"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-project"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "mimic-syntax",
 ]
 
 [[package]]
 name = "mimic-syntax"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 
 [[package]]
 name = "mimic-toolchain"
-version = "0.4.2"
+version = "0.4.3-preview.1"
 dependencies = [
  "cc",
  "flate2",

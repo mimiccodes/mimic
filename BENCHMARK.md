@@ -120,6 +120,22 @@ Mimic aims to be the fastest programming language. This file defines what that c
 
 ## Current results (measured)
 
+### The held-out set, first measurement (0.4.3-dev, 2026-11-24)
+
+The held-out set (`bench/heldout/`, docs/versions.md stage 0.4): 40 programs written plainly from a task list by an agent that had only the tutorial, never the compiler or the corpus, and never used to tune anything. Measured on the CI machines by `heldout.yml` (run 45307776528), in Mimic and C, each run stopped past 4 GB or 5 minutes. This is the honest baseline the corpus could not give: it measures code written the way a newcomer writes it, which the corpus, written around known slow spots, flatters.
+
+| | Linux x86-64 | macOS arm64 | Windows x86-64 |
+|---|---|---|---|
+| Programs that run (all with the right output) | 15 of 40 | 15 of 40 | 15 of 40 |
+| Over 4 GB of memory | 20 | 18 | 20 |
+| Crashed (a segmentation fault; most likely the stack, in deep recursion) | 4 | 6 | 4 |
+| Over 5 minutes | 1 | 1 | 1 |
+| Mimic on one core against C, geometric mean of those that run | 9.02× | 8.49× | 10.03× |
+
+Within reach of C or faster: `mandel` (0.30–0.59×, 0.10–0.25× on all cores), `gcdsum`, `perfect`, `digitsum`, `primes`, `linkedlist` (0.9–2.8×). Far behind: `bigfactorial` 508–3,242×, `life` 117–360×, `nqueens` 116–263×, `dijkstra` 47–143×, `polynomial`, `bst`, `editdistance`, `particles`, `knapsack` 4–17×.
+
+Most failures share one cause: a list built by `push` in a function that calls itself (`gen(n - 1, y, push(acc, v))`, the way every program makes its input) is copied at every step when its elements are not `i64` (strings, floats, records), and each copy stays alive in its call's frame, so time and memory grow with the square of the length; deep recursion of that shape most likely also overflows the stack (the crashes). These and the other slow spots are in docs/gaps.md, each with the 0.4 step that closes it; stage 0.4 closes when the held-out set is within 1.5× of C on one core (geometric mean), with no program above 3×.
+
 ### The whole corpus on CI machines (0.4.2, 2026-11-24)
 
 All 130 benchmarks of the corpus on GitHub's CI machines, run [45273951342](https://github.com/mimiccodes/mimic/actions/runs/45273951342): best of 5 runs after a warm-up; each ratio is to C (below 1.0 is faster than C). C and Rust run their sequential versions on one core; Rust + Rayon is the parallel Rust version, where there is one.

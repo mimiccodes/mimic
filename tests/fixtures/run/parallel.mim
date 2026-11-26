@@ -7,7 +7,7 @@ fn main() {
     print(xs × 2 ▷ +/)
     print(xs ¨ square ▷ ⌈/)                 // parallel ¨ (pure)
     let fs = xs ÷ 7
-    print(fs ▷ +/)                          // deterministic f64 sum
+    print("{fs ▷ +/:.3}")                   // f64 sum (its last bits depend on the chunk size, which MIMIC_PAR_GRAIN changes)
     print(xs % 3 == 0 ▷ +/)                 // count multiples of 3
     print(⍳ 5 ¨ shout ▷ +/)                 // impure ¨: runs in order
 }

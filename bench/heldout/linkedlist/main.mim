@@ -1,0 +1,44 @@
+module main
+
+// Build a singly linked list of 2,000,000 generated values as a union type
+// (each new value goes on the front), reverse it, and sum every third
+// value (positions 0, 3, 6, …).
+
+type List = Nil | Cons(i64, List)
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn build(n: i64, x: i64, list: List) -> List {
+    if n == 0 { list } else {
+        let y = next(x)
+        build(n - 1, y, Cons(y % 1001, list))
+    }
+}
+
+fn reverse_list(list: List, done: List) -> List {
+    match list {
+        Nil => done,
+        Cons(v, rest) => reverse_list(rest, Cons(v, done)),
+    }
+}
+
+fn length(list: List, n: i64) -> i64 {
+    match list {
+        Nil => n,
+        Cons(_, rest) => length(rest, n + 1),
+    }
+}
+
+fn every_third(list: List, i: i64, total: i64) -> i64 {
+    match list {
+        Nil => total,
+        Cons(v, rest) => every_third(rest, i + 1, if i % 3 == 0 { total + v } else { total }),
+    }
+}
+
+fn main() {
+    let list = build(2000000, 42, Nil)
+    let reversed = reverse_list(list, Nil)
+    print(length(reversed, 0))
+    print(every_third(reversed, 0, 0))
+}

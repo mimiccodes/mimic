@@ -1,0 +1,11 @@
+// expect-error: E0214 `shape` is a built-in primitive (⍴) and cannot be used as a name
+module main
+
+// before a `:` any word is read as a name, but every later use of `shape`
+// would be the primitive: refused where it is declared
+
+fn numel(shape: [i64]) -> i64 { 0 }
+
+fn main() {
+    print(numel([2 3]))
+}

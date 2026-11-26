@@ -30,6 +30,8 @@ These are visible in every file without an import. The string, list and map func
 
 ### Formats in interpolation
 
+A float with no spec, `"{x}"` (and `print(x)`), is the shortest text that reads back as the same number: `parse_float("{x}")` is `Some(x)` for every finite `x`, as in Rust, Go, JavaScript and Python. So `0.1 + 0.2` shows as `0.30000000000000004`; a spec such as `.2` rounds for display. To save floats exactly in binary, see `math::to_bits` and `bytes::of_f64s`.
+
 `"{x:spec}"` formats a value by a spec after a single `:`, the grammar Python and Rust use: `[[fill]align][sign][#][0][width][,][.precision][type]`.
 
 | Spec | Example | Text |
@@ -119,7 +121,11 @@ math::atan2(1.0, 1.0) * 4.0        // π
 | `math::sin(x)`, `math::cos(x)`, `math::tan(x)` | trigonometry, in radians |
 | `math::asin(x)`, `math::acos(x)`, `math::atan(x)`, `math::atan2(y, x)` | inverse trigonometry |
 | `math::exp(x)`, `math::ln(x)`, `math::log2(x)`, `math::log10(x)` | exponential and logarithms |
+| `math::tanh(x)`, `math::sinh(x)`, `math::cosh(x)` | hyperbolic functions |
+| `math::log1p(x)`, `math::expm1(x)` | ln(1 + x) and eˣ − 1, exact near zero (stable losses) |
+| `math::sigmoid(x)` | the logistic function 1 / (1 + e⁻ˣ), without overflow for large negative `x` |
 | `math::floor(x)`, `math::ceil(x)`, `math::round(x)` | rounding (to an `f64`) |
+| `math::to_bits(x)`, `math::from_bits(b)` | a float's 64 bits as an `i64`, and back, exactly (NaNs and `-0.0` included); `math::to_bits32`, `math::from_bits32` for `f32` (its bits as 0 … 4294967295) |
 | `math::to_int(x)` | the integer part as an `i64`, towards zero: `math::to_int(¯2.7)` is `-2`; `math::to_int(math::round(x))` rounds. NaN, or a number no `i64` holds, stops the program. (An integer becomes a float with `n * 1.0`.) |
 | `math::pi()`, `math::e()` | the constants |
 
@@ -159,12 +165,14 @@ Failures come back as values, never as crashes. Error messages name the operatio
 | `fs::walk(path)` | `Result[[str], str]`: every file below `path`, its subdirectories too, as sorted paths relative to it with `/` | concurrent |
 | `fs::modified(path)` | `Result[i64, str]`: when the file last changed, in ns since 1970 (like `time::now()`) | concurrent |
 | `fs::exists(path)`, `fs::is_file(path)`, `fs::is_dir(path)` | `bool` | concurrent |
-| `fs::current_dir()`, `fs::temp_dir()` | `str` | concurrent |
+| `fs::current_dir()`, `fs::temp_dir()` | `str` (the temporary directory: `TMPDIR` or `/tmp`; on Windows the user's, from `TMP`/`TEMP`) | concurrent |
 | `fs::write(path, text)`, `fs::append(path, text)` | `Result[i64, str]`: bytes written | sync |
 | `fs::write_bytes(path, data)` | `Result[i64, str]` | sync |
 | `fs::copy(from, to)` | `Result[i64, str]` | sync |
 | `fs::rename(from, to)`, `fs::remove(path)` | `Result[bool, str]`; `remove` also removes empty directories | sync |
 | `fs::make_dir(path)` | `Result[bool, str]`: creates missing parents too; fine if it exists | sync |
+
+The error text of the `fs` functions already names the path and the reason, `cannot read data.csv: No such file or directory`: show it as it is rather than adding the path again.
 
 ### `chan`: channels between tasks (concurrent)
 
@@ -209,6 +217,7 @@ How channels behave:
 | `bytes::to_text(b)` | `Result[str, str]`: `Err` unless the bytes are valid UTF-8 |
 | `bytes::hex(b)`, `bytes::from_hex(s)` | `"486921"` ↔ bytes; `from_hex` returns a `Result` |
 | `bytes::base64(b)`, `bytes::from_base64(s)` | standard base64 ↔ bytes; `from_base64` returns a `Result` |
+| `bytes::of_f64s(xs)`, `bytes::to_f64s(b)` | floats as 8 bytes each (little-endian) ↔ bytes, exactly: model weights saved and read back bit for bit (`to_f64s` stops the program unless the length is a multiple of 8) |
 
 `fs::read_bytes`/`fs::write_bytes` and `tcp::send_bytes`/`tcp::receive_bytes` read and write bytes. A `[u8]` parameter accepts only bytes; passing a list of `i64` is a compile error.
 

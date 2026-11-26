@@ -131,6 +131,7 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         i += 1;
     }
     items.extend(lifted.into_iter().map(Item::Fn));
+    tuple_updates(items);
     // `let f = (a, b) => …` called only as `f(x, y)`: a hidden function too
     let mut hidden = Vec::new();
     for item in items.iter_mut() {
@@ -139,7 +140,420 @@ fn lift_items(items: &mut Vec<Item>) -> Result<(), Diag> {
         }
     }
     items.extend(hidden.into_iter().map(Item::Fn));
+    for item in items.iter_mut() {
+        if let Item::Fn(f) = item {
+            let mut n = 0;
+            blocks_mut(&mut f.body, &mut |b| hoist_copy_reads(b, &mut n));
+            sink_with(&mut f.body);
+            f.body.walk_mut(&mut |e| {
+                if let ExprKind::Block(b) | ExprKind::Unsafe(b) = &mut e.kind {
+                    sink_with(b);
+                }
+                if let ExprKind::If { then, .. } = &mut e.kind {
+                    sink_with(then);
+                }
+            });
+        }
+    }
     Ok(())
+}
+
+/// `let out = if c { push(s.out, x) } else { concat(s.out, ys) }` followed
+/// by `{ s with k: s.k + 2, out: out }` as the block's result: the update
+/// moves into each branch, `if c { { s with k: s.k + 2, out: push(s.out, x) } }
+/// else { … }`, where a record held once has its list taken out and changed
+/// in place (codegen's steals) instead of copied at every step (a list
+/// grown in a loop's state took time growing with the square of its
+/// length). The same values in the same order: the branch's value first,
+/// then the other fields (it is listed first). Only when `out` is used nowhere else, no branch
+/// binds a name the other fields read, and some branch reads `s.out`.
+fn sink_with(b: &mut Block) {
+    let Some(tail) = &b.tail else { return };
+    let ExprKind::With { base, fields } = &tail.kind else { return };
+    let ExprKind::Path(bp) = &base.kind else { return };
+    if bp.len() != 1 {
+        return;
+    }
+    let Some(Stmt::Let { name: v, mutable: false, ty: None, value, .. }) = b.stmts.last() else { return };
+    if !matches!(value.kind, ExprKind::If { .. }) || bp[0] == *v {
+        return;
+    }
+    let is_v = |e: &Expr| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == *v);
+    let at: Vec<usize> = fields.iter().enumerate().filter(|(_, (_, x, _))| is_v(x)).map(|(i, _)| i).collect();
+    let [k] = at[..] else { return };
+    let field = fields[k].0.clone();
+    // `v` read nowhere else (the other fields, or inside the branches)
+    let mut names = vec![bp[0].clone()];
+    for (i, (_, x, _)) in fields.iter().enumerate() {
+        if i == k {
+            continue;
+        }
+        x.walk(&mut |e| {
+            if let ExprKind::Path(p) = &e.kind
+                && p.len() == 1
+            {
+                names.push(p[0].clone());
+            }
+        });
+    }
+    if names.contains(v) {
+        return;
+    }
+    // the branches: each a block with a result, the last an `else`
+    let mut branches: Vec<&Block> = Vec::new();
+    let mut cur = value;
+    loop {
+        let ExprKind::If { then, els, .. } = &cur.kind else { return };
+        branches.push(then);
+        match els.as_deref() {
+            Some(e) if matches!(e.kind, ExprKind::If { .. }) => cur = e,
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => {
+                branches.push(eb);
+                break;
+            }
+            _ => return,
+        }
+    }
+    if branches.len() > 4 {
+        return;
+    }
+    let mut reads_field = false;
+    for br in &branches {
+        let Some(t) = &br.tail else { return };
+        let mut bound = Vec::new();
+        br.bound_names(&mut bound);
+        t.walk(&mut |e| match &e.kind {
+            ExprKind::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+            ExprKind::Field { base, name } if *name == field && matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == bp[0]) => reads_field = true,
+            _ => {}
+        });
+        if bound.iter().any(|n| names.contains(n) || n == v) {
+            return;
+        }
+        let mut uses_v = false;
+        t.walk(&mut |e| uses_v |= is_v(e));
+        for st in &br.stmts {
+            if let Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } = st {
+                value.walk(&mut |e| uses_v |= is_v(e));
+            }
+        }
+        if uses_v {
+            return;
+        }
+    }
+    if !reads_field {
+        return;
+    }
+    // rewrite: each branch's result becomes the record update
+    let Some(Stmt::Let { value, .. }) = b.stmts.pop() else { unreachable!() };
+    let tail = b.tail.take().unwrap();
+    let ExprKind::With { base, fields } = tail.kind else { unreachable!() };
+    let span = tail.span;
+    fn put(e: &mut Expr, base: &Expr, fields: &[(String, Expr, crate::Span)], k: usize, span: crate::Span) {
+        let ExprKind::If { then, els, .. } = &mut e.kind else { return };
+        let wrap = |bl: &mut Block| {
+            let r = bl.tail.take().unwrap();
+            // (the branch's value listed first: the fields are computed in
+            // their order, and it came first as written)
+            let mut fs = fields.to_vec();
+            let mut f = fs.remove(k);
+            f.1 = *r;
+            fs.insert(0, f);
+            bl.tail = Some(Box::new(Expr { kind: ExprKind::With { base: Box::new(base.clone()), fields: fs }, span }));
+        };
+        wrap(then);
+        match els.as_deref_mut() {
+            Some(x) if matches!(x.kind, ExprKind::If { .. }) => put(x, base, fields, k, span),
+            Some(Expr { kind: ExprKind::Block(eb), .. }) => wrap(eb),
+            _ => {}
+        }
+    }
+    let mut value = value;
+    put(&mut value, &base, &fields, k, span);
+    b.tail = Some(Box::new(value));
+}
+
+/// Every block in `b` (itself included, inner ones first).
+fn blocks_mut(b: &mut Block, f: &mut dyn FnMut(&mut Block)) {
+    fn expr(e: &mut Expr, f: &mut dyn FnMut(&mut Block)) {
+        match &mut e.kind {
+            ExprKind::If { cond, then, els } => {
+                expr(cond, f);
+                blocks_mut(then, f);
+                if let Some(x) = els {
+                    expr(x, f);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks_mut(b, f),
+            ExprKind::Match { scrut, arms } => {
+                expr(scrut, f);
+                for a in arms {
+                    expr(&mut a.body, f);
+                }
+            }
+            ExprKind::Lambda { body, .. } => expr(body, f),
+            ExprKind::Call { callee, args } => {
+                expr(callee, f);
+                args.iter_mut().for_each(|a| expr(a, f));
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            ExprKind::Unary { expr: x, .. } => expr(x, f),
+            _ => {}
+        }
+    }
+    for st in &mut b.stmts {
+        match st {
+            Stmt::Let { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } => expr(value, f),
+            Stmt::Return(Some(e), _) => expr(e, f),
+            Stmt::LetElse { value, els, .. } => {
+                expr(value, f);
+                blocks_mut(els, f);
+            }
+            Stmt::Return(None, _) => {}
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        expr(t, f);
+    }
+    f(b);
+}
+
+/// `let mut s = h` followed straight away by `s[i] = h[j]` `s[j] = h[i]`:
+/// the indices and values are computed first, into hidden `let`s, then the
+/// copy is made and changed. The values are the same (they read `h`, never
+/// `s`), but `h` is now used last where it is copied, so a list `h` held
+/// once is changed in place instead of copied at every swap (a hand-written
+/// heap swapped a million-element list at every step). Only when every
+/// index and value is plain (names, numbers, indexing, fields, arithmetic:
+/// nothing a reordering could make observable) and reads `h`.
+fn hoist_copy_reads(b: &mut Block, n: &mut usize) {
+    fn plain(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Index { base, index } => plain(base) && plain(index),
+            ExprKind::Field { base, .. } => plain(base),
+            ExprKind::Binary { lhs, rhs, .. } => plain(lhs) && plain(rhs),
+            ExprKind::Unary { expr, .. } => plain(expr),
+            _ => false,
+        }
+    }
+    fn mentions(e: &Expr, name: &str) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| {
+            if matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) {
+                found = true;
+            }
+        });
+        found
+    }
+    let mut i = 0;
+    while i < b.stmts.len() {
+        let (copy, from) = match &b.stmts[i] {
+            Stmt::Let { name, mutable: true, ty: None, value, .. } => match &value.kind {
+                ExprKind::Path(p) if p.len() == 1 && p[0] != *name => (name.clone(), p[0].clone()),
+                // (or a part of it: `let mut rest = h ↑ (n - 1)`)
+                ExprKind::Prim { prim: crate::glyphs::Prim::Take | crate::glyphs::Prim::Drop, args }
+                    if args.len() == 2 && plain(&args[1]) && matches!(&args[0].kind, ExprKind::Path(p) if p.len() == 1 && p[0] != *name) =>
+                {
+                    let ExprKind::Path(p) = &args[0].kind else { unreachable!() };
+                    (name.clone(), p[0].clone())
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let assign_ok = |st: &Stmt| {
+            matches!(st, Stmt::Assign { name, index: Some(idx), value, .. }
+                if *name == copy && plain(idx) && plain(value) && !mentions(idx, &copy) && !mentions(value, &copy))
+        };
+        // `if c { s[i] = h[j] }`, c plain and not reading `s`, no else
+        let guarded_ok = |st: &Stmt| {
+            matches!(st, Stmt::Expr(Expr { kind: ExprKind::If { cond, then, els: None }, .. })
+                if plain(cond) && !mentions(cond, &copy) && then.tail.is_none() && !then.stmts.is_empty() && then.stmts.iter().all(assign_ok))
+        };
+        let mut end = i + 1;
+        while let Some(st) = b.stmts.get(end)
+            && (assign_ok(st) || guarded_ok(st))
+        {
+            end += 1;
+        }
+        let reads_of = |st: &Stmt| matches!(st, Stmt::Assign { index: Some(idx), value, .. } if mentions(idx, &from) || mentions(value, &from));
+        let reads = b.stmts[i + 1..end].iter().any(|st| match st {
+            Stmt::Expr(Expr { kind: ExprKind::If { then, .. }, .. }) => then.stmts.iter().any(reads_of),
+            st => reads_of(st),
+        });
+        if end == i + 1 || !reads {
+            i = end.max(i + 1);
+            continue;
+        }
+        let mut hoisted = Vec::new();
+        for st in &mut b.stmts[i + 1..end] {
+            match st {
+                Stmt::Assign { index: Some(idx), value, span, .. } => {
+                    for e in [idx, value] {
+                        let t = format!("\0read{n}");
+                        *n += 1;
+                        let sp = e.span;
+                        let old = std::mem::replace(e, Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+                        hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: *span });
+                    }
+                }
+                // guarded: read only when the guard holds, as a list of
+                // nothing or the value (`if c { [h[j]] } else { [] }`), and
+                // taken from it inside the same guard: never a read the
+                // program would not have made
+                Stmt::Expr(Expr { kind: ExprKind::If { cond, then, .. }, .. }) => {
+                    for inner in &mut then.stmts {
+                        let Stmt::Assign { index: Some(idx), value, span, .. } = inner else { unreachable!() };
+                        for e in [idx, value] {
+                            // (only what reads the list: a constant index stays)
+                            if !mentions(e, &from) {
+                                continue;
+                            }
+                            let t = format!("\0read{n}");
+                            *n += 1;
+                            let sp = e.span;
+                            let at = |kind| Expr { kind, span: sp };
+                            let old = std::mem::replace(e, at(ExprKind::Index { base: Box::new(at(ExprKind::Path(vec![t.clone()]))), index: Box::new(at(ExprKind::Int(0))) }));
+                            let some = Block { stmts: Vec::new(), tail: Some(Box::new(at(ExprKind::Array(vec![old])))), span: sp };
+                            let none = at(ExprKind::Block(Block { stmts: Vec::new(), tail: Some(Box::new(at(ExprKind::Array(Vec::new())))), span: sp }));
+                            let value = at(ExprKind::If { cond: cond.clone(), then: some, els: Some(Box::new(none)) });
+                            hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value, span: *span });
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        let k = hoisted.len();
+        b.stmts.splice(i..i, hoisted);
+        i = end + k;
+    }
+    hoist_call_reads(b, n);
+}
+
+/// `sift_up(push(h, v), ≢ h)`: a later argument that only measures a
+/// variable an earlier one uses is computed first, into a hidden `let`, so
+/// the earlier one is the variable's last use (`push` then grows `h` in
+/// place instead of copying it at every push). Only arguments that cannot
+/// fail or do anything (names, numbers, fields, `≢`, `+ - ×` of those), in a
+/// call that is a statement's value or a block's result.
+fn hoist_call_reads(b: &mut Block, n: &mut usize) {
+    fn quiet(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Field { base, .. } => quiet(base),
+            ExprKind::Prim { prim: crate::glyphs::Prim::Len, args } => args.iter().all(quiet),
+            ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, lhs, rhs } => quiet(lhs) && quiet(rhs),
+            _ => false,
+        }
+    }
+    fn names(e: &Expr) -> Vec<String> {
+        let mut out = Vec::new();
+        e.walk(&mut |x| {
+            if let ExprKind::Path(p) = &x.kind
+                && p.len() == 1
+            {
+                out.push(p[0].clone());
+            }
+        });
+        out
+    }
+    // (the call and where its hidden `let`s go)
+    let mut i = 0;
+    while i <= b.stmts.len() {
+        let mut call = if i < b.stmts.len() {
+            match &mut b.stmts[i] {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => Some(value),
+                _ => None,
+            }
+        } else {
+            b.tail.as_deref_mut()
+        };
+        let mut hoisted = Vec::new();
+        if let Some(c) = call.as_deref_mut() {
+            first_arg_reads(c, &mut hoisted, n);
+        }
+        if let Some(Expr { kind: ExprKind::Call { args, .. }, .. }) = call {
+            for j in 1..args.len() {
+                let a = &args[j];
+                if matches!(a.kind, ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) || !quiet(a) {
+                    continue;
+                }
+                // (only beside an earlier argument that may take the
+                // variable over, a call such as `push(h, v)`: plain
+                // arithmetic on numbers, `f(zr * zr - zi * zi, 2.0 * zr * zi)`,
+                // gains nothing and its order is better left alone)
+                let earlier: Vec<String> = args[..j].iter().filter(|x| !quiet(x)).flat_map(names).collect();
+                if !names(a).iter().any(|x| earlier.contains(x)) {
+                    continue;
+                }
+                let t = format!("\0read{n}");
+                *n += 1;
+                let sp = args[j].span;
+                let old = std::mem::replace(&mut args[j], Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+                hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: sp });
+            }
+        }
+        let k = hoisted.len();
+        let at = i.min(b.stmts.len());
+        b.stmts.splice(at..at, hoisted);
+        i += k + 1;
+    }
+}
+
+/// `put(xs, j + 1, xs[j])`, also as the first argument of a call
+/// (`insert(put(xs, j + 1, xs[j]), j - 1, v)`): an element of the list given
+/// first, read by a later argument, is read first into a hidden `let`, so
+/// the list is handed over and changed in place instead of copied at every
+/// call (a hand-written insertion sort copied its list at every shift).
+/// Only `name[i]` with `i` and the arguments between quiet, so what runs
+/// before it is unchanged: nothing that can fail or do anything.
+fn first_arg_reads(e: &mut Expr, hoisted: &mut Vec<Stmt>, n: &mut usize) {
+    fn quiet(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Field { base, .. } => quiet(base),
+            ExprKind::Prim { prim: crate::glyphs::Prim::Len, args } => args.iter().all(quiet),
+            ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, lhs, rhs } => quiet(lhs) && quiet(rhs),
+            _ => false,
+        }
+    }
+    let ExprKind::Call { args, .. } = &mut e.kind else { return };
+    let Some(first) = args.first_mut() else { return };
+    if matches!(first.kind, ExprKind::Call { .. }) {
+        first_arg_reads(first, hoisted, n);
+        return;
+    }
+    let ExprKind::Path(p) = &first.kind else { return };
+    if p.len() != 1 {
+        return;
+    }
+    let name = p[0].clone();
+    for j in 1..args.len() {
+        let read = match &args[j].kind {
+            ExprKind::Index { base, index } => matches!(&base.kind, ExprKind::Path(q) if q.len() == 1 && q[0] == name) && quiet(index),
+            _ => false,
+        };
+        if read {
+            let t = format!("\0read{n}");
+            *n += 1;
+            let sp = args[j].span;
+            let old = std::mem::replace(&mut args[j], Expr { kind: ExprKind::Path(vec![t.clone()]), span: sp });
+            hoisted.push(Stmt::Let { name: t, mutable: false, ty: None, value: old, span: sp });
+        } else if !quiet(&args[j]) {
+            return;
+        }
+    }
 }
 
 /// `let f = (a, b) => body` that the rest of its block only calls, `f(x, y)`,
@@ -540,4 +954,311 @@ fn {run_fn}() {{\n    random::seed({seed})\n    expect_quiet(true)\n    let star
     let mut out = vec![Item::Fn(body)];
     out.extend(generated.module.items);
     Ok(out)
+}
+
+// ---- a record update after a tuple chosen by an `if` -------------------------
+
+/// `let (bytes, op) = chunk(p, prev)` (a small helper of this module whose
+/// result is a tuple chosen by `if`s) followed by `{ s with out: concat(s.out,
+/// bytes), ops: put(s.ops, op, …) }` as the block's result: the helper is
+/// inlined and the update moved into each branch, after `let bytes = …`
+/// `let op = …` there. Each branch then appends a list of known length (in
+/// registers) to the record's own list, changed in place, where the tuple
+/// and its list were allocated and freed at every step (a QOI encoder's
+/// pixel). The same values in the same order: the arguments, the helper's
+/// statements, its branch, then the update.
+fn tuple_updates(items: &mut [Item]) {
+    let defines_concat = items.iter().any(|it| matches!(it, Item::Fn(f) if matches!(f.name.as_str(), "concat" | "push" | "put")));
+    let helpers: Vec<FnDecl> = items.iter().filter_map(|it| if let Item::Fn(f) = it { tuple_helper(f).then(|| f.clone()) } else { None }).collect();
+    let mut n = 0usize;
+    for it in items.iter_mut() {
+        let Item::Fn(f) = it else { continue };
+        let mut blocks: Vec<*mut Block> = vec![&mut f.body as *mut Block];
+        f.body.walk_mut(&mut |e| match &mut e.kind {
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b as *mut Block),
+            ExprKind::If { then, .. } => blocks.push(then as *mut Block),
+            _ => {}
+        });
+        // innermost first: rewriting a block replaces what it holds, so the
+        // blocks inside it are done by then and never reached again
+        for b in blocks.into_iter().rev() {
+            // SAFETY: the pointers come from one walk of `f.body`, which
+            // nothing else touches meanwhile; each block is still where the
+            // walk found it, as only blocks inside it (done before) or
+            // outside it (done after) have been rewritten
+            let b = unsafe { &mut *b };
+            if !defines_concat {
+                regroup_concats(b);
+            }
+            let mut c = b.clone();
+            if inline_tuple_call(&mut c, &helpers, &mut n) && sink_tuple(&mut c) {
+                if !defines_concat {
+                    regroup_concats_in_tail(&mut c);
+                }
+                *b = c;
+            } else if sink_tuple(b) && !defines_concat {
+                regroup_concats_in_tail(b);
+            }
+        }
+    }
+}
+
+/// A helper worth inlining: not generic, every parameter plain, a body of at
+/// most 200 nodes without `return`, `match`, lambdas or a call of itself,
+/// whose result is a tuple chosen by `if`s.
+fn tuple_helper(f: &FnDecl) -> bool {
+    if !f.type_params.is_empty() || f.export_c || !f.requires.is_empty() || !f.ensures.is_empty() || f.params.iter().any(|p| p.default.is_some()) {
+        return false;
+    }
+    let Some(t) = &f.body.tail else { return false };
+    if tuple_arity(t).is_none() {
+        return false;
+    }
+    let mut ok = true;
+    let mut size = 0;
+    for st in &f.body.stmts {
+        if !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. }) {
+            ok = false;
+        }
+    }
+    f.body.walk(&mut |e| {
+        size += 1;
+        match &e.kind {
+            ExprKind::Match { .. } | ExprKind::Lambda { .. } | ExprKind::Arms { .. } | ExprKind::Named { .. } => ok = false,
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => {
+                if b.stmts.iter().any(|st| !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. })) {
+                    ok = false;
+                }
+            }
+            ExprKind::If { then, .. } => {
+                if then.stmts.iter().any(|st| !matches!(st, Stmt::Let { .. } | Stmt::LetTuple { .. })) {
+                    ok = false;
+                }
+            }
+            ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == f.name) => ok = false,
+            _ => {}
+        }
+    });
+    ok && size <= 200
+}
+
+/// The number of elements of the tuples an expression's branches all end in.
+fn tuple_arity(e: &Expr) -> Option<usize> {
+    match &e.kind {
+        ExprKind::Tuple(xs) => Some(xs.len()),
+        ExprKind::Block(b) => tuple_arity(b.tail.as_deref()?),
+        ExprKind::If { then, els: Some(els), .. } => {
+            let a = tuple_arity(then.tail.as_deref()?)?;
+            (tuple_arity(els)? == a).then_some(a)
+        }
+        _ => None,
+    }
+}
+
+/// How many tuples an expression's branches end in.
+fn tuple_leaves(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Block(b) => b.tail.as_deref().map_or(0, tuple_leaves),
+        ExprKind::If { then, els: Some(els), .. } => then.tail.as_deref().map_or(0, tuple_leaves) + tuple_leaves(els),
+        _ => 1,
+    }
+}
+
+/// A record update of a variable that changes one of its lists in place:
+/// `{ s with out: concat(s.out, …) }` (or `push`, `put`).
+fn in_place_update(e: &Expr) -> Option<&str> {
+    let ExprKind::With { base, fields } = &e.kind else { return None };
+    let ExprKind::Path(bp) = &base.kind else { return None };
+    if bp.len() != 1 {
+        return None;
+    }
+    let changes = fields.iter().any(|(_, x, _)| {
+        let mut x = x;
+        loop {
+            let ExprKind::Call { callee, args } = &x.kind else { return false };
+            if !matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && matches!(p[0].as_str(), "concat" | "push" | "put")) {
+                return false;
+            }
+            let Some(a) = args.first() else { return false };
+            match &a.kind {
+                ExprKind::Field { base, .. } => return matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == bp[0]),
+                _ => x = a,
+            }
+        }
+    });
+    changes.then_some(bp[0].as_str())
+}
+
+/// `let (a, b) = helper(x, y)` as the last statement before an in-place
+/// update: the helper's body in its place, its parameters and locals renamed
+/// (hidden names), the arguments bound first.
+fn inline_tuple_call(b: &mut Block, helpers: &[FnDecl], n: &mut usize) -> bool {
+    if b.tail.as_deref().and_then(in_place_update).is_none() {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, .. }) = b.stmts.last() else { return false };
+    let ExprKind::Call { callee, args } = &value.kind else { return false };
+    let ExprKind::Path(p) = &callee.kind else { return false };
+    if p.len() != 1 {
+        return false;
+    }
+    let Some(h) = helpers.iter().find(|h| h.name == p[0]) else { return false };
+    if h.params.len() != args.len() || args.iter().any(|a| matches!(a.kind, ExprKind::Named { .. })) {
+        return false;
+    }
+    if tuple_arity(h.body.tail.as_deref().unwrap()) != Some(names.len()) || tuple_leaves(h.body.tail.as_deref().unwrap()) > 6 {
+        return false;
+    }
+    *n += 1;
+    let k = *n;
+    let mut bound: Vec<String> = h.params.iter().map(|p| p.name.clone()).collect();
+    h.body.bound_names(&mut bound);
+    let rename = |x: &str| format!("\0in{k}_{x}");
+    let mut body = h.body.clone();
+    rename_block(&mut body, &bound, &rename);
+    let Some(Stmt::LetTuple { names, value, span }) = b.stmts.pop() else { unreachable!() };
+    let ExprKind::Call { args, .. } = value.kind else { unreachable!() };
+    for (prm, a) in h.params.iter().zip(args) {
+        b.stmts.push(Stmt::Let { name: rename(&prm.name), mutable: false, ty: prm.ty.clone(), value: a, span });
+    }
+    b.stmts.extend(body.stmts);
+    b.stmts.push(Stmt::LetTuple { names, value: *body.tail.unwrap(), span });
+    true
+}
+
+/// Every name of `names` bound or used in `b` renamed.
+fn rename_block(b: &mut Block, names: &[String], rename: &dyn Fn(&str) -> String) {
+    fn stmts(b: &mut Block, names: &[String], rename: &dyn Fn(&str) -> String) {
+        for st in &mut b.stmts {
+            match st {
+                Stmt::Let { name, .. } | Stmt::Assign { name, .. } | Stmt::LetElse { name, .. } if names.contains(name) => *name = rename(name),
+                Stmt::LetTuple { names: ns, .. } => {
+                    for x in ns.iter_mut() {
+                        if names.contains(x) {
+                            *x = rename(x);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    stmts(b, names, rename);
+    b.walk_mut(&mut |e| match &mut e.kind {
+        ExprKind::Path(p) if p.len() == 1 && names.contains(&p[0]) => p[0] = rename(&p[0]),
+        ExprKind::Block(x) | ExprKind::Unsafe(x) => stmts(x, names, rename),
+        ExprKind::If { then, .. } => stmts(then, names, rename),
+        _ => {}
+    });
+}
+
+/// `let (a, b) = if c { …; (x, y) } else { … }` then `{ s with … }` (an
+/// in-place update) as the block's result: each branch ends in `let a = x`
+/// `let b = y` and the update. At most 6 branches; no branch binds a name
+/// the update reads.
+fn sink_tuple(b: &mut Block) -> bool {
+    let Some(tail) = b.tail.as_deref() else { return false };
+    if in_place_update(tail).is_none() {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, .. }) = b.stmts.last() else { return false };
+    if !matches!(value.kind, ExprKind::If { .. }) || tuple_arity(value) != Some(names.len()) || tuple_leaves(value) > 6 {
+        return false;
+    }
+    // the update's names, other than the tuple's, are bound by no branch
+    let mut reads = Vec::new();
+    tail.walk(&mut |e| {
+        if let ExprKind::Path(p) = &e.kind
+            && p.len() == 1
+            && !names.contains(&p[0])
+        {
+            reads.push(p[0].clone());
+        }
+    });
+    let mut bound = Vec::new();
+    value.walk(&mut |e| match &e.kind {
+        ExprKind::Block(x) | ExprKind::Unsafe(x) => x.bound_names(&mut bound),
+        ExprKind::If { then, .. } => then.bound_names(&mut bound),
+        ExprKind::Lambda { params, .. } => bound.extend(params.iter().cloned()),
+        _ => {}
+    });
+    if bound.iter().any(|x| reads.contains(x) || names.contains(x)) {
+        return false;
+    }
+    let Some(Stmt::LetTuple { names, value, span }) = b.stmts.pop() else { unreachable!() };
+    let update = *b.tail.take().unwrap();
+    fn place(e: Expr, names: &[String], update: &Expr, span: crate::Span) -> Expr {
+        let sp = e.span;
+        match e.kind {
+            ExprKind::Tuple(xs) => {
+                let stmts = names
+                    .iter()
+                    .zip(xs)
+                    .map(|(n, x)| if n == "_" { Stmt::Expr(x) } else { Stmt::Let { name: n.clone(), mutable: false, ty: None, value: x, span } })
+                    .collect();
+                Expr { kind: ExprKind::Block(Block { stmts, tail: Some(Box::new(update.clone())), span: sp }), span: sp }
+            }
+            ExprKind::Block(bl) => Expr { kind: ExprKind::Block(place_block(bl, names, update, span)), span: sp },
+            ExprKind::If { cond, then, els } => Expr {
+                kind: ExprKind::If { cond, then: place_block(then, names, update, span), els: els.map(|x| Box::new(place(*x, names, update, span))) },
+                span: sp,
+            },
+            _ => unreachable!("checked by tuple_arity"),
+        }
+    }
+    fn place_block(mut bl: Block, names: &[String], update: &Expr, span: crate::Span) -> Block {
+        let t = *bl.tail.take().unwrap();
+        bl.tail = Some(Box::new(place(t, names, update, span)));
+        bl
+    }
+    b.tail = Some(Box::new(place(value, &names, &update, span)));
+    true
+}
+
+/// `concat(s.out, concat(flush, bytes))` in a record update's fields as
+/// `concat(concat(s.out, flush), bytes)`: the same list (concatenation
+/// groups either way) with the same values in the same order, but built by
+/// growing `s.out` in place rather than by a new list for the inner part.
+fn regroup_concats(b: &mut Block) {
+    if let Some(t) = b.tail.as_deref_mut() {
+        regroup_update(t);
+    }
+}
+
+fn regroup_concats_in_tail(b: &mut Block) {
+    if let Some(t) = b.tail.as_deref_mut() {
+        t.walk_mut(&mut |e| regroup_update(e));
+    }
+}
+
+fn regroup_update(e: &mut Expr) {
+    if in_place_update(e).is_none() && !matches!(&e.kind, ExprKind::With { base, .. } if matches!(&base.kind, ExprKind::Path(p) if p.len() == 1)) {
+        return;
+    }
+    let ExprKind::With { base, fields } = &mut e.kind else { return };
+    let ExprKind::Path(bp) = &base.kind else { return };
+    let s = bp[0].clone();
+    let is_concat = |x: &Expr| matches!(&x.kind, ExprKind::Call { callee, args } if args.len() == 2 && matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "concat"));
+    for (name, x, _) in fields.iter_mut() {
+        // concat(s.f, concat(y, z)) → concat(concat(s.f, y), z), repeatedly
+        loop {
+            if !is_concat(x) {
+                break;
+            }
+            let ExprKind::Call { args, .. } = &x.kind else { unreachable!() };
+            let own = matches!(&args[0].kind, ExprKind::Field { base, name: f } if f == name && matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == s))
+                || is_concat(&args[0]);
+            if !own || !is_concat(&args[1]) {
+                break;
+            }
+            let ExprKind::Call { callee, mut args } = std::mem::replace(&mut x.kind, ExprKind::Bool(false)) else { unreachable!() };
+            let inner = args.pop().unwrap();
+            let a = args.pop().unwrap();
+            let ExprKind::Call { callee: c2, args: mut yz } = inner.kind else { unreachable!() };
+            let z = yz.pop().unwrap();
+            let y = yz.pop().unwrap();
+            let left = Expr { kind: ExprKind::Call { callee: c2, args: vec![a, y] }, span: inner.span };
+            x.kind = ExprKind::Call { callee, args: vec![left, z] };
+        }
+    }
 }

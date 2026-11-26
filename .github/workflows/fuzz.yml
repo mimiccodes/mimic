@@ -1,0 +1,84 @@
+# Differential testing with random programs (tools/fuzz.py): each night,
+# random valid programs are written and run in five ways (release, debug,
+# release without the Mimic IR, release on one thread, debug on 8 threads
+# with one element per chunk); every way must print the same. A program
+# where they disagree, or one fails, is uploaded (fuzz-found) with each
+# way's output, to be added as a fixture once its cause is fixed. Each night
+# takes a new seed (the date); a seed can be given to run one again.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: programs per system
+        default: "300"
+      seed:
+        description: "the seed (empty: today's date)"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 23.1.4
+  TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-arm64
+    name: fuzz (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref }}
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustc --version
+
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deps="$HOME/.mimic/deps"
+          mkdir -p "$deps"
+          gh release download "$TAG" -p "llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -D "$deps"
+          tar -xJf "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz" -C "$deps"
+          rm "$deps/llvm-$LLVM_VERSION-${{ matrix.platform }}.tar.xz"
+          ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Random programs, five ways each
+        env:
+          COUNT: ${{ inputs.count || '300' }}
+          SEED: ${{ inputs.seed }}
+        run: |
+          seed=${SEED:-$(date -u +%Y%m%d)}
+          python3 tools/fuzz.py --mimic target/release/mimic --count "$COUNT" --seed "$seed" --out fuzz-found | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-found-${{ matrix.platform }}
+          path: fuzz-found
+          retention-days: 30

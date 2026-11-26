@@ -1,0 +1,28 @@
+module main
+
+// `xs ¨ f` over a list of lists: one compiled loop, each row lent to `f`
+// as it is (a lambda that captures, or a named function)
+
+fn ok(row: [i64]) -> bool { all(sort(row) == ⍳ 3 + 1) }
+
+fn main() {
+    let g = [[3 1 2] [1 1 2] [2 3 1]]
+    let c = 1
+    // rows to numbers, capturing c
+    print(g ¨ (row => row[c]))
+    // rows to truth values, a named function
+    print(g ¨ ok)
+    // rows to strings
+    print(g ¨ (row => "{≢ row}:{row ▷ +/}"))
+    // rows of floats
+    let fs = [[0.5 1.5] [2.0 4.0]]
+    print(fs ¨ (r => r ▷ +/))
+    // an empty row, and an empty list of rows
+    let some = [[1 2] [] [5]]
+    print(some ¨ (r => ≢ r))
+    let none = some ⌿ [false false false]
+    print(≢ (none ¨ (r => ≢ r)))
+    // long enough to be split over the cores
+    let big = ⍳ 30000 ¨ (i => [i, i * 2, i % 7])
+    print(big ¨ (r => r[1] - r[0] + r[2] + c) ▷ +/)
+}

@@ -1,0 +1,22 @@
+module main
+
+// Count the primes below 3,000,000, testing each number by trial
+// division up to its square root.
+
+fn is_prime(n: i64) -> bool {
+    if n < 2 { false }
+    else if n % 2 == 0 { n == 2 }
+    else { no_divisor(n, 3) }
+}
+
+// true when no odd d, d², … up to √n divides n
+fn no_divisor(n: i64, d: i64) -> bool {
+    if d * d > n { true }
+    else if n % d == 0 { false }
+    else { no_divisor(n, d + 2) }
+}
+
+fn main() {
+    let limit = 3000000
+    print(count(2 ‥ limit, is_prime))
+}

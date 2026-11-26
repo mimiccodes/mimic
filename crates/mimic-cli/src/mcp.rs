@@ -489,7 +489,8 @@ impl Server {
                 let p = self.path(&s("file"))?;
                 let src = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
                 let glyphs = a.get("glyphs").and_then(Value::as_bool).unwrap_or(false);
-                let out = mimic_syntax::format::format(&src, glyphs).map_err(|d| d.render(&p, &src))?;
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let out = mimic_syntax::format::format_file(&name, &src, glyphs).map_err(|d| d.render(&p, &src))?;
                 if out != src {
                     std::fs::write(&p, &out).map_err(|e| e.to_string())?;
                 }

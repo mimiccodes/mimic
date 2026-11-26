@@ -1148,9 +1148,8 @@ impl Lower<'_> {
             ExprKind::Prim { prim: prim @ (Prim::Evolve | Prim::Settle), args } if args.len() == 3 => {
                 let evolve = *prim == Prim::Evolve;
                 let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
-                // (a list as the state: each step's list would have to free
-                // the last one; not covered yet)
-                if matches!(ty, Ty::List(_) | Ty::Rec(_)) || self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                // (a state on the heap: owned by the loop, see own.rs)
+                if self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
                     return None;
                 }
                 let init = self.expr(r, &args[0])?;
@@ -1171,7 +1170,7 @@ impl Lower<'_> {
                     None => None,
                 };
                 let step = self.lambda_region(step, var, ty)?;
-                Some(self.emit(r, ty, Op::Loop { init, var, count, done, step }, e.span))
+                Some(self.emit(r, ty, Op::Loop { init, var, count, done, step, moved: false }, e.span))
             }
             // match on a number, a truth value or a value kept in registers:
             // each arm's test, then the arm (its names bound) or the next;

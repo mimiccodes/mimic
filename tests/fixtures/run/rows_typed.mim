@@ -1,0 +1,34 @@
+module main
+
+// lists of lists typed by their rows ([[i64]], [[f64]], [[bool]]): an
+// element read is a bounds check and a load (each read went through the
+// runtime with type checks); rows grown, replaced, and built by nested maps
+
+fn cell(grid: [[i64]], r: i64, c: i64) -> i64 {
+    let n = ≢ grid
+    if r >= 0 and r < n and c >= 0 and c < ≢ grid[r] { grid[r][c] } else { 0 }
+}
+
+fn around(grid: [[i64]], r: i64, c: i64) -> i64 {
+    cell(grid, r - 1, c) + cell(grid, r + 1, c) + cell(grid, r, c - 1) + cell(grid, r, c + 1)
+}
+
+fn grow(rows: [[f64]], k: i64) -> [[f64]] {
+    if k == 0 { rows } else { grow(push(rows, ⍳ k ¨ (i => i * 0.5)), k - 1) }
+}
+
+fn main() {
+    let g = ⍳ 5 ¨ (r => ⍳ 5 ¨ (c => r * 5 + c))
+    print(g[2][3])
+    print(around(g, 2, 2))
+    print(around(g, 0, 0))
+    print(⍳ 5 ¨ (r => ⍳ 5 ¨ (c => around(g, r, c))) ¨ (row => row ▷ +/))
+    let rows = grow([], 4)
+    print(rows)
+    print(rows ¨ (row => ≢ row))
+    let flags: [[bool]] = [[true false] [false false true]]
+    print(flags[1][2] and not flags[0][1])
+    let h = put(g, 1, [9 9 9])
+    print("{h[1]} {g[1]} {≢ h}")
+    print(cell(h, 1, 4))
+}

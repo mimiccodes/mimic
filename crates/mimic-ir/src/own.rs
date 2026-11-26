@@ -22,6 +22,7 @@ use crate::{Function, Inst, Op, Region, Ty, Val, owns};
 
 /// Places the drops and moves of the whole function.
 pub fn function(f: &mut Function) {
+    SELF.with(|n| *n.borrow_mut() = f.name.rsplit("::").next().unwrap_or("").to_string());
     let mut next = f.values;
     region(&mut f.body, &mut next, &[], &[]);
     f.values = next;
@@ -89,11 +90,19 @@ fn region(r: &mut Region, next: &mut u32, given: &[Val], outer: &[Val]) {
                 region(then, next, &mine, &live);
                 region(els, next, &mine, &live);
             }
-            Op::Loop { done, step, .. } => {
+            // a state on the heap: given to the step (which takes it on or
+            // releases it), lent to `done`
+            Op::Loop { done, step, var, .. } => {
+                let heap = matches!(inst.ty, Ty::List(_) | Ty::Rec(_));
                 if let Some(d) = done {
-                    region(d, next, &[], &roots);
+                    let mut lent = roots.clone();
+                    if heap {
+                        lent.push(*var);
+                    }
+                    region(d, next, &[], &lent);
                 }
-                region(step, next, &[], &roots);
+                let given: &[Val] = if heap { std::slice::from_ref(var) } else { &[] };
+                region(step, next, given, &roots);
             }
             _ => {}
         }
@@ -106,6 +115,29 @@ fn region(r: &mut Region, next: &mut u32, given: &[Val], outer: &[Val]) {
         *next += 1;
         r.insts.insert(j, Inst { dst, ty: Ty::Unit, op: Op::Drop(v), span });
     }
+}
+
+thread_local! {
+    /// The name of the function being placed (its last segment)
+    static SELF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Whether the embedded expression `e` ends with a call to the function
+/// itself (in every branch that ends with a call): text handed to it moves,
+/// so that nothing is left to release after the call, and the recursion
+/// runs as a loop (`make_rows(n - 1, d, push(acc, row))`)
+fn ends_in_self_call(e: &mimic_syntax::ast::Expr) -> bool {
+    use mimic_syntax::ast::ExprKind;
+    let me = SELF.with(|n| n.borrow().clone());
+    fn ends(e: &mimic_syntax::ast::Expr, me: &str) -> bool {
+        match &e.kind {
+            ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Path(p) if p.last().is_some_and(|l| l == me)),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => b.tail.as_deref().is_some_and(|t| ends(t, me)),
+            ExprKind::If { then, els, .. } => then.tail.as_deref().is_some_and(|t| ends(t, me)) || els.as_deref().is_some_and(|x| ends(x, me)),
+            _ => false,
+        }
+    }
+    !me.is_empty() && ends(e, &me)
 }
 
 /// Whether `op`, the last use of the owned `v`, takes it (and marks it so):
@@ -140,6 +172,11 @@ fn take(op: &mut Op, v: Val) -> bool {
             // (a number a change reads)
             None => false,
         },
+        // a loop's first state: the loop holds it on
+        Op::Loop { init, moved, .. } if *init == v => {
+            *moved = true;
+            true
+        }
         Op::Record { fields, moves, .. } => {
             let k = fields.iter().position(|f| *f == v).expect("an operand");
             moves[k] = true;
@@ -148,8 +185,17 @@ fn take(op: &mut Op, v: Val) -> bool {
         // a record an embedded expression reads last: the old path moves it
         // on where it can (`start ▷ evolve(…)` changes it in place), else
         // releases it after the expression
-        Op::Embed { uses, moves, .. } => match uses.iter().position(|u| u.1 == v) {
-            Some(k) if matches!(uses[k].2, Ty::Rec(_)) => {
+        // (a list too, of any element type but text: `push(acc, x)` at the
+        // list's last use grows it in place. Text stays lent: moving it into
+        // the old path made `roman`, `semver` and `url` slower)
+        // (text too into one that ends with the function calling itself)
+        Op::Embed { uses, moves, expr, .. } => match uses.iter().position(|u| u.1 == v) {
+            Some(k)
+                if matches!(uses[k].2, Ty::Rec(_))
+                    || matches!(uses[k].2, Ty::List(t) if !matches!(t, mimic_check::types::Ty::Arr(mimic_check::types::El::Char, _)))
+                    // SAFETY: the expression is a node of the Program, which outlives its IR
+                    || (matches!(uses[k].2, Ty::List(_)) && ends_in_self_call(unsafe { &**expr })) =>
+            {
                 moves[k] = true;
                 true
             }
@@ -208,7 +254,7 @@ mod tests {
             insts: vec![
                 inst(0, Ty::I64, Op::Param(0)),
                 inst(1, list(), Op::Map(Tree::Iota(Val(0)))),
-                inst(2, Ty::I64, Op::Loop { init: Val(0), var: Val(3), count: Some(Val(0)), done: None, step }),
+                inst(2, Ty::I64, Op::Loop { init: Val(0), var: Val(3), count: Some(Val(0)), done: None, step, moved: false }),
             ],
             result: Some(Val(1)),
         };

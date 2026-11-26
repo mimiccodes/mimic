@@ -1,0 +1,36 @@
+module main
+
+// Build CSV text of 300,000 rows of 4 generated numbers, parse it back, and
+// print each column's sum and the first row with the largest third column.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn make_rows(n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let a = next(x)
+        let b = next(a)
+        let c = next(b)
+        let d = next(c)
+        let row = "{a % 1001},{b % 100003},{c % 999983},{d % 99}"
+        make_rows(n - 1, d, push(acc, row))
+    }
+}
+
+fn parse_row(line: str) -> [i64] {
+    split(line, ",") ¨ (field => match parse_int(field) {
+        Some(v) => v,
+        None => 0,
+    })
+}
+
+fn main() {
+    let text = make_rows(300000, 42, []) ▷ join("\n")
+    let rows = lines(text + "\n") ¨ parse_row
+    let sums = ⍳ 4 ¨ (k => rows ¨ (r => r[k]) ▷ +/)
+    print(sums ¨ string ▷ join(" "))
+    let third = rows ¨ (r => r[2])
+    let biggest = third ▷ ⌈/
+    let at = (⍳ (≢ third)) ⌿ (third == biggest)
+    let best = at[0]
+    print("row {best}: {rows[best] ¨ string ▷ join(",")}")
+}

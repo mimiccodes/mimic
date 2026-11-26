@@ -173,8 +173,11 @@ impl Ty {
             // (text and lists of text too: the IR moves and releases them as
             // any list; reading their elements is left to the old path)
             C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
-            // (a plain record: not an instance of a generic or shaped one)
-            C::Obj(id) if mimic_check::types::obj_tid(id) == id as usize && matches!(p.types[id as usize].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(t),
+            // (a plain record: not an instance of a generic one. A shaped
+            // one, built from lists of known length, is the same record on
+            // the heap: its declared type; a field read of known length is
+            // left to the old path, its type not the declared one)
+            C::Obj(id) if mimic_check::types::obj_args(id).is_empty() && matches!(p.types[mimic_check::types::obj_tid(id)].decl.kind, mimic_syntax::ast::TypeKind::Record(_)) => Ty::Rec(C::Obj(mimic_check::types::obj_tid(id) as u32)),
             _ => return None,
         })
     }
@@ -307,8 +310,9 @@ pub enum Op {
     /// `lazies`: `let`s of lists used only inside array expressions, never
     /// built: the old path fuses each into where it is read (in order:
     /// one may read an earlier one). `moves[k]`: the expression is the last
-    /// use of record `uses[k]`, which the old path may move on there (into a
-    /// loop that changes it in place) or release after it.
+    /// use of `uses[k]`, a record or a list (not text), which the old path
+    /// may move on there (into a loop that changes it in place, a `push`
+    /// that grows it in place) or release after it.
     Embed { expr: *const mimic_syntax::ast::Expr, uses: Vec<(String, Val, Ty)>, lazies: Vec<(String, *const mimic_syntax::ast::Expr)>, moves: Vec<bool> },
     /// A loop over a state (`x ▷ evolve(n, s => …)`, `x ▷ settle(s => …,
     /// s => …)`): `var` is the state, defined by the loop and seen by its
@@ -316,7 +320,11 @@ pub enum Op {
     /// `count` (evolve) the step runs that many times (a negative count
     /// stops the program); with `done` (settle) it runs until `done`,
     /// asked before each step, yields true. The loop gives the last state.
-    Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region },
+    /// A state on the heap (a list, a record) is owned by the loop: `step`
+    /// is given it (takes it on or releases it) and yields the next one,
+    /// owned; `done` borrows it. `moved`: `init` handed over as it is (its
+    /// last use), else the loop holds a reference of its own.
+    Loop { init: Val, var: Val, count: Option<Val>, done: Option<Region>, step: Region, moved: bool },
 }
 
 /// One change of a list of i64 (in a [`Op::With`]'s `changes`).
@@ -470,7 +478,7 @@ impl Region {
 /// record): a call's, an `if`'s (both branches then yield owned values), a
 /// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. })
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. })
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -577,7 +585,7 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Set(v, k, x) => {
                 let _ = writeln!(out, "{v} with .{k} = {x}: {}", i.ty.name());
             }
-            Op::Loop { init, var, count, done, step } => {
+            Op::Loop { init, var, count, done, step, .. } => {
                 match count {
                     Some(n) => {
                         let _ = writeln!(out, "loop {var} = {init}, {n} times: {} {{", i.ty.name());
@@ -788,7 +796,7 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
                 }
                 ty(*x, types)?;
             }
-            Op::Loop { init, var, count, done, step } => {
+            Op::Loop { init, var, count, done, step, .. } => {
                 let st = ty(*init, types)?;
                 if st != i.ty {
                     return Err(format!("{}: the loop {} starts as another type", f.name, i.dst));

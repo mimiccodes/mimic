@@ -25,6 +25,7 @@ pub const RUNTIME_GPU_C: &str = include_str!("../../../runtime/mimic_gpu.c");
 /// wepoll 1.5.8 (BSD-2-Clause): epoll on Windows, for the event loop there
 pub const RUNTIME_WEPOLL_C: &str = include_str!("../../../runtime/third_party/wepoll.c");
 pub const RUNTIME_JSON_C: &str = include_str!("../../../runtime/mimic_json.c");
+pub const RUNTIME_OWN_C: &str = include_str!("../../../runtime/mimic_own.c");
 
 /// What to compile: a whole project, or a single standalone `.mim` file.
 pub enum Input {
@@ -115,6 +116,15 @@ pub type Option[T] = Some(T) | None
 
 // Results of operations that can fail: `else` unwraps Ok.
 pub type Result[T, E] = Ok(T) | Err(E)
+
+// The value inside, or `default` when there is none:
+// `parse_int(s) ▷ unwrap_or(300)`, `get(counts, w) ▷ unwrap_or(0)`.
+pub fn unwrap_or[T](o: Option[T], default: T) -> T {
+    match o {
+        Some(x) => x,
+        None => default,
+    }
+}
 
 // Tests: `expect(…)` in a `test \"…\" { }` block becomes one of these (the
 // compiler adds the expression's text and line; runtime/mimic_std.c).
@@ -421,6 +431,9 @@ pub module bytes {
         fn from_hex(text: str) -> Result[[u8], str]
         fn base64(data: [u8]) -> str
         fn from_base64(text: str) -> Result[[u8], str]
+        // floats as 8 bytes each, little-endian, and back (exact)
+        fn of_f64s(values: [f64]) -> [u8]
+        fn to_f64s(data: [u8]) -> [f64]
     }
 }
 
@@ -1046,6 +1059,7 @@ pub fn plan(input: &Input, program: &Program) -> Result<Vec<mimic_codegen::Decis
             native: true,
             opt_level: profile.opt,
             leak_check: false,
+            memcheck: !profile.release,
             emit_main: is_exe,
             export_pub: !is_exe,
             use_net: profile.net,
@@ -1104,6 +1118,14 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     if frame_pointers {
         flags.push("-fno-omit-frame-pointer".into());
     }
+    // every function of the runtime at a 64-byte boundary: a change to one
+    // then moves the functions after it by whole cache lines, never within
+    // one, so a benchmark's speed does not change with where its runtime
+    // code happens to fall (unchanged programs measured 5-20% slower on one
+    // machine after runtime changes they never ran: fib, vm, qoi)
+    if !target.name().starts_with("wasm") {
+        flags.push("-falign-functions=64".into());
+    }
     if !target.is_apple() {
         // a section per function, so the linker drops what a program does not
         // use (Mach-O linkers do this by symbol without being asked)
@@ -1122,6 +1144,11 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
         }
         _ => {}
     }
+    // debug builds: the memory check (a freed value marked, and a use of it
+    // stops the program; mimic_own.c); release builds compile none of it
+    if !release {
+        flags.push("-DMIM_MEMCHECK=1".into());
+    }
     // MIMIC_COUNT_RC=1: a runtime that counts its reference-count operations
     // (docs/design/ownership.md)
     if counting_rc() {
@@ -1134,7 +1161,7 @@ pub fn runtime_object(tc: &Toolchain, target: &Target, release: bool, cpu: Optio
     }
     let base = toolchain::cc(tc, target);
     let base_args: Vec<String> = base.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{RUNTIME_WINDOW_C}{RUNTIME_GPU_C}{RUNTIME_WEPOLL_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
+    let key = mimic_syntax::fnv1a(format!("{RUNTIME_C}{RUNTIME_H}{RUNTIME_NET_C}{RUNTIME_STD_C}{RUNTIME_SCHED_C}{RUNTIME_IO_C}{RUNTIME_UI_C}{RUNTIME_SOCKET_C}{RUNTIME_JSON_C}{RUNTIME_WINDOW_C}{RUNTIME_GPU_C}{RUNTIME_OWN_C}{RUNTIME_WEPOLL_C}{}{base_args:?}{flags:?}", target.name()).as_bytes());
     let dir = packages::cache_dir().join("runtime");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let obj = dir.join(format!("mimic_rt-{}-{key:016x}.o", target.name()));
@@ -1180,6 +1207,7 @@ fn runtime_sources(dir: &Path, key: u64) -> Result<PathBuf, String> {
         ("mimic_json.c", RUNTIME_JSON_C),
         ("mimic_window.c", RUNTIME_WINDOW_C),
         ("mimic_gpu.c", RUNTIME_GPU_C),
+        ("mimic_own.c", RUNTIME_OWN_C),
         ("wepoll.c", RUNTIME_WEPOLL_C),
         ("mimic_rt.h", RUNTIME_H),
     ] {
@@ -1685,6 +1713,7 @@ fn codegen_and_link(
             native: target.name.is_none(),
             opt_level: profile.opt,
             leak_check: profile.leak_check,
+            memcheck: !profile.release,
             emit_main: is_exe,
             export_pub: !is_exe,
             use_net: profile.net,

@@ -1,0 +1,46 @@
+module main
+
+// evolve and settle over a state on the heap (a record holding lists, a
+// list): the loop holds the state, each step takes it on and gives the
+// next; a first state still read after the loop is left as it was
+
+type S = { xs: [i64], k: i64, done: bool }
+
+fn step(s: S) -> S { { s with xs: push(s.xs, s.k * s.k), k: s.k + 1, done: s.k >= 6 } }
+
+fn fresh(s: S) -> S { S { xs: [s.k], k: s.k + 1, done: false } }
+
+fn counted(n: i64) -> S { S { xs: [], k: 0, done: false } ▷ evolve(n, s => step(s)) }
+
+fn until(t: i64) -> S { S { xs: [], k: 0, done: false } ▷ settle(s => step(s), s => s.done or s.k == t) }
+
+// the first state borrowed (a parameter), then read again
+fn again(s: S) -> [i64] {
+    let e = s ▷ evolve(3, x => step(x))
+    concat(s.xs, e.xs)
+}
+
+// a list as the state
+fn grow(n: i64) -> [i64] { [1] ▷ evolve(n, xs => push(xs, ≢ xs * 10)) }
+
+// a first state of known shape (one list of two numbers)
+fn shaped(t: i64) -> S {
+    let start = S { xs: [t, t + 1], k: 0, done: false }
+    start ▷ settle(s => step(s), s => s.k == 3)
+}
+
+fn main() {
+    print(counted(5).xs)
+    print(counted(0).xs)
+    print(until(4).xs)
+    print(until(100).xs)
+    let base = S { xs: [7], k: 2, done: false }
+    let both = again(base)
+    print("{both} {base.xs}")
+    print(grow(4))
+    print(grow(0))
+    print(shaped(9).xs)
+    // a step that makes a new state, the old one released
+    let f = S { xs: [], k: 0, done: false } ▷ evolve(4, s => fresh(s))
+    print("{f.xs} {f.k}")
+}

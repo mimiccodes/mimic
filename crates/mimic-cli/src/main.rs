@@ -828,8 +828,23 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else if window {
                 child.env("MIMIC_UI", "window");
             }
-            let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
-            Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
+            // the program takes this process's place: stopping it (Ctrl-C,
+            // `kill`, a time limit) stops the program, not only `mimic`, and
+            // the shell sees the program's own exit status, a signal included
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::process::CommandExt;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().flush();
+                let e = child.exec();
+                Err(format!("cannot run {}: {e}", a.path.display()))
+            }
+            #[cfg(not(unix))]
+            {
+                let st = child.status().map_err(|e| format!("cannot run {}: {e}", a.path.display()))?;
+                Ok(ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8))
+            }
         }
         Cmd::Test { args, profile, coverage } => test_cmd(args, profile, coverage),
         Cmd::Fmt { files, glyphs, check } => fmt_cmd(files, glyphs, check),
@@ -1180,7 +1195,8 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
     let (mut changed, mut failed) = (Vec::new(), 0);
     for f in &files {
         let src = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
-        match mimic_syntax::format::format(&src, glyphs) {
+        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match mimic_syntax::format::format_file(&name, &src, glyphs) {
             Ok(text) if text != src => {
                 if !check {
                     std::fs::write(f, &text).map_err(|e| format!("cannot write {}: {e}", f.display()))?;
@@ -1189,8 +1205,9 @@ fn fmt_cmd(files: Vec<PathBuf>, glyphs: bool, check: bool) -> Result<ExitCode, S
             }
             Ok(_) => {}
             Err(d) => {
+                // (left untouched: it does not parse)
                 failed += 1;
-                eprintln!("{}:{}:{}: {}", f.display(), d.span.line, d.span.col, d.msg);
+                eprintln!("{}:{}:{}: {} (not formatted: the file does not parse)", f.display(), d.span.line, d.span.col, d.msg);
             }
         }
     }
@@ -1238,6 +1255,9 @@ fn lldb_cmd(file: Option<PathBuf>, args: Vec<String>) -> Result<ExitCode, String
     let st = std::process::Command::new("lldb")
         .arg("-o")
         .arg(format!("command script import {}", script.display()))
+        // (the memory check of debug builds stops here: a freed value used)
+        .arg("-o")
+        .arg("breakpoint set --name mim_memcheck_failed")
         .arg("--")
         .arg(&exe)
         .args(&args)
@@ -1384,6 +1404,12 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs, coverage: bool) -> Result<E
                     Ok(o) => {
                         let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
                         text.push_str(&String::from_utf8_lossy(&o.stderr));
+                        // (a test that died from a signal: said, not an ordinary failure)
+                        if let Some(c) = crash_of(&o.status)
+                            && !text.contains("the program crashed")
+                        {
+                            text.push_str(&format!("crashed ({c})\n"));
+                        }
                         (o.status.success(), text, t.elapsed().as_secs_f64())
                     }
                     Err(e) => (false, format!("cannot run the test: {e}"), 0.0),
@@ -1414,6 +1440,39 @@ fn test_cmd(args: Vec<String>, profile: ProfileArgs, coverage: bool) -> Result<E
         coverage_report(&a.path.with_extension("covmap"), d)?;
     }
     Ok(if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
+}
+
+/// A process that died from a signal (Unix) or an exception (Windows):
+/// its name.
+fn crash_of(st: &std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // (SIGBUS is 10 on macOS and the BSDs, 7 on Linux)
+        let sigbus = if cfg!(target_os = "linux") { 7 } else { 10 };
+        if let Some(sig) = st.signal() {
+            return Some(match sig {
+                11 => "SIGSEGV".to_string(),
+                s if s == sigbus => "SIGBUS".to_string(),
+                4 => "SIGILL".to_string(),
+                8 => "SIGFPE".to_string(),
+                6 => "SIGABRT".to_string(),
+                9 => "SIGKILL".to_string(),
+                s => format!("signal {s}"),
+            });
+        }
+    }
+    #[cfg(windows)]
+    if let Some(c) = st.code() {
+        let c = c as u32;
+        return match c {
+            0xC0000005 => Some("an access violation".into()),
+            0xC00000FD => Some("a stack overflow".into()),
+            0xC0000000..=0xCFFFFFFF => Some(format!("exception 0x{c:08X}")),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Add up the counts of every test process: a summary per file, and

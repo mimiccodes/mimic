@@ -821,7 +821,7 @@ fn where_code_runs() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("w.mim");
-    std::fs::write(&f, "module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn square(x: i64) -> i64 { x * x }\n\nfn shout(x: i64) -> i64 {\n    print(x)\n    x\n}\n\nfn load(path: str) -> Result[str, str] { fs::read(path) }\n\nfn main() {\n    let xs = ⍳ 1000\n    print(xs × 2 ▷ +/)\n    print(xs ¨ square ▷ +/)\n    print([\"ab\" \"cd\"] ¨ (s => upper(s)))\n    print([1 2] ¨ shout)\n    let text = load(\"w.mim\")\n    print(fib(20))\n    print(text)\n}\n").unwrap();
+    std::fs::write(&f, "module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn square(x: i64) -> i64 { x * x }\n\nfn shout(x: i64) -> i64 {\n    print(x)\n    x\n}\n\nfn load(path: str) -> Result[str, str] { fs::read(path) }\n\nfn main() {\n    let xs = ⍳ 1000\n    print(xs × 2 ▷ +/)\n    print(xs ¨ square ▷ +/)\n    print([1 2] ¨ (n => upper(\"x{n}\")))\n    print([1 2] ¨ shout)\n    let text = load(\"w.mim\")\n    print(fib(20))\n    print(text)\n}\n").unwrap();
     let out = mimic().args(["why", "--in"]).arg(&f).arg("--json").output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
     let has = |func: &str, kind: &str, code: &str| v.as_array().unwrap().iter().any(|d| d["function"] == func && d["kind"] == kind && d["code"].as_str().unwrap().contains(code));
@@ -1901,13 +1901,52 @@ fn c_callbacks() {
     std::fs::write(
         proj.join("src/main.mim"),
         "module main\n\nextern \"C\" include \"cb.h\"\n\nfn square(x: f64) -> f64 { x × x }\n\nfn main() {\n\
-         \x20   print(unsafe { c::integrate(x => 2.0 × x, 0.0, 1.0, 10) })\n    let k = 10\n    print(unsafe { c::apply_twice(x => x + k, 1) })\n\
+         \x20   let area = unsafe { c::integrate(x => 2.0 × x, 0.0, 1.0, 10) }\n    print(\"{area:.6}\")\n    let k = 10\n    print(unsafe { c::apply_twice(x => x + k, 1) })\n\
          \x20   unsafe { c::count_up(3, (i, ud) => print(\"visit {i}\"), 0) }\n    print(unsafe { c::sum_mapped(4, i => unsafe { c::apply_twice(j => j × 2, i) }) })\n\
          \x20   print(unsafe { c::integrate(square, 0.0, 1.0, 4) })\n}\n",
     )
     .unwrap();
     let out = mimic().current_dir(&proj).arg("run").output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1.0\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1.000000\n21\nvisit 0\nvisit 1\nvisit 2\n40\n0.328125\n", "{}", String::from_utf8_lossy(&out.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The memory check of debug builds: a value released, retained or read
+/// after it was freed stops the program with what was done and what the
+/// value was (here C code does it through the runtime's own functions: a
+/// Mimic program cannot, unless the compiler is wrong).
+#[test]
+fn memory_check() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-memcheck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(mimic().current_dir(&dir).args(["create", "mcp"]).status().unwrap().success());
+    let proj = dir.join("mcp");
+    std::fs::create_dir_all(proj.join("c")).unwrap();
+    std::fs::write(proj.join("c/uaf.h"), "int freed_then(int how);\n").unwrap();
+    std::fs::write(
+        proj.join("c/uaf.c"),
+        "#include \"uaf.h\"\nvoid *mim_alloc_vec(int dtype, long long n);\nvoid mim_release(void *v);\nvoid mim_retain(void *v);\n\
+         void *mim_int(long long x);\nvoid *mim_index(void *xs, void *i);\n\
+         int freed_then(int how) { void *v = mim_alloc_vec(0, 4); mim_release(v);\n\
+         if (how == 0) mim_release(v); else if (how == 1) mim_retain(v); else mim_index(v, mim_int(0));\n\
+         return 0; }\n",
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(proj.join("mim.mim")).unwrap();
+    std::fs::write(proj.join("mim.mim"), manifest.replace("link = []", "sources = [\"c/uaf.c\"]\n    include = [\"c\"]")).unwrap();
+    for (how, done) in [(0, "released"), (1, "retained"), (2, "read")] {
+        std::fs::write(
+            proj.join("src/main.mim"),
+            format!("module main\n\nextern \"C\" include \"uaf.h\"\n\nfn main() {{\n    print(\"before\")\n    print(unsafe {{ c::freed_then({how}) }})\n}}\n"),
+        )
+        .unwrap();
+        let out = mimic().current_dir(&proj).args(["run", "--debug"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "before\n", "{err}");
+        assert!(!out.status.success(), "{err}");
+        assert!(err.contains(&format!("memory check: a value ([i64], 4 elements) was {done} after it was freed")), "{err}");
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -2157,9 +2196,11 @@ fn profile_names_functions() {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("busy.mim");
     // a long sequential chain: one function holds nearly all the time
+    // (long enough for 20 samples on a fast machine: 50,000,000 steps took
+    // 0.24 s on one, 16 samples)
     std::fs::write(
         &f,
-        "module main\n\nfn spin(n: i64, acc: i64) -> i64 {\n    if n == 0 { acc } else { spin(n - 1, (acc * 31 + n) % 1000003) }\n}\n\nfn main() {\n    print(spin(50000000, 1) > 0)\n}\n",
+        "module main\n\nfn spin(n: i64, acc: i64) -> i64 {\n    if n == 0 { acc } else { spin(n - 1, (acc * 31 + n) % 1000003) }\n}\n\nfn main() {\n    print(spin(300000000, 1) > 0)\n}\n",
     )
     .unwrap();
     let out = mimic().args(["profile", "--json"]).arg(&f).output().unwrap();

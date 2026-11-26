@@ -1,0 +1,55 @@
+module main
+
+// 500 bank accounts as records. Applies 4,000,000 generated deposits,
+// withdrawals (refused when the balance is short) and transfers, then
+// prints the total money, the richest account and the refusals.
+
+type Account = { id: i64, balance: i64 }
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn add(accounts: [Account], i: i64, amount: i64) -> [Account] {
+    let mut updated = accounts
+    updated[i] = { updated[i] with balance: updated[i].balance + amount }
+    updated
+}
+
+fn apply(n: i64, x: i64, accounts: [Account], refused: i64) -> ([Account], i64) {
+    if n == 0 {
+        (accounts, refused)
+    } else {
+        let x1 = next(x)
+        let kind = x1 % 3
+        let x2 = next(x1)
+        let a = x2 % 500
+        let x3 = next(x2)
+        let amount = x3 % 1000 + 1
+        if kind == 0 {
+            apply(n - 1, x3, add(accounts, a, amount), refused)
+        } else if kind == 1 {
+            if accounts[a].balance >= amount {
+                apply(n - 1, x3, add(accounts, a, -amount), refused)
+            } else {
+                apply(n - 1, x3, accounts, refused + 1)
+            }
+        } else {
+            let x4 = next(x3)
+            let b = x4 % 500
+            if accounts[a].balance >= amount {
+                apply(n - 1, x4, add(add(accounts, a, -amount), b, amount), refused)
+            } else {
+                apply(n - 1, x4, accounts, refused + 1)
+            }
+        }
+    }
+}
+
+fn main() {
+    let start = ⍳ 500 ¨ (i => Account { id: i, balance: 1000 })
+    let (accounts, refused) = apply(4000000, 42, start, 0)
+    let total = accounts ¨ (a => a.balance) ▷ +/
+    print("total {total}")
+    let richest = max_by(accounts, a => a.balance) else { return }
+    print("richest {richest.id} with {richest.balance}")
+    print("refused {refused}")
+}

@@ -1,0 +1,40 @@
+module main
+
+// Encrypt a generated 10 MB text with a Caesar shift of 13 (letters only),
+// decrypt it again, and print a checksum of the cipher text and whether
+// the round trip gives back the original.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn make_text(alphabet: [str], n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let y = next(x)
+        make_text(alphabet, n - 1, y, push(acc, alphabet[y % ≢ alphabet]))
+    }
+}
+
+fn shift(c: str, k: i64) -> str {
+    let code = char_code(c)
+    if code >= char_code("a") and code <= char_code("z") {
+        char_of(char_code("a") + (code - char_code("a") + k) % 26)
+    } else if code >= char_code("A") and code <= char_code("Z") {
+        char_of(char_code("A") + (code - char_code("A") + k) % 26)
+    } else {
+        c
+    }
+}
+
+fn caesar(text: str, k: i64) -> str {
+    chars(text) ¨ (c => shift(c, k)) ▷ join("")
+}
+
+fn main() {
+    let alphabet = chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ .,!?;:")
+    let text = make_text(alphabet, 10000000, 42, []) ▷ join("")
+    let cipher = caesar(text, 13)
+    let plain = caesar(cipher, 26 - 13)
+    let b = bytes::of_text(cipher)
+    let weights = (⍳ (≢ b)) % 255 + 1
+    print(b * weights ▷ +/)
+    print(plain == text)
+}

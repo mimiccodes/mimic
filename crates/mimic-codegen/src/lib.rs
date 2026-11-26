@@ -59,6 +59,10 @@ pub struct Settings {
     pub opt_level: u8,
     /// Emit the runtime leak check at exit (debug builds).
     pub leak_check: bool,
+    /// The memory check (debug builds, with a runtime built for it): every
+    /// release goes to the runtime, which marks what it frees, so no value
+    /// is freed by compiled code out of its sight.
+    pub memcheck: bool,
     /// Emit a C `main` that calls `<root>::main::main`.
     pub emit_main: bool,
     /// Keep `pub` functions externally visible (library builds).
@@ -350,6 +354,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         futures: Vec::new(),
         schemas: HashMap::new(),
         opt_level: settings.opt_level,
+        memcheck: settings.memcheck,
         profiling: settings.frame_pointers,
         cov: settings.coverage.then(HashMap::new),
         cov_order: Vec::new(),
@@ -358,10 +363,21 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         exit_fid: None,
         building_literal: false,
         body_exit: None,
+        tail_calls: HashMap::new(),
+        tail_fns: std::collections::HashSet::new(),
+        ir_exit_top: 0,
         lazy_deep: None,
         cur_kind: Kind::Plain,
         borrow_binds: false,
         let_moves: false,
+        tuple_moves: Vec::new(),
+        after_args: Vec::new(),
+        parts_fns: HashMap::new(),
+        parts_queue: Vec::new(),
+        parts_mode: false,
+        tail_ctx: false,
+        want_parts_site: None,
+        parts_result: None,
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -432,17 +448,45 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
             f.add_attribute(inkwell::attributes::AttributeLoc::Function, fp);
         }
     }
+    cg.mark_arg_arrays();
     cg.module.verify().map_err(|e| format!("internal compiler error: invalid LLVM IR:\n{}", e.to_string()))?;
     if settings.opt_level > 0 {
         cg.module
             .run_passes(&format!("default<O{}>", settings.opt_level.min(3)), &tm, PassBuilderOptions::create())
             .s()?;
+    } else {
+        // (every other function is left as written: `optnone`, which these
+        // passes skip, so the debugger finds its variables where they are)
+        let optnone = inkwell::attributes::Attribute::get_named_enum_kind_id("optnone");
+        let noinline = inkwell::attributes::Attribute::get_named_enum_kind_id("noinline");
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            let always = f.get_enum_attribute(inkwell::attributes::AttributeLoc::Function, inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline")).is_some();
+            if !always && !cg.tail_fns.contains(f.get_name().to_string_lossy().as_ref()) {
+                f.add_attribute(inkwell::attributes::AttributeLoc::Function, cg.ctx.create_enum_attribute(optnone, 0));
+                f.add_attribute(inkwell::attributes::AttributeLoc::Function, cg.ctx.create_enum_attribute(noinline, 0));
+            }
+        }
+        // debug builds: no optimisation, but a function that calls itself
+        // last still runs as a loop, as in a release build, so a program
+        // that works there does not overflow the stack here (variables
+        // become registers first, which the debugger still follows, so a
+        // release of a value moved before the call folds away)
+        cg.module.run_passes("function(mem2reg,instsimplify,simplifycfg,jump-threading,simplifycfg,tailcallelim)", &tm, PassBuilderOptions::create()).s()?;
+    }
+    // every function of the program at a 64-byte boundary too, as the
+    // runtime's (driver.rs): where the runtime's code falls no longer moves
+    // a program's own hot functions within a cache line (fib's recursion,
+    // which calls nothing of the runtime on one core, moved 12% with it)
+    let tstr = triple.as_str().to_string_lossy().to_string();
+    if !(tstr.starts_with("wasm") || tstr.starts_with("nvptx") || tstr.starts_with("amdgcn") || tstr.starts_with("spirv") || tstr.starts_with("bpf")) {
+        for f in cg.module.get_functions().filter(|f| f.count_basic_blocks() > 0) {
+            f.as_global_value().set_alignment(64);
+        }
     }
     if let Some(ir) = ir {
         cg.module.print_to_file(ir).s()?;
     }
     // backends that only write assembly
-    let tstr = triple.as_str().to_string_lossy().to_string();
     if tstr.starts_with("nvptx") || tstr.starts_with("xcore") {
         let asm = obj.with_extension(if tstr.starts_with("nvptx") { "ptx" } else { "s" });
         tm.write_to_file(&cg.module, FileType::Assembly, &asm).s()?;
@@ -602,6 +646,7 @@ struct Cg<'ctx, 'p> {
     lazies: Vec<(String, *const Expr)>,
     /// LLVM optimisation level (tail recursion becomes loops at ≥ 2).
     opt_level: u8,
+    memcheck: bool,
     /// A profiling build (Settings::frame_pointers): every allocation goes
     /// through the runtime's allocator, which counts them.
     profiling: bool,
@@ -623,6 +668,17 @@ struct Cg<'ctx, 'p> {
     building_literal: bool,
     /// The scope depth of that function's body while it is compiled.
     body_exit: Option<usize>,
+    /// The function's calls to itself that are its result, and the locals
+    /// each one's arguments may still use (see owned::tail_self_calls)
+    tail_calls: HashMap<usize, Vec<owned::TailArg>>,
+    /// The functions that call themselves last (their LLVM names): in debug
+    /// builds only these are optimised (into loops), the rest stay as written
+    /// for the debugger
+    tail_fns: std::collections::HashSet<String>,
+    /// The IR region of `main`'s body while it is compiled (its address):
+    /// what an expression there is handed is not released after it either,
+    /// as main's own values are not (the process exits next)
+    ir_exit_top: usize,
     /// In a native function of plain numbers: its key (the depth is checked
     /// before each call it makes; see `scalars_only`).
     lazy_deep: Option<Key>,
@@ -635,6 +691,25 @@ struct Cg<'ctx, 'p> {
     borrow_binds: bool,
     /// The `let` about to be compiled may move (owned.rs).
     let_moves: bool,
+    /// The names of the `let (a, b) = …` being compiled that move at their
+    /// one use (as a `let`'s, see let_move_site)
+    tuple_moves: Vec<String>,
+    /// For the call being compiled: its arguments that are a variable at its
+    /// last use (argument index, name), released once every argument is
+    /// evaluated when the callee takes them (see call_user)
+    after_args: Vec<(usize, String)>,
+    /// A tuple of a few numbers and values on the heap returned as its parts
+    /// (a struct in registers, no tuple made): the functions compiled that
+    /// way (each beside its ordinary version), the ones still to compile,
+    /// whether the function being compiled is one, whether the block being
+    /// compiled is in its tail position, the call site that asked for
+    /// parts, and the parts that call gave
+    parts_fns: HashMap<(Key, Kind), FunctionValue<'ctx>>,
+    parts_queue: Vec<(Key, Kind)>,
+    parts_mode: bool,
+    tail_ctx: bool,
+    want_parts_site: Option<usize>,
+    parts_result: Option<inkwell::values::StructValue<'ctx>>,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -1008,6 +1083,59 @@ impl<'ctx> Cg<'ctx, '_> {
         Ok(())
     }
 
+    /// In the functions that call themselves last, and those they call (two
+    /// levels: what inlining may bring into them): a runtime call given an
+    /// array of values on the stack, which it reads during the call and does
+    /// not keep (runtime/mimic_rt.c), says so to LLVM (`captures(none)`). The
+    /// array then does not escape, and the call to itself can still be a
+    /// jump (a recursion that builds a string or a record on the way runs as
+    /// a loop). Only there: said everywhere, LLVM marked other calls as tail
+    /// calls too, and `vm` and `http_parse` ran 6-10% slower.
+    fn mark_arg_arrays(&self) {
+        use inkwell::values::{CallSiteValue, InstructionOpcode};
+        let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("captures");
+        if kind == 0 || self.tail_fns.is_empty() {
+            return;
+        }
+        let calls = |f: FunctionValue<'ctx>| -> Vec<CallSiteValue<'ctx>> {
+            f.get_basic_blocks()
+                .into_iter()
+                .flat_map(|b| b.get_instructions())
+                .filter(|i| i.get_opcode() == InstructionOpcode::Call)
+                .filter_map(|i| CallSiteValue::try_from(i).ok())
+                .collect()
+        };
+        let mut set: Vec<FunctionValue<'ctx>> = self.module.get_functions().filter(|f| self.tail_fns.contains(f.get_name().to_string_lossy().as_ref())).collect();
+        let mut frontier = set.clone();
+        for _ in 0..2 {
+            let mut next = Vec::new();
+            for f in &frontier {
+                for c in calls(*f) {
+                    if let Some(g) = c.get_called_fn_value()
+                        && g.count_basic_blocks() > 0
+                        && !set.contains(&g)
+                    {
+                        set.push(g);
+                        next.push(g);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        for f in set {
+            for c in calls(f) {
+                let Some(g) = c.get_called_fn_value() else { continue };
+                let i = match g.get_name().to_bytes() {
+                    b"mim_concat" | b"mim_array_lit" => 1,
+                    b"mim_obj" | b"mim_closure" => 2,
+                    b"mim_closure_checked" => 3,
+                    _ => continue,
+                };
+                c.add_attribute(inkwell::attributes::AttributeLoc::Param(i), self.ctx.create_enum_attribute(kind, 0));
+            }
+        }
+    }
+
     /// Release a value: short numeric vectors held once go straight back to
     /// this thread's free list, inline; everything else through mim_release.
     fn release(&self, p: PointerValue<'ctx>) -> R<()> {
@@ -1020,10 +1148,28 @@ impl<'ctx> Cg<'ctx, '_> {
                     None => self.b.build_call(self.release_fn(false), &[p.into()], "").s()?,
                 };
             }
+            false if !self.tail_calls.is_empty() => self.release_out(p)?,
             false => {
                 self.call_rt("mim_release", &[p.into()])?;
             }
         }
+        Ok(())
+    }
+
+    /// `mim_release`, out of line, after a check for null (a value moved
+    /// away): once the variable is a register, a release after a moved
+    /// value folds away, and a call before it can still be the function's
+    /// last act (a recursion that runs as a loop)
+    fn release_out(&self, p: PointerValue<'ctx>) -> R<()> {
+        let f = self.b.get_insert_block().and_then(|b| b.get_parent()).ok_or("internal compiler error: release outside a function")?;
+        let go = self.ctx.append_basic_block(f, "rel");
+        let done = self.ctx.append_basic_block(f, "rel_done");
+        let null = self.b.build_is_null(p, "").s()?;
+        self.b.build_conditional_branch(null, done, go).s()?;
+        self.b.position_at_end(go);
+        self.call_rt("mim_release", &[p.into()])?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
         Ok(())
     }
 
@@ -1190,6 +1336,15 @@ impl<'ctx> Cg<'ctx, '_> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
         let params: Vec<BasicMetadataTypeEnum> = if with_heap { vec![self.ptr.into(), self.ptr.into()] } else { vec![self.ptr.into()] };
         let f = self.module.add_function(name, self.ctx.void_type().fn_type(&params, false), Some(Linkage::Internal));
+        // (the memory check: the runtime frees everything, and marks it)
+        if self.memcheck {
+            let b = self.ctx.create_builder();
+            b.position_at_end(self.ctx.append_basic_block(f, "entry"));
+            let v = f.get_nth_param(if with_heap { 1 } else { 0 }).unwrap();
+            b.build_call(self.rt("mim_release"), &[v.into()], "").expect("building _mimic_release");
+            b.build_return(None).expect("building _mimic_release");
+            return f;
+        }
         let build = || -> R<()> {
             let (vt, ht) = (self.val_ty(), self.heap_ty());
             let b = self.ctx.create_builder();
@@ -1628,6 +1783,8 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_memo" => ptr.fn_type(&[p, p, i32t, p], false),
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
+            "mim_set_index_v" => ptr.fn_type(&[p, p, p], false),
+            "mim_shrink_own" => ptr.fn_type(&[p, i64t, i32t], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
             "mim_as_f64" => self.ctx.f64_type().fn_type(&[p], false),
@@ -1639,6 +1796,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_index_fail" => void.fn_type(&[p, i64t], false),
+            "mim_char_of_i64" => ptr.fn_type(&[i64t], false),
             "mim_byte_fail" => void.fn_type(&[i64t, i64t], false),
             "mim_sort_i64_small" | "mim_sort_f64_small" => void.fn_type(&[p, i64t], false),
             "mim_vec_as" => ptr.fn_type(&[p, i32t], false),
@@ -1662,7 +1820,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_obj_with" => ptr.fn_type(&[p, i64t, p], false),
             "mim_lit_list" => ptr.fn_type(&[p, p], false),
             "mim_obj_unique" => ptr.fn_type(&[p], false),
-            "mim_format" => ptr.fn_type(&[p], false),
+            "mim_format" | "mim_std_char_code" => ptr.fn_type(&[p], false),
             "mim_concat" => ptr.fn_type(&[i64t, p], false),
             "mim_str_eq" | "mim_str_cmp" | "mim_equal" => self.ctx.i64_type().fn_type(&[p, p], false),
             "mim_unwrap_ok" => self.ctx.i64_type().fn_type(&[p], false),
@@ -1822,10 +1980,170 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn drain(&mut self) -> R<()> {
-        while let Some((k, kind)) = self.queue.pop() {
-            self.define(&k, kind)?;
+        loop {
+            if let Some((k, kind)) = self.queue.pop() {
+                self.define(&k, kind)?;
+            } else if let Some((k, kind)) = self.parts_queue.pop() {
+                let fv = self.parts_fns[&(k.clone(), kind)];
+                self.parts_mode = true;
+                let r = self.define_with(fv, &k, kind);
+                self.parts_mode = false;
+                self.tail_ctx = false;
+                r?;
+            } else {
+                return Ok(());
+            }
         }
+    }
+
+    /// The parts a tuple of type `t` is returned as, when it is returned so:
+    /// 2 to 4 of them, each a number, a truth value or a value on the heap
+    /// (a tuple of numbers alone is in registers anyway: `flat`)
+    fn parts_tys(&self, t: Ty) -> Option<Vec<Ty>> {
+        let Ty::Tup(id) = t else { return None };
+        if self.flat(t).is_some() {
+            return None;
+        }
+        let es = types::tuple_elems(id);
+        let ok = (2..=4).contains(&es.len())
+            && es.iter().all(|e| matches!(e, Ty::I64 | Ty::F64 | Ty::Bool) || (fixed(*e).is_none() && self.flat(*e).is_none() && !matches!(e, Ty::Unit | Ty::Never | Ty::F32 | Ty::I32) && self.repr(*e).is_pointer_type()));
+        ok.then_some(es)
+    }
+
+    fn parts_struct(&self, es: &[Ty]) -> inkwell::types::StructType<'ctx> {
+        let ts: Vec<BasicTypeEnum<'ctx>> = es.iter().map(|e| self.repr(*e)).collect();
+        self.ctx.struct_type(&ts, false)
+    }
+
+    /// The version of `k` that returns its tuple as parts.
+    fn request_parts(&mut self, k: &Key, kind: Kind) -> R<FunctionValue<'ctx>> {
+        if let Some(f) = self.parts_fns.get(&(k.clone(), kind)) {
+            return Ok(*f);
+        }
+        let s = self.spec(k)?;
+        let es = self.parts_tys(s.ret).ok_or("internal compiler error: not a tuple of parts")?;
+        let st = self.parts_struct(&es);
+        let mut ps: Vec<BasicMetadataTypeEnum> = s.params.iter().map(|t| self.repr(*t).into()).collect();
+        if kind.has_depth() {
+            ps.push(self.ctx.i32_type().into());
+        }
+        let name = format!("{}${}.parts", self.p.fns[k.0].symbol, ty_suffix(&k.1));
+        let f = self.module.add_function(&name, st.fn_type(&ps, false), Some(Linkage::Internal));
+        self.parts_fns.insert((k.clone(), kind), f);
+        self.parts_queue.push((k.clone(), kind));
+        Ok(f)
+    }
+
+    /// A tuple value (boxed) as its parts, each owned.
+    fn unpack_parts(&mut self, v: V<'ctx>, es: &[Ty]) -> R<inkwell::values::StructValue<'ctx>> {
+        let b = self.boxed(v)?;
+        let mut out = self.parts_struct(es).get_undef();
+        for (i, t) in es.iter().enumerate() {
+            let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+            let fv = self.as_ty(fv, *t, "part of the result")?;
+            let fv = self.own(fv)?;
+            out = self.b.build_insert_value(out, self.basic(fv), i as u32, "").s()?.into_struct_value();
+        }
+        self.drop_tmp(b)?;
+        Ok(out)
+    }
+
+    /// Leave the function with its parts (as `ret` does: tasks first, then
+    /// every owned local released).
+    fn ret_parts(&mut self, sv: inkwell::values::StructValue<'ctx>) -> R<()> {
+        let pending: Vec<Pending<'ctx>> = self.futures.iter().flatten().cloned().collect();
+        for p in pending {
+            let h = self.b.build_load(self.ptr, p.hslot, "").s()?;
+            let r = self.call_rt("mim_await", &[h.into()])?.unwrap().into_pointer_value();
+            self.call_rt("mim_release", &[r.into()])?;
+        }
+        for scope in self.scopes.iter().rev() {
+            self.release_scope(scope)?;
+        }
+        self.b.build_return(Some(&sv)).s()?;
         Ok(())
+    }
+
+    /// `e`, the result of a function returning parts: a tuple written out
+    /// gives them as they are (no tuple made), an `if` gives them from each
+    /// branch, a call of such a function hands its parts on; anything else
+    /// is a tuple taken apart.
+    fn ret_tail(&mut self, e: &Expr) -> R<()> {
+        let es = self.parts_tys(self.cur_ret).ok_or("internal compiler error: not a tuple of parts")?;
+        match &e.kind {
+            ExprKind::Tuple(xs) if xs.len() == es.len() => {
+                let mut out = self.parts_struct(&es).get_undef();
+                for (i, (x, t)) in xs.iter().zip(&es).enumerate() {
+                    let v = self.expr(x)?;
+                    let v = self.as_ty(v, *t, "part of the result")?;
+                    let v = self.own(v)?;
+                    out = self.b.build_insert_value(out, self.basic(v), i as u32, "").s()?.into_struct_value();
+                }
+                if !self.terminated() {
+                    self.ret_parts(out)?;
+                }
+                Ok(())
+            }
+            ExprKind::If { cond, then, els: Some(els) } => {
+                let c = self.expr(cond)?;
+                let bit = self.truth(c)?;
+                let f = self.cur_fn.unwrap();
+                let then_bb = self.ctx.append_basic_block(f, "then");
+                let else_bb = self.ctx.append_basic_block(f, "else");
+                self.b.build_conditional_branch(bit, then_bb, else_bb).s()?;
+                self.b.position_at_end(then_bb);
+                self.tail_ctx = true;
+                let v = self.block(then)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                self.b.position_at_end(else_bb);
+                match &els.kind {
+                    ExprKind::Block(b) => {
+                        self.tail_ctx = true;
+                        let v = self.block(b)?;
+                        if !self.terminated() {
+                            self.ret(v)?;
+                        }
+                    }
+                    _ => self.ret_tail(els)?,
+                }
+                Ok(())
+            }
+            ExprKind::Block(b) => {
+                self.tail_ctx = true;
+                let v = self.block(b)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                Ok(())
+            }
+            ExprKind::Call { .. } => {
+                self.want_parts_site = Some(id(e));
+                let v = self.expr(e)?;
+                self.want_parts_site = None;
+                match self.parts_result.take() {
+                    Some(sv) => {
+                        if !self.terminated() {
+                            self.ret_parts(sv)?;
+                        }
+                    }
+                    None => {
+                        if !self.terminated() {
+                            self.ret(v)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                let v = self.expr(e)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Which kind of a callee to call from the current context.
@@ -1877,6 +2195,10 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn define(&mut self, k: &Key, kind: Kind) -> R<()> {
         let fv = self.fns[&(k.clone(), kind)];
+        self.define_with(fv, k, kind)
+    }
+
+    fn define_with(&mut self, fv: FunctionValue<'ctx>, k: &Key, kind: Kind) -> R<()> {
         let spec = self.spec(k)?;
         // the Program's own AST: expression types are keyed by node address
         let p = self.p;
@@ -1907,7 +2229,17 @@ impl<'ctx> Cg<'ctx, '_> {
             self.b.build_store(slot, fv.get_nth_param(i as u32).unwrap()).s()?;
             self.dbg_var(&prm.name, slot, t, decl.span.line, Some(i as u32 + 1));
             let c = consumed.get(i).copied().unwrap_or(false);
-            let m = sites.get(i).is_some_and(|s| !s.is_empty());
+            let mut m = sites.get(i).is_some_and(|s| !s.is_empty());
+            // a list (or a value of unknown type) taken over: it moves on at
+            // its last use in each branch (into the `push` that grows it in
+            // place, into the call that takes it)
+            if c && !m && matches!(t, Ty::Arr(_, 0) | Ty::Dyn) {
+                let at = owned::last_use_sites(&prm.name, &decl.body);
+                if !at.is_empty() {
+                    self.move_at.extend(at);
+                    m = true;
+                }
+            }
             self.scopes[0].push(Local { name: prm.name.clone(), slot, ty: t, owned: c, mutable: false, moves: m });
         }
         if self.opt_level >= 2 {
@@ -1978,7 +2310,14 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.call_rt("mim_deep_enter", &[])?;
                 let r = self.b.build_call(wrap, &args, "").s()?.try_as_basic_value().basic().unwrap();
                 self.call_rt("mim_deep_leave", &[])?;
-                self.b.build_return(Some(&r)).s()?;
+                if self.parts_mode {
+                    // (the net gives the tuple: taken apart)
+                    let es = self.parts_tys(spec.ret).ok_or("internal compiler error: not a tuple of parts")?;
+                    let sv = self.unpack_parts(V::P(r.into_pointer_value(), true), &es)?;
+                    self.b.build_return(Some(&sv)).s()?;
+                } else {
+                    self.b.build_return(Some(&r)).s()?;
+                }
                 self.b.position_at_end(body_bb);
                 self.native_frame = true;
                 self.cur_depth = Some(depth);
@@ -1994,13 +2333,19 @@ impl<'ctx> Cg<'ctx, '_> {
             Kind::Plain | Kind::Seq => {}
         }
         self.body_exit = (self.exit_fid == Some(k.0) && kind == Kind::Plain && k.1.is_empty()).then_some(self.scopes.len() + 1);
+        // (the IR's embedded expressions too: one that is the function's
+        // result ends with the call as well)
+        self.tail_calls = if self.heap_ok_target() { owned::tail_self_calls(p, p.fns[k.0].module, k.0, &decl.body) } else { HashMap::new() };
+        if !self.tail_calls.is_empty() {
+            self.tail_fns.insert(fv.get_name().to_string_lossy().into_owned());
+        }
         // through the Mimic IR, when it covers the function (MIMIC_IR, ir.rs)
         let (use_ir, print_ir) = ir::wanted();
         // (MIMIC_IR_ONLY=text: only functions whose path holds it, to find
         // which function an IR difference comes from)
         let only = std::env::var("MIMIC_IR_ONLY").ok();
         // (not in coverage builds: the IR counts no lines)
-        let lowered = if use_ir && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
+        let lowered = if use_ir && !self.parts_mode && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
             let takes = self.consumed(k);
             mimic_ir::lower::function(self.p, k.0, spec.clone(), &takes, self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
@@ -2019,12 +2364,17 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 self.ir_body(f)?
             }
-            None => self.block(&decl.body)?,
+            None => {
+                self.tail_ctx = self.parts_mode;
+                self.block(&decl.body)?
+            }
         };
         self.body_exit = None;
         if !self.terminated() {
             self.ret(v)?;
         }
+        // (after the return: its releases check for null too)
+        self.tail_calls.clear();
         self.scopes.clear();
         self.native_frame = false;
         self.cur_depth = None;
@@ -2039,6 +2389,11 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Convert to the return type, release every owned local, and return.
     fn ret(&mut self, v: V<'ctx>) -> R<()> {
+        if self.parts_mode {
+            let es = self.parts_tys(self.cur_ret).ok_or("internal compiler error: not a tuple of parts")?;
+            let sv = self.unpack_parts(v, &es)?;
+            return self.ret_parts(sv);
+        }
         // leaving the function: every implicit future still running finishes first
         let pending: Vec<Pending<'ctx>> = self.futures.iter().flatten().cloned().collect();
         for p in pending {
@@ -2182,6 +2537,8 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_what = std::mem::take(&mut self.ret_what);
         let saved_futures = std::mem::take(&mut self.futures);
         let saved_kind = std::mem::replace(&mut self.cur_kind, Kind::Plain);
+        // (a function made inside one returning parts returns its own way)
+        let saved_parts = (std::mem::replace(&mut self.parts_mode, false), std::mem::replace(&mut self.tail_ctx, false), self.want_parts_site.take());
         let saved_dbg = self.dbg_save();
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
@@ -2191,6 +2548,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let name = fv.get_name().to_string_lossy().into_owned();
         self.dbg_enter(fv, &name, None, line, true);
         let r = f(self);
+        (self.parts_mode, self.tail_ctx, self.want_parts_site) = saved_parts;
         self.dbg_restore(saved_dbg);
         self.cur_fn = saved_fn;
         self.scopes = saved_scopes;
@@ -2598,6 +2956,10 @@ impl<'ctx> Cg<'ctx, '_> {
                     // (inline: a value that moved away left a null, which
                     // LLVM sees and drops the release entirely)
                     self.release(cur.into_pointer_value())?;
+                } else if !self.tail_calls.is_empty() {
+                    // (a function that calls itself last: checked for the
+                    // null an early release left, see release_out)
+                    self.release_out(cur.into_pointer_value())?;
                 } else {
                     self.call_rt("mim_release", &[cur.into()])?;
                 }
@@ -2607,6 +2969,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
+        // (the tail of a function returning parts: returned from here)
+        let tail_here = std::mem::take(&mut self.tail_ctx);
         self.scopes.push(Vec::new());
         // the end of `main`: the process exits next (see Cg::exit_fid)
         let at_exit = self.body_exit == Some(self.scopes.len());
@@ -2651,8 +3015,34 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.let_moves = true;
                 self.move_at.insert(site);
             }
+            // `let mut v`: it moves at its one read after its last change
+            // (`fill(n - 1, y, c)` after `c[bin] = c[bin] + 1`), when every
+            // change is a statement of this block (none further in)
+            if let Stmt::Let { name, mutable: true, .. } = s
+                && let Some(site) = owned::mut_move_site(name, &b.stmts[i + 1..], b.tail.as_deref()).filter(|_| self.heap_ok_target())
+            {
+                self.let_moves = true;
+                self.move_at.insert(site);
+            }
+            // (each name of a tuple `let` likewise: `let (p, root) = find(…)`
+            // then `let mut c = p` changes the list in place, not a copy)
+            // (only a function's result, which nothing else holds: a tuple
+            // a variable still holds, `let (i, open, jump) = s`, keeps its
+            // parts, and moving those of a `settle`'s state gained nothing
+            // but code)
+            if let Stmt::LetTuple { names, value, .. } = s
+                && matches!(value.kind, ExprKind::Call { .. })
+            {
+                for n in names.iter().filter(|n| *n != "_") {
+                    if let Some(site) = self.let_move_site(n, &b.stmts[i + 1..], b.tail.as_deref()) {
+                        self.move_at.insert(site);
+                        self.tuple_moves.push(n.clone());
+                    }
+                }
+            }
             self.stmt(s)?;
             self.let_moves = false;
+            self.tuple_moves.clear();
         }
         if !pending.is_empty() && !self.terminated() {
             match &b.tail {
@@ -2669,6 +3059,11 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         *self.futures.last_mut().unwrap() = pending.clone();
         let v = match &b.tail {
+            Some(e) if tail_here && self.parts_mode && !self.terminated() => {
+                self.cover(e.span)?;
+                self.ret_tail(e)?;
+                self.null()
+            }
             Some(e) => {
                 if !self.terminated() {
                     self.cover(e.span)?;
@@ -2819,12 +3214,39 @@ impl<'ctx> Cg<'ctx, '_> {
                         let ep = unsafe { self.b.build_in_bounds_gep(self.repr(t), slot, &[i64t.const_zero(), iv], "").s()? };
                         self.b.build_store(ep, x).s()?;
                     }
+                    // a number into a list of i64: written in place where
+                    // the list is held once, of i64 and the index in range;
+                    // anything else as below (the same checks and messages)
+                    Some(i) if self.opt_level >= 2 && t == Ty::Arr(El::I64, 0) && self.ty_of(i) == Ty::I64 && self.ty_of(value) == Ty::I64 && self.cur_fn.is_some() => {
+                        let iv = self.expr(i)?;
+                        let iv = self.to_i64(iv)?;
+                        let v = self.expr(value)?;
+                        let x = self.to_i64(v)?;
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?.into_pointer_value();
+                        let out = self.put_i64_inline_or(cur, iv, x, &mut |cg: &mut Self| {
+                            let bi = cg.boxed(V::I(iv))?;
+                            let bx = cg.boxed(V::I(x))?;
+                            let r = cg.call_rt_ptr("mim_set_index_v", &[cur.into(), cg.basic(bi).into(), cg.basic(bx).into()])?;
+                            cg.drop_tmp(bi)?;
+                            cg.drop_tmp(bx)?;
+                            Ok(cg.basic(r).into_pointer_value())
+                        })?;
+                        self.b.build_store(slot, out).s()?;
+                    }
                     Some(i) => {
                         let iv = self.expr(i)?;
                         let iv = self.boxed(iv)?;
                         let v = self.expr(value)?;
                         let v = self.boxed(v)?;
-                        self.call_rt("mim_set_index", &[slot.into(), self.basic(iv).into(), self.basic(v).into()])?;
+                        // (the list in, the list out: the variable's slot is
+                        // not handed to the runtime, so it stays a register
+                        // and a call after it can still be a tail call, as
+                        // `run(k - 1, bump(cells, i))` with `bump` inlined)
+                        // (everywhere: a function that does this may be
+                        // inlined into one that calls itself last)
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                        let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(iv).into(), self.basic(v).into()])?;
+                        self.b.build_store(slot, self.basic(out)).s()?;
                         self.drop_tmp(iv)?;
                         self.drop_tmp(v)?;
                     }
@@ -2847,7 +3269,35 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             Stmt::LetTuple { names, value, .. } if self.let_tuple_in_regs(s, names, value)? => {}
             Stmt::LetTuple { names, value, .. } => {
+                // a call of a function returning parts: each part straight
+                // into its variable (no tuple made)
+                if let ExprKind::Call { .. } = &value.kind {
+                    self.want_parts_site = Some(id(value));
+                }
                 let v = self.expr(value)?;
+                self.want_parts_site = None;
+                if let Some(sv) = self.parts_result.take() {
+                    let k = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(value)).cloned()).ok_or("internal compiler error: a call of parts")?;
+                    let es = self.parts_tys(self.spec(&k)?.ret).ok_or("internal compiler error: not a tuple of parts")?;
+                    for (i, et) in es.iter().enumerate() {
+                        let x = self.b.build_extract_value(sv, i as u32, "").s()?;
+                        let part = self.val_of(x, *et, true);
+                        let n = names.get(i).map(String::as_str).unwrap_or("_");
+                        if n == "_" {
+                            self.drop_tmp(part)?;
+                            continue;
+                        }
+                        let t = self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn);
+                        let fv = self.as_ty(part, t, &format!("`{n}`"))?;
+                        let fv = self.own(fv)?;
+                        let slot = self.entry_alloca(t, n)?;
+                        self.b.build_store(slot, self.basic(fv)).s()?;
+                        let owned = matches!(fv, V::P(..));
+                        let moves = owned && self.tuple_moves.contains(&n.to_string());
+                        self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false, moves });
+                    }
+                    return Ok(());
+                }
                 if let V::R(r, rt) = v
                     && let Some(fs) = self.flat(rt)
                     && fs.len() >= names.len()
@@ -2878,7 +3328,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     let slot = self.entry_alloca(t, n)?;
                     self.b.build_store(slot, self.basic(fv)).s()?;
                     let owned = matches!(fv, V::P(..));
-                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves: false });
+                    let moves = owned && self.tuple_moves.contains(n);
+                    self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves });
                 }
                 self.drop_tmp(b)?;
             }
@@ -4655,8 +5106,16 @@ impl<'ctx> Cg<'ctx, '_> {
             Some((kd, d)) => (kd, d),
             None => (self.kind_for(fid), None),
         };
-        let f = self.request(&k, kind)?;
         let spec = self.spec(&k)?;
+        // (asked for its parts: the version returning them, where there is one)
+        let parts = self.want_parts_site == Some(site)
+            && fork_depth.is_none()
+            && matches!(kind, Kind::Plain | Kind::Native | Kind::Seq | Kind::NativeSeq)
+            && self.parts_tys(spec.ret).is_some();
+        if self.want_parts_site == Some(site) {
+            self.want_parts_site = None;
+        }
+        let f = if parts { self.request_parts(&k, kind)? } else { self.request(&k, kind)? };
         let path_s = self.p.fn_path(fid).join("::");
         let pnames: Vec<String> = match &self.p.fns[fid].kind {
             FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
@@ -4665,9 +5124,24 @@ impl<'ctx> Cg<'ctx, '_> {
         let mut argv = Vec::new();
         let mut conv = Vec::new();
         let consumed = self.consumed(&k);
+        let converts: Vec<bool> = (0..vals.len()).map(|i| self.cur_spec.as_ref().is_some_and(|s| s.converts.contains(&(site, i)))).collect();
+        // (converted copies of lent lists, released after the call)
+        let mut copies = Vec::new();
         for (i, v) in vals.into_iter().enumerate() {
-            let c = self.as_ty(v, spec.params[i], &format!("argument `{}` of `{path_s}`", pnames[i]))?;
-            if consumed.get(i).copied().unwrap_or(false) {
+            // a list of unknown type for a parameter declared a typed list:
+            // converted here (the callee is compiled for the declared type)
+            let what = format!("argument `{}` of `{path_s}`", pnames[i]);
+            let takes = consumed.get(i).copied().unwrap_or(false);
+            let c = if converts[i] && !takes {
+                let (c, copy) = self.convert_arg(v, spec.params[i], &what)?;
+                copies.extend(copy);
+                c
+            } else if converts[i] {
+                self.convert_slot(v, Ty::Dyn, spec.params[i], &what)?
+            } else {
+                self.as_ty(v, spec.params[i], &what)?
+            };
+            if takes {
                 let c = self.hand_over(c)?; // the callee takes it
                 argv.push(self.basic(c).into());
                 continue;
@@ -4707,9 +5181,81 @@ impl<'ctx> Cg<'ctx, '_> {
             };
             argv.push(d1.into());
         }
+        // a variable handed to a parameter the callee takes, at its last
+        // use: the callee holds its own reference now (hand_over), so the
+        // variable's goes before the call, not after it, and the callee holds
+        // the only one (`compressed[i] = root` further down changes the list
+        // in place instead of copying it at every level of a `find`)
+        for (j, name) in std::mem::take(&mut self.after_args) {
+            if consumed.get(j).copied().unwrap_or(false)
+                && let Some(slot) = self.lookup(&name).filter(|l| l.owned).map(|l| l.slot)
+            {
+                // (checked for null: a variable that moved into the call
+                // left one, and the release then folds away)
+                let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                self.release_out(cur.into_pointer_value())?;
+                self.b.build_store(slot, self.ptr.const_null()).s()?;
+            }
+        }
+        // a call to itself that is the function's result: every local its
+        // arguments do not use is released first (and its slot emptied, so
+        // the release at the end of its scope folds away), leaving the call
+        // the last thing done: the recursion runs as a loop, deep or not
+        if Some(fid) == self.cur_fid
+            && self.body_exit.is_none()
+            && self.futures.iter().all(|f| f.is_empty())
+            && let Some(per_arg) = self.tail_calls.get(&site).cloned()
+        {
+            // (a variable passed as it is to a parameter the callee takes
+            // has been handed its own reference: the variable's goes too,
+            // and the callee holds the only one, changing it in place)
+            let keep: std::collections::HashSet<String> = per_arg
+                .iter()
+                .enumerate()
+                .filter(|(j, a)| !(a.direct.is_some() && consumed.get(*j).copied().unwrap_or(false)))
+                .flat_map(|(_, a)| a.roots.iter().cloned())
+                .collect();
+            // a kept name that borrows from another local (a `match`
+            // binding points into the value matched, which a local of its
+            // own holds): what it borrows from is not known here, so
+            // nothing is released early (a parameter is the caller's)
+            let params: Vec<String> = match &self.p.fns[fid].kind {
+                FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
+                _ => Vec::new(),
+            };
+            // (a number held in a register borrows nothing)
+            let borrows = keep.iter().any(|n| !params.contains(n) && self.lookup(n).is_some_and(|l| !l.owned && self.repr(l.ty).is_pointer_type()));
+            let early: Vec<(PointerValue<'ctx>, bool)> =
+                if borrows { Vec::new() } else { self.scopes.iter().flatten().filter(|l| l.owned && !keep.contains(&l.name)).map(|l| (l.slot, l.moves)).collect() };
+            for (slot, moves) in early {
+                let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                if moves {
+                    self.release(cur.into_pointer_value())?;
+                } else {
+                    self.release_out(cur.into_pointer_value())?;
+                }
+                self.b.build_store(slot, self.ptr.const_null()).s()?;
+            }
+        }
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+        if parts {
+            self.parts_result = Some(r.into_struct_value());
+        }
         for c in conv {
             self.drop_tmp(c)?;
+        }
+        for (p, copied) in copies {
+            let fun = self.cur_fn.unwrap();
+            let free = self.ctx.append_basic_block(fun, "conv_free");
+            let after = self.ctx.append_basic_block(fun, "conv_after");
+            self.b.build_conditional_branch(copied, free, after).s()?;
+            self.b.position_at_end(free);
+            self.release(p)?;
+            self.b.build_unconditional_branch(after).s()?;
+            self.b.position_at_end(after);
+        }
+        if parts {
+            return Ok(self.null());
         }
         Ok(self.val_of(r, spec.ret, true))
     }
@@ -4773,20 +5319,74 @@ impl<'ctx> Cg<'ctx, '_> {
     /// says how it is stored, so a list of integers (or booleans) going where
     /// a list of floats (or integers) is declared is converted here, once;
     /// a list whose type is not known statically is checked.
+    /// A list of unknown type passed for a parameter declared `[i64]` or
+    /// `[f64]` (a lent one): passed as it is when it is already that kind
+    /// of list, which one load and compare shows (the common case: a call
+    /// in a loop pays nothing more); else converted by the runtime. The
+    /// second part, when given, is the value passed and whether it is a
+    /// converted copy, to release after the call.
+    #[allow(clippy::type_complexity)]
+    fn convert_arg(&mut self, v: V<'ctx>, to: Ty, what: &str) -> R<(V<'ctx>, Option<(PointerValue<'ctx>, IntValue<'ctx>)>)> {
+        let dt: u64 = match to {
+            Ty::Arr(El::I64, _) => 0,
+            Ty::Arr(El::F64, _) => 1,
+            Ty::Arr(El::Bool, _) => 2,
+            _ => return Ok((self.as_ty(v, to, what)?, None)),
+        };
+        // (a list in registers, or one this call owns: the simple way)
+        let V::P(p, false) = v else { return Ok((self.convert_slot(v, Ty::Dyn, to, what)?, None)) };
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let f = self.cur_fn.ok_or("internal compiler error: an argument outside a function")?;
+        let check = self.ctx.append_basic_block(f, "conv_check");
+        let slow = self.ctx.append_basic_block(f, "conv_slow");
+        let done = self.ctx.append_basic_block(f, "conv_done");
+        let null = self.b.build_is_null(p, "").s()?;
+        self.b.build_conditional_branch(null, slow, check).s()?;
+        // dtype and rank side by side: one 64-bit load and compare
+        self.b.position_at_end(check);
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
+        let kind = self.b.build_load(i64t, kind_p, "kind").s()?.into_int_value();
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want = if little { (1u64 << 32) | dt } else { (dt << 32) | 1 };
+        let ok = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        self.b.build_conditional_branch(ok, done, slow).s()?;
+        self.b.position_at_end(slow);
+        let r = self.call_rt_ptr("mim_vec_as", &[p.into(), self.i32c(dt as i32)])?;
+        let r = self.basic(r).into_pointer_value();
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let ptr = self.b.build_phi(self.ptr, "conv").s()?;
+        ptr.add_incoming(&[(&p, check), (&r, slow_end)]);
+        let flag = self.b.build_phi(self.ctx.bool_type(), "conv_owned").s()?;
+        let (no, yes) = (self.ctx.bool_type().const_zero(), self.ctx.bool_type().const_int(1, false));
+        flag.add_incoming(&[(&no, check), (&yes, slow_end)]);
+        let ptr = ptr.as_basic_value().into_pointer_value();
+        let c = self.as_ty(V::P(ptr, false), to, what)?;
+        Ok((c, Some((ptr, flag.as_basic_value().into_int_value()))))
+    }
+
     fn convert_slot(&mut self, v: V<'ctx>, from: Ty, to: Ty, what: &str) -> R<V<'ctx>> {
         let want = match to {
             Ty::Arr(El::F64, _) => Some(1),
             Ty::Arr(El::I64, _) => Some(0),
+            Ty::Arr(El::Bool, _) => Some(2),
             _ => None,
         };
         let differs = matches!(
             (from, to),
-            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) | (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64, _))
+            (Ty::Arr(El::I64 | El::Bool, _), Ty::Arr(El::F64, _)) | (Ty::Arr(El::Bool, _), Ty::Arr(El::I64, _)) | (Ty::Dyn | Ty::Arr(El::Dyn, _), Ty::Arr(El::F64 | El::I64 | El::Bool, _))
         );
         let v = match (want, differs, v) {
             // a list in registers: convert its elements, then store it
             (Some(w), true, V::A(a, _)) => {
-                let el = if w == 1 { El::F64 } else { El::I64 };
+                let el = match w {
+                    1 => El::F64,
+                    2 => El::Bool,
+                    _ => El::I64,
+                };
                 let c = self.as_fixed(v, el, a.get_type().len(), what)?;
                 self.boxed(c)?
             }
@@ -5127,6 +5727,49 @@ impl<'ctx> Cg<'ctx, '_> {
         ((1..=64).contains(&n) && self.is_fae(a)).then_some((a, el, n as u32))
     }
 
+    /// `char_code(s)`: the first byte when `s` is text whose first character
+    /// is ASCII; else (empty, other characters) `mim_std_char_code`.
+    fn char_code_inline(&mut self, s: V<'ctx>) -> R<IntValue<'ctx>> {
+        let i64t = self.ctx.i64_type();
+        let i32t = self.ctx.i32_type();
+        let i8t = self.ctx.i8_type();
+        let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+        let p = self.basic(s).into_pointer_value();
+        let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
+        let kind = self.b.build_load(i64t, kind_p, "").s()?.into_int_value();
+        let len_p = self.b.build_struct_gep(hdr, p, 3, "").s()?;
+        let len = self.b.build_load(i64t, len_p, "").s()?.into_int_value();
+        let little = self.module.get_data_layout().as_str().to_string_lossy().starts_with('e');
+        let want: u64 = if little { (1u64 << 32) | 3 } else { (3u64 << 32) | 1 };
+        let ok_k = self.b.build_int_compare(IntPredicate::EQ, kind, i64t.const_int(want, false), "").s()?;
+        let ok_n = self.b.build_int_compare(IntPredicate::SGT, len, i64t.const_zero(), "").s()?;
+        let go = self.b.build_and(ok_k, ok_n, "").s()?;
+        let f = self.cur_fn.unwrap();
+        let read = self.ctx.append_basic_block(f, "cc_read");
+        let fast = self.ctx.append_basic_block(f, "cc_fast");
+        let slow = self.ctx.append_basic_block(f, "cc_slow");
+        let done = self.ctx.append_basic_block(f, "cc_done");
+        self.b.build_conditional_branch(go, read, slow).s()?;
+        self.b.position_at_end(read);
+        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "data").s()? };
+        let byte = self.b.build_load(i8t, data, "").s()?.into_int_value();
+        let ascii = self.b.build_int_compare(IntPredicate::SGE, byte, i8t.const_zero(), "").s()?;
+        self.b.build_conditional_branch(ascii, fast, slow).s()?;
+        self.b.position_at_end(fast);
+        let quick = self.b.build_int_z_extend(byte, i64t, "").s()?;
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(slow);
+        let r = self.call_rt_ptr("mim_std_char_code", &[p.into()])?;
+        let full = self.to_i64(r)?;
+        self.drop_tmp(r)?;
+        let slow_end = self.b.get_insert_block().unwrap();
+        self.b.build_unconditional_branch(done).s()?;
+        self.b.position_at_end(done);
+        let phi = self.b.build_phi(i64t, "").s()?;
+        phi.add_incoming(&[(&quick, fast), (&full, slow_end)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
     fn index_fast(&mut self, arr: V<'ctx>, i: IntValue<'ctx>, el: El, ty: Ty) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let i32t = self.ctx.i32_type();
@@ -5277,6 +5920,24 @@ impl<'ctx> Cg<'ctx, '_> {
         let ty = self.ty_of(e);
         // kernel fusion: whole array expressions become one loop
         match &e.kind {
+            // `xs ↑ k` / `xs ↓ k` at xs's last use (it moves here): a list
+            // held once shrinks in place instead of being copied (a heap's
+            // pop, `h ↑ (n - 1)`, copied the whole heap every time)
+            ExprKind::Prim { prim: p @ (Prim::Take | Prim::Drop), args }
+                if args.len() == 2
+                    && self.move_at.contains(&id(&args[0]))
+                    && matches!(&args[0].kind, ExprKind::Path(q) if q.len() == 1 && self.lookup(&q[0]).is_some_and(|l| l.owned))
+                    && matches!(self.ty_of(&args[0]), Ty::Arr(..))
+                    && self.ty_of(&args[1]) == Ty::I64 =>
+            {
+                let l = self.expr(&args[0])?;
+                let l = self.own(self.boxed(l)?)?;
+                let k = self.expr(&args[1])?;
+                let k = self.to_i64(k)?;
+                let drop = self.i32c((*p == Prim::Drop) as i32);
+                let r = self.call_rt_ptr("mim_shrink_own", &[self.basic(l).into(), k.into(), drop])?;
+                return self.as_ty(r, ty, "take/drop");
+            }
             // `≢ xs` of a list: its length, from the header (or known)
             ExprKind::Prim { prim: Prim::Len, args } if matches!(self.ty_of(&args[0]), Ty::Arr(..)) && !self.is_fae(&args[0]) && !self.keep_fusible(Prim::Len, &args[0]) => {
                 let v = self.expr(&args[0])?;
@@ -5388,6 +6049,40 @@ impl<'ctx> Cg<'ctx, '_> {
                 let v = V::P(phi.as_basic_value().into_pointer_value(), false);
                 self.as_ty(v, ty, "list")
             }
+            // `[]` typed by the branch next to it: an empty list of its
+            // numbers (mim_array_lit's is always of i64)
+            ExprKind::Array(xs) if xs.is_empty() && matches!(ty, Ty::Arr(El::I64 | El::F64 | El::U8, 0)) => {
+                let Ty::Arr(el, _) = ty else { unreachable!() };
+                if self.cur_fn.is_none() || self.building_literal {
+                    return self.alloc_vec(fuse::dtype_of(el), i64t.const_zero());
+                }
+                // one immortal empty list, made the first time (as a list of
+                // literals is): `if c { [x] } else { [] }` taken at every
+                // step allocated and freed one each time; a change to it
+                // copies, as to any list held more than once
+                let g = self.module.add_global(self.ptr, None, "empty");
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&self.ptr.const_null());
+                let slot = self.gaddr(g);
+                let cached = self.b.build_load(self.ptr, slot, "empty").s()?;
+                inkwell::values::BasicValue::as_instruction_value(&cached).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+                let cached = cached.into_pointer_value();
+                let f = self.cur_fn.unwrap();
+                let pre = self.b.get_insert_block().unwrap();
+                let build_bb = self.ctx.append_basic_block(f, "empty_build");
+                let done_bb = self.ctx.append_basic_block(f, "empty_done");
+                let have = self.b.build_is_not_null(cached, "").s()?;
+                self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+                self.b.position_at_end(build_bb);
+                let built = self.alloc_vec(fuse::dtype_of(el), i64t.const_zero())?;
+                let V::P(published, _) = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])? else { unreachable!() };
+                let build_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done_bb).s()?;
+                self.b.position_at_end(done_bb);
+                let phi = self.b.build_phi(self.ptr, "empty").s()?;
+                phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+                Ok(V::P(phi.as_basic_value().into_pointer_value(), false))
+            }
             ExprKind::Array(xs) if fixed(ty).is_some() => {
                 let (el, _) = fixed(ty).unwrap();
                 let mut elems = Vec::new();
@@ -5450,7 +6145,7 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
-                let (slot, lt, mutable, moves) = (l.slot, l.ty, l.mutable, l.owned && l.moves && !l.mutable && self.move_at.contains(&id(e)));
+                let (slot, lt, mutable, moves) = (l.slot, l.ty, l.mutable, l.owned && l.moves && self.move_at.contains(&id(e)));
                 let bv = self.b.build_load(self.repr(lt), slot, &path[0]).s()?;
                 let v = self.val_of(bv, lt, false);
                 // its one use: the value moves out (the slot keeps a null)
@@ -5506,6 +6201,42 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // char_of of a number: the runtime's with it as it is (a
+                // boxed number made and checked per character otherwise)
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "char_of"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 1
+                    && self.ty_of(&args[0]) == Ty::I64
+                {
+                    let v = self.expr(&args[0])?;
+                    let n = self.to_i64(v)?;
+                    let r = self.call_rt_ptr("mim_char_of_i64", &[n.into()])?;
+                    return self.as_ty(r, ty, "result of `char_of`");
+                }
+                // char_code of text starting with an ASCII character: its
+                // first byte, read in place (a call, a type check and a boxed
+                // result per character otherwise); other text: the runtime's
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "char_code"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 1
+                    && self.ty_of(&args[0]) == Ty::Arr(El::Char, 0)
+                {
+                    // (of a literal, `char_code("a")`: known now)
+                    if let ExprKind::Str(t) = &args[0].kind
+                        && let Some(c) = t.chars().next()
+                    {
+                        return self.as_ty(V::I(self.ctx.i64_type().const_int(c as u64, false)), ty, "result of `char_code`");
+                    }
+                    let v = self.expr(&args[0])?;
+                    let b = self.boxed(v)?;
+                    let r = self.char_code_inline(b)?;
+                    self.drop_tmp(b)?;
+                    return self.as_ty(V::I(r), ty, "result of `char_code`");
+                }
                 // sort of a list kept in registers (a 3×3 neighbourhood):
                 // sorted on the stack, back in registers, no heap list
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
@@ -5553,9 +6284,21 @@ impl<'ctx> Cg<'ctx, '_> {
                     && self.p.mods[self.p.fns[fid].module].name == "math"
                     && self.p.mods[self.p.fns[fid].module].package == "std"
                     && decl.name != "mulmod" && decl.name != "powmod" // whole numbers: the runtime's 128-bit products
+                    && decl.name != "to_bits32" && decl.name != "from_bits32" // f32 values: the runtime's
                     && vals.iter().all(|v| matches!(v, V::I(_) | V::F(_)))
                 {
                     let name = decl.name.clone();
+                    // a float's 64 bits as an integer, and back: the same bits
+                    if name == "to_bits" {
+                        let x = self.to_f64(vals[0])?;
+                        let n = self.b.build_bit_cast(x, self.ctx.i64_type(), "").s()?.into_int_value();
+                        return self.as_ty(V::I(n), ty, "result of `math::to_bits`");
+                    }
+                    if name == "from_bits" {
+                        let n = self.to_i64(vals[0])?;
+                        let x = self.b.build_bit_cast(n, self.ctx.f64_type(), "").s()?.into_float_value();
+                        return self.as_ty(V::F(x), ty, "result of `math::from_bits`");
+                    }
                     if name == "to_int" {
                         // towards zero, as C's cast; NaN and numbers out of
                         // range stop the program instead of wrapping
@@ -5604,7 +6347,33 @@ impl<'ctx> Cg<'ctx, '_> {
                 {
                     // `tcp::send` → mim_std_tcp_send; prelude functions → mim_std_<name>
                     let m = &self.p.mods[self.p.fns[fid].module];
-                    let name = if m.name == "prelude" { format!("mim_std_{}", decl.name) } else { format!("mim_std_{}_{}", m.name, decl.name) };
+                    // `push`, `put` or `concat` of a list this code owns here
+                    // (a variable at its last use): handed over to
+                    // the runtime's owning version, which changes it in
+                    // place when nothing else holds it (else copies it and
+                    // releases it, as lending it would)
+                    // (a variable at its last use: `push(acc, x)` handed down a
+                    // recursion. Not a temporary, `put(put(t, i, x), j, y)`:
+                    // changing one in place left it where an earlier step made
+                    // it, which measured slower on some machines than the copy)
+                    let own_first = m.name == "prelude"
+                        && matches!(decl.name.as_str(), "push" | "put" | "concat")
+                        && matches!(vals.first(), Some(V::P(_, true)))
+                        && (matches!(args.first().map(|a| &a.kind), Some(ExprKind::Path(_)))
+                            // (or a list another `push` just gave back:
+                            // `push(push(pieces, word), sep)` held nowhere else;
+                            // copied, a text built by such a recursion took
+                            // time growing with the square of its length)
+                            || (decl.name == "push"
+                                && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Call { callee, .. })
+                                    if matches!(&callee.kind, ExprKind::Path(p) if p.last().is_some_and(|l| l == "push")))));
+                    let name = if own_first {
+                        format!("mim_take_{}", decl.name)
+                    } else if m.name == "prelude" {
+                        format!("mim_std_{}", decl.name)
+                    } else {
+                        format!("mim_std_{}_{}", m.name, decl.name)
+                    };
                     let f = match self.module.get_function(&name) {
                         Some(f) => f,
                         None => {
@@ -5618,7 +6387,8 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let argv: Vec<BasicMetadataValueEnum> = boxed.iter().map(|b| self.basic(*b).into()).collect();
                     let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
-                    for b in boxed {
+                    // (the list handed over is the runtime's now)
+                    for b in boxed.into_iter().skip(usize::from(own_first)) {
                         self.drop_tmp(b)?;
                     }
                     return self.as_ty(V::P(r.into_pointer_value(), true), ty, &format!("result of `{}`", decl.name));
@@ -5680,6 +6450,27 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     return Ok(out);
                 }
+                // (a variable whose last use is this call, also read by
+                // another argument: `find(parent, parent[i])`)
+                let mut after = Vec::new();
+                if let Some(body) = self.cur_fid.and_then(|f| match &self.p.fns[f].kind {
+                    FnKind::User(d) => Some(&d.body),
+                    _ => None,
+                }) {
+                    for (j, a) in args.iter().enumerate() {
+                        if let ExprKind::Path(p) = &a.kind
+                            && p.len() == 1
+                            // (not one that moves into this argument itself:
+                            // its slot is empty already)
+                            && !self.move_at.contains(&id(a))
+                            && self.lookup(&p[0]).is_some_and(|l| l.owned)
+                            && owned::last_in_call(&p[0], body, id(e), id(a))
+                        {
+                            after.push((j, p[0].clone()));
+                        }
+                    }
+                }
+                self.after_args = after;
                 self.call_user(id(e), fid, vals)
             }
             // an element of a list in registers
@@ -5747,7 +6538,24 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Index { base, index }
                 if fuse::index_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
             {
-                let b = self.expr(base)?;
+                // a `let mut` list read for a number: lent as it is, not
+                // retained for the read (`c[bin] + 1` in a loop: a retain and
+                // a release each step), when the index cannot change it
+                let lent = match &base.kind {
+                    ExprKind::Path(p) if p.len() == 1 => {
+                        let mut block = false;
+                        index.walk(&mut |x| block |= matches!(x.kind, ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::Lambda { .. }));
+                        self.lookup(&p[0]).filter(|l| l.mutable && !block && matches!(l.ty, Ty::Arr(_, 0))).map(|l| (l.slot, l.ty))
+                    }
+                    _ => None,
+                };
+                let b = match lent {
+                    Some((slot, lt)) => {
+                        let bv = self.b.build_load(self.repr(lt), slot, "").s()?;
+                        self.val_of(bv, lt, false)
+                    }
+                    None => self.expr(base)?,
+                };
                 let b = self.boxed(b)?;
                 let i = self.expr(index)?;
                 let i = self.to_i64(i)?;
@@ -5758,7 +6566,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // an element of a list of records, strings or tuples: one bounds
             // check and a load (lent while the list is; else a reference)
             ExprKind::Index { base, index }
-                if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
+                if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
             {
                 let b = self.expr(base)?;
                 let b = self.boxed(b)?;
@@ -6246,14 +7054,34 @@ impl<'ctx> Cg<'ctx, '_> {
                 let steals: Vec<Option<Vec<(&str, &[Expr])>>> = fields.iter().map(|(n, x, _)| if path_base { self.steal_chain(base, tid, n, x, fields) } else { None }).collect();
                 let mut early = Vec::new();
                 let mut early_rest: Vec<Vec<Vec<V<'ctx>>>> = Vec::new();
+                // `concat(s.f, v ⥊ [n])` on a list of i64: v and n kept as
+                // numbers, the copies written into the list (no list made)
+                let mut fills: Vec<Vec<Option<(IntValue<'ctx>, IntValue<'ctx>)>>> = Vec::new();
                 if path_base {
-                    for ((_, x, _), st) in fields.iter().zip(&steals) {
+                    for ((fname, x, _), st) in fields.iter().zip(&steals) {
                         match st {
                             Some(chain) => {
                                 // numbers stay raw, short lists in registers
                                 // (typed calls below); anything else boxed
                                 let mut levels = Vec::new();
-                                for (_, rest) in chain {
+                                let mut fl = Vec::new();
+                                let i64_field = matches!(self.record_field(tid, fname).1, Ty::Arr(El::I64, 0));
+                                for (op, rest) in chain {
+                                    if let (true, "concat", [Expr { kind: ExprKind::Prim { prim: Prim::Reshape, args }, .. }]) = (i64_field, *op, *rest)
+                                        && let [v, Expr { kind: ExprKind::Array(dims), .. }] = args.as_slice()
+                                        && let [d] = dims.as_slice()
+                                        && self.ty_of(v) == Ty::I64
+                                        && self.ty_of(d) == Ty::I64
+                                    {
+                                        let vv = self.expr(v)?;
+                                        let vv = self.to_i64(vv)?;
+                                        let dv = self.expr(d)?;
+                                        let dv = self.to_i64(dv)?;
+                                        levels.push(vec![V::I(vv), V::I(dv)]);
+                                        fl.push(Some((vv, dv)));
+                                        continue;
+                                    }
+                                    fl.push(None);
                                     let mut vs = Vec::new();
                                     for a in rest.iter() {
                                         let v = self.expr(a)?;
@@ -6265,10 +7093,12 @@ impl<'ctx> Cg<'ctx, '_> {
                                     levels.push(vs);
                                 }
                                 early_rest.push(levels);
+                                fills.push(fl);
                                 early.push(V::I(self.ctx.i64_type().const_zero()));
                             }
                             None => {
                                 early_rest.push(Vec::new());
+                                fills.push(Vec::new());
                                 early.push(self.expr(x)?);
                             }
                         }
@@ -6326,6 +7156,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     for (lvl, (op, _)) in chain.iter().enumerate() {
                     let op = *op;
                     let rest = early_rest[k][lvl].clone();
+                    if let Some((v, m)) = fills[k][lvl] {
+                        let i64t = self.ctx.i64_type();
+                        let f = self.module.get_function("mim_fill_i64_own").unwrap_or_else(|| {
+                            self.module.add_function("mim_fill_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(Linkage::External))
+                        });
+                        list = self.b.build_call(f, &[list.into(), v.into(), m.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                        continue;
+                    }
                     let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
                     let u8_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::U8, 0));
                     let i64t = self.ctx.i64_type();
@@ -6344,11 +7182,27 @@ impl<'ctx> Cg<'ctx, '_> {
                         _ => None,
                     };
                     if let Some((name, argv)) = typed {
-                        let f = self.module.get_function(name).unwrap_or_else(|| {
-                            let ps: Vec<BasicMetadataTypeEnum> = argv.iter().enumerate().map(|(j, _)| if j == 0 || (name == "mim_concat_i64_own" && j == 1) { self.ptr.into() } else { i64t.into() }).collect();
-                            self.module.add_function(name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
-                        });
-                        list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                        let call = move |cg: &mut Self| -> R<PointerValue<'ctx>> {
+                            let f = cg.module.get_function(name).unwrap_or_else(|| {
+                                let ps: Vec<BasicMetadataTypeEnum> = argv.iter().enumerate().map(|(j, _)| if j == 0 || (name == "mim_concat_i64_own" && j == 1) { cg.ptr.into() } else { i64t.into() }).collect();
+                                cg.module.add_function(name, cg.ptr.fn_type(&ps, false), Some(Linkage::External))
+                            });
+                            Ok(cg.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+                        };
+                        // the common case, a list held once with room (or an
+                        // index in range), done here; the runtime otherwise
+                        list = match (op, rest.as_slice()) {
+                            ("push", [V::I(x)]) if i64_list && self.opt_level >= 2 => self.append_i64_inline(list, &[*x], &mut { call })?,
+                            ("put", [V::I(i), V::I(x)]) if i64_list && self.opt_level >= 2 => self.put_i64_inline_or(list, *i, *x, &mut { call })?,
+                            ("concat", [V::A(a, El::I64)]) if i64_list && self.opt_level >= 2 && a.get_type().len() <= 8 => {
+                                let mut xs = Vec::new();
+                                for j in 0..a.get_type().len() {
+                                    xs.push(self.b.build_extract_value(*a, j, "").s()?.into_int_value());
+                                }
+                                self.append_i64_inline(list, &xs, &mut { call })?
+                            }
+                            _ => call(self)?,
+                        };
                         continue;
                     }
                     let mut boxed_rest = Vec::new();
@@ -6364,7 +7218,41 @@ impl<'ctx> Cg<'ctx, '_> {
                         let ps: Vec<BasicMetadataTypeEnum> = argv.iter().map(|_| self.ptr.into()).collect();
                         self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
                     });
+                    // `concat(s.out, flush)` with `flush` an empty list (one
+                    // dimension, no elements): the list as it is, no call
+                    let empty_bb = match (op, boxed_rest.as_slice()) {
+                        ("concat", [V::P(ys, _)]) if self.opt_level >= 2 => {
+                            let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+                            let hdr = self.val_ty();
+                            let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, *ys, 2, "").s()?, "rank").s()?.into_int_value();
+                            let n = self.b.build_load(i64t, self.b.build_struct_gep(hdr, *ys, 3, "").s()?, "len").s()?.into_int_value();
+                            let none = self.b.build_and(
+                                self.b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?,
+                                self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?,
+                                "",
+                            ).s()?;
+                            let fun = self.cur_fn.unwrap();
+                            let skip = self.ctx.append_basic_block(fun, "concat_none");
+                            let call = self.ctx.append_basic_block(fun, "concat_call");
+                            let join = self.ctx.append_basic_block(fun, "concat_join");
+                            self.b.build_conditional_branch(none, skip, call).s()?;
+                            self.b.position_at_end(skip);
+                            self.b.build_unconditional_branch(join).s()?;
+                            self.b.position_at_end(call);
+                            Some((skip, join))
+                        }
+                        _ => None,
+                    };
+                    let before = list;
                     list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                    if let Some((skip, join)) = empty_bb {
+                        let call_end = self.b.get_insert_block().unwrap();
+                        self.b.build_unconditional_branch(join).s()?;
+                        self.b.position_at_end(join);
+                        let phi = self.b.build_phi(self.ptr, "list").s()?;
+                        phi.add_incoming(&[(&before, skip), (&list, call_end)]);
+                        list = phi.as_basic_value().into_pointer_value();
+                    }
                     for v in boxed_rest {
                         self.drop_tmp(v)?;
                     }

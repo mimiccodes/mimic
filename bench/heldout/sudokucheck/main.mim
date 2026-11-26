@@ -1,0 +1,52 @@
+module main
+
+// Generates 400,000 9 x 9 grids from a valid sudoku solution by shifting
+// every row the same number of places (some also get two cells swapped)
+// and checks each one: every row, column and box must hold 1-9 once.
+// Prints how many grids are valid.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn base(r: i64, c: i64) -> i64 { (r * 3 + r div 3 + c) % 9 + 1 }
+
+fn group_ok(cells: [i64]) -> bool {
+    all(sort(cells) == ⍳ 9 + 1)
+}
+
+fn valid(g: [[i64]]) -> bool {
+    let rows = g
+    let columns = ⍳ 9 ¨ (c => g ¨ (row => row[c]))
+    let boxes = ⍳ 9 ¨ (b => ⍳ 9 ¨ (i => g[(b div 3) * 3 + i div 3][(b % 3) * 3 + i % 3]))
+    all(rows ¨ group_ok) and all(columns ¨ group_ok) and all(boxes ¨ group_ok)
+}
+
+fn swap(g: [[i64]], a: i64, b: i64) -> [[i64]] {
+    let (ra, ca, rb, cb) = (a div 9, a % 9, b div 9, b % 9)
+    let mut out = g
+    out[ra] = put(out[ra], ca, g[rb][cb])
+    out[rb] = put(out[rb], cb, g[ra][ca])
+    out
+}
+
+fn count_valid(n: i64, x: i64, found: i64) -> i64 {
+    if n == 0 {
+        found
+    } else {
+        let x1 = next(x)
+        let k = x1 % 9
+        let grid = ⍳ 9 ¨ (r => ⍳ 9 ¨ (c => base(r, (c + k) % 9)))
+        let x2 = next(x1)
+        if x2 % 4 == 0 {
+            let x3 = next(x2)
+            let x4 = next(x3)
+            let swapped = swap(grid, x3 % 81, x4 % 81)
+            count_valid(n - 1, x4, found + if valid(swapped) { 1 } else { 0 })
+        } else {
+            count_valid(n - 1, x2, found + if valid(grid) { 1 } else { 0 })
+        }
+    }
+}
+
+fn main() {
+    print(count_valid(400000, 42, 0))
+}

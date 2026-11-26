@@ -1,0 +1,53 @@
+module main
+
+// Generate 200,000 strings of brackets ()[]{}, check each for balance with
+// a stack, and print how many are balanced and the deepest nesting seen.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+// k fragments picked at random, joined; also gives back the generator state
+fn pieces(frags: [str], k: i64, x: i64, body: str) -> (str, i64) {
+    if k == 0 { (body, x) } else {
+        let y = next(x)
+        pieces(frags, k - 1, y, body + frags[y % 11])
+    }
+}
+
+fn make_strings(frags: [str], n: i64, x: i64, acc: [str]) -> [str] {
+    if n == 0 { acc } else {
+        let a = next(x)
+        let (body, b) = pieces(frags, 1 + a % 13, a, "")
+        let c = next(b)
+        let wrap = c % 5
+        let s = repeat("(", wrap) + body + repeat(")", wrap)
+        make_strings(frags, n - 1, c, push(acc, s))
+    }
+}
+
+fn is_open(c: str) -> bool { c == "(" or c == "[" or c == "\{" }
+
+fn matches(open: str, close: str) -> bool {
+    (open == "(" and close == ")") or (open == "[" and close == "]") or (open == "\{" and close == "\}")
+}
+
+// (balanced?, deepest stack seen before the scan ended)
+fn check(cs: [str], i: i64, stack: [str], deepest: i64) -> (bool, i64) {
+    if i == ≢ cs {
+        (≢ stack == 0, deepest)
+    } else if is_open(cs[i]) {
+        let grown = push(stack, cs[i])
+        check(cs, i + 1, grown, max(deepest, ≢ grown))
+    } else if ≢ stack == 0 or not matches(stack[≢ stack - 1], cs[i]) {
+        (false, deepest)
+    } else {
+        check(cs, i + 1, stack ↓ ¯1, deepest)
+    }
+}
+
+fn main() {
+    let frags = ["()" "[]" "\{\}" "([])" "\{()\}" "[\{\}]" "(()())" "\{[()]\}" "[[]]" "(" "]"]
+    let strings = make_strings(frags, 200000, 42, [])
+    let results = strings ¨ (s => check(chars(s), 0, [], 0))
+    print(count(results, r => r.0))
+    print(results ¨ (r => r.1) ▷ ⌈/)
+}

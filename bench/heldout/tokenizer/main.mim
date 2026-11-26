@@ -1,0 +1,87 @@
+module main
+
+// Generates 200,000 arithmetic expressions of numbers, names and the
+// operators + - * / (sometimes with spaces around an operator), splits
+// each into tokens and prints how many numbers, names and operators.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn random_name(n: i64, x: i64, letters: [str]) -> (str, i64) {
+    if n == 0 {
+        (join(letters, ""), x)
+    } else {
+        let y = next(x)
+        random_name(n - 1, y, push(letters, char_of(97 + y % 26)))
+    }
+}
+
+// a number or a name
+fn operand(x: i64) -> (str, i64) {
+    let x1 = next(x)
+    let x2 = next(x1)
+    if x1 % 3 != 0 {
+        ("{x2 % 1000}", x2)
+    } else {
+        random_name(x2 % 5 + 1, x2, [])
+    }
+}
+
+fn more_operands(i: i64, k: i64, x: i64, text: str) -> (str, i64) {
+    if i == k {
+        (text, x)
+    } else {
+        let x1 = next(x)
+        let op = ["+" "-" "*" "/"][x1 % 4]
+        let x2 = next(x1)
+        let sep = if x2 % 3 == 0 { " {op} " } else { op }
+        let (o, x3) = operand(x2)
+        more_operands(i + 1, k, x3, text + sep + o)
+    }
+}
+
+fn make_expr(x: i64) -> (str, i64) {
+    let x1 = next(x)
+    let k = x1 % 8 + 2
+    let (first, x2) = operand(x1)
+    more_operands(1, k, x2, first)
+}
+
+fn make_all(n: i64, x: i64, exprs: [str]) -> [str] {
+    if n == 0 {
+        exprs
+    } else {
+        let (e, y) = make_expr(x)
+        make_all(n - 1, y, push(exprs, e))
+    }
+}
+
+fn is_digit(c: str) -> bool { c >= "0" and c <= "9" }
+
+fn is_letter(c: str) -> bool { c >= "a" and c <= "z" }
+
+// the first position from i on where f no longer holds
+fn skip(cs: [str], i: i64, f: fn(str) -> bool) -> i64 {
+    if i < ≢ cs and f(cs[i]) { skip(cs, i + 1, f) } else { i }
+}
+
+fn tokenize(cs: [str], i: i64, numbers: i64, names: i64, ops: i64) -> (i64, i64, i64) {
+    if i >= ≢ cs {
+        (numbers, names, ops)
+    } else if is_digit(cs[i]) {
+        tokenize(cs, skip(cs, i, is_digit), numbers + 1, names, ops)
+    } else if is_letter(cs[i]) {
+        tokenize(cs, skip(cs, i, is_letter), numbers, names + 1, ops)
+    } else if cs[i] == " " {
+        tokenize(cs, i + 1, numbers, names, ops)
+    } else {
+        tokenize(cs, i + 1, numbers, names, ops + 1)
+    }
+}
+
+fn main() {
+    let exprs = make_all(200000, 42, [])
+    let counts = exprs ¨ (e => tokenize(chars(e), 0, 0, 0, 0))
+    print("numbers {counts ¨ (t => t.0) ▷ +/}")
+    print("names {counts ¨ (t => t.1) ▷ +/}")
+    print("operators {counts ¨ (t => t.2) ▷ +/}")
+}

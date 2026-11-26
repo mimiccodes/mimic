@@ -1,0 +1,24 @@
+module main
+
+// Buckets 20,000,000 generated values (0 to 99,999) into 100 bins of
+// width 1,000; prints the 3 fullest bins.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn fill(n: i64, x: i64, counts: [i64]) -> [i64] {
+    if n == 0 {
+        counts
+    } else {
+        let y = next(x)
+        let bin = (y % 100000) div 1000
+        let mut c = counts
+        c[bin] = c[bin] + 1
+        fill(n - 1, y, c)
+    }
+}
+
+fn main() {
+    let counts = fill(20000000, 42, 0 ⥊ [100])
+    let fullest = sort_by(⍳ 100, b => counts[b], descending: true) ↑ 3
+    fullest ¨ (b => print("bin {b}: {counts[b]}"))
+}

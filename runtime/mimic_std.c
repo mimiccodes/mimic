@@ -49,6 +49,8 @@ static mim_val *list_take(int64_t n, mim_val **xs) {
 
 /* ==== strings ============================================================== */
 
+static mim_val *ascii1(unsigned char c); /* (mimic_own.c) */
+
 mim_val *mim_std_split(mim_val *s, mim_val *sep) {
     const char *a = str_arg(s, "split"), *d = str_arg(sep, "split");
     int64_t n = s->len, m = sep->len;
@@ -64,7 +66,7 @@ mim_val *mim_std_split(mim_val *s, mim_val *sep) {
             if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
             if (i + len > n) len = n - i;
             if (k == cap) parts = (mim_val **)realloc(parts, sizeof(mim_val *) * (size_t)(cap *= 2));
-            parts[k++] = mim_str(a + i, len);
+            parts[k++] = len == 1 && c < 0x80 ? ascii1(c) : mim_str(a + i, len);
             i += len - 1;
             continue;
         }
@@ -123,14 +125,25 @@ mim_val *mim_std_join(mim_val *xs, mim_val *sep) {
         return xs;
     }
     if (xs->rank == 0 || (xs->dtype != MIM_BOXED && xs->len > 0)) mim_panic("join: expected a list of str");
-    sbuf b = {0};
+    /* the length first (each element checked), then the string written
+     * once: no buffer grown and copied again (a word of a few letters,
+     * joined millions of times) */
     mim_val **h = (mim_val **)xs->data;
-    for (int64_t i = 0; i < xs->len; i++) {
-        if (i) sb_put(&b, d, (size_t)sep->len);
-        sb_put(&b, str_arg(h[i], "join"), (size_t)h[i]->len);
+    int64_t n = xs->len, total = n > 0 ? (n - 1) * sep->len : 0;
+    for (int64_t i = 0; i < n; i++) {
+        (void)str_arg(h[i], "join");
+        total += h[i]->len;
     }
-    mim_val *r = mim_str(b.p ? b.p : "", (int64_t)b.n);
-    free(b.p);
+    mim_val *r = alloc(MIM_CHAR, 1, total);
+    char *o = (char *)r->data;
+    for (int64_t i = 0; i < n; i++) {
+        if (i && sep->len) {
+            memcpy(o, d, (size_t)sep->len);
+            o += sep->len;
+        }
+        memcpy(o, h[i]->data, (size_t)h[i]->len);
+        o += h[i]->len;
+    }
     return r;
 }
 
@@ -335,6 +348,19 @@ static mim_val *grow_owned(mim_val *xs, int64_t n) {
     } else if ((c_old >= SIZE_CLASSES || xs->desc) && (xs->desc ? ROOM_OF(xs) : block_usable(xs) - sizeof(mim_val)) >= need) {
         /* the malloc'd block has room (a short list grown here earlier has
          * one too: its room is in desc, though its length is a pool size) */
+    } else if (c_old < SIZE_CLASSES && !xs->desc && size_class(need) < SIZE_CLASSES) {
+        /* a pooled list growing into the next pool: a block of that pool.
+         * (Given a 4 KB block of its own instead, a list of a few elements
+         * kept a pool length, and went back to a pool's free list when
+         * released: a word built letter by letter in a recursion left 4 KB
+         * behind each time, 1 GB for 180,000 words. A block of its own is
+         * now only for a list past the pools, and nothing shrinks a list in
+         * place, so free_block, which picks by length, always frees it.) */
+        mim_val *r = alloc(dt, xs->rank, n);
+        memcpy(r->data, xs->data, old);
+        r->rc = xs->rc;
+        free_block(&t_heap, xs);
+        xs = r;
     } else {
         size_t cap = need * 2 < 4096 ? 4096 : need * 2;
         if (c_old >= SIZE_CLASSES || xs->desc) {
@@ -431,6 +457,24 @@ mim_val *mim_concat_i64_own(mim_val *xs, const int64_t *ys, int64_t m) {
     }
     mim_val *y = alloc(MIM_I64, 1, m);
     memcpy(y->data, ys, sizeof(int64_t) * (size_t)m);
+    mim_val *r = mim_std_concat_own(xs, y);
+    mim_release(y);
+    return r;
+}
+
+/* concat(xs, v ⥊ [n]) on a list of i64 held once, with raw numbers: the
+ * copies written straight into the list, no list of them made first */
+mim_val *mim_fill_i64_own(mim_val *xs, int64_t v, int64_t n) {
+    if (n < 0) mim_panic("⥊ (reshape): negative dimension");
+    if (own_plain(xs) && xs->dtype == MIM_I64) {
+        int64_t k = xs->len;
+        xs = grow_owned(xs, k + n);
+        int64_t *d = (int64_t *)xs->data + k;
+        for (int64_t j = 0; j < n; j++) d[j] = v;
+        return xs;
+    }
+    mim_val *y = alloc(MIM_I64, 1, n);
+    for (int64_t j = 0; j < n; j++) ((int64_t *)y->data)[j] = v;
     mim_val *r = mim_std_concat_own(xs, y);
     mim_release(y);
     return r;
@@ -1147,6 +1191,11 @@ MATH2(pow, pow(x, y))
 MATH1(floor, floor(x))
 MATH1(ceil, ceil(x))
 MATH1(round, round(x))
+MATH1(tanh, tanh(x))
+MATH1(sinh, sinh(x))
+MATH1(cosh, cosh(x))
+MATH1(log1p, log1p(x))
+MATH1(expm1, expm1(x))
 
 /* math::mulmod(a, b, m): a × b modulo m for any m > 0 an i64 holds, the
  * result in 0 … m - 1 (a 128-bit product where the target has one, else
@@ -1327,13 +1376,17 @@ mim_val *mim_std_char_code(mim_val *s) {
 }
 
 /* char_of(65) → "A" */
-mim_val *mim_std_char_of(mim_val *code) {
-    int64_t c = int_arg(code, "char_of");
+mim_val *mim_char_of_i64(int64_t c);
+mim_val *mim_std_char_of(mim_val *code) { return mim_char_of_i64(int_arg(code, "char_of")); }
+
+/* char_of with a raw number (compiled code with an i64: no boxing) */
+mim_val *mim_char_of_i64(int64_t c) {
     if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
         char buf[96];
         snprintf(buf, sizeof buf, "char_of: %lld is not a Unicode character", (long long)c);
         mim_panic(buf);
     }
+    if (c < 0x80) return ascii1((unsigned char)c);
     char b[4];
     int n;
     if (c < 0x80) { b[0] = (char)c; n = 1; }

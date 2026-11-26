@@ -1,0 +1,80 @@
+# The held-out set (bench/heldout/; docs/versions.md, stage 0.4): programs
+# written plainly and never used to tune the compiler. Each is built and run
+# in Mimic and in C on Linux, macOS and Windows, its output checked against
+# expected.txt, and timed (bench/run.py --heldout); the table and the
+# geometric mean against C go into the run's summary. A program that does
+# not build, prints the wrong output, runs over 5 minutes or over 4 GB of
+# memory is listed as failed there, after every other program has been
+# measured; the job itself does not fail on it (it measures, it does not
+# gate).
+#
+# On pull requests that change the set, the runner, the compiler or the
+# runtime, by hand, and every night on dev (the measure stage 0.4 closes on).
+name: heldout
+
+on:
+  pull_request:
+    branches: [dev, main]
+    # (the compiler and the runtime too: during stage 0.4 every change shows
+    # what it does to the set)
+    paths: ["bench/heldout/**", "bench/run.py", ".github/workflows/heldout.yml", "crates/**", "runtime/**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "30 5 * * *"
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 23.1.4
+  TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+
+jobs:
+  heldout:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x86_64 }
+          - { os: macos-15, platform: macos-arm64 }
+          - { os: windows-2025, platform: windows-x86_64 }
+    name: heldout (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the nightly run measures dev, where the work is
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+
+      - uses: ./.github/actions/setup
+        with:
+          platform: ${{ matrix.platform }}
+
+      - name: Build mimic
+        run: cargo build --release
+
+      # it measures: failures are listed in the summary (and stage 0.4
+      # closes only when there are none), not a reason to block a merge
+      - name: The held-out set
+        continue-on-error: true
+        run: '"$(command -v python3 || command -v python)" bench/run.py --heldout --runs 3 --json heldout.json'
+
+      - name: Results
+        if: always()
+        run: |
+          echo "### Held-out set (${{ matrix.platform }})" >> "$GITHUB_STEP_SUMMARY"
+          cat bench/results-heldout.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no results)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heldout-${{ matrix.platform }}
+          path: |
+            bench/results-heldout.md
+            heldout.json
+          if-no-files-found: ignore

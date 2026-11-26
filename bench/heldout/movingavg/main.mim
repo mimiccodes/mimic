@@ -1,0 +1,29 @@
+module main
+
+// A 50-wide moving average over 10,000,000 generated floats (multiples of
+// 1/64); prints the largest average and the last one.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn generate(n: i64, x: i64, acc: [f64]) -> [f64] {
+    if n == 0 {
+        acc
+    } else {
+        let y = next(x)
+        generate(n - 1, y, push(acc, (y % 10000) / 64))
+    }
+}
+
+fn main() {
+    let width = 50
+    let values = generate(10000000, 42, [])
+    let n = ≢ values
+    // running totals; each window is the difference of two of them
+    let totals = values ▷ trail(+)
+    let windows = concat([totals[width - 1]], (totals ↓ width) - (totals ↑ (n - width)))
+    let averages = windows / width
+    let best = averages ▷ ⌈/
+    let last = averages[≢ averages - 1]
+    print("{best:.6}")
+    print("{last:.6}")
+}

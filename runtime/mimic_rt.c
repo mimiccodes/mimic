@@ -113,6 +113,21 @@ typedef struct mim_val {
 
 #define MIM_IMMORTAL ((int64_t)1 << 62)
 
+/* Debug builds' memory check (-DMIM_MEMCHECK=1, mimic_own.c): a freed value
+ * is marked (its count MIM_FREED_RC, its type MIM_FREED_DT, so the compiled
+ * code's checks of a type never pass and it reaches the runtime), filled with
+ * junk, and kept a while before its memory is used again; a retain, a release
+ * or a read of it stops the program. Release builds: nothing. */
+#ifdef MIM_MEMCHECK
+#define MIM_FREED_RC ((int64_t)-0x5EED0DEAD)
+#define MIM_FREED_DT 0x7EED
+static void memcheck_hit(const mim_val *v, const char *what);
+static mim_val *memcheck_hold(mim_val *v, size_t bytes, size_t *out_bytes);
+#define MEMCHECK(v, what) do { if ((v) && (v)->rc == MIM_FREED_RC) memcheck_hit((v), (what)); } while (0)
+#else
+#define MEMCHECK(v, what) ((void)0)
+#endif
+
 typedef mim_val *(*mim_fn1)(mim_val *);
 
 enum { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE, OP_AND, OP_OR, OP_IDIV, OP_MAX2, OP_MIN2,
@@ -493,6 +508,7 @@ static void timed_range(void *c, int64_t lo, int64_t hi) {
     t->f(t->ctx, lo + t->from, hi + t->from);
 }
 
+
 void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx) {
     if (n <= 0) return;
     if (n == 1 || g_nthreads <= 1 || t_in_parallel) {
@@ -529,6 +545,9 @@ void mim_par_for_timed(int64_t n, void (*f)(void *, int64_t, int64_t), void *ctx
         step *= 2;
     }
 }
+
+/* a pure `¨` over n elements, shared out when worth it (mimic_own.c) */
+static void each_par(int64_t n, void (*range)(void *, int64_t, int64_t), void *ctx, void *key);
 int64_t mim_par_grain(void);
 
 /* ==== fork-join ===========================================================
@@ -1376,6 +1395,7 @@ static void rc_report(void) {
  * thread can see the value, so no atomic update. */
 static inline void release_in(heap_state *h, mim_val *v) {
     if (!v) return;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1) dealloc_in(h, v);
@@ -1387,6 +1407,7 @@ static inline int holds_values(int dt) { return dt == MIM_BOXED || dt == MIM_OBJ
 /* Drop a reference: 1 when it was the last. */
 static inline int drop_ref(mim_val *v) {
     if (!v) return 0;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     return rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0);
@@ -1400,6 +1421,11 @@ static void free_block(heap_state *h, mim_val *v) {
     size_t bytes = payload_bytes(dt, v->len);
     padded_count *lc = live_of(h);
     __atomic_store_n(&lc->n, lc->n - 1, __ATOMIC_RELAXED);
+#ifdef MIM_MEMCHECK
+    /* kept, marked, a while; what comes back is an older one to free now */
+    v = memcheck_hold(v, bytes, &bytes);
+    if (!v) return;
+#endif
     int c = size_class(bytes);
     if (c < SIZE_CLASSES) {
         if (h->free_len[c] >= FREE_LIST_CAP) pool_give(h, c);
@@ -1513,12 +1539,14 @@ static void free_list_drain(void) {
 mim_val *mim_alloc_vec(int32_t dtype, int64_t n) { return alloc(dtype, 1, n); }
 
 void mim_retain(mim_val *v) {
+    MEMCHECK(v, "retained");
     if (v) RC_COUNT(g_rc_retains);
     if (v && __atomic_load_n(&v->rc, __ATOMIC_RELAXED) < MIM_IMMORTAL) __atomic_fetch_add(&v->rc, 1, __ATOMIC_RELAXED);
 }
 
 void mim_release(mim_val *v) {
     if (!v) return;
+    MEMCHECK(v, "released");
     RC_COUNT(g_rc_releases);
     int64_t rc = __atomic_load_n(&v->rc, __ATOMIC_ACQUIRE);
     if (rc == 1 || (rc < MIM_IMMORTAL && __atomic_sub_fetch(&v->rc, 1, __ATOMIC_ACQ_REL) == 0)) dealloc_in(&t_heap, v);
@@ -1591,8 +1619,11 @@ static void raise_open_files(void) {
 }
 #endif
 
+static void mim_crash_handlers(void); /* (mimic_own.c) */
+
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
+    mim_crash_handlers();
 #ifdef MIM_COUNT_RC
     atexit(rc_report);
 #endif
@@ -1745,6 +1776,7 @@ static const char *dtname(const mim_val *v) {
     static const char *s[] = {"i64", "f64", "bool", "char"};
     static const char *vs[] = {"[i64]", "[f64]", "[bool]", "str"};
     if (!v) return "()";
+    MEMCHECK(v, "read");
     if (v->dtype == MIM_OBJ) return v->desc && v->desc->type_name ? v->desc->type_name : "record";
     if (v->dtype == MIM_BOXED) return "list";
     if (v->dtype == MIM_FN) return "function";
@@ -1756,6 +1788,7 @@ static const char *dtname(const mim_val *v) {
 }
 
 static void need(const mim_val *v, const char *what) {
+    MEMCHECK(v, "read");
     if (!v) {
         char buf[160];
         snprintf(buf, sizeof buf, "%s: got unit value `()`", what);
@@ -2283,6 +2316,8 @@ static void sb_i64(sbuf *b, int64_t x) {
     sb_put(b, buf, fmt_i64(buf, x));
 }
 
+static void fmt_f64(char *buf, size_t n, double x); /* (mimic_own.c) */
+
 static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     char buf[64];
     switch (v->dtype) {
@@ -2292,7 +2327,7 @@ static void fmt_elem(sbuf *b, const mim_val *v, int64_t i) {
     case MIM_CHAR: { char c = (char)geti(v, i); sb_put(b, &c, 1); break; }
     case MIM_F64: {
         double x = getf(v, i);
-        snprintf(buf, sizeof buf, "%.15g", x);
+        fmt_f64(buf, sizeof buf, x);
         sb_str(b, buf);
         if (isfinite(x) && !strpbrk(buf, ".e")) sb_str(b, ".0");
         break;
@@ -3201,7 +3236,15 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
     switch (prim) {
     case P_TAKE:
     case P_DROP: {
-        if (b->rank != 0 || IS_FLOAT(b->dtype)) mim_panic("take/drop count must be an integer scalar");
+        /* the count on either side, as the compiled forms take it: `2 ↑ xs`
+         * (a list of records came here with its count on the left and
+         * stopped with "the count must be an integer") */
+        if (a->rank == 0 && b->rank != 0) {
+            mim_val *t = a;
+            a = b;
+            b = t;
+        }
+        if (b->rank != 0 || IS_FLOAT(b->dtype) || IS_HANDLES(b)) mim_panic("take/drop: the count must be an integer");
         if (a->rank == 0) mim_panic("take/drop expects a vector on the left");
         int64_t n = geti(b, 0), len = dim_of(a, 0);
         int64_t k = n < 0 ? -n : n;
@@ -3250,6 +3293,7 @@ mim_val *mim_prim2(int32_t prim, mim_val *a, mim_val *b) {
 /* ==== each =============================================================== */
 
 static mim_val *scalar_at(const mim_val *xs, int64_t i) {
+    MEMCHECK(xs, "read");
     switch (xs->dtype) {
     case MIM_OBJ: return slot_get(xs, i);
     case MIM_BOXED: {
@@ -3309,7 +3353,7 @@ mim_val *mim_each(mim_val *xs, mim_fn1 f, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_ctx c = {xs, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_range, &c);
+    } else if (pure) each_par(n, each_range, &c, (void *)f);
     else each_range(&c, 0, n);
     /* a function run for its effects only: `xs ¨ (x => chan::close(x))` is () */
     int64_t units = 0;
@@ -3427,6 +3471,9 @@ static int memo_same_closure(const memo_tab *old, const mim_val *f) {
 }
 
 static mim_val *each_memo_run(mim_val *xs, mim_fn1 f, mim_val *closure, int32_t pure, void **site);
+/* (mimic_own.c) */
+static int each_worth_sharing(int64_t spent, int64_t done, int64_t left);
+
 mim_val *mim_each_fn(mim_val *xs, mim_val *f);
 
 mim_val *mim_each_memo(mim_val *xs, mim_fn1 f, int32_t pure, void **site) {
@@ -3512,7 +3559,7 @@ mim_val *mim_each_raw(mim_val *xs, mim_fn_raw f, int32_t dt, int32_t pure) {
     mim_val **tmp = (mim_val **)malloc(sizeof(mim_val *) * (size_t)n);
     each_raw_ctx c = {(const int64_t *)xs->data, f, tmp};
     if (pure == 2 && n > 1 && run_on_loop(n, each_raw_range, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), each_raw_range, &c);
+    } else if (pure) each_par(n, each_raw_range, &c, (void *)f);
     else each_raw_range(&c, 0, n);
     int64_t units = 0;
     for (int64_t i = 0; i < n; i++) units += tmp[i] == NULL;
@@ -3555,7 +3602,7 @@ mim_val *mim_each_own(mim_val *xs, mim_fn1 f, int32_t pure) {
     each_ctx c = {xs, f, tmp};
     mim_task run = take ? each_own_range : each_lend_range;
     if (pure == 2 && n > 1 && run_on_loop(n, run, &c)) {
-    } else if (pure) parallel_for_grain(n, fine_grain(n), run, &c);
+    } else if (pure) each_par(n, run, &c, (void *)f);
     else run(&c, 0, n);
     if (take) {
         free_block(&t_heap, xs); /* the block only: its elements were given away */
@@ -3618,7 +3665,7 @@ mim_val *mim_each_fn(mim_val *xs, mim_val *f) {
             if (done == n) break;
             clock_gettime(CLOCK_MONOTONIC, &b);
             int64_t spent = (int64_t)(b.tv_sec - a.tv_sec) * 1000000000 + (b.tv_nsec - a.tv_nsec);
-            if (spent / done * (n - done) > 50000) {
+            if (each_worth_sharing(spent, done, n - done)) {
                 c.base = done;
                 parallel_for_grain(n - done, fine_grain(n - done), each_fn_range, &c);
                 break;
@@ -4057,6 +4104,40 @@ mim_val *mim_vec_as(mim_val *v, int32_t dtype) {
         }
         return r;
     }
+    /* a list of boxed numbers (a `flatten`, a list grown from `[]` the
+     * generic way): the typed list its declaration asks for, when every
+     * element is a number of that kind (an empty list included) */
+    if (v && v->rank == 1 && v->dtype == MIM_BOXED && (dtype == MIM_I64 || dtype == MIM_F64)) {
+        mim_val **xs = (mim_val **)v->data;
+        int64_t n = v->len;
+        int ok = 1;
+        for (int64_t k = 0; k < n && ok; k++) {
+            mim_val *x = xs[k];
+            ok = x && x->rank == 0 && (x->dtype == MIM_I64 || x->dtype == MIM_BOOL || x->dtype == MIM_I32 || (dtype == MIM_F64 && (x->dtype == MIM_F64 || x->dtype == MIM_F32)));
+        }
+        if (ok) {
+            mim_val *r = alloc(dtype, 1, n);
+            for (int64_t k = 0; k < n; k++) {
+                if (dtype == MIM_F64) ((double *)r->data)[k] = getf(xs[k], 0);
+                else ((int64_t *)r->data)[k] = geti(xs[k], 0);
+            }
+            return r;
+        }
+    }
+    /* a list of truth values: an empty list of numbers (`[]`), or a list
+     * of boxed truth values, made one; anything else as it is */
+    if (v && dtype == MIM_BOOL && v->rank == 1 && v->dtype != MIM_BOOL) {
+        int ok = v->len == 0 ? IS_NUMDT(v->dtype) || v->dtype == MIM_BOXED : v->dtype == MIM_BOXED;
+        mim_val **xs = (mim_val **)v->data;
+        for (int64_t k = 0; ok && k < v->len; k++) ok = xs[k] && xs[k]->rank == 0 && xs[k]->dtype == MIM_BOOL;
+        if (ok) {
+            mim_val *r = alloc(MIM_BOOL, 1, v->len);
+            for (int64_t k = 0; k < v->len; k++) ((uint8_t *)r->data)[k] = ((uint8_t *)xs[k]->data)[0] != 0;
+            return r;
+        }
+        mim_retain(v);
+        return v;
+    }
     if (!v || v->dtype == dtype || v->rank == 0 || (v->dtype != MIM_I64 && v->dtype != MIM_BOOL && v->dtype != MIM_I32 && v->dtype != MIM_F32)) {
         mim_retain(v);
         return v;
@@ -4116,6 +4197,8 @@ mim_val *mim_fixed_in(mim_val *v, int32_t dtype, int64_t n, const char *what) {
 }
 
 mim_val *mim_index(mim_val *xs, mim_val *i) {
+    MEMCHECK(xs, "read");
+    MEMCHECK(i, "read");
     if (xs && xs->dtype == MIM_MAP) return map_get(xs, i);
     if (is_tuple(i)) {
         int n;
@@ -4254,6 +4337,7 @@ static int type_ok(mim_val *v, int32_t ty);
 int32_t mim_is_type(mim_val *v, int32_t ty) { return type_ok(v, ty); }
 
 void mim_check_type(mim_val *v, int32_t ty, const char *what) {
+    MEMCHECK(v, "read");
     if (type_ok(v, ty)) return;
     static const char *names[] = {"", "integer scalar", "f64 scalar", "bool", "char", "str", "[i64]", "[f64]", "[bool]", "function", "[u8]", "f32 scalar", "i32 scalar", "[f32]", "[i32]"};
     char buf[256];
@@ -4331,3 +4415,6 @@ void *mim_dataptr(mim_val *v) {
 #include "mimic_window.c"
 /* GPU kernels (Metal, macOS) */
 #include "mimic_gpu.c"
+/* lists and maps handed over by compiled code, changed in place (last, so
+ * the code of everything above stays where it is) */
+#include "mimic_own.c"

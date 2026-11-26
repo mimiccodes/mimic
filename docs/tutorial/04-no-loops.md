@@ -13,7 +13,7 @@ Mimic has no `for` or `while`. That is deliberate:
 | You want to… | Use |
 |---|---|
 | transform every element | `xs ¨ f` (each) |
-| combine all elements into one | `xs ▷ gather(f)`, or `+/` `×/` `⌈/` `⌊/` |
+| combine all elements into one | `xs ▷ gather(f)`, or `+/` `×/` `⌈/` `⌊/` `∧/` `∨/` |
 | keep the running result | `xs ▷ trail(f)` |
 | repeat a step *n* times | `x ▷ evolve(n, step)` |
 | repeat until a condition holds | `x ▷ settle(step, done)` |
@@ -119,7 +119,7 @@ fn main() {
 ```
 
 ```output
-1.41421356237309
+1.414213562373095
 1024
 ```
 
@@ -154,7 +154,7 @@ The glyph form is `⋔`.
 
 ## Recursion
 
-For anything the words don't cover, write a recursive function. Mimic turns tail calls into jumps, so deep recursion doesn't use up the stack:
+For anything the words don't cover, write a recursive function. When a function's last act is calling itself (a tail call), Mimic turns the call into a jump, in debug and release builds alike, so the recursion doesn't use up the stack however deep it goes. That holds when the function carries lists, strings or records too: whatever the call no longer needs is released or handed over before it. A call whose result is still worked on (`n * fact(n - 1)`) is not a tail call, and very deep recursion of that kind is better written with `evolve` or `settle`:
 
 ```mimic run
 module main

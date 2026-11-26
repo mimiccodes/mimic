@@ -1,0 +1,37 @@
+module main
+
+// Sorts 1,000,000 generated numbers with a hand-written quicksort
+// (middle element as pivot, split three ways) and prints a checksum.
+
+fn next(x: i64) -> i64 { (x * 1103515245 + 12345) % 2147483648 }
+
+fn generate(n: i64, x: i64, acc: [i64]) -> [i64] {
+    if n == 0 {
+        acc
+    } else {
+        let y = next(x)
+        generate(n - 1, y, push(acc, y % 1000000))
+    }
+}
+
+fn quicksort(xs: [i64]) -> [i64] {
+    if ≢ xs <= 1 {
+        xs
+    } else {
+        let pivot = xs[≢ xs div 2]
+        let smaller = xs ⌿ (xs < pivot)
+        let same = xs ⌿ (xs == pivot)
+        let larger = xs ⌿ (xs > pivot)
+        concat(concat(quicksort(smaller), same), quicksort(larger))
+    }
+}
+
+fn checksum(xs: [i64]) -> i64 {
+    let idx = ⍳ (≢ xs)
+    xs * (idx % 1000 + 1) ▷ +/
+}
+
+fn main() {
+    let xs = generate(1000000, 42, [])
+    print(checksum(quicksort(xs)))
+}

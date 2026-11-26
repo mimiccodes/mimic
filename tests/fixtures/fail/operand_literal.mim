@@ -1,0 +1,6 @@
+// expect-error: E0401 `settle` needs a function of 1 argument(s) here, not a value
+module main
+fn main() {
+    let x = 1 ▷ settle(s => s + 1, 10)
+    print(x)
+}
