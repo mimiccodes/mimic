@@ -872,8 +872,10 @@ impl Infer<'_> {
                 // type (`if … { [] } else { [x] }`): the declared list, the
                 // value made typed (checked) once as it is returned, so a
                 // caller's `flatten`, indexing and arithmetic on it run typed
+                // (`-> [bool]` too: a list of truth values grown from `[]`
+                // by `push` is stored as truth values from its first one)
                 if let Ty::Arr(El::Dyn, _) = ret
-                    && let Some(Ty::Arr(el @ (El::I64 | El::F64), _)) = ann_env(p, module, rt, &env)
+                    && let Some(Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), _)) = ann_env(p, module, rt, &env)
                 {
                     ret = Ty::Arr(el, 0);
                 }
@@ -1167,7 +1169,7 @@ impl Walk<'_, '_> {
                 if i < args.len()
                     && matches!(args[i], Ty::Dyn | Ty::Arr(El::Dyn, _))
                     && let Some(t) = prm.ty.as_ref().and_then(|t| ann_in(self.inf.p, m, t))
-                    && matches!(t, Ty::Arr(El::I64 | El::F64, 0))
+                    && matches!(t, Ty::Arr(El::I64 | El::F64 | El::Bool, 0))
                 {
                     args[i] = t;
                     self.out.converts.insert((at, i));
