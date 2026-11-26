@@ -1778,6 +1778,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_closure" => ptr.fn_type(&[p, i64t, p], false),
             "mim_closure_checked" => ptr.fn_type(&[p, p, i64t, p], false),
             "mim_index_fail" => void.fn_type(&[p, i64t], false),
+            "mim_char_of_i64" => ptr.fn_type(&[i64t], false),
             "mim_byte_fail" => void.fn_type(&[i64t, i64t], false),
             "mim_sort_i64_small" | "mim_sort_f64_small" => void.fn_type(&[p, i64t], false),
             "mim_vec_as" => ptr.fn_type(&[p, i32t], false),
@@ -5951,6 +5952,20 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // char_of of a number: the runtime's with it as it is (a
+                // boxed number made and checked per character otherwise)
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "char_of"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 1
+                    && self.ty_of(&args[0]) == Ty::I64
+                {
+                    let v = self.expr(&args[0])?;
+                    let n = self.to_i64(v)?;
+                    let r = self.call_rt_ptr("mim_char_of_i64", &[n.into()])?;
+                    return self.as_ty(r, ty, "result of `char_of`");
+                }
                 // char_code of text starting with an ASCII character: its
                 // first byte, read in place (a call, a type check and a boxed
                 // result per character otherwise); other text: the runtime's
