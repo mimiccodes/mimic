@@ -717,6 +717,28 @@ impl Lower<'_> {
     /// `put(xs, i, x)` or `push(xs, x)` (the prelude's) of a list of i64
     /// and numbers, giving a list of i64: its name and arguments.
     fn list_change<'e>(&self, e: &'e Expr) -> Option<(&'static str, &'e [Expr])> {
+        let (op, args) = self.prelude_change(e)?;
+        let list = Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0));
+        if self.ty(&args[0])? != list || self.ty(e)? != list {
+            return None;
+        }
+        // (concat: another list of i64; put and push: numbers)
+        let ok = if op == "concat" { self.ty(&args[1]).is_some_and(crate::i64_list) } else { args[1..].iter().all(|a| self.ty(a) == Some(Ty::I64)) };
+        ok.then_some((op, args))
+    }
+
+    /// The element kind of `e`, a short list of i64 or f64 kept in registers.
+    fn short_numbers(&self, e: &Expr) -> Option<mimic_check::types::El> {
+        let Ty::Agg(t) = self.ty(e)? else { return None };
+        match crate::short_list(t)? {
+            (el @ (mimic_check::types::El::I64 | mimic_check::types::El::F64), _) => Some(el),
+            _ => None,
+        }
+    }
+
+    /// A call of the prelude's `put` (3 arguments), `push` or `concat` (2):
+    /// its name and arguments, whatever their types.
+    fn prelude_change<'e>(&self, e: &'e Expr) -> Option<(&'static str, &'e [Expr])> {
         let ExprKind::Call { callee, args } = &e.kind else { return None };
         let ExprKind::Path(path) = &callee.kind else { return None };
         if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
@@ -733,13 +755,7 @@ impl Lower<'_> {
             ("concat", 2) => "concat",
             _ => return None,
         };
-        let list = Ty::List(mimic_check::types::Ty::Arr(mimic_check::types::El::I64, 0));
-        if self.ty(&args[0])? != list || self.ty(e)? != list {
-            return None;
-        }
-        // (concat: another list of i64; put and push: numbers)
-        let ok = if op == "concat" { self.ty(&args[1]).is_some_and(crate::i64_list) } else { args[1..].iter().all(|a| self.ty(a) == Some(Ty::I64)) };
-        ok.then_some((op, args))
+        Some((op, args))
     }
 
     /// One branch of a field's new value (see the split in `with`): the
@@ -1092,6 +1108,30 @@ impl Lower<'_> {
                 }
                 let t = self.tree(r, &args[0])?;
                 Some(self.emit(r, ty, Op::Reduce(*p, t, el), e.span))
+            }
+            // xs[i] of a short list of numbers kept in registers (a machine's
+            // tape in a record): the element, checked, without the list ever
+            // being built on the heap
+            ExprKind::Index { base, index } if self.short_numbers(base).is_some() => {
+                let el = self.short_numbers(base)?;
+                if ty != Ty::of_el_ir(el) || self.ty(index)? != Ty::I64 {
+                    return None;
+                }
+                let b = self.expr(r, base)?;
+                let i = self.expr(r, index)?;
+                Some(self.emit(r, ty, Op::GetAt(b, i), e.span))
+            }
+            // put(xs, i, x) of such a list, a list of the same kind and length
+            ExprKind::Call { .. } if self.prelude_change(e).is_some_and(|(op, args)| op == "put" && self.short_numbers(&args[0]).is_some()) => {
+                let (_, args) = self.prelude_change(e)?;
+                let el = self.short_numbers(&args[0])?;
+                if self.ty(&args[0])? != ty || self.ty(&args[1])? != Ty::I64 || self.ty(&args[2])? != Ty::of_el_ir(el) {
+                    return None;
+                }
+                let b = self.expr(r, &args[0])?;
+                let i = self.expr(r, &args[1])?;
+                let x = self.expr(r, &args[2])?;
+                Some(self.emit(r, ty, Op::SetAt(b, i, x), e.span))
             }
             // xs[i] of a list: a number of its kind
             ExprKind::Index { base, index } if matches!(self.ty(base)?, Ty::List(_)) => {

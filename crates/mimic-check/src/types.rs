@@ -1720,6 +1720,12 @@ impl Walk<'_, '_> {
                         });
                         return Ty::Dyn;
                     }
+                    // a start that is `[]`, or a tuple with `[]` parts
+                    // (`(0, [], marks)`): those lists take the type the step
+                    // gives them, a list of i64 or of f64, when the step then
+                    // gives back the state it was given (else the state was
+                    // dynamic, and so was every function using it)
+                    let a = self.empty_lists_from_step(&args[0], a, step);
                     let r = self.lambda(step, vec![a]);
                     // the same record, its list fields' known lengths aside
                     // (a start built from `[x]` knows one): the record type
@@ -1830,6 +1836,54 @@ impl Walk<'_, '_> {
 }
 
 impl Walk<'_, '_> {
+    /// A loop's start `init` (typed `a`) that is `[]`, or a tuple literal
+    /// with `[]` parts: retyped with those lists of i64, or else of f64,
+    /// when the step (one parameter) gives back that state (list lengths
+    /// aside); else `a` as it was.
+    fn empty_lists_from_step(&mut self, init: &Expr, a: Ty, step: &Expr) -> Ty {
+        let empties: Vec<&Expr> = match (&init.kind, a) {
+            (_, Ty::Arr(El::Dyn, _)) if is_empty_list(init) => vec![init],
+            (ExprKind::Tuple(xs), Ty::Tup(t)) => {
+                let ts = tuple_elems(t);
+                xs.iter().zip(&ts).filter(|(x, t)| is_empty_list(x) && matches!(t, Ty::Arr(El::Dyn, _))).map(|(x, _)| x).collect()
+            }
+            _ => vec![],
+        };
+        if empties.is_empty() {
+            return a;
+        }
+        let with = |el: El| match a {
+            Ty::Tup(t) => {
+                let ts = tuple_elems(t);
+                let ExprKind::Tuple(xs) = &init.kind else { unreachable!() };
+                let parts: Vec<Ty> = xs.iter().zip(&ts).map(|(x, t)| if is_empty_list(x) && matches!(t, Ty::Arr(El::Dyn, _)) { Ty::Arr(el, 0) } else { *t }).collect();
+                Ty::Tup(tuple_id(&parts))
+            }
+            _ => Ty::Arr(el, 0),
+        };
+        for el in [El::I64, El::F64] {
+            let try_a = with(el);
+            let r = self.lambda(step, vec![try_a]);
+            // the step's lists may differ in their known lengths: the state
+            // is the join, if the step gives that back too
+            let j = try_a.join(r);
+            let typed = |t: &Ty| !matches!(t, Ty::Dyn | Ty::Never | Ty::Arr(El::Dyn, _));
+            let all_typed = match j {
+                Ty::Tup(t) => tuple_elems(t).iter().all(typed),
+                t => typed(&t),
+            };
+            if r == Ty::Never || !all_typed || self.lambda(step, vec![j]) != j {
+                continue;
+            }
+            for x in &empties {
+                self.out.exprs.insert(id(x), Ty::Arr(el, 0));
+            }
+            self.out.exprs.insert(id(init), j);
+            return j;
+        }
+        a
+    }
+
     /// The type of `base.name`.
     fn field_ty(&mut self, base: Ty, name: &str, span: mimic_syntax::Span) -> Ty {
         let p = self.inf.p;
