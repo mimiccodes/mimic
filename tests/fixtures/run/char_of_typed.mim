@@ -1,0 +1,12 @@
+module main
+
+// char_of with a number: the runtime's, with the number as it is
+
+fn code(i: i64) -> i64 { [65 241 8364 128512 10][i] }
+
+fn main() {
+    let cs = ⍳ 5 ¨ (i => char_of(code(i)))
+    print(cs ▷ join("|"))
+    print(⍳ 26 ¨ (i => char_of(97 + i)) ▷ join(""))
+    print(char_code(char_of(8364)))
+}

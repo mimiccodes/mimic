@@ -1376,8 +1376,11 @@ mim_val *mim_std_char_code(mim_val *s) {
 }
 
 /* char_of(65) → "A" */
-mim_val *mim_std_char_of(mim_val *code) {
-    int64_t c = int_arg(code, "char_of");
+mim_val *mim_char_of_i64(int64_t c);
+mim_val *mim_std_char_of(mim_val *code) { return mim_char_of_i64(int_arg(code, "char_of")); }
+
+/* char_of with a raw number (compiled code with an i64: no boxing) */
+mim_val *mim_char_of_i64(int64_t c) {
     if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
         char buf[96];
         snprintf(buf, sizeof buf, "char_of: %lld is not a Unicode character", (long long)c);
