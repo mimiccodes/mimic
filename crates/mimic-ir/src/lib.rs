@@ -90,11 +90,6 @@ pub fn worth(f: &Function) -> bool {
                 // as `nbody`'s `main` showed)
                 Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::GetAt(..) | Op::SetAt(..) => *work = true,
                 Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
-                // a loop whose state is kept in registers: the old path
-                // builds that state on the heap at every step (`brainf`'s
-                // machine, a record holding a short tape: one allocation
-                // and two reference-count operations per instruction)
-                Op::Loop { .. } if matches!(i.ty, Ty::Agg(_)) => *work = true,
                 _ => {}
             }
             for g in i.op.regions() {
