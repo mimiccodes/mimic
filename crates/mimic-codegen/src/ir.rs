@@ -725,6 +725,14 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         self.b.build_unconditional_branch(head).s()?;
         xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
+        // the exit after the step's blocks, as the old path laid it out
+        // (made before them, it sat between the test and the step, and
+        // sieve's crossing-out loop ran 8% slower on Linux)
+        if let Some(last) = fun.get_last_basic_block()
+            && last != out
+        {
+            out.move_after(last).map_err(|_| "internal compiler error: loop exit")?;
+        }
         self.b.position_at_end(out);
         Ok(cur)
     }
