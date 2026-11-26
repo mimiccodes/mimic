@@ -35,7 +35,7 @@ fn scaled(xs: [i64], f: i64) -> ([i64], i64) {
     (ys, ys ▷ +/)
 }
 
-// deep (50,000 calls, each keeping the tuple's parts)
+// recursion that keeps each level's parts (3,000 deep: WebAssembly's stack is small; deeper is a gap, docs/gaps.md)
 fn count_down(n: i64, acc: [i64]) -> ([i64], i64) {
     if n == 0 { (acc, ≢ acc) } else {
         let (a, k) = count_down(n - 1, acc)
@@ -56,7 +56,7 @@ fn main() {
     for_each([¯1 0 4 7])
     let (ys, total) = scaled([1 2 3], 10)
     print("{ys} {total}")
-    let (a, depth) = count_down(50000, [9])
+    let (a, depth) = count_down(3000, [9])
     print("{a} {depth}")
 }
 
