@@ -1,0 +1,31 @@
+module main
+
+// concat(s.f, v ⥊ [n]) on a record's list of numbers: the copies written
+// into the list itself; the list shared, empty, or copies none of them,
+// each gives what a list made first and then joined would
+
+type Run = { k: i64, out: [i64] }
+
+fn step(s: Run) -> Run {
+    { s with k: s.k + 1, out: concat(s.out, s.k ⥊ [s.k % 4]) }
+}
+
+fn grow(s: Run, v: i64, n: i64) -> Run {
+    { s with out: concat(s.out, v ⥊ [n]) }
+}
+
+fn main() {
+    let start = Run { k: 0, out: [] }
+    let end = start ▷ evolve(9, s => step(s))
+    print(end.out)
+    // shared: the first list must not change
+    let a = Run { k: 0, out: [1 2] }
+    let b = grow(a, 7, 3)
+    print("{a.out} {b.out}")
+    // none at all, then many (past the list's room)
+    let c = grow(grow(b, 5, 0), 9, 40)
+    print("{≢ c.out} {c.out[4]} {c.out[44]} {+/ c.out}")
+    // in a settle, as the qoi decoder does
+    let d = Run { k: 0, out: [] } ▷ settle(s => grow({ s with k: s.k + 1 }, s.k, 3), s => ≢ s.out >= 30)
+    print("{d.out ▷ +/} {≢ d.out}")
+}

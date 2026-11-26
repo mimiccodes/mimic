@@ -1,0 +1,6 @@
+// expect-error: E0401 `evolve` takes the number of steps first
+module main
+fn main() {
+    let x = 1 ▷ evolve(s => s + 1, 9)
+    print(x)
+}

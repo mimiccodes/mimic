@@ -6711,14 +6711,35 @@ impl<'ctx> Cg<'ctx, '_> {
                 let steals: Vec<Option<Vec<(&str, &[Expr])>>> = fields.iter().map(|(n, x, _)| if path_base { self.steal_chain(base, tid, n, x, fields) } else { None }).collect();
                 let mut early = Vec::new();
                 let mut early_rest: Vec<Vec<Vec<V<'ctx>>>> = Vec::new();
+                // `concat(s.f, v ⥊ [n])` on a list of i64: v and n kept as
+                // numbers, the copies written into the list (no list made)
+                let mut fills: Vec<Vec<Option<(IntValue<'ctx>, IntValue<'ctx>)>>> = Vec::new();
                 if path_base {
-                    for ((_, x, _), st) in fields.iter().zip(&steals) {
+                    for ((fname, x, _), st) in fields.iter().zip(&steals) {
                         match st {
                             Some(chain) => {
                                 // numbers stay raw, short lists in registers
                                 // (typed calls below); anything else boxed
                                 let mut levels = Vec::new();
-                                for (_, rest) in chain {
+                                let mut fl = Vec::new();
+                                let i64_field = matches!(self.record_field(tid, fname).1, Ty::Arr(El::I64, 0));
+                                for (op, rest) in chain {
+                                    if let (true, "concat", [Expr { kind: ExprKind::Prim { prim: Prim::Reshape, args }, .. }]) = (i64_field, *op, *rest) {
+                                        if let [v, Expr { kind: ExprKind::Array(dims), .. }] = args.as_slice() {
+                                            if let [d] = dims.as_slice() {
+                                                if self.ty_of(v) == Ty::I64 && self.ty_of(d) == Ty::I64 {
+                                                    let vv = self.expr(v)?;
+                                                    let vv = self.to_i64(vv)?;
+                                                    let dv = self.expr(d)?;
+                                                    let dv = self.to_i64(dv)?;
+                                                    levels.push(vec![V::I(vv), V::I(dv)]);
+                                                    fl.push(Some((vv, dv)));
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    fl.push(None);
                                     let mut vs = Vec::new();
                                     for a in rest.iter() {
                                         let v = self.expr(a)?;
@@ -6730,10 +6751,12 @@ impl<'ctx> Cg<'ctx, '_> {
                                     levels.push(vs);
                                 }
                                 early_rest.push(levels);
+                                fills.push(fl);
                                 early.push(V::I(self.ctx.i64_type().const_zero()));
                             }
                             None => {
                                 early_rest.push(Vec::new());
+                                fills.push(Vec::new());
                                 early.push(self.expr(x)?);
                             }
                         }
@@ -6791,6 +6814,14 @@ impl<'ctx> Cg<'ctx, '_> {
                     for (lvl, (op, _)) in chain.iter().enumerate() {
                     let op = *op;
                     let rest = early_rest[k][lvl].clone();
+                    if let Some((v, m)) = fills[k][lvl] {
+                        let i64t = self.ctx.i64_type();
+                        let f = self.module.get_function("mim_fill_i64_own").unwrap_or_else(|| {
+                            self.module.add_function("mim_fill_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(Linkage::External))
+                        });
+                        list = self.b.build_call(f, &[list.into(), v.into(), m.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                        continue;
+                    }
                     let i64_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::I64, 0));
                     let u8_list = matches!(self.record_field(tid, n).1, Ty::Arr(El::U8, 0));
                     let i64t = self.ctx.i64_type();

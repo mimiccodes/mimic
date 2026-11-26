@@ -451,6 +451,24 @@ mim_val *mim_concat_i64_own(mim_val *xs, const int64_t *ys, int64_t m) {
     return r;
 }
 
+/* concat(xs, v ⥊ [n]) on a list of i64 held once, with raw numbers: the
+ * copies written straight into the list, no list of them made first */
+mim_val *mim_fill_i64_own(mim_val *xs, int64_t v, int64_t n) {
+    if (n < 0) mim_panic("⥊ (reshape): negative dimension");
+    if (own_plain(xs) && xs->dtype == MIM_I64) {
+        int64_t k = xs->len;
+        xs = grow_owned(xs, k + n);
+        int64_t *d = (int64_t *)xs->data + k;
+        for (int64_t j = 0; j < n; j++) d[j] = v;
+        return xs;
+    }
+    mim_val *y = alloc(MIM_I64, 1, n);
+    for (int64_t j = 0; j < n; j++) ((int64_t *)y->data)[j] = v;
+    mim_val *r = mim_std_concat_own(xs, y);
+    mim_release(y);
+    return r;
+}
+
 mim_val *mim_put_i64_own(mim_val *xs, int64_t i, int64_t v) {
     if (own_plain(xs) && xs->dtype == MIM_I64 && i >= 0 && i < xs->len) {
         ((int64_t *)xs->data)[i] = v;

@@ -12,6 +12,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **`math::tanh`, `math::sinh`, `math::cosh`, `math::log1p`, `math::expm1` and `math::sigmoid`** (libm calls that fuse into array kernels like `math::exp`; `log1p` and `expm1` exact near zero; `sigmoid` without overflow for large negative inputs), and **`unwrap_or`** for an `Option`: `parse_int(s) ▷ unwrap_or(300)`. Reported by a user.
 
 ### Changed
+- **`concat(s.f, v ⥊ [n])` on a record's list of numbers writes the `n` copies into the list itself** when the record holds it alone: no list of them is made first and joined (`qoi`'s decoder repeating a pixel for a run).
 - **A record's list grows in place when the new list is chosen by an `if` first:** `let out = if k == 0 { push(s.out, x) } else { concat(s.out, ys) }` followed by `{ s with k: s.k + 2, out: out }` gives each branch the update, so a record held once has its list changed in place (as `{ s with out: push(s.out, x) }` already did) instead of copied at every step. An LZ77 decoder's `settle` over a 512 KiB output: 1.71 s → 0.03 s.
 - **`push`, `put` and `concat` of a short list on a record's list of numbers are done inline** when the record holds the list alone and it has room: the numbers are stored and the length raised where the code runs, without a call into the runtime (as `put` on a variable's list already was). A QOI encoder written with them: 0.49 s → 0.35 s on one core.
 - **`if c { xs } else { [] }` is a list of `xs`'s numbers** (`[i64]`, `[f64]` or bytes), not a list of unknown type: the `[]` takes the other branch's type, as a literal number already did, so code using the result is compiled for its numbers instead of the generic path.
@@ -29,6 +30,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 - **A parameter declared as a list of numbers (`xs: [i64]`, `[f64]`) is that list:** given a list of unknown type (`[]`, the result of `flatten`, a list grown from `[]`), the function used to be compiled for the unknown type, on the generic path, and the declaration only checked; now it is compiled for the declared type and the call converts the list (a list already of that type is passed as it is). `bigfactorial` in the held-out set (a list of digits started as `[]`): 39 s → 0.9 s. Reported by a user too (`bytes: [i64]` showing as `[?]`).
 
 ### Fixed
+- **`evolve` with its arguments swapped, `x ▷ evolve(step, n)`, is an error** (E0401, saying the count comes first) instead of a program that never runs the step; a number, string or list given where `settle`, `evolve`, `gather`, `trail` or `¨` needs a function is an error too.
 - `fs::temp_dir()` was `/tmp` on Windows, which does not exist there; it is the user's temporary directory (`TMP`, `TEMP`).
 - `k ↑ xs` and `k ↓ xs` on a list of records (the count on the left) stopped the program with "take/drop count must be an integer scalar"; the count may be on either side, as for lists of numbers.
 - `_` binds nothing: a value dropped on purpose can go to `_` any number of times in a function (the second `_ ← …` was E0302).
