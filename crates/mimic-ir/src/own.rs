@@ -90,11 +90,19 @@ fn region(r: &mut Region, next: &mut u32, given: &[Val], outer: &[Val]) {
                 region(then, next, &mine, &live);
                 region(els, next, &mine, &live);
             }
-            Op::Loop { done, step, .. } => {
+            // a state on the heap: given to the step (which takes it on or
+            // releases it), lent to `done`
+            Op::Loop { done, step, var, .. } => {
+                let heap = matches!(inst.ty, Ty::List(_) | Ty::Rec(_));
                 if let Some(d) = done {
-                    region(d, next, &[], &roots);
+                    let mut lent = roots.clone();
+                    if heap {
+                        lent.push(*var);
+                    }
+                    region(d, next, &[], &lent);
                 }
-                region(step, next, &[], &roots);
+                let given: &[Val] = if heap { std::slice::from_ref(var) } else { &[] };
+                region(step, next, given, &roots);
             }
             _ => {}
         }
@@ -164,6 +172,11 @@ fn take(op: &mut Op, v: Val) -> bool {
             // (a number a change reads)
             None => false,
         },
+        // a loop's first state: the loop holds it on
+        Op::Loop { init, moved, .. } if *init == v => {
+            *moved = true;
+            true
+        }
         Op::Record { fields, moves, .. } => {
             let k = fields.iter().position(|f| *f == v).expect("an operand");
             moves[k] = true;
@@ -241,7 +254,7 @@ mod tests {
             insts: vec![
                 inst(0, Ty::I64, Op::Param(0)),
                 inst(1, list(), Op::Map(Tree::Iota(Val(0)))),
-                inst(2, Ty::I64, Op::Loop { init: Val(0), var: Val(3), count: Some(Val(0)), done: None, step }),
+                inst(2, Ty::I64, Op::Loop { init: Val(0), var: Val(3), count: Some(Val(0)), done: None, step, moved: false }),
             ],
             result: Some(Val(1)),
         };
