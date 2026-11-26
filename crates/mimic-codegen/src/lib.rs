@@ -6752,20 +6752,19 @@ impl<'ctx> Cg<'ctx, '_> {
                                 let mut fl = Vec::new();
                                 let i64_field = matches!(self.record_field(tid, fname).1, Ty::Arr(El::I64, 0));
                                 for (op, rest) in chain {
-                                    if let (true, "concat", [Expr { kind: ExprKind::Prim { prim: Prim::Reshape, args }, .. }]) = (i64_field, *op, *rest) {
-                                        if let [v, Expr { kind: ExprKind::Array(dims), .. }] = args.as_slice() {
-                                            if let [d] = dims.as_slice() {
-                                                if self.ty_of(v) == Ty::I64 && self.ty_of(d) == Ty::I64 {
-                                                    let vv = self.expr(v)?;
-                                                    let vv = self.to_i64(vv)?;
-                                                    let dv = self.expr(d)?;
-                                                    let dv = self.to_i64(dv)?;
-                                                    levels.push(vec![V::I(vv), V::I(dv)]);
-                                                    fl.push(Some((vv, dv)));
-                                                    continue;
-                                                }
-                                            }
-                                        }
+                                    if let (true, "concat", [Expr { kind: ExprKind::Prim { prim: Prim::Reshape, args }, .. }]) = (i64_field, *op, *rest)
+                                        && let [v, Expr { kind: ExprKind::Array(dims), .. }] = args.as_slice()
+                                        && let [d] = dims.as_slice()
+                                        && self.ty_of(v) == Ty::I64
+                                        && self.ty_of(d) == Ty::I64
+                                    {
+                                        let vv = self.expr(v)?;
+                                        let vv = self.to_i64(vv)?;
+                                        let dv = self.expr(d)?;
+                                        let dv = self.to_i64(dv)?;
+                                        levels.push(vec![V::I(vv), V::I(dv)]);
+                                        fl.push(Some((vv, dv)));
+                                        continue;
                                     }
                                     fl.push(None);
                                     let mut vs = Vec::new();
