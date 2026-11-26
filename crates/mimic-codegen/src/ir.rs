@@ -174,8 +174,15 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.as_ty(r, ty, "value")?
                 }
                 Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
-                Op::Loop { init, var, count, done, step } => {
+                Op::Loop { init, var, count, done, step, moved } => {
                     let (init, count) = (get(vals, *init)?, count.map(|c| get(vals, c)).transpose()?);
+                    // a state on the heap: the loop holds a reference of its
+                    // own (the first state handed over, or retained)
+                    let init = match init {
+                        V::P(p, true) if !moved => self.own(V::P(p, false))?,
+                        V::P(p, false) => self.own(V::P(p, false))?,
+                        x => x,
+                    };
                     self.ir_loop(f, ty, init, *var, count, done.as_ref(), step, vals)?
                 }
                 // a value kept in registers: a short list, or a tuple or
@@ -687,8 +694,13 @@ impl<'ctx> Cg<'ctx, '_> {
             Some(_) => Some(self.b.build_phi(i64t, "i").s()?),
             None => None,
         };
-        let cur = self.val_of(xp.as_basic_value(), ty, false);
-        vals[var.0 as usize] = Some(cur);
+        // (on the heap: owned, given to the step; lent to `done`)
+        let cur = self.val_of(xp.as_basic_value(), ty, true);
+        let lent = match cur {
+            V::P(p, _) => V::P(p, false),
+            x => x,
+        };
+        vals[var.0 as usize] = Some(lent);
         let stop = match (n, done) {
             (Some(n), _) => {
                 let i = ip.unwrap().as_basic_value().into_int_value();
@@ -702,6 +714,7 @@ impl<'ctx> Cg<'ctx, '_> {
         };
         self.b.build_conditional_branch(stop, out, body).s()?;
         self.b.position_at_end(body);
+        vals[var.0 as usize] = Some(cur);
         let next = self.ir_region(f, step, vals)?;
         let next = self.as_ty(next, ty, "loop state")?;
         let latch = self.b.get_insert_block().unwrap();
