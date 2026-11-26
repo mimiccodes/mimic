@@ -10,6 +10,10 @@ on:
       benches:
         description: benchmarks (bench/ names; empty for all)
         default: ""
+  # and on a change to this file, to try it (a workflow run by hand is
+  # dispatchable only once it is on main)
+  pull_request:
+    paths: [.github/workflows/rc-count.yml]
 
 permissions:
   contents: read
