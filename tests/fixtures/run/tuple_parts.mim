@@ -1,0 +1,68 @@
+module main
+
+// A function giving back a tuple of a list and a number gives its parts as
+// they are (no tuple made) where the caller takes them apart at once; a
+// caller that keeps the tuple gets one
+
+fn find(parent: [i64], i: i64) -> ([i64], i64) {
+    if parent[i] == i { (parent, i) } else {
+        let (p, root) = find(parent, parent[i])
+        let mut c = p
+        c[i] = root
+        (c, root)
+    }
+}
+
+// several ways out: else-if branches, an early return, another such function
+fn classify(xs: [i64], k: i64) -> ([i64], str) {
+    if k < 0 {
+        return (xs, "negative")
+    }
+    if k == 0 {
+        (push(xs, 0), "zero")
+    } else if k % 2 == 0 {
+        (push(xs, k), "even")
+    } else {
+        relabel(push(xs, k))
+    }
+}
+
+fn relabel(xs: [i64]) -> ([i64], str) { (xs, "odd {≢ xs}") }
+
+// a lambda inside: its own way of returning
+fn scaled(xs: [i64], f: i64) -> ([i64], i64) {
+    let ys = xs ¨ (x => x * f)
+    (ys, ys ▷ +/)
+}
+
+// deep (50,000 calls, each keeping the tuple's parts)
+fn count_down(n: i64, acc: [i64]) -> ([i64], i64) {
+    if n == 0 { (acc, ≢ acc) } else {
+        let (a, k) = count_down(n - 1, acc)
+        (a, k + 1)
+    }
+}
+
+fn main() {
+    let parent = [0 0 1 2 3 4 5 6]
+    let (p, root) = find(parent, 7)
+    print("{p} {root} {parent}")
+    // the list part not wanted: released
+    let (_, r2) = find(p, 5)
+    print(r2)
+    // kept as a tuple
+    let t = find([1 1 1], 2)
+    print(t)
+    for_each([¯1 0 4 7])
+    let (ys, total) = scaled([1 2 3], 10)
+    print("{ys} {total}")
+    let (a, depth) = count_down(50000, [9])
+    print("{a} {depth}")
+}
+
+fn for_each(ks: [i64]) {
+    let rs = ks ¨ (k => classify([1], k))
+    print(rs)
+    let (xs, label) = classify([5], 3)
+    print("{xs} {label}")
+}
