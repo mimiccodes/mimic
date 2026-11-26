@@ -372,6 +372,12 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         let_moves: false,
         tuple_moves: Vec::new(),
         after_args: Vec::new(),
+        parts_fns: HashMap::new(),
+        parts_queue: Vec::new(),
+        parts_mode: false,
+        tail_ctx: false,
+        want_parts_site: None,
+        parts_result: None,
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -692,6 +698,18 @@ struct Cg<'ctx, 'p> {
     /// last use (argument index, name), released once every argument is
     /// evaluated when the callee takes them (see call_user)
     after_args: Vec<(usize, String)>,
+    /// A tuple of a few numbers and values on the heap returned as its parts
+    /// (a struct in registers, no tuple made): the functions compiled that
+    /// way (each beside its ordinary version), the ones still to compile,
+    /// whether the function being compiled is one, whether the block being
+    /// compiled is in its tail position, the call site that asked for
+    /// parts, and the parts that call gave
+    parts_fns: HashMap<(Key, Kind), FunctionValue<'ctx>>,
+    parts_queue: Vec<(Key, Kind)>,
+    parts_mode: bool,
+    tail_ctx: bool,
+    want_parts_site: Option<usize>,
+    parts_result: Option<inkwell::values::StructValue<'ctx>>,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -1962,10 +1980,170 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn drain(&mut self) -> R<()> {
-        while let Some((k, kind)) = self.queue.pop() {
-            self.define(&k, kind)?;
+        loop {
+            if let Some((k, kind)) = self.queue.pop() {
+                self.define(&k, kind)?;
+            } else if let Some((k, kind)) = self.parts_queue.pop() {
+                let fv = self.parts_fns[&(k.clone(), kind)];
+                self.parts_mode = true;
+                let r = self.define_with(fv, &k, kind);
+                self.parts_mode = false;
+                self.tail_ctx = false;
+                r?;
+            } else {
+                return Ok(());
+            }
         }
+    }
+
+    /// The parts a tuple of type `t` is returned as, when it is returned so:
+    /// 2 to 4 of them, each a number, a truth value or a value on the heap
+    /// (a tuple of numbers alone is in registers anyway: `flat`)
+    fn parts_tys(&self, t: Ty) -> Option<Vec<Ty>> {
+        let Ty::Tup(id) = t else { return None };
+        if self.flat(t).is_some() {
+            return None;
+        }
+        let es = types::tuple_elems(id);
+        let ok = (2..=4).contains(&es.len())
+            && es.iter().all(|e| matches!(e, Ty::I64 | Ty::F64 | Ty::Bool) || (fixed(*e).is_none() && self.flat(*e).is_none() && !matches!(e, Ty::Unit | Ty::Never | Ty::F32 | Ty::I32) && self.repr(*e).is_pointer_type()));
+        ok.then_some(es)
+    }
+
+    fn parts_struct(&self, es: &[Ty]) -> inkwell::types::StructType<'ctx> {
+        let ts: Vec<BasicTypeEnum<'ctx>> = es.iter().map(|e| self.repr(*e)).collect();
+        self.ctx.struct_type(&ts, false)
+    }
+
+    /// The version of `k` that returns its tuple as parts.
+    fn request_parts(&mut self, k: &Key, kind: Kind) -> R<FunctionValue<'ctx>> {
+        if let Some(f) = self.parts_fns.get(&(k.clone(), kind)) {
+            return Ok(*f);
+        }
+        let s = self.spec(k)?;
+        let es = self.parts_tys(s.ret).ok_or("internal compiler error: not a tuple of parts")?;
+        let st = self.parts_struct(&es);
+        let mut ps: Vec<BasicMetadataTypeEnum> = s.params.iter().map(|t| self.repr(*t).into()).collect();
+        if kind.has_depth() {
+            ps.push(self.ctx.i32_type().into());
+        }
+        let name = format!("{}${}.parts", self.p.fns[k.0].symbol, ty_suffix(&k.1));
+        let f = self.module.add_function(&name, st.fn_type(&ps, false), Some(Linkage::Internal));
+        self.parts_fns.insert((k.clone(), kind), f);
+        self.parts_queue.push((k.clone(), kind));
+        Ok(f)
+    }
+
+    /// A tuple value (boxed) as its parts, each owned.
+    fn unpack_parts(&mut self, v: V<'ctx>, es: &[Ty]) -> R<inkwell::values::StructValue<'ctx>> {
+        let b = self.boxed(v)?;
+        let mut out = self.parts_struct(es).get_undef();
+        for (i, t) in es.iter().enumerate() {
+            let fv = self.call_rt_ptr("mim_obj_get", &[self.basic(b).into(), self.ctx.i64_type().const_int(i as u64, false).into()])?;
+            let fv = self.as_ty(fv, *t, "part of the result")?;
+            let fv = self.own(fv)?;
+            out = self.b.build_insert_value(out, self.basic(fv), i as u32, "").s()?.into_struct_value();
+        }
+        self.drop_tmp(b)?;
+        Ok(out)
+    }
+
+    /// Leave the function with its parts (as `ret` does: tasks first, then
+    /// every owned local released).
+    fn ret_parts(&mut self, sv: inkwell::values::StructValue<'ctx>) -> R<()> {
+        let pending: Vec<Pending<'ctx>> = self.futures.iter().flatten().cloned().collect();
+        for p in pending {
+            let h = self.b.build_load(self.ptr, p.hslot, "").s()?;
+            let r = self.call_rt("mim_await", &[h.into()])?.unwrap().into_pointer_value();
+            self.call_rt("mim_release", &[r.into()])?;
+        }
+        for scope in self.scopes.iter().rev() {
+            self.release_scope(scope)?;
+        }
+        self.b.build_return(Some(&sv)).s()?;
         Ok(())
+    }
+
+    /// `e`, the result of a function returning parts: a tuple written out
+    /// gives them as they are (no tuple made), an `if` gives them from each
+    /// branch, a call of such a function hands its parts on; anything else
+    /// is a tuple taken apart.
+    fn ret_tail(&mut self, e: &Expr) -> R<()> {
+        let es = self.parts_tys(self.cur_ret).ok_or("internal compiler error: not a tuple of parts")?;
+        match &e.kind {
+            ExprKind::Tuple(xs) if xs.len() == es.len() => {
+                let mut out = self.parts_struct(&es).get_undef();
+                for (i, (x, t)) in xs.iter().zip(&es).enumerate() {
+                    let v = self.expr(x)?;
+                    let v = self.as_ty(v, *t, "part of the result")?;
+                    let v = self.own(v)?;
+                    out = self.b.build_insert_value(out, self.basic(v), i as u32, "").s()?.into_struct_value();
+                }
+                if !self.terminated() {
+                    self.ret_parts(out)?;
+                }
+                Ok(())
+            }
+            ExprKind::If { cond, then, els: Some(els) } => {
+                let c = self.expr(cond)?;
+                let bit = self.truth(c)?;
+                let f = self.cur_fn.unwrap();
+                let then_bb = self.ctx.append_basic_block(f, "then");
+                let else_bb = self.ctx.append_basic_block(f, "else");
+                self.b.build_conditional_branch(bit, then_bb, else_bb).s()?;
+                self.b.position_at_end(then_bb);
+                self.tail_ctx = true;
+                let v = self.block(then)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                self.b.position_at_end(else_bb);
+                match &els.kind {
+                    ExprKind::Block(b) => {
+                        self.tail_ctx = true;
+                        let v = self.block(b)?;
+                        if !self.terminated() {
+                            self.ret(v)?;
+                        }
+                    }
+                    _ => self.ret_tail(els)?,
+                }
+                Ok(())
+            }
+            ExprKind::Block(b) => {
+                self.tail_ctx = true;
+                let v = self.block(b)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                Ok(())
+            }
+            ExprKind::Call { .. } => {
+                self.want_parts_site = Some(id(e));
+                let v = self.expr(e)?;
+                self.want_parts_site = None;
+                match self.parts_result.take() {
+                    Some(sv) => {
+                        if !self.terminated() {
+                            self.ret_parts(sv)?;
+                        }
+                    }
+                    None => {
+                        if !self.terminated() {
+                            self.ret(v)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                let v = self.expr(e)?;
+                if !self.terminated() {
+                    self.ret(v)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Which kind of a callee to call from the current context.
@@ -2017,6 +2195,10 @@ impl<'ctx> Cg<'ctx, '_> {
 
     fn define(&mut self, k: &Key, kind: Kind) -> R<()> {
         let fv = self.fns[&(k.clone(), kind)];
+        self.define_with(fv, k, kind)
+    }
+
+    fn define_with(&mut self, fv: FunctionValue<'ctx>, k: &Key, kind: Kind) -> R<()> {
         let spec = self.spec(k)?;
         // the Program's own AST: expression types are keyed by node address
         let p = self.p;
@@ -2128,7 +2310,14 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.call_rt("mim_deep_enter", &[])?;
                 let r = self.b.build_call(wrap, &args, "").s()?.try_as_basic_value().basic().unwrap();
                 self.call_rt("mim_deep_leave", &[])?;
-                self.b.build_return(Some(&r)).s()?;
+                if self.parts_mode {
+                    // (the net gives the tuple: taken apart)
+                    let es = self.parts_tys(spec.ret).ok_or("internal compiler error: not a tuple of parts")?;
+                    let sv = self.unpack_parts(V::P(r.into_pointer_value(), true), &es)?;
+                    self.b.build_return(Some(&sv)).s()?;
+                } else {
+                    self.b.build_return(Some(&r)).s()?;
+                }
                 self.b.position_at_end(body_bb);
                 self.native_frame = true;
                 self.cur_depth = Some(depth);
@@ -2156,7 +2345,7 @@ impl<'ctx> Cg<'ctx, '_> {
         // which function an IR difference comes from)
         let only = std::env::var("MIMIC_IR_ONLY").ok();
         // (not in coverage builds: the IR counts no lines)
-        let lowered = if use_ir && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
+        let lowered = if use_ir && !self.parts_mode && self.cov.is_none() && matches!(kind, Kind::Plain | Kind::Seq | Kind::Native | Kind::NativeSeq) && self.fj.quiet() && only.as_ref().is_none_or(|o| path.contains(o.as_str())) {
             let takes = self.consumed(k);
             mimic_ir::lower::function(self.p, k.0, spec.clone(), &takes, self).filter(|f| match mimic_ir::verify(f) {
                 Ok(()) => true,
@@ -2175,7 +2364,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 self.ir_body(f)?
             }
-            None => self.block(&decl.body)?,
+            None => {
+                self.tail_ctx = self.parts_mode;
+                self.block(&decl.body)?
+            }
         };
         self.body_exit = None;
         if !self.terminated() {
@@ -2197,6 +2389,11 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// Convert to the return type, release every owned local, and return.
     fn ret(&mut self, v: V<'ctx>) -> R<()> {
+        if self.parts_mode {
+            let es = self.parts_tys(self.cur_ret).ok_or("internal compiler error: not a tuple of parts")?;
+            let sv = self.unpack_parts(v, &es)?;
+            return self.ret_parts(sv);
+        }
         // leaving the function: every implicit future still running finishes first
         let pending: Vec<Pending<'ctx>> = self.futures.iter().flatten().cloned().collect();
         for p in pending {
@@ -2340,6 +2537,8 @@ impl<'ctx> Cg<'ctx, '_> {
         let saved_what = std::mem::take(&mut self.ret_what);
         let saved_futures = std::mem::take(&mut self.futures);
         let saved_kind = std::mem::replace(&mut self.cur_kind, Kind::Plain);
+        // (a function made inside one returning parts returns its own way)
+        let saved_parts = (std::mem::replace(&mut self.parts_mode, false), std::mem::replace(&mut self.tail_ctx, false), self.want_parts_site.take());
         let saved_dbg = self.dbg_save();
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.b.position_at_end(entry);
@@ -2349,6 +2548,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let name = fv.get_name().to_string_lossy().into_owned();
         self.dbg_enter(fv, &name, None, line, true);
         let r = f(self);
+        (self.parts_mode, self.tail_ctx, self.want_parts_site) = saved_parts;
         self.dbg_restore(saved_dbg);
         self.cur_fn = saved_fn;
         self.scopes = saved_scopes;
@@ -2769,6 +2969,8 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     fn block(&mut self, b: &Block) -> R<V<'ctx>> {
+        // (the tail of a function returning parts: returned from here)
+        let tail_here = std::mem::take(&mut self.tail_ctx);
         self.scopes.push(Vec::new());
         // the end of `main`: the process exits next (see Cg::exit_fid)
         let at_exit = self.body_exit == Some(self.scopes.len());
@@ -2857,6 +3059,11 @@ impl<'ctx> Cg<'ctx, '_> {
         }
         *self.futures.last_mut().unwrap() = pending.clone();
         let v = match &b.tail {
+            Some(e) if tail_here && self.parts_mode && !self.terminated() => {
+                self.cover(e.span)?;
+                self.ret_tail(e)?;
+                self.null()
+            }
             Some(e) => {
                 if !self.terminated() {
                     self.cover(e.span)?;
@@ -3062,7 +3269,35 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             Stmt::LetTuple { names, value, .. } if self.let_tuple_in_regs(s, names, value)? => {}
             Stmt::LetTuple { names, value, .. } => {
+                // a call of a function returning parts: each part straight
+                // into its variable (no tuple made)
+                if let ExprKind::Call { .. } = &value.kind {
+                    self.want_parts_site = Some(id(value));
+                }
                 let v = self.expr(value)?;
+                self.want_parts_site = None;
+                if let Some(sv) = self.parts_result.take() {
+                    let k = self.cur_spec.as_ref().and_then(|sp| sp.calls.get(&id(value)).cloned()).ok_or("internal compiler error: a call of parts")?;
+                    let es = self.parts_tys(self.spec(&k)?.ret).ok_or("internal compiler error: not a tuple of parts")?;
+                    for (i, et) in es.iter().enumerate() {
+                        let x = self.b.build_extract_value(sv, i as u32, "").s()?;
+                        let part = self.val_of(x, *et, true);
+                        let n = names.get(i).map(String::as_str).unwrap_or("_");
+                        if n == "_" {
+                            self.drop_tmp(part)?;
+                            continue;
+                        }
+                        let t = self.cur_spec.as_ref().and_then(|sp| sp.tuple_lets.get(&(id(s), i)).copied()).unwrap_or(Ty::Dyn);
+                        let fv = self.as_ty(part, t, &format!("`{n}`"))?;
+                        let fv = self.own(fv)?;
+                        let slot = self.entry_alloca(t, n)?;
+                        self.b.build_store(slot, self.basic(fv)).s()?;
+                        let owned = matches!(fv, V::P(..));
+                        let moves = owned && self.tuple_moves.contains(&n.to_string());
+                        self.scopes.last_mut().unwrap().push(Local { name: n.to_string(), slot, ty: t, owned, mutable: false, moves });
+                    }
+                    return Ok(());
+                }
                 if let V::R(r, rt) = v
                     && let Some(fs) = self.flat(rt)
                     && fs.len() >= names.len()
@@ -4871,8 +5106,16 @@ impl<'ctx> Cg<'ctx, '_> {
             Some((kd, d)) => (kd, d),
             None => (self.kind_for(fid), None),
         };
-        let f = self.request(&k, kind)?;
         let spec = self.spec(&k)?;
+        // (asked for its parts: the version returning them, where there is one)
+        let parts = self.want_parts_site == Some(site)
+            && fork_depth.is_none()
+            && matches!(kind, Kind::Plain | Kind::Native | Kind::Seq | Kind::NativeSeq)
+            && self.parts_tys(spec.ret).is_some();
+        if self.want_parts_site == Some(site) {
+            self.want_parts_site = None;
+        }
+        let f = if parts { self.request_parts(&k, kind)? } else { self.request(&k, kind)? };
         let path_s = self.p.fn_path(fid).join("::");
         let pnames: Vec<String> = match &self.p.fns[fid].kind {
             FnKind::User(d) => d.params.iter().map(|p| p.name.clone()).collect(),
@@ -4995,6 +5238,9 @@ impl<'ctx> Cg<'ctx, '_> {
             }
         }
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap();
+        if parts {
+            self.parts_result = Some(r.into_struct_value());
+        }
         for c in conv {
             self.drop_tmp(c)?;
         }
@@ -5007,6 +5253,9 @@ impl<'ctx> Cg<'ctx, '_> {
             self.release(p)?;
             self.b.build_unconditional_branch(after).s()?;
             self.b.position_at_end(after);
+        }
+        if parts {
+            return Ok(self.null());
         }
         Ok(self.val_of(r, spec.ret, true))
     }
