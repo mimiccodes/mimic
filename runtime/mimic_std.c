@@ -125,14 +125,25 @@ mim_val *mim_std_join(mim_val *xs, mim_val *sep) {
         return xs;
     }
     if (xs->rank == 0 || (xs->dtype != MIM_BOXED && xs->len > 0)) mim_panic("join: expected a list of str");
-    sbuf b = {0};
+    /* the length first (each element checked), then the string written
+     * once: no buffer grown and copied again (a word of a few letters,
+     * joined millions of times) */
     mim_val **h = (mim_val **)xs->data;
-    for (int64_t i = 0; i < xs->len; i++) {
-        if (i) sb_put(&b, d, (size_t)sep->len);
-        sb_put(&b, str_arg(h[i], "join"), (size_t)h[i]->len);
+    int64_t n = xs->len, total = n > 0 ? (n - 1) * sep->len : 0;
+    for (int64_t i = 0; i < n; i++) {
+        (void)str_arg(h[i], "join");
+        total += h[i]->len;
     }
-    mim_val *r = mim_str(b.p ? b.p : "", (int64_t)b.n);
-    free(b.p);
+    mim_val *r = alloc(MIM_CHAR, 1, total);
+    char *o = (char *)r->data;
+    for (int64_t i = 0; i < n; i++) {
+        if (i && sep->len) {
+            memcpy(o, d, (size_t)sep->len);
+            o += sep->len;
+        }
+        memcpy(o, h[i]->data, (size_t)h[i]->len);
+        o += h[i]->len;
+    }
     return r;
 }
 

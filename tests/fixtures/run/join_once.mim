@@ -1,0 +1,17 @@
+module main
+
+// join: the length first, then the string written once (no buffer grown)
+
+fn main() {
+    let none: [str] = []
+    print("[{join(none, ", ")}]")
+    print(join(["one"], ", "))
+    print(join(["a", "b", "c"], ", "))
+    print(join(["a", "b", "c"], ""))
+    print("[{join(["", "", ""], "-")}]")
+    print(join(["añ", "€", "x"], "·"))
+    let many = ⍳ 100000 ¨ (i => "{i % 10}")
+    let s = join(many, "")
+    let head = s ▷ chars ▷ take(12) ▷ join("|")
+    print("{≢ s} {head}")
+}
