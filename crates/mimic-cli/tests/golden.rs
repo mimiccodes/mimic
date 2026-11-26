@@ -821,7 +821,7 @@ fn where_code_runs() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("w.mim");
-    std::fs::write(&f, "module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn square(x: i64) -> i64 { x * x }\n\nfn shout(x: i64) -> i64 {\n    print(x)\n    x\n}\n\nfn load(path: str) -> Result[str, str] { fs::read(path) }\n\nfn main() {\n    let xs = ⍳ 1000\n    print(xs × 2 ▷ +/)\n    print(xs ¨ square ▷ +/)\n    print([\"ab\" \"cd\"] ¨ (s => upper(s)))\n    print([1 2] ¨ shout)\n    let text = load(\"w.mim\")\n    print(fib(20))\n    print(text)\n}\n").unwrap();
+    std::fs::write(&f, "module main\n\nfn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\nfn square(x: i64) -> i64 { x * x }\n\nfn shout(x: i64) -> i64 {\n    print(x)\n    x\n}\n\nfn load(path: str) -> Result[str, str] { fs::read(path) }\n\nfn main() {\n    let xs = ⍳ 1000\n    print(xs × 2 ▷ +/)\n    print(xs ¨ square ▷ +/)\n    print([1 2] ¨ (n => upper(\"x{n}\")))\n    print([1 2] ¨ shout)\n    let text = load(\"w.mim\")\n    print(fib(20))\n    print(text)\n}\n").unwrap();
     let out = mimic().args(["why", "--in"]).arg(&f).arg("--json").output().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
     let has = |func: &str, kind: &str, code: &str| v.as_array().unwrap().iter().any(|d| d["function"] == func && d["kind"] == kind && d["code"].as_str().unwrap().contains(code));

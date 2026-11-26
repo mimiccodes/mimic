@@ -1,0 +1,36 @@
+module main
+
+// `xs ¨ f` over a list of strings, `f` a lambda that captures: one compiled
+// loop (split over the cores when long), each string lent to `f`, each
+// string it makes kept by the new list
+
+fn shift(c: str, k: i64) -> str {
+    let code = char_code(c)
+    if code >= char_code("a") and code <= char_code("z") {
+        char_of(char_code("a") + (code - char_code("a") + k) % 26)
+    } else {
+        c
+    }
+}
+
+fn main() {
+    let k = 3
+    let words = ["apple", "kiwi", "", "fig"]
+    // strings to strings, capturing k
+    print(chars("hello, world") ¨ (c => shift(c, k)) ▷ join(""))
+    // strings to numbers, capturing k
+    print(chars("abc") ¨ (c => char_code(c) + k))
+    // strings to new strings (made, not shared)
+    print(words ¨ (w => "{w}{k}"))
+    // an empty list
+    let none: [str] = []
+    print(≢ (none ¨ (c => shift(c, k))))
+    // text that is not ASCII is passed through as it is
+    print(chars("añb€c") ¨ (c => shift(c, k)) ▷ join(""))
+    // long enough to be split over the cores; the same as one at a time
+    let long = ⍳ 200000 ¨ (i => "abcdefghij"[i % 10]) ▷ join("")
+    let once = chars(long) ¨ (c => shift(c, k)) ▷ join("")
+    let twice = chars(once) ¨ (c => shift(c, 26 - k)) ▷ join("")
+    let head = chars(once) ▷ take(12) ▷ join("")
+    print("{≢ once} {head} {twice == long}")
+}
