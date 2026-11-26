@@ -111,5 +111,10 @@ check continue_or     '    let a = 1
 check tuple_type      '    let v: V = (1, 2)
     print(v.0)' 'type V = (i64, i64)'
 
+# found by a user's image program (0.4.3-preview.1)
+check inflate         '    print(compress::inflate(compress::deflate(bytes::from([1 2 3]))))'
+check bytes_try_from  '    print(bytes::try_from([1 256]))'
+check bytes_clamped   '    print(bytes::clamped([¯5 300 7]))'
+
 echo
 echo "$missing of $total checks missing (docs/gaps.md)"
