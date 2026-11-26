@@ -195,7 +195,10 @@ impl<'ctx> Cg<'ctx, '_> {
     /// (no `⍳` list, no boxed call per element), in parallel.
     pub(crate) fn each_obj_fusible(&self, e: &Expr) -> bool {
         let ExprKind::Prim { prim: Prim::Each, args } = &e.kind else { return false };
-        matches!(self.ty_of(e), Ty::Arr(El::Obj(_) | El::Str, _))
+        // (strings made from strings only: a list of numbers mapped to
+        // strings is often a few heavy calls, `⍳ 6 ¨ equalize`, which the
+        // runtime's each spreads better)
+        (matches!(self.ty_of(e), Ty::Arr(El::Obj(_), _)) || (self.ty_of(e) == Ty::Arr(El::Str, 0) && args.len() == 2 && self.ty_of(&args[0]) == Ty::Arr(El::Str, 0)))
             // (rows of a screen keep their own path: reused when unchanged)
             && !self.screen_rows(self.ty_of(e))
             && args.len() == 2
@@ -1241,7 +1244,8 @@ impl<'ctx> Cg<'ctx, '_> {
     /// `xs ¨ f` making records (see each_obj_fusible).
     pub(crate) fn fused_each_obj(&mut self, e: &Expr) -> R<V<'ctx>> {
         self.fused_at.set(Some(e.span));
-        self.note(e.span, "fused", "`¨` building records is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
+        let made = if self.ty_of(e) == Ty::Arr(El::Str, 0) { "strings" } else { "records" };
+        self.note(e.span, "fused", format!("`¨` building {made} is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it"));
         let Ty::Arr(el @ (El::Obj(_) | El::Str), _) = self.ty_of(e) else { return Err("internal compiler error: not a list of records".into()) };
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
