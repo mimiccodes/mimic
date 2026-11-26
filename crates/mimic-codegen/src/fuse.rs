@@ -195,11 +195,11 @@ impl<'ctx> Cg<'ctx, '_> {
     /// (no `⍳` list, no boxed call per element), in parallel.
     pub(crate) fn each_obj_fusible(&self, e: &Expr) -> bool {
         let ExprKind::Prim { prim: Prim::Each, args } = &e.kind else { return false };
-        matches!(self.ty_of(e), Ty::Arr(El::Obj(_), _))
+        matches!(self.ty_of(e), Ty::Arr(El::Obj(_) | El::Str, _))
             // (rows of a screen keep their own path: reused when unchanged)
             && !self.screen_rows(self.ty_of(e))
             && args.len() == 2
-            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]))
+            && (self.is_fae(&args[0]) || num_el(self.ty_of(&args[0])).is_some() || self.flat_list(self.ty_of(&args[0])) || self.obj_chain(&args[0]) || self.ty_of(&args[0]) == Ty::Arr(El::Str, 0))
             && self.each_fusible_to(e, args, true)
     }
 
@@ -222,17 +222,19 @@ impl<'ctx> Cg<'ctx, '_> {
 
     /// (`records`: `f` may return a record)
     fn each_fusible_to(&self, e: &Expr, args: &[Expr], records: bool) -> bool {
-        if args.len() != 2 || !(self.is_fae(&args[0]) || index_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_), _))) {
+        if args.len() != 2 || !(self.is_fae(&args[0]) || index_el(self.ty_of(&args[0])).is_some() || matches!(self.ty_of(&args[0]), Ty::Arr(El::Obj(_) | El::Str, _))) {
             return false;
         }
         if !self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
             return false;
         }
         let simple_num = |t: Ty| (t.is_unboxed() || matches!(t, Ty::F32 | Ty::I32)) && t != Ty::Unit;
-        let simple = |t: Ty| simple_num(t) || (records && matches!(t, Ty::Obj(_)));
-        // a record on the heap comes in lent, as a pointer; a flat one is
-        // read into registers first
-        let simple_in = |t: Ty| simple_num(t) || matches!(t, Ty::Obj(_));
+        // (a string: a handle, as a record on the heap is)
+        let text = |t: Ty| t == Ty::Arr(El::Char, 0);
+        let simple = |t: Ty| simple_num(t) || (records && (matches!(t, Ty::Obj(_)) || text(t)));
+        // a record on the heap (or a string) comes in lent, as a pointer; a
+        // flat one is read into registers first
+        let simple_in = |t: Ty| simple_num(t) || matches!(t, Ty::Obj(_)) || text(t);
         match &args[1].kind {
             ExprKind::Lambda { params, body } => {
                 let Some((pts, rt)) = self.cur_spec.as_ref().and_then(|s| s.lambdas.get(&id(&args[1])).cloned()) else { return false };
@@ -432,7 +434,7 @@ impl<'ctx> Cg<'ctx, '_> {
             return self.build(x, plan);
         }
         let t = self.ty_of(x);
-        if let Ty::Arr(el @ El::Obj(_), _) = t {
+        if let Ty::Arr(el @ (El::Obj(_) | El::Str), _) = t {
             let v = self.expr(x)?;
             let v = self.boxed(v)?;
             let (len, data) = self.vec_header(v, el)?;
@@ -649,7 +651,7 @@ impl<'ctx> Cg<'ctx, '_> {
                         let r = self.as_flat_in(x, *pt, &fs, "argument", false)?;
                         self.basic(r).into()
                     }
-                    Ty::Obj(_) => self.basic(x).into(), // a record, lent
+                    Ty::Obj(_) | Ty::Arr(El::Char, 0) => self.basic(x).into(), // a record or a string, lent
                     _ => self.to_i64(x)?.into(),
                 };
                 let mut args = vec![x];
@@ -671,7 +673,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 let r = call.try_as_basic_value().basic().ok_or("internal compiler error: ¨ function returns nothing")?;
                 // (a record made by the function is ours)
-                self.val_of(r, *rt, matches!(rt, Ty::Obj(_)))
+                self.val_of(r, *rt, matches!(rt, Ty::Obj(_) | Ty::Arr(El::Char, 0)))
             }
         })
     }
@@ -1240,7 +1242,7 @@ impl<'ctx> Cg<'ctx, '_> {
     pub(crate) fn fused_each_obj(&mut self, e: &Expr) -> R<V<'ctx>> {
         self.fused_at.set(Some(e.span));
         self.note(e.span, "fused", "`¨` building records is one loop, with no arrays in between; it is split over the cores when large, and uses SIMD where the CPU has it".into());
-        let Ty::Arr(el @ El::Obj(_), _) = self.ty_of(e) else { return Err("internal compiler error: not a list of records".into()) };
+        let Ty::Arr(el @ (El::Obj(_) | El::Str), _) = self.ty_of(e) else { return Err("internal compiler error: not a list of records".into()) };
         let mut plan = Plan::default();
         let root = self.build(e, &mut plan)?;
         let n = self.plan_len(&plan)?;
@@ -1470,8 +1472,8 @@ impl<'ctx> Cg<'ctx, '_> {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
                 self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i8_type(), "").s()?).s()?;
             }
-            // a record: the list takes a reference of its own
-            El::Obj(_) => {
+            // a record or a string: the list takes a reference of its own
+            El::Obj(_) | El::Str => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ptr, base, &[i], "").s()? };
                 let b = self.boxed(v)?;
                 let b = self.own(b)?;
@@ -1900,7 +1902,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let dtype = load(self, 1, i32t.into())?.into_int_value();
         let rank = load(self, 2, i32t.into())?.into_int_value();
         // a list of records holds handles (an empty list has no elements to read)
-        let want = if matches!(el, El::Obj(_)) { 4 } else { dtype_of(el) };
+        let want = if matches!(el, El::Obj(_) | El::Str) { 4 } else { dtype_of(el) };
         let mut ok_t = self.b.build_int_compare(IntPredicate::EQ, dtype, i32t.const_int(want as u64, false), "").s()?;
         if want == 4 {
             let n = load(self, 3, i64t.into())?.into_int_value();
