@@ -2812,6 +2812,15 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.let_moves = true;
                 self.move_at.insert(site);
             }
+            // `let mut v`: it moves at its one read after its last change
+            // (`fill(n - 1, y, c)` after `c[bin] = c[bin] + 1`), when every
+            // change is a statement of this block (none further in)
+            if let Stmt::Let { name, mutable: true, .. } = s
+                && let Some(site) = owned::mut_move_site(name, &b.stmts[i + 1..], b.tail.as_deref()).filter(|_| self.heap_ok_target())
+            {
+                self.let_moves = true;
+                self.move_at.insert(site);
+            }
             // (each name of a tuple `let` likewise: `let (p, root) = find(…)`
             // then `let mut c = p` changes the list in place, not a copy)
             // (only a function's result, which nothing else holds: a tuple
@@ -2996,6 +3005,25 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.b.position_at_end(good);
                         let ep = unsafe { self.b.build_in_bounds_gep(self.repr(t), slot, &[i64t.const_zero(), iv], "").s()? };
                         self.b.build_store(ep, x).s()?;
+                    }
+                    // a number into a list of i64: written in place where
+                    // the list is held once, of i64 and the index in range;
+                    // anything else as below (the same checks and messages)
+                    Some(i) if self.opt_level >= 2 && t == Ty::Arr(El::I64, 0) && self.ty_of(i) == Ty::I64 && self.ty_of(value) == Ty::I64 && self.cur_fn.is_some() => {
+                        let iv = self.expr(i)?;
+                        let iv = self.to_i64(iv)?;
+                        let v = self.expr(value)?;
+                        let x = self.to_i64(v)?;
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?.into_pointer_value();
+                        let out = self.put_i64_inline_or(cur, iv, x, &mut |cg: &mut Self| {
+                            let bi = cg.boxed(V::I(iv))?;
+                            let bx = cg.boxed(V::I(x))?;
+                            let r = cg.call_rt_ptr("mim_set_index_v", &[cur.into(), cg.basic(bi).into(), cg.basic(bx).into()])?;
+                            cg.drop_tmp(bi)?;
+                            cg.drop_tmp(bx)?;
+                            Ok(cg.basic(r).into_pointer_value())
+                        })?;
+                        self.b.build_store(slot, out).s()?;
                     }
                     Some(i) => {
                         let iv = self.expr(i)?;
@@ -5861,7 +5889,7 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             ExprKind::Path(path) => {
                 let l = self.lookup(&path[0]).ok_or_else(|| format!("unknown variable `{}`", path.join("::")))?;
-                let (slot, lt, mutable, moves) = (l.slot, l.ty, l.mutable, l.owned && l.moves && !l.mutable && self.move_at.contains(&id(e)));
+                let (slot, lt, mutable, moves) = (l.slot, l.ty, l.mutable, l.owned && l.moves && self.move_at.contains(&id(e)));
                 let bv = self.b.build_load(self.repr(lt), slot, &path[0]).s()?;
                 let v = self.val_of(bv, lt, false);
                 // its one use: the value moves out (the slot keeps a null)
@@ -6240,7 +6268,24 @@ impl<'ctx> Cg<'ctx, '_> {
             ExprKind::Index { base, index }
                 if fuse::index_el(self.ty_of(base)).is_some() && self.ty_of(index) == Ty::I64 && ty.is_unboxed() =>
             {
-                let b = self.expr(base)?;
+                // a `let mut` list read for a number: lent as it is, not
+                // retained for the read (`c[bin] + 1` in a loop: a retain and
+                // a release each step), when the index cannot change it
+                let lent = match &base.kind {
+                    ExprKind::Path(p) if p.len() == 1 => {
+                        let mut block = false;
+                        index.walk(&mut |x| block |= matches!(x.kind, ExprKind::Block(_) | ExprKind::Unsafe(_) | ExprKind::Lambda { .. }));
+                        self.lookup(&p[0]).filter(|l| l.mutable && !block && matches!(l.ty, Ty::Arr(_, 0))).map(|l| (l.slot, l.ty))
+                    }
+                    _ => None,
+                };
+                let b = match lent {
+                    Some((slot, lt)) => {
+                        let bv = self.b.build_load(self.repr(lt), slot, "").s()?;
+                        self.val_of(bv, lt, false)
+                    }
+                    None => self.expr(base)?,
+                };
                 let b = self.boxed(b)?;
                 let i = self.expr(index)?;
                 let i = self.to_i64(i)?;
