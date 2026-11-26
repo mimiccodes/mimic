@@ -433,6 +433,41 @@ pub(crate) fn tail_self_calls(p: &Program, module: ModId, fid: usize, body: &Blo
 }
 
 /// Every expression of a block's statements and tail, as roots to walk.
+/// Where `let mut name` can move: its one read after the last statement of
+/// this block that changes it (`name = …`, `name[i] = …`), when no change
+/// is further in (inside an `if`, a loop's body, a lambda) and none of the
+/// statements after that last change does anything with it but that read.
+pub(crate) fn mut_move_site(name: &str, rest: &[Stmt], tail: Option<&Expr>) -> Option<usize> {
+    let mut nested = false;
+    let mut roots = Vec::new();
+    block_roots(rest, tail, &mut roots);
+    for r in &roots {
+        r.walk(&mut |x| {
+            if let ExprKind::Block(b) | ExprKind::Unsafe(b) = &x.kind
+                && b.stmts.iter().any(|s| matches!(s, Stmt::Assign { name: n, .. } if n == name))
+            {
+                nested = true;
+            }
+            if let ExprKind::Lambda { body, .. } = &x.kind {
+                body.walk(&mut |y| {
+                    if let ExprKind::Block(b) = &y.kind
+                        && b.stmts.iter().any(|s| matches!(s, Stmt::Assign { name: n, .. } if n == name))
+                    {
+                        nested = true;
+                    }
+                });
+            }
+        });
+    }
+    if nested {
+        return None;
+    }
+    let after = rest.iter().rposition(|s| matches!(s, Stmt::Assign { name: n, .. } if n == name)).map_or(0, |k| k + 1);
+    let mut roots = Vec::new();
+    block_roots(&rest[after..], tail, &mut roots);
+    move_site(name, &roots)
+}
+
 pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &mut Vec<&'a Expr>) {
     for s in stmts {
         match s {
