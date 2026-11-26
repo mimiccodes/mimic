@@ -1,0 +1,28 @@
+module main
+
+// a list of lists in a function the Mimic IR compiles: held, passed on,
+// measured and released there, its rows read by the old path
+
+type V = { pc: i64, acc: i64, regs: [i64] }
+
+fn step(v: V, code: [i64], arg: [i64]) -> V {
+    let op = code[v.pc]
+    if op == 0 { { v with pc: v.pc + 1, acc: v.acc + arg[v.pc] } }
+    else { { v with pc: v.pc + 1, regs: put(v.regs, arg[v.pc], v.acc) } }
+}
+
+fn total(rows: [[i64]]) -> i64 { +/ (rows ¨ (r => +/ r)) }
+
+fn main() {
+    let program = [[0, 5] [0, 7] [1, 2] [0, 1] [1, 0]]
+    let code = program ¨ (p => p[0])
+    let arg = program ¨ (p => p[1])
+    let v = V { pc: 0, acc: 0, regs: ⍳ 4 ¨ (_ => 0) } ▷ settle(s => step(s, code, arg), s => s.pc == ≢ program)
+    print("{v.acc} {v.regs} {≢ program} {total(program)}")
+    grown(program)
+}
+
+fn grown(rows: [[i64]]) {
+    let more = push(rows, [9, 9])
+    print("{≢ more} {more[5]} {total(more)}")
+}
