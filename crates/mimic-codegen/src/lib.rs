@@ -5769,7 +5769,35 @@ impl<'ctx> Cg<'ctx, '_> {
             // numbers (mim_array_lit's is always of i64)
             ExprKind::Array(xs) if xs.is_empty() && matches!(ty, Ty::Arr(El::I64 | El::F64 | El::U8, 0)) => {
                 let Ty::Arr(el, _) = ty else { unreachable!() };
-                self.alloc_vec(fuse::dtype_of(el), i64t.const_zero())
+                if self.cur_fn.is_none() || self.building_literal {
+                    return self.alloc_vec(fuse::dtype_of(el), i64t.const_zero());
+                }
+                // one immortal empty list, made the first time (as a list of
+                // literals is): `if c { [x] } else { [] }` taken at every
+                // step allocated and freed one each time; a change to it
+                // copies, as to any list held more than once
+                let g = self.module.add_global(self.ptr, None, "empty");
+                g.set_linkage(Linkage::Internal);
+                g.set_initializer(&self.ptr.const_null());
+                let slot = self.gaddr(g);
+                let cached = self.b.build_load(self.ptr, slot, "empty").s()?;
+                inkwell::values::BasicValue::as_instruction_value(&cached).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+                let cached = cached.into_pointer_value();
+                let f = self.cur_fn.unwrap();
+                let pre = self.b.get_insert_block().unwrap();
+                let build_bb = self.ctx.append_basic_block(f, "empty_build");
+                let done_bb = self.ctx.append_basic_block(f, "empty_done");
+                let have = self.b.build_is_not_null(cached, "").s()?;
+                self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+                self.b.position_at_end(build_bb);
+                let built = self.alloc_vec(fuse::dtype_of(el), i64t.const_zero())?;
+                let V::P(published, _) = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])? else { unreachable!() };
+                let build_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(done_bb).s()?;
+                self.b.position_at_end(done_bb);
+                let phi = self.b.build_phi(self.ptr, "empty").s()?;
+                phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+                Ok(V::P(phi.as_basic_value().into_pointer_value(), false))
             }
             ExprKind::Array(xs) if fixed(ty).is_some() => {
                 let (el, _) = fixed(ty).unwrap();
@@ -6845,7 +6873,41 @@ impl<'ctx> Cg<'ctx, '_> {
                         let ps: Vec<BasicMetadataTypeEnum> = argv.iter().map(|_| self.ptr.into()).collect();
                         self.module.add_function(&name, self.ptr.fn_type(&ps, false), Some(Linkage::External))
                     });
+                    // `concat(s.out, flush)` with `flush` an empty list (one
+                    // dimension, no elements): the list as it is, no call
+                    let empty_bb = match (op, boxed_rest.as_slice()) {
+                        ("concat", [V::P(ys, _)]) if self.opt_level >= 2 => {
+                            let (i32t, i64t) = (self.ctx.i32_type(), self.ctx.i64_type());
+                            let hdr = self.val_ty();
+                            let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, *ys, 2, "").s()?, "rank").s()?.into_int_value();
+                            let n = self.b.build_load(i64t, self.b.build_struct_gep(hdr, *ys, 3, "").s()?, "len").s()?.into_int_value();
+                            let none = self.b.build_and(
+                                self.b.build_int_compare(IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?,
+                                self.b.build_int_compare(IntPredicate::EQ, n, i64t.const_zero(), "").s()?,
+                                "",
+                            ).s()?;
+                            let fun = self.cur_fn.unwrap();
+                            let skip = self.ctx.append_basic_block(fun, "concat_none");
+                            let call = self.ctx.append_basic_block(fun, "concat_call");
+                            let join = self.ctx.append_basic_block(fun, "concat_join");
+                            self.b.build_conditional_branch(none, skip, call).s()?;
+                            self.b.position_at_end(skip);
+                            self.b.build_unconditional_branch(join).s()?;
+                            self.b.position_at_end(call);
+                            Some((skip, join))
+                        }
+                        _ => None,
+                    };
+                    let before = list;
                     list = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                    if let Some((skip, join)) = empty_bb {
+                        let call_end = self.b.get_insert_block().unwrap();
+                        self.b.build_unconditional_branch(join).s()?;
+                        self.b.position_at_end(join);
+                        let phi = self.b.build_phi(self.ptr, "list").s()?;
+                        phi.add_incoming(&[(&before, skip), (&list, call_end)]);
+                        list = phi.as_basic_value().into_pointer_value();
+                    }
                     for v in boxed_rest {
                         self.drop_tmp(v)?;
                     }
