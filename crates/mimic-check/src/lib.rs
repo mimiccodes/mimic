@@ -1284,6 +1284,10 @@ impl Checker<'_> {
                 Ok(r) => self.err(Diag::new(&C::WRONG_KIND, format!("{} is not a function", self.p.describe(r)), e.span)),
                 Err(m) => self.err(m.diag(self.p, self.file, e.span)),
             },
+            // a literal never does
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Array(_) => {
+                self.err(Diag::new(&C::TYPE_MISMATCH, format!("{who} needs a function of {want_arity} argument(s) here, not a value"), e.span))
+            }
             // any other expression may produce a function value
             _ => self.expr(e),
         }
@@ -1430,6 +1434,11 @@ impl Checker<'_> {
                     // x ▷ evolve(n, step)
                     Prim::Evolve => {
                         self.expr(&args[0]);
+                        // the step given first: say which comes first
+                        if matches!(args[1].kind, ExprKind::Lambda { .. } | ExprKind::OpRef(_)) {
+                            self.err(Diag::new(&C::TYPE_MISMATCH, "`evolve` takes the number of steps first, then the step: `x ▷ evolve(n, step)`", args[1].span));
+                            return;
+                        }
                         self.expr(&args[1]);
                         self.fn_operand_named(&args[2], 1, "evolve");
                     }
