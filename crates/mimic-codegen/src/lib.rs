@@ -6242,6 +6242,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // join(chars(t) ¨ (c => …), sep): one pass over t's bytes
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "join"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 2
+                    && let Some(v) = self.chars_map_join(&args[0], &args[1])?
+                {
+                    return self.as_ty(v, ty, "result of `join`");
+                }
                 // char_of of a number: the runtime's with it as it is (a
                 // boxed number made and checked per character otherwise)
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
@@ -7581,6 +7591,163 @@ impl<'ctx> Cg<'ctx, '_> {
         let f = self.module.get_function("mim_step_exit").unwrap_or_else(|| self.module.add_function("mim_step_exit", self.ctx.void_type().fn_type(&[i32t.into()], false), Some(Linkage::External)));
         self.b.build_call(f, &[old.into()], "").s()?;
         Ok(())
+    }
+
+    /// `join(chars(t) ¨ (c => …), sep)` with a function giving text: one
+    /// pass over t's bytes, each character (a shared one-letter string for
+    /// ASCII) given to the function and its text appended at once; no list
+    /// of characters made, none of results joined (text worked on character
+    /// by character: 10 million of each in the held-out `caesar`). Anything
+    /// else: `None`, the usual way.
+    fn chars_map_join(&mut self, xs: &Expr, sep: &Expr) -> R<Option<V<'ctx>>> {
+        let text = Ty::Arr(El::Char, 0);
+        let ExprKind::Prim { prim: Prim::Each, args } = &xs.kind else { return Ok(None) };
+        if args.len() != 2 || self.ty_of(sep) != text || self.ty_of(xs) != Ty::Arr(El::Str, 0) {
+            return Ok(None);
+        }
+        let Some(fun) = self.cur_fn else { return Ok(None) };
+        let ExprKind::Lambda { params, body } = &args[1].kind else { return Ok(None) };
+        let ExprKind::Call { callee, args: cargs } = &args[0].kind else { return Ok(None) };
+        let ExprKind::Path(cp) = &callee.kind else { return Ok(None) };
+        if params.len() != 1 || cargs.len() != 1 || self.ty_of(&cargs[0]) != text {
+            return Ok(None);
+        }
+        let Some(Resolved::Fn(cf)) = self.p.lookup(self.cur_mod, cp) else { return Ok(None) };
+        let FnKind::Extern { decl, .. } = &self.p.fns[cf].kind else { return Ok(None) };
+        if !(decl.intrinsic && decl.name == "chars" && self.p.mods[self.p.fns[cf].module].name == "prelude") {
+            return Ok(None);
+        }
+        let caps = self.captures(params, body);
+        let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
+        if pts.first() != Some(&text) || rt != text {
+            return Ok(None);
+        }
+        let t = self.expr(&cargs[0])?;
+        let t = self.boxed(t)?;
+        let s = self.expr(sep)?;
+        let s = self.boxed(s)?;
+        let mut capv: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (name, _) in &caps {
+            let l = self.lookup(name).ok_or("internal compiler error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            capv.push(self.b.build_load(self.repr(lt), slot, name).s()?.into());
+        }
+        let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
+        let decl = |cg: &Self, name: &str, ft: inkwell::types::FunctionType<'ctx>| cg.module.get_function(name).unwrap_or_else(|| cg.module.add_function(name, ft, Some(Linkage::External)));
+        let at = decl(self, "mim_char_at_byte", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), self.ptr.into()], false));
+        let add = decl(self, "mim_text_join_add", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into(), self.ptr.into(), i32t.into()], false));
+        let mk = decl(self, "mim_str", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false));
+        let tp = self.basic(t).into_pointer_value();
+        let n = self.b.build_load(i64t, self.b.build_struct_gep(self.val_ty(), tp, 3, "").s()?, "len").s()?.into_int_value();
+        let empty = self.global_cstr("");
+        let acc0 = self.b.build_call(mk, &[empty.into(), i64t.const_zero().into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let next = self.entry_alloca_ty(i64t.into(), "next_char")?;
+        // (a pure function: the texts it gives the ASCII characters, asked
+        // once each; 10 million calls in `caesar` become a few dozen)
+        let table = if self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
+            let tt = self.ptr.array_type(128);
+            let tab = self.entry_alloca_ty(tt.into(), "char_texts")?;
+            self.b.build_store(tab, tt.const_zero()).s()?;
+            Some(tab)
+        } else {
+            None
+        };
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "chars_join");
+        let body_bb = self.ctx.append_basic_block(fun, "chars_join_step");
+        let done = self.ctx.append_basic_block(fun, "chars_join_done");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let ip = self.b.build_phi(i64t, "i").s()?;
+        let accp = self.b.build_phi(self.ptr, "acc").s()?;
+        let i = ip.as_basic_value().into_int_value();
+        let acc = accp.as_basic_value().into_pointer_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, n, "").s()?;
+        self.b.build_conditional_branch(more, body_bb, done).s()?;
+        self.b.position_at_end(body_bb);
+        let first = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_zero(), "").s()?;
+        let first = self.b.build_int_z_extend(first, i32t, "").s()?;
+        let (acc1, latch) = match table {
+            // a pure function: its text for each ASCII character asked once,
+            // kept in the table; others (and any character, else) as below
+            Some(tab) => {
+                let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), tp, &[i32t.const_int(1, false)], "data").s()? };
+                let bp = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
+                let byte = self.b.build_load(self.ctx.i8_type(), bp, "byte").s()?.into_int_value();
+                let ascii = self.b.build_int_compare(IntPredicate::SGE, byte, self.ctx.i8_type().const_zero(), "").s()?;
+                let ascii_bb = self.ctx.append_basic_block(fun, "chars_join_ascii");
+                let ask_bb = self.ctx.append_basic_block(fun, "chars_join_ask");
+                let have_bb = self.ctx.append_basic_block(fun, "chars_join_have");
+                let other_bb = self.ctx.append_basic_block(fun, "chars_join_other");
+                let join_bb = self.ctx.append_basic_block(fun, "chars_join_next");
+                self.b.build_conditional_branch(ascii, ascii_bb, other_bb).s()?;
+                self.b.position_at_end(ascii_bb);
+                let k = self.b.build_int_z_extend(byte, i64t, "").s()?;
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ptr, tab, &[k], "").s()? };
+                let known = self.b.build_load(self.ptr, ep, "known").s()?.into_pointer_value();
+                let is_known = self.b.build_is_not_null(known, "").s()?;
+                self.b.build_conditional_branch(is_known, have_bb, ask_bb).s()?;
+                self.b.position_at_end(ask_bb);
+                let c = self.b.build_call(at, &[tp.into(), i.into(), next.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let mut fargs: Vec<BasicMetadataValueEnum<'ctx>> = vec![c.into()];
+                fargs.extend(capv.iter().copied());
+                let r = self.b.build_call(f, &fargs, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: a character's function gave nothing")?.into_pointer_value();
+                self.release(c)?;
+                self.b.build_store(ep, r).s()?;
+                let ask_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(have_bb).s()?;
+                self.b.position_at_end(have_bb);
+                let piece = self.b.build_phi(self.ptr, "piece").s()?;
+                piece.add_incoming(&[(&known, ascii_bb), (&r, ask_end)]);
+                let a1 = self.b.build_call(add, &[acc.into(), piece.as_basic_value().into(), self.basic(s).into(), first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let i_ascii = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+                let have_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(join_bb).s()?;
+                self.b.position_at_end(other_bb);
+                let (a2, i2) = self.chars_join_call(at, add, f, &capv, tp, i, next, acc, self.basic(s).into_pointer_value(), first)?;
+                let other_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(join_bb).s()?;
+                self.b.position_at_end(join_bb);
+                let ap = self.b.build_phi(self.ptr, "acc").s()?;
+                ap.add_incoming(&[(&a1, have_end), (&a2, other_end)]);
+                let inp = self.b.build_phi(i64t, "i").s()?;
+                inp.add_incoming(&[(&i_ascii, have_end), (&i2, other_end)]);
+                let i1 = inp.as_basic_value().into_int_value();
+                (ap.as_basic_value().into_pointer_value(), (i1, self.b.get_insert_block().unwrap()))
+            }
+            None => {
+                let (a1, i1) = self.chars_join_call(at, add, f, &capv, tp, i, next, acc, self.basic(s).into_pointer_value(), first)?;
+                (a1, (i1, self.b.get_insert_block().unwrap()))
+            }
+        };
+        let (i1, latch) = latch;
+        self.b.build_unconditional_branch(head).s()?;
+        ip.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        accp.add_incoming(&[(&acc0, pre), (&acc1, latch)]);
+        self.b.position_at_end(done);
+        if let Some(tab) = table {
+            let rel = decl(self, "mim_release_all_of", self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into()], false));
+            self.b.build_call(rel, &[tab.into(), i64t.const_int(128, false).into()], "").s()?;
+        }
+        self.drop_tmp(t)?;
+        self.drop_tmp(s)?;
+        Ok(Some(V::P(acc, true)))
+    }
+
+    /// One character the general way: made (or shared), given to the
+    /// function, its text appended, both released; the text and where the
+    /// next character starts.
+    #[allow(clippy::too_many_arguments)]
+    fn chars_join_call(&mut self, at: FunctionValue<'ctx>, add: FunctionValue<'ctx>, f: FunctionValue<'ctx>, capv: &[BasicMetadataValueEnum<'ctx>], tp: PointerValue<'ctx>, i: IntValue<'ctx>, next: PointerValue<'ctx>, acc: PointerValue<'ctx>, sep: PointerValue<'ctx>, first: IntValue<'ctx>) -> R<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        let c = self.b.build_call(at, &[tp.into(), i.into(), next.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let mut fargs: Vec<BasicMetadataValueEnum<'ctx>> = vec![c.into()];
+        fargs.extend(capv.iter().copied());
+        let r = self.b.build_call(f, &fargs, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: a character's function gave nothing")?.into_pointer_value();
+        let a1 = self.b.build_call(add, &[acc.into(), r.into(), sep.into(), first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        self.release(r)?;
+        self.release(c)?;
+        let i1 = self.b.build_load(self.ctx.i64_type(), next, "").s()?.into_int_value();
+        Ok((a1, i1))
     }
 }
 

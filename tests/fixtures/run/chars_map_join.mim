@@ -1,0 +1,26 @@
+module main
+
+// join(chars(t) ¨ (c => …), sep): one pass over the text's bytes, each
+// character given to the function and its text appended at once (no list
+// of characters made). ASCII and longer characters, a separator, a
+// function that keeps, drops, doubles or replaces a character, a captured
+// value, empty text.
+
+fn shift(c: str, k: i64) -> str {
+    let code = char_code(c)
+    if code >= 97 and code <= 122 { char_of(97 + (code - 97 + k) % 26) } else { c }
+}
+
+fn rot(t: str, k: i64) -> str { chars(t) ¨ (c => shift(c, k)) ▷ join("") }
+
+fn main() {
+    print(rot("hello, world!", 13))
+    print(rot(rot("round trip", 13), 13))
+    print(chars("naïve café ☕ 𝄞") ¨ (c => c + c) ▷ join(""))
+    print(join(chars("abc") ¨ (c => upper(c)), "-"))
+    print(join(chars("a1b2c3") ¨ (c => if contains("0123456789", c) { "" } else { c }), ""))
+    let mark = "*"
+    print(chars("xyz") ¨ (c => mark + c) ▷ join(""))
+    print("[" + (chars("") ¨ (c => c + c) ▷ join("")) + "]")
+    print(≢ (chars(rot("abcdefghijklmnopqrstuvwxyz", 1)) ¨ (c => c) ▷ join("")))
+}
