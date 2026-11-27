@@ -432,12 +432,68 @@ pub(crate) fn tail_self_calls(p: &Program, module: ModId, fid: usize, body: &Blo
     out
 }
 
+/// Whether a loop (`while`, `for`) among `stmts`, or in a block inside
+/// them, reads or changes `name`. Such a value is read again at every turn
+/// of the loop: it never moves inside it, and is never fused into a read
+/// there (a lazy `let`).
+pub(crate) fn in_loop(name: &str, stmts: &[Stmt], tail: Option<&Expr>) -> bool {
+    fn names_it(b: &Block, name: &str) -> bool {
+        let mut hit = false;
+        b.walk(&mut |x| {
+            if matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) {
+                hit = true;
+            }
+        });
+        hit || assigns(&b.stmts, name)
+    }
+    fn assigns(stmts: &[Stmt], name: &str) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Assign { name: n, .. } => n == name,
+            Stmt::While { body, .. } => assigns(&body.stmts, name),
+            Stmt::LetElse { els, .. } => assigns(&els.stmts, name),
+            _ => false,
+        })
+    }
+    fn in_stmts(stmts: &[Stmt], tail: Option<&Expr>, name: &str) -> bool {
+        let mut found = false;
+        for s in stmts {
+            if let Stmt::While { cond, body, .. } = s {
+                let mut reads = false;
+                cond.walk(&mut |x| {
+                    if matches!(&x.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == name) {
+                        reads = true;
+                    }
+                });
+                if reads || names_it(body, name) {
+                    return true;
+                }
+            }
+        }
+        let mut roots = Vec::new();
+        block_roots(stmts, tail, &mut roots);
+        for r in roots {
+            r.walk(&mut |x| {
+                if let ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } = &x.kind
+                    && in_stmts(&b.stmts, None, name)
+                {
+                    found = true;
+                }
+            });
+        }
+        found
+    }
+    in_stmts(stmts, tail, name)
+}
+
 /// Every expression of a block's statements and tail, as roots to walk.
 /// Where `let mut name` can move: its one read after the last statement of
 /// this block that changes it (`name = …`, `name[i] = …`), when no change
 /// is further in (inside an `if`, a loop's body, a lambda) and none of the
 /// statements after that last change does anything with it but that read.
 pub(crate) fn mut_move_site(name: &str, rest: &[Stmt], tail: Option<&Expr>) -> Option<usize> {
+    if in_loop(name, rest, tail) {
+        return None;
+    }
     let mut nested = false;
     let mut roots = Vec::new();
     block_roots(rest, tail, &mut roots);
@@ -484,6 +540,11 @@ pub(crate) fn block_roots<'a>(stmts: &'a [Stmt], tail: Option<&'a Expr>, out: &m
                 out.push(value);
                 block_roots(&els.stmts, els.tail.as_deref(), out);
             }
+            Stmt::While { cond, body, .. } => {
+                out.push(cond);
+                block_roots(&body.stmts, body.tail.as_deref(), out);
+            }
+            Stmt::Break(_) => {}
         }
     }
     if let Some(t) = tail {
@@ -719,6 +780,9 @@ impl<'ctx> Cg<'ctx, '_> {
         if !self.heap_ok_target() {
             return None;
         }
+        if in_loop(name, rest, tail) {
+            return None;
+        }
         let mut roots = Vec::new();
         block_roots(rest, tail, &mut roots);
         move_site(name, &roots)
@@ -735,6 +799,9 @@ impl<'ctx> Cg<'ctx, '_> {
 /// that ends with it), or none when a use is inside a lambda: where a
 /// parameter the function takes over can move on.
 pub(crate) fn last_use_sites(name: &str, body: &Block) -> Vec<usize> {
+    if in_loop(name, &body.stmts, body.tail.as_deref()) {
+        return Vec::new();
+    }
     let order = UseOrder::new(name, body);
     if order.in_closure {
         return Vec::new();

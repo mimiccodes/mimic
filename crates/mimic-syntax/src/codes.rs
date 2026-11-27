@@ -183,6 +183,13 @@ Pick another name (`total`). Run `mimic glyphs` for the reserved words.";
 "Dyadic primitives take a left and a right argument: write `xs ↑ 3` or
 `take(xs, 3)`, not `↑ xs`. Monadic ones take one: `⌽ xs` or `reverse(xs)`.";
 
+    BREAK_OUTSIDE_LOOP = "E0216" "break-outside-loop" "`break` outside a loop"
+"`break` (`↯`) leaves the innermost `while` or `for` loop of the function it
+is written in. Outside a loop, and inside a lambda (a function of its own,
+even when the lambda sits in a loop), there is nothing to leave: use
+`return` to leave a function, or `settle` with a `done` test to stop a loop
+written as a step.";
+
     // ---- E03xx names and modules ---------------------------------------------
     DUPLICATE_DEFINITION = "E0301" "duplicate-definition" "two items with the same name in one module"
 "Within one module, functions, types, variants, sub-modules and `use` imports

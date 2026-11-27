@@ -172,6 +172,12 @@ impl BlockEnd for Block {
                         visit(e);
                     }
                 }
+                Stmt::While { cond, body, span } => {
+                    end.set(end.get().max(span.end));
+                    visit(cond);
+                    body.walk(&mut |x: &Expr| end.set(end.get().max(x.span.end)));
+                }
+                Stmt::Break(span) => end.set(end.get().max(span.end)),
             }
         }
         if let Some(t) = &self.tail {
@@ -221,6 +227,11 @@ fn unused_lets(a: &mut Audit, file: usize, body: &Block, src: &str) {
                         count(e, uses);
                     }
                 }
+                Stmt::While { cond, body, .. } => {
+                    count(cond, uses);
+                    collect(body, lets, uses);
+                }
+                Stmt::Break(_) => {}
             }
         }
         if let Some(t) = &b.tail {
@@ -268,6 +279,11 @@ fn unchecked(a: &mut Audit, module: usize, file: usize, body: &Block) {
         let e = match s {
             Stmt::Let { value, .. } | Stmt::LetElse { value, .. } | Stmt::LetTuple { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } => Some(value),
             Stmt::Return(e, _) => e.as_ref(),
+            Stmt::While { cond, body, .. } => {
+                visit_block(body, &mut found);
+                Some(cond)
+            }
+            Stmt::Break(_) => None,
         };
         if let Some(e) = e {
             e.walk(&mut |x: &Expr| {

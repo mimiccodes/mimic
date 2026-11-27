@@ -11,7 +11,7 @@ Mimic is a compiled language for programs that should be **fast without effort**
 * **Array-based.** Whole arrays are values. `prices × 1.2` updates every price at once.
 * **Parallel by default.** You never mark code as parallel. The compiler runs everything that can safely run at the same time across all your cores.
 * **Memory safe.** It has no garbage collector and no manual freeing. Values are immutable unless you say `mut`.
-* **No loops.** Iteration is written with array operations and a handful of loop *words*.
+* **Loop words first.** Iteration is written with array operations and a handful of loop *words*; plain `for` and `while` loops are there for work that goes step by step.
 * **One binary.** `mimic` contains its own LLVM, Clang and linker. It builds native programs for macOS, Linux, Windows, iOS, WebAssembly and more, with nothing else installed.
 
 ## How to use this guide
@@ -23,7 +23,7 @@ The chapters build on each other, so read them in order the first time. Every ex
 | 1 | [Getting started](01-getting-started.md) | Install, your first program, `mimic run` |
 | 2 | [Values and functions](02-values-and-functions.md) | Numbers, `let`, `fn`, `if`, string interpolation |
 | 3 | [Arrays and glyphs](03-arrays-and-glyphs.md) | Array operations, glyphs ↔ words, pipelines |
-| 4 | [No loops](04-no-loops.md) | `¨`, `gather`, `trail`, `evolve`, `settle`, `arms`, recursion |
+| 4 | [Loops and loop words](04-no-loops.md) | `¨`, `gather`, `trail`, `evolve`, `settle`, `arms`, recursion, `for`, `while`, `break` |
 | 5 | [Records, unions and match](05-records-unions-match.md) | Your own types and pattern matching |
 | 6 | [Strings, lists and maps](06-strings-lists-maps.md) | The standard library |
 | 7 | [Errors without exceptions](07-errors.md) | `Option`, `Result`, `let … else` |

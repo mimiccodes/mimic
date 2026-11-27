@@ -132,7 +132,9 @@ pub const SYNTAX_GLYPHS: &[SyntaxGlyph] = &[
     SyntaxGlyph { glyph: "●", word: "true", digraph: Some("\\1"), doc: "true" },
     SyntaxGlyph { glyph: "○", word: "false", digraph: Some("\\0"), doc: "false" },
     SyntaxGlyph { glyph: "⊢", word: "test", digraph: Some("\\H"), doc: "a test block (⊢ \"adds\" { expect(1 + 1 == 2) })" },
-    SyntaxGlyph { glyph: "∀", word: "for", digraph: Some("\\F"), doc: "a property test's inputs (⊢ \"…\" ∀ x: i64 { … })" },
+    SyntaxGlyph { glyph: "∀", word: "for", digraph: Some("\\F"), doc: "a loop over a range or a list (∀ i in 0 ‥ n { … }); a property test's inputs (⊢ \"…\" ∀ x: i64 { … })" },
+    SyntaxGlyph { glyph: "⟳", word: "while", digraph: Some("\\O"), doc: "a loop while a condition holds (⟳ i < n { … })" },
+    SyntaxGlyph { glyph: "↯", word: "break", digraph: Some("\\B"), doc: "leave the innermost loop" },
     SyntaxGlyph { glyph: "⎘", word: "include", digraph: Some("\\C"), doc: "a C header in an extern block (⎘ \"math.h\")" },
 ];
 

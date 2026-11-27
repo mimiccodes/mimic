@@ -371,7 +371,7 @@ fn manual() {
     let (ok, text, _) = man(&["E0303"]);
     assert!(ok && text.contains("unresolved-name"), "{text}");
     let (ok, text, _) = man(&["4"]);
-    assert!(ok && text.starts_with("No loops"), "chapter 4: {text}");
+    assert!(ok && text.starts_with("Loops and loop words"), "chapter 4: {text}");
     let (ok, text, _) = man(&["json"]);
     assert!(ok && text.contains("json::decode"), "the module, not the chapter: {text}");
     let (ok, text, _) = man(&["coming-from-python"]);

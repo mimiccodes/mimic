@@ -75,6 +75,11 @@ fn isqrt(n: i64) -> i64
 | `x = e` | `x ↩ e` | reassign (`mut` only) |
 | `xs[i] = v` | `xs[i] ↩ v` | copy-on-write element store |
 | `return e` | | early return |
+| `for x in a ‥ b { … }`, `for x in xs { … }` | `∀ x in … { … }` | a loop over a range (`b` left out) or a list's elements |
+| `while cond { … }` | `⟳ cond { … }` | a loop while `cond` holds |
+| `break` | `↯` | leaves the innermost loop (E0216 outside one, or inside a lambda) |
+
+A loop's body may reassign only its function's `let mut` variables; loops are sequential (parallel work is `¨` and the array primitives). `for` is a `while` over a hidden counter: the range's bounds, or the list and its length, are taken once, before the loop. Each bound is a whole expression: `for j in 1 ‥ n + 1` counts up to `n + 1` (as an expression, `1 ‥ n + 1` is `(1 ‥ n) + 1`, the range binding tighter; in a `for`, parentheses keep that meaning).
 
 Statements end at a newline or `;`. A block's last expression is its value. A pipeline may continue on the next line if that line starts with `▷`/`|>`.
 
@@ -244,7 +249,8 @@ Every keyword has a glyph, and every glyph a digraph (`\U` types `⇑`). Words a
 | `⋄` | `else` | `\:` | `✓` | `trusted` | `\V` |
 | `⏎` | `return` | `\L` | `⎘` | `include` | `\C` |
 | `●` | `true` | `\1` | `⊢` | `test` | `\H` |
-| `○` | `false` | `\0` | `∀` | `for` (property tests) | `\F` |
+| `○` | `false` | `\0` | `∀` | `for` (loops, property tests) | `\F` |
+| `⟳` | `while` | `\O` | `↯` | `break` | `\B` |
 | `▷` | `\|>` | `\>` | `→` | `->` | |
 | `⇒` | `=>` | | `⍝` | `//` comment | |
 

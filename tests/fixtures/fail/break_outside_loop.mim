@@ -1,0 +1,13 @@
+// expect-error: E0216 `break` outside a loop
+module main
+
+// `break` leaves a loop of the function it is written in; a lambda is a
+// function of its own, so a `break` in one has no loop to leave
+
+fn main() {
+    let xs = [1 2 3] ¨ (x => {
+        if x > 1 { break }
+        x
+    })
+    print(xs)
+}
