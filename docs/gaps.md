@@ -146,6 +146,7 @@ Reported while processing the pixels of a photograph (1086×1448 RGB): each one 
 | A matrix row cannot be assigned in one write: `m[0] = [10 40 70]` passed `mimic check` and stopped the program (`needs one index per dimension`); no catenate along an axis or zip to interleave planes back into RGB | write each element, or one plane per file | 0.4.4 (an error when checking); 0.4.5 (`m[i] = row`, catenate along an axis, zip) |
 | `let … else` only as its own statement: `parse_int(x) else { 1086 }` inside an expression is E0201 | a helper function with the `let … else` in it | open: a change to the syntax, for the owner to decide |
 | `bytes::from` stops the program on a value outside 0 … 255 (it returns `[u8]`, not a `Result`), and `mimic check` accepts a literal list that cannot fit; arithmetic on `[u8]` gives `[i64]` | clamp before converting (`⌈ 0 ⌊ 255`) | 0.4.4 (`bytes::try_from` giving a `Result`, `bytes::clamped`, a literal out of range an error when checking; narrow integers in machine code, the results still `i64`) |
+| `[256 -1 255]` is a subtraction, `[255 255]`, with no error (a negative element needed `¯1`) | ✅ a `-` touching its number after a space is a negative element | 0.4.3 |
 | A file of a project whose module is not `main` cannot be run by itself: `mimic run src/probe.mim` is E0903 even with a `fn main` in it | a separate `module main` file | 0.4.4 (`mimic run` on a project's file runs that module's `main`) |
 
 ## Found by the held-out set
