@@ -379,6 +379,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         want_parts_site: None,
         parts_result: None,
         loops: Vec::new(),
+        loop_lists: Vec::new(),
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -583,6 +584,104 @@ fn expr_names(e: &Expr, out: &mut Vec<String>) {
     });
 }
 
+/// A list a loop changes element by element (see Cg::loop_lists).
+#[derive(Clone, Copy)]
+struct LoopList<'ctx> {
+    slot: PointerValue<'ctx>,
+    /// a plain list of the elements' kind, held once
+    fast: IntValue<'ctx>,
+    len: IntValue<'ctx>,
+    el: El,
+}
+
+/// The names a loop (its test and body) uses only as `name[i]`,
+/// `name[i] = v` and `≢ name`: never whole (passed, kept, reassigned,
+/// captured by a lambda, bound again), so nothing in the loop can make the
+/// list shared or change its length.
+fn element_only_names(cond: &Expr, body: &Block) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut cands: Vec<String> = Vec::new();
+    let mut ok: HashMap<String, usize> = HashMap::new();
+    let mut all: HashMap<String, usize> = HashMap::new();
+    let mut bad: Vec<String> = Vec::new();
+    fn stmts(ss: &[Stmt], cands: &mut Vec<String>, bad: &mut Vec<String>, exprs: &mut Vec<*const Expr>) {
+        for s in ss {
+            match s {
+                Stmt::Assign { name, index: Some(i), value, .. } => {
+                    cands.push(name.clone());
+                    exprs.push(i);
+                    exprs.push(value);
+                }
+                Stmt::Assign { name, index: None, value, .. } => {
+                    bad.push(name.clone());
+                    exprs.push(value);
+                }
+                Stmt::Let { name, value, .. } | Stmt::LetElse { name, value, .. } => {
+                    bad.push(name.clone());
+                    exprs.push(value);
+                }
+                Stmt::LetTuple { names, value, .. } => {
+                    bad.extend(names.iter().cloned());
+                    exprs.push(value);
+                }
+                Stmt::While { cond, body, .. } => {
+                    exprs.push(cond);
+                    stmts(&body.stmts, cands, bad, exprs);
+                    if let Some(t) = &body.tail {
+                        exprs.push(&**t);
+                    }
+                }
+                Stmt::Expr(e) => exprs.push(e),
+                Stmt::Return(Some(e), _) => exprs.push(e),
+                Stmt::Return(None, _) | Stmt::Break(_) => {}
+            }
+        }
+    }
+    let mut exprs: Vec<*const Expr> = vec![cond];
+    stmts(&body.stmts, &mut cands, &mut bad, &mut exprs);
+    if let Some(t) = &body.tail {
+        exprs.push(&**t);
+    }
+    for p in exprs {
+        // SAFETY: every pointer is into `cond` or `body`, alive here
+        let e: &Expr = unsafe { &*p };
+        e.walk(&mut |x| match &x.kind {
+            ExprKind::Path(p) if p.len() == 1 => *all.entry(p[0].clone()).or_default() += 1,
+            ExprKind::Index { base, .. } => {
+                if let ExprKind::Path(p) = &base.kind
+                    && p.len() == 1
+                {
+                    *ok.entry(p[0].clone()).or_default() += 1;
+                }
+            }
+            ExprKind::Prim { prim: Prim::Len, args } if args.len() == 1 => {
+                if let ExprKind::Path(p) = &args[0].kind
+                    && p.len() == 1
+                {
+                    *ok.entry(p[0].clone()).or_default() += 1;
+                }
+            }
+            // (a block inside: its statements' bindings and changes too)
+            ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::If { then: b, .. } => {
+                let mut ignore = Vec::new();
+                stmts(&b.stmts, &mut cands, &mut bad, &mut ignore);
+            }
+            ExprKind::Lambda { body: lb, .. } => lb.walk(&mut |y| {
+                if let ExprKind::Path(p) = &y.kind
+                    && p.len() == 1
+                {
+                    bad.push(p[0].clone());
+                }
+            }),
+            _ => {}
+        });
+    }
+    cands.sort();
+    cands.dedup();
+    cands.retain(|n| !bad.contains(n) && all.get(n).copied().unwrap_or(0) == ok.get(n).copied().unwrap_or(0));
+    cands
+}
+
 fn stmt_names(s: &Stmt) -> Vec<String> {
     let mut out = Vec::new();
     match s {
@@ -726,6 +825,11 @@ struct Cg<'ctx, 'p> {
     /// each ends, and how many scopes were open around it (a `break`
     /// releases the locals of the scopes inside it)
     loops: Vec<(inkwell::basic_block::BasicBlock<'ctx>, usize)>,
+    /// `let mut` lists of numbers the loops being compiled only read and
+    /// write element by element (element_only_names): held once from the
+    /// loop's start, their kind and length checked there, so an element
+    /// write is a bounds check and a store
+    loop_lists: Vec<(String, LoopList<'ctx>)>,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -3208,6 +3312,49 @@ impl<'ctx> Cg<'ctx, '_> {
                             self.b.build_store(slot, self.basic(v)).s()?;
                         }
                     }
+                    // a list the loop around only reads and writes element by
+                    // element (loop_lists): its kind and count checked at the
+                    // loop's start, so here a bounds check and a store; else
+                    // the general way
+                    Some(i)
+                        if self.ty_of(i) == Ty::I64
+                            && let Some(ll) = self.loop_lists.iter().rev().find(|(n, _)| n == name).map(|x| x.1)
+                            && match ll.el {
+                                El::I64 => self.ty_of(value) == Ty::I64,
+                                El::F64 => matches!(self.ty_of(value), Ty::F64 | Ty::I64),
+                                _ => false,
+                            } =>
+                    {
+                        let i64t = self.ctx.i64_type();
+                        let iv = self.expr(i)?;
+                        let iv = self.to_i64(iv)?;
+                        let v = self.expr(value)?;
+                        let x: BasicValueEnum = if ll.el == El::F64 { self.to_f64(v)?.into() } else { self.to_i64(v)?.into() };
+                        let inside = self.b.build_int_compare(IntPredicate::ULT, iv, ll.len, "").s()?;
+                        let ok = self.b.build_and(ll.fast, inside, "").s()?;
+                        let f = self.cur_fn.unwrap();
+                        let fast_bb = self.ctx.append_basic_block(f, "loop_set");
+                        let slow_bb = self.ctx.append_basic_block(f, "loop_set_slow");
+                        let done_bb = self.ctx.append_basic_block(f, "loop_set_done");
+                        self.b.build_conditional_branch(ok, fast_bb, slow_bb).s()?;
+                        self.b.position_at_end(fast_bb);
+                        let list = self.b.build_load(self.ptr, ll.slot, "").s()?.into_pointer_value();
+                        let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[self.ctx.i32_type().const_int(1, false)], "data").s()? };
+                        let et: BasicTypeEnum = if ll.el == El::F64 { self.ctx.f64_type().into() } else { i64t.into() };
+                        let at = unsafe { self.b.build_in_bounds_gep(et, data, &[iv], "").s()? };
+                        self.b.build_store(at, x).s()?;
+                        self.b.build_unconditional_branch(done_bb).s()?;
+                        self.b.position_at_end(slow_bb);
+                        let cur = self.b.build_load(self.ptr, ll.slot, "").s()?;
+                        let bi = self.boxed(V::I(iv))?;
+                        let bx = self.boxed(self.val_of(x, if ll.el == El::F64 { Ty::F64 } else { Ty::I64 }, true))?;
+                        let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(bi).into(), self.basic(bx).into()])?;
+                        self.b.build_store(ll.slot, self.basic(out)).s()?;
+                        self.drop_tmp(bi)?;
+                        self.drop_tmp(bx)?;
+                        self.b.build_unconditional_branch(done_bb).s()?;
+                        self.b.position_at_end(done_bb);
+                    }
                     // an element of a list in registers: checked against its
                     // known length, stored in place
                     Some(i) if fixed(t).is_some() && self.ty_of(i) == Ty::I64 => {
@@ -3375,6 +3522,33 @@ impl<'ctx> Cg<'ctx, '_> {
             // `break` goes to the end
             Stmt::While { cond, body, .. } => {
                 let f = self.cur_fn.ok_or("internal compiler error: a loop outside a function")?;
+                // `let mut` lists of numbers the loop only reads and writes
+                // element by element: held once from here, their kind and
+                // length checked once (an element write in the loop is then
+                // a bounds check and a store, no atomic count read)
+                let mark = self.loop_lists.len();
+                if self.opt_level >= 2 {
+                    for name in element_only_names(cond, body) {
+                        let Some((slot, lt, mutable)) = self.lookup(&name).map(|l| (l.slot, l.ty, l.mutable)) else { continue };
+                        let Ty::Arr(el @ (El::I64 | El::F64), 0) = lt else { continue };
+                        if !mutable {
+                            continue;
+                        }
+                        let i64t = self.ctx.i64_type();
+                        let lf = self.module.get_function("mim_loop_list").unwrap_or_else(|| {
+                            self.module.add_function("mim_loop_list", self.ptr.fn_type(&[self.ptr.into(), self.ctx.i32_type().into(), self.ptr.into()], false), Some(Linkage::External))
+                        });
+                        // (the list in, the list out, as a store: the
+                        // variable's slot stays a register)
+                        let len_slot = self.entry_alloca(Ty::I64, "loop_len")?;
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                        let out = self.b.build_call(lf, &[cur.into(), self.ctx.i32_type().const_int(fuse::dtype_of(el) as u64, false).into(), len_slot.into()], "").s()?.try_as_basic_value().basic().unwrap();
+                        self.b.build_store(slot, out).s()?;
+                        let len = self.b.build_load(i64t, len_slot, "len").s()?.into_int_value();
+                        let fast = self.b.build_int_compare(IntPredicate::SGE, len, i64t.const_zero(), "fast").s()?;
+                        self.loop_lists.push((name, LoopList { slot, fast, len, el }));
+                    }
+                }
                 let head = self.ctx.append_basic_block(f, "while");
                 let body_bb = self.ctx.append_basic_block(f, "while_body");
                 let done = self.ctx.append_basic_block(f, "while_done");
@@ -3393,6 +3567,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.b.build_unconditional_branch(head).s()?;
                 }
                 self.b.position_at_end(done);
+                self.loop_lists.truncate(mark);
             }
             // (the locals of the scopes inside the loop released, as a
             // block's end would)

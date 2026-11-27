@@ -1,0 +1,39 @@
+module main
+
+// a `let mut` list a loop only reads and writes element by element: held
+// once from the loop's start (copied there when it is shared), each write
+// a bounds check and a store
+
+fn squares(n: i64) -> [i64] {
+    let base = 0 ⥊ [n]
+    let mut xs = base
+    for i in 0 ‥ n {
+        xs[i] = i * i
+    }
+    print(base)
+    xs
+}
+
+fn halves() -> [f64] {
+    let mut ys = 1.0 ⥊ [4]
+    for i in 0 ‥ ≢ ys {
+        ys[i] = ys[i] * 0.5 + i
+    }
+    ys
+}
+
+fn table(n: i64) -> [i64] {
+    let mut t = 0 ⥊ [n * n]
+    for r in 0 ‥ n {
+        for c in 0 ‥ n {
+            t[r * n + c] = r * 10 + c
+        }
+    }
+    t
+}
+
+fn main() {
+    print(squares(5))
+    print(halves())
+    print(table(3))
+}
