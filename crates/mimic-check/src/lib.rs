@@ -840,6 +840,7 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                     file: f.file,
                     scopes: Vec::new(),
                     lambda_floor: 0,
+                    loops: 0,
                     unsafe_depth: 0,
                     type_params: d.type_params.clone(),
                     diags: &mut diags,
@@ -869,6 +870,7 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
             file: td.file,
             scopes: Vec::new(),
             lambda_floor: 0,
+            loops: 0,
             unsafe_depth: 0,
             type_params: td.decl.params.clone(),
             diags: &mut diags,
@@ -948,6 +950,8 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Var>>,
     /// scopes below this index belong to an enclosing function (lambda captures)
     lambda_floor: usize,
+    /// loops (`while`, `for`) around the statement, in this function
+    loops: usize,
     unsafe_depth: usize,
     /// type parameters in scope (`fn first[T]`, `type Pair[A, B]`)
     type_params: Vec<String>,
@@ -1241,6 +1245,17 @@ impl Checker<'_> {
                             .note("it runs when the value is `None` or `Err`, so the binding has no value"));
                     }
                     self.declare(name, false, *span);
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.expr(cond);
+                    self.loops += 1;
+                    self.block(body, true);
+                    self.loops -= 1;
+                }
+                Stmt::Break(span) => {
+                    if self.loops == 0 {
+                        self.err(Diag::new(&C::BREAK_OUTSIDE_LOOP, "`break` outside a loop", *span).note("`break` leaves a `while` or `for` loop of this function; a lambda is a function of its own"));
+                    }
                 }
             }
         }
@@ -1580,6 +1595,7 @@ impl Checker<'_> {
 
     fn lambda(&mut self, params: &[String], body: &Expr) {
         let saved_floor = self.lambda_floor;
+        let saved_loops = std::mem::replace(&mut self.loops, 0);
         self.lambda_floor = self.scopes.len();
         self.scopes.push(HashMap::new());
         // the enclosing function's variables stay visible: they are captured by value
@@ -1589,6 +1605,7 @@ impl Checker<'_> {
         self.expr(body);
         self.scopes.pop();
         self.lambda_floor = saved_floor;
+        self.loops = saved_loops;
     }
 }
 
@@ -1858,6 +1875,11 @@ impl Norm<'_> {
                     self.expr(value);
                     self.block(els);
                 }
+                Stmt::While { cond, body, .. } => {
+                    self.expr(cond);
+                    self.block(body);
+                }
+                Stmt::Break(_) => {}
             }
         }
         if let Some(t) = &mut b.tail {
@@ -2280,6 +2302,8 @@ impl Purity {
         match s {
             Stmt::Return(e, _) => e.as_ref().is_none_or(|e| w.expr(e)),
             Stmt::LetElse { value, els, .. } => w.expr(value) && w.block(els),
+            Stmt::While { cond, body, .. } => w.expr(cond) && w.block(body),
+            Stmt::Break(_) => true,
             Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::LetTuple { value, .. } => w.expr(value),
             Stmt::Assign { index, value, .. } => index.as_ref().is_none_or(|i| w.expr(i)) && w.expr(value),
         }
@@ -2349,6 +2373,8 @@ impl PurityWalk<'_> {
             Stmt::Return(e, _) => e.as_ref().is_none_or(|e| self.expr(e)),
             Stmt::LetTuple { value, .. } => self.expr(value),
             Stmt::LetElse { value, els, .. } => self.expr(value) && self.block(els),
+            Stmt::While { cond, body, .. } => self.expr(cond) && self.block(body),
+            Stmt::Break(_) => true,
         }) && b.tail.as_ref().is_none_or(|t| self.expr(t))
     }
 

@@ -378,6 +378,7 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         tail_ctx: false,
         want_parts_site: None,
         parts_result: None,
+        loops: Vec::new(),
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -566,7 +567,7 @@ struct Pending<'ctx> {
 
 fn stmt_span(s: &Stmt) -> mimic_syntax::Span {
     match s {
-        Stmt::Let { span, .. } | Stmt::Assign { span, .. } | Stmt::LetTuple { span, .. } | Stmt::LetElse { span, .. } | Stmt::Return(_, span) => *span,
+        Stmt::Let { span, .. } | Stmt::Assign { span, .. } | Stmt::LetTuple { span, .. } | Stmt::LetElse { span, .. } | Stmt::Return(_, span) | Stmt::While { span, .. } | Stmt::Break(span) => *span,
         Stmt::Expr(e) => e.span,
     }
 }
@@ -599,6 +600,17 @@ fn stmt_names(s: &Stmt) -> Vec<String> {
             }
         }
         Stmt::LetElse { value, .. } => expr_names(value, &mut out),
+        // (every name the loop reads or changes)
+        Stmt::While { cond, body, .. } => {
+            expr_names(cond, &mut out);
+            for t in &body.stmts {
+                out.extend(stmt_names(t));
+            }
+            if let Some(t) = &body.tail {
+                expr_names(t, &mut out);
+            }
+        }
+        Stmt::Break(_) => {}
     }
     out
 }
@@ -710,6 +722,10 @@ struct Cg<'ctx, 'p> {
     tail_ctx: bool,
     want_parts_site: Option<usize>,
     parts_result: Option<inkwell::values::StructValue<'ctx>>,
+    /// The loops (`while`, `for`) being compiled, innermost last: where
+    /// each ends, and how many scopes were open around it (a `break`
+    /// releases the locals of the scopes inside it)
+    loops: Vec<(inkwell::basic_block::BasicBlock<'ctx>, usize)>,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -804,7 +820,12 @@ fn loops_only(p: &Program, fid: usize, d: &FnDecl) -> bool {
                         }
                         self.none(value);
                     }
-                    Stmt::Return(None, _) => {}
+                    Stmt::Return(None, _) | Stmt::Break(_) => {}
+                    // (a loop's body is never in tail position)
+                    Stmt::While { cond, body, .. } => {
+                        self.none(cond);
+                        self.block(body, false);
+                    }
                 }
             }
             if let Some(t) = &b.tail {
@@ -3332,6 +3353,38 @@ impl<'ctx> Cg<'ctx, '_> {
                     self.scopes.last_mut().unwrap().push(Local { name: n.clone(), slot, ty: t, owned, mutable: false, moves });
                 }
                 self.drop_tmp(b)?;
+            }
+            // `while cond { … }`: the test, the body, back to the test;
+            // `break` goes to the end
+            Stmt::While { cond, body, .. } => {
+                let f = self.cur_fn.ok_or("internal compiler error: a loop outside a function")?;
+                let head = self.ctx.append_basic_block(f, "while");
+                let body_bb = self.ctx.append_basic_block(f, "while_body");
+                let done = self.ctx.append_basic_block(f, "while_done");
+                self.b.build_unconditional_branch(head).s()?;
+                self.b.position_at_end(head);
+                let c = self.expr(cond)?;
+                let bit = self.truth(c)?;
+                self.b.build_conditional_branch(bit, body_bb, done).s()?;
+                self.b.position_at_end(body_bb);
+                self.loops.push((done, self.scopes.len()));
+                let v = self.block(body);
+                self.loops.pop();
+                let v = v?;
+                if !self.terminated() {
+                    self.drop_tmp(v)?;
+                    self.b.build_unconditional_branch(head).s()?;
+                }
+                self.b.position_at_end(done);
+            }
+            // (the locals of the scopes inside the loop released, as a
+            // block's end would)
+            Stmt::Break(_) => {
+                let (done, depth) = *self.loops.last().ok_or("internal compiler error: `break` outside a loop")?;
+                for k in (depth..self.scopes.len()).rev() {
+                    self.release_scope(&self.scopes[k])?;
+                }
+                self.b.build_unconditional_branch(done).s()?;
             }
             Stmt::LetElse { name, value, els, .. } => {
                 let v = self.expr(value)?;

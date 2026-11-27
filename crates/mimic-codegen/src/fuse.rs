@@ -2052,6 +2052,11 @@ impl<'ctx> Cg<'ctx, '_> {
         if !self.is_fae(value) || !self.trivially_pure(value) {
             return false;
         }
+        // (a loop after it may change what it reads, or read it at every
+        // turn: computed where it is bound)
+        if rest.iter().any(|s| matches!(s, Stmt::While { .. })) || super::owned::in_loop(name, rest, tail) {
+            return false;
+        }
         // substituted at every use: once, or cheap enough to compute again
         // (else a chain `b = a × a`, `c = b × b`, … doubles at each step)
         let mut roots = Vec::new();
@@ -2104,6 +2109,8 @@ impl<'ctx> Cg<'ctx, '_> {
             Stmt::Assign { name: n, index, value, .. } => n != name && index.as_ref().is_none_or(|i| self.uses_ok(name, i, false)) && self.uses_ok(name, value, false),
             Stmt::Return(e, _) => e.as_ref().is_none_or(|e| self.uses_ok(name, e, false)),
             Stmt::LetElse { value, els, .. } => self.uses_ok(name, value, false) && self.block_uses_ok(name, els),
+            Stmt::While { cond, body, .. } => self.uses_ok(name, cond, false) && self.block_uses_ok(name, body),
+            Stmt::Break(_) => true,
         }
     }
 

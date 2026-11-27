@@ -312,6 +312,12 @@ pub enum Stmt {
     LetTuple { names: Vec<String>, value: Expr, span: Span },
     /// `let x = value else { … }`: unwraps `Some`/`Ok`; otherwise the block runs and must leave
     LetElse { name: String, ty: Option<Type>, value: Expr, els: Block, span: Span },
+    /// `while cond { … }` (`⟳`): runs the body while `cond` holds; the body
+    /// may reassign only its function's `let mut` variables. (`for` is
+    /// written as one by the parser.)
+    While { cond: Expr, body: Block, span: Span },
+    /// `break` (`↯`): leaves the innermost loop.
+    Break(Span),
 }
 
 #[derive(Clone, Debug)]
@@ -526,6 +532,11 @@ impl Block {
                     value.walk(f);
                     els.walk(f);
                 }
+                Stmt::While { cond, body, .. } => {
+                    cond.walk(f);
+                    body.walk(f);
+                }
+                Stmt::Break(_) => {}
             }
         }
         if let Some(t) = &self.tail {
@@ -615,6 +626,11 @@ impl Block {
                     value.walk_mut(f);
                     els.walk_mut(f);
                 }
+                Stmt::While { cond, body, .. } => {
+                    cond.walk_mut(f);
+                    body.walk_mut(f);
+                }
+                Stmt::Break(_) => {}
             }
         }
         if let Some(t) = &mut self.tail {
@@ -633,6 +649,9 @@ impl Block {
             }
             if let Stmt::LetElse { els, .. } = s {
                 els.bound_names(out);
+            }
+            if let Stmt::While { body, .. } = s {
+                body.bound_names(out);
             }
         }
         self.walk(&mut |e| match &e.kind {

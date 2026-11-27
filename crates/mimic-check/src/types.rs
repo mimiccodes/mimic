@@ -994,6 +994,16 @@ impl Walk<'_, '_> {
                     self.ret = self.ret.join(t);
                     diverged = true;
                 }
+                // a loop: its body walked twice, so a variable an assignment
+                // in it widens is seen widened at the top as well (the
+                // function is typed until nothing changes anyway)
+                Stmt::While { cond, body, .. } => {
+                    for _ in 0..2 {
+                        self.expr(cond);
+                        self.block(body);
+                    }
+                }
+                Stmt::Break(_) => {}
                 Stmt::LetTuple { names, value, span } => {
                     let vt = self.expr(value);
                     let elems = match vt {

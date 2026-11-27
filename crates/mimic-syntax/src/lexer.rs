@@ -441,6 +441,9 @@ impl<'a> Lexer<'a> {
             // test's inputs (`⊢ "…" ∀ x: i64 { … }`), a C header
             '⊢' => Tok::Ident("test".into()),
             '∀' => Tok::Ident("for".into()),
+            // loops (`⟳ i < n { … }`, `↯`)
+            '⟳' => Tok::Ident("while".into()),
+            '↯' => Tok::Ident("break".into()),
             '⎘' => Tok::Ident("include".into()),
             '⌈' | '⌊' => {
                 if self.peek() == Some('/') {
@@ -784,7 +787,7 @@ mod tests {
     #[test]
     fn every_keyword_has_a_glyph() {
         // each keyword's glyph and digraph lex to the keyword itself
-        let keywords = ["module", "fn", "pub", "mut", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "with", "true", "false", "and", "or", "not", "div", "arms", "test", "for", "include"];
+        let keywords = ["module", "fn", "pub", "mut", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "with", "true", "false", "and", "or", "not", "div", "arms", "test", "for", "include", "while", "break"];
         for w in keywords {
             let g = crate::glyphs::SYNTAX_GLYPHS.iter().find(|g| g.word == w).unwrap_or_else(|| panic!("`{w}` has no glyph"));
             assert_eq!(toks(g.glyph), toks(w), "{} for {w}", g.glyph);

@@ -1,14 +1,16 @@
 ---
-title: No loops
-description: How Mimic replaces for and while with each, gather, trail, evolve, settle, arms and recursion.
+title: Loops and loop words
+description: Iteration with each, gather, trail, evolve, settle, arms and recursion, and the plain loops for, while and break.
 order: 4
 ---
 
-# No loops
+# Loops and loop words
 
-Mimic has no `for` or `while`. That is deliberate:
+Most iteration in Mimic is written with array operations and a handful of loop *words*, and it pays to reach for them first:
 * **Parallelism.** A loop forces one step after another. Array operations and the loop words below say *what* to compute, which leaves the compiler free to spread the work over every core.
 * **Safety.** Many bug types simply can't happen: off-by-one indices, forgotten increments, loops that never end by accident.
+
+For work that really is one step after another (a parser walking its input, a simulation's state, a search), there are also plain loops: `for`, `while` and `break` ([below](#for-while-and-break)). They run on one core, in order.
 
 | You want to… | Use |
 |---|---|
@@ -19,6 +21,7 @@ Mimic has no `for` or `while`. That is deliberate:
 | repeat until a condition holds | `x ▷ settle(step, done)` |
 | split work in two, recursively | `arms (…) { … arm(…) … }` |
 | anything else | a recursive function |
+| step by step, changing variables | `for`, `while`, `break` |
 
 ## each: `¨`
 
@@ -151,6 +154,52 @@ fn main() {
 ```
 
 The glyph form is `⋔`.
+
+## for, while and break
+
+A loop changes `let mut` variables of its function, one step after another:
+
+```mimic run
+module main
+
+fn main() {
+    let mut total = 0
+    for i in 1 ‥ 11 {
+        total = total + i
+    }
+    print(total)
+
+    let mut n = 27
+    let mut steps = 0
+    while n > 1 {
+        if n % 2 == 0 { n = n div 2 } else { n = 3 * n + 1 }
+        steps = steps + 1
+    }
+    print(steps)
+
+    let mut first = ¯1
+    for x in [4 9 16 25] {
+        if x > 10 {
+            first = x
+            break
+        }
+    }
+    print(first)
+}
+```
+
+```output
+55
+111
+16
+```
+
+* `for i in a ‥ b` counts from `a` up to, not including, `b`; `for x in xs` takes each element of a list.
+* `while cond { … }` runs while `cond` holds; `break` leaves the innermost loop.
+* The glyphs are `∀` (`for`), `⟳` (`while`) and `↯` (`break`).
+* A loop may change only its own function's `let mut` variables, and a lambda is a function of its own: a `break` inside one is an error (E0216).
+
+A loop is sequential. When the steps don't depend on each other, `¨` and the reductions above do the same work on every core.
 
 ## Recursion
 

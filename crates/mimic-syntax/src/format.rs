@@ -52,11 +52,13 @@ const SYNTAX: &[(&str, &str)] = &[
     ("○", "false"),
     ("⊢", "test"),
     ("∀", "for"),
+    ("⟳", "while"),
+    ("↯", "break"),
     ("⎘", "include"),
 ];
 
 /// Glyphs of keywords: `mimic fmt --glyphs` leaves their words as they are.
-const KEYWORD_GLYPHS: &[&str] = &["§", "ƒ", "⇑", "⇄", "⍰", "⋄", "⏎", "⇐", "≔", "⌁", "☡", "✓", "⊡", "⊨", "⊕", "●", "○", "⊢", "∀", "⎘"];
+const KEYWORD_GLYPHS: &[&str] = &["§", "ƒ", "⇑", "⇄", "⍰", "⋄", "⏎", "⇐", "≔", "⌁", "☡", "✓", "⊡", "⊨", "⊕", "●", "○", "⊢", "∀", "⎘", "⟳", "↯"];
 
 /// The text a token is written as in the chosen form, if it changes.
 fn respell(t: &Token, glyphs: bool) -> Option<&'static str> {

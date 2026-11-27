@@ -313,6 +313,11 @@ fn blocks_mut(b: &mut Block, f: &mut dyn FnMut(&mut Block)) {
                 blocks_mut(els, f);
             }
             Stmt::Return(None, _) => {}
+            Stmt::While { cond, body, .. } => {
+                expr(cond, f);
+                blocks_mut(body, f);
+            }
+            Stmt::Break(_) => {}
         }
     }
     if let Some(t) = &mut b.tail {

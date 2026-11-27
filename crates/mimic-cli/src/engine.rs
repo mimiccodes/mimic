@@ -1013,6 +1013,11 @@ impl RefWalk<'_> {
                         self.expr(e);
                     }
                 }
+                Stmt::While { cond, body, .. } => {
+                    self.expr(cond);
+                    self.block(body);
+                }
+                Stmt::Break(_) => {}
             }
         }
         if let Some(t) = &b.tail {

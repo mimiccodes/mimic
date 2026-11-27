@@ -1,0 +1,102 @@
+module main
+
+// loops: `for` over a range and a list, `while`, `break` (and their glyphs
+// ∀ ⟳ ↯), with values on the heap changed in them and released when a
+// `break` leaves early.
+
+fn sum_to(n: i64) -> i64 {
+    let mut s = 0
+    for i in 0 ‥ n {
+        s = s + i
+    }
+    s
+}
+
+fn first_over(xs: [i64], limit: i64) -> i64 {
+    let mut found = ¯1
+    for x in xs {
+        if x > limit {
+            found = x
+            break
+        }
+    }
+    found
+}
+
+fn collatz(n0: i64) -> i64 {
+    let mut n = n0
+    let mut steps = 0
+    while n > 1 {
+        if n % 2 == 0 { n = n div 2 } else { n = 3 * n + 1 }
+        steps = steps + 1
+    }
+    steps
+}
+
+fn main_a() {
+    print(sum_to(10))
+    print(first_over([3 8 1 12 40], 10))
+    print(first_over([1 2], 10))
+    print(collatz(27))
+    let mut row = [1]
+    ⟳ ≢ row < 6 {
+        row = push(row, row[≢ row - 1] * 2)
+    }
+    print(row)
+    let mut words = ""
+    ∀ w in ["a" "bb" "ccc"] {
+        words = words + w + ";"
+    }
+    print(words)
+    let mut k = 0
+    while true {
+        k = k + 1
+        if k == 5 { ↯ }
+    }
+    print(k)
+}
+
+fn grid(n: i64) -> [[i64]] {
+    let mut rows = [⍳ n]
+    for r in 1 ‥ n {
+        let mut row = [r]
+        for c in 1 ‥ n {
+            let cell = (r * c) % 7
+            if cell == 6 { break }
+            row = push(row, cell)
+        }
+        rows = push(rows, row)
+    }
+    rows
+}
+
+fn build(xs: [i64]) -> [i64] {
+    let mut out = xs
+    let mut i = 0
+    while i < ≢ xs {
+        let pair = [xs[i], xs[i] * 10]
+        if xs[i] < 0 { break }
+        out = concat(out, pair)
+        i = i + 1
+    }
+    out
+}
+
+fn main_b() {
+    print(grid(5))
+    let base = [1 2 ¯3 4]
+    print(build(base))
+    print(base)
+    let mut text = "start"
+    for w in ["x" "y" "stop" "z"] {
+        let piece = text + "/" + w
+        if w == "stop" { break }
+        text = piece
+    }
+    print(text)
+}
+
+fn main() {
+    main_a()
+    main_b()
+}

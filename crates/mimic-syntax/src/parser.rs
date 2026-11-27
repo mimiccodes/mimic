@@ -64,7 +64,12 @@ fn respan(e: &mut Expr, span: Span) {
                     *sp = span;
                     respan(value, span);
                     blk(els, span);
+                }                Stmt::While { cond, body, span: sp } => {
+                    *sp = span;
+                    respan(cond, span);
+                    blk(body, span);
                 }
+                Stmt::Break(sp) => *sp = span,
             }
         }
         if let Some(t) = &mut b.tail {
@@ -204,6 +209,41 @@ fn or_else(value: Expr, els: Block) -> Expr {
     let test = Expr { kind: ExprKind::If { cond: Box::new(call("__has_value")), then, els: Some(Box::new(Expr { kind: ExprKind::Block(els), span: els_span })) }, span };
     let bind = Stmt::Let { name: tmp.clone(), mutable: false, ty: None, value, span };
     Expr { kind: ExprKind::Block(Block { stmts: vec![bind], tail: Some(Box::new(test)), span }), span }
+}
+
+/// `for x in a ‥ b { … }` / `for x in xs { … }` as a `while` over a hidden
+/// counter (the bounds, or the list and its length, computed once, before
+/// the loop): `{ let __hi = b; let mut __i = a; while __i < __hi { let x =
+/// __i; __i = __i + 1; … } }`. The counter moves on before the body, so a
+/// `break` in it leaves nothing to undo.
+fn for_loop(var: String, iter: Expr, body: Block, span: Span) -> Stmt {
+    let at = span.start;
+    let (i, hi, xs) = (format!("__i{at}"), format!("__hi{at}"), format!("__xs{at}"));
+    let path = |n: &str| Expr { kind: ExprKind::Path(vec![n.to_string()]), span };
+    let int = |v: i64| Expr { kind: ExprKind::Int(v), span };
+    let bin = |op: BinOp, a: Expr, b: Expr| Expr { kind: ExprKind::Binary { op, lhs: Box::new(a), rhs: Box::new(b) }, span };
+    let let_ = |n: &str, mutable: bool, value: Expr| Stmt::Let { name: n.to_string(), mutable, ty: None, value, span };
+    let (mut setup, start, element) = match iter.kind {
+        ExprKind::Prim { prim: Prim::Range, args } if args.len() == 2 => {
+            let mut args = args.into_iter();
+            let (a, b) = (args.next().unwrap(), args.next().unwrap());
+            (vec![let_(&hi, false, b)], a, path(&i))
+        }
+        _ => {
+            let len = Expr { kind: ExprKind::Prim { prim: Prim::Len, args: vec![path(&xs)] }, span };
+            let elem = Expr { kind: ExprKind::Index { base: Box::new(path(&xs)), index: Box::new(path(&i)) }, span };
+            (vec![let_(&xs, false, iter), let_(&hi, false, len)], int(0), elem)
+        }
+    };
+    setup.push(let_(&i, true, start));
+    let mut stmts = vec![let_(&var, false, element), Stmt::Assign { name: i.clone(), index: None, value: bin(BinOp::Add, path(&i), int(1)), span }];
+    stmts.extend(body.stmts);
+    if let Some(t) = body.tail {
+        stmts.push(Stmt::Expr(*t));
+    }
+    let lp = Stmt::While { cond: bin(BinOp::Lt, path(&i), path(&hi)), body: Block { stmts, tail: None, span: body.span }, span };
+    setup.push(lp);
+    Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: setup, tail: None, span }), span })
 }
 
 pub fn parse_expr(src: &str) -> Result<Expr, Diag> {
@@ -877,6 +917,33 @@ impl Parser {
                 self.next();
                 let value = if matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace) { None } else { Some(self.expr()?) };
                 Ok(Stmt::Return(value, start))
+            }
+            // `while cond { … }` (`⟳`), `for x in … { … }` (`∀`), `break`
+            // (`↯`): words a statement starts with, not reserved elsewhere
+            Tok::Ident(w) if w == "while" && !self.toks.get(self.pos + 1).is_some_and(|t| matches!(t.tok, Tok::Bind | Tok::Assign | Tok::Reassign | Tok::LParen | Tok::Dot)) => {
+                self.next();
+                // (the condition must not swallow the `{`)
+                let saved = std::mem::replace(&mut self.nl_ignore, 0);
+                let cond = self.expr();
+                self.nl_ignore = saved;
+                let cond = cond?;
+                let body = self.block()?;
+                Ok(Stmt::While { cond, body, span: start.to(self.prev_span()) })
+            }
+            Tok::Ident(w) if w == "for" && matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Ident(_))) && matches!(self.toks.get(self.pos + 2).map(|t| &t.tok), Some(Tok::Ident(k)) if k == "in") => {
+                self.next();
+                let (var, _) = self.decl_ident()?;
+                self.next(); // in
+                let saved = std::mem::replace(&mut self.nl_ignore, 0);
+                let iter = self.expr();
+                self.nl_ignore = saved;
+                let iter = iter?;
+                let body = self.block()?;
+                Ok(for_loop(var, iter, body, start.to(self.prev_span())))
+            }
+            Tok::Ident(w) if w == "break" && matches!(self.toks.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof)) => {
+                self.next();
+                Ok(Stmt::Break(start))
             }
             Tok::Ident(name) if self.toks.get(self.pos + 1).is_some_and(|t| t.tok == Tok::Bind) => {
                 self.next();

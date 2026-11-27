@@ -213,4 +213,4 @@ Here `step` works on six numbers in registers and the four steps allocate nothin
 
 Arrays with more than one dimension are covered in the [arrays in depth](15-multidimensional-arrays.md) chapter.
 
-Next: [no loops](04-no-loops.md).
+Next: [loops and loop words](04-no-loops.md).
