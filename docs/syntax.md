@@ -230,14 +230,39 @@ How matrices behave:
 
 ## Keyword glyphs
 
-| Glyph | Word | Glyph | Word |
-|---|---|---|---|
-| `§` | `module` | `▷` | `\|>` |
-| `ƒ` | `fn` | `→` | `->` |
-| `←` | `let … =` | `⇒` | `=>` |
-| `↩` | `=` (reassign) | `⍝` | `//` comment |
+Every keyword has a glyph, and every glyph a digraph (`\U` types `⇑`). Words and glyphs mix freely; `mimic fmt` writes them all as words, and `mimic glyphs` lists them.
 
-`pub`, `mut`, `if`, `else`, `use`, `extern`, `unsafe` and `return` only have word forms for now. Their glyphs are still to be designed.
+| Glyph | Word | Digraph | Glyph | Word | Digraph |
+|---|---|---|---|---|---|
+| `§` | `module` | `\S` | `⊡` | `type` | `\Y` |
+| `ƒ` | `fn` | `\f` | `⊨` | `match` | `\K` |
+| `⇑` | `pub` | `\U` | `⊕` | `with` | `\w` |
+| `⇄` | `mut` | `\D` | `⇐` | `use` | `\I` |
+| `←` | `let … =` | `\<` | `≔` | `as` | `\A` |
+| `↩` | `=` (reassign) | `\=` | `⌁` | `extern` | `\E` |
+| `⍰` | `if` | `\?` | `☡` | `unsafe` | `\W` |
+| `⋄` | `else` | `\:` | `✓` | `trusted` | `\V` |
+| `⏎` | `return` | `\L` | `⎘` | `include` | `\C` |
+| `●` | `true` | `\1` | `⊢` | `test` | `\H` |
+| `○` | `false` | `\0` | `∀` | `for` (property tests) | `\F` |
+| `▷` | `\|>` | `\>` | `→` | `->` | |
+| `⇒` | `=>` | | `⍝` | `//` comment | |
+
+```mimic
+⊡ Shape = Circle(f64) | Rect(f64, f64)
+
+⇑ ƒ area(s: Shape) → f64 {
+    ⊨ s {
+        Circle(r) ⇒ 3.14159 × r × r,
+        Rect(w, h) ⇒ w × h,
+    }
+}
+
+ƒ clamp(x: i64) → i64 {
+    ⍰ x < 0 { ⏎ 0 }
+    ⍰ x > 255 { 255 } ⋄ { x }
+}
+```
 
 ## Records, unions and `match`
 
