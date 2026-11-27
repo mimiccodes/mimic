@@ -1,0 +1,13 @@
+module main
+
+// gather and trail with ^, & and | over integers: folded in a loop, nothing
+// boxed (the same results as the runtime's generic fold)
+fn main() {
+    let xs = [12 10 6 255 7]
+    print("{xs ▷ gather(^)} {xs ▷ gather(&)} {xs ▷ gather(|)}")
+    print(xs ▷ trail(^))
+    print(xs ▷ trail(&))
+    print([5] ▷ gather(^))
+    print(⍳ 0 ▷ trail(|))
+    print(⍳ 1000 ¨ (i => i * 2654435761 % 1000003) ▷ gather(^))
+}

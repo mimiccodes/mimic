@@ -165,6 +165,18 @@ fn prim_expr(prim: Prim, mut args: Vec<Expr>, span: Span) -> Expr {
             };
             ExprKind::Prim { prim, args }
         }
+        // gather(^), gather(&), gather(|) (and trail): the lambda
+        // `(a, b) => a ^ b`, which the checker types over integers and code
+        // generation folds in a loop, nothing boxed (the runtime's generic
+        // fold called a function value with two boxed numbers per element)
+        (Prim::Gather | Prim::Trail, 2) if matches!(args[1].kind, ExprKind::OpRef(BinOp::BitXor | BinOp::BitAnd | BinOp::BitOr)) => {
+            let ExprKind::OpRef(op) = args[1].kind else { unreachable!() };
+            let at = args[1].span;
+            let var = |n: &str| Expr { kind: ExprKind::Path(vec![n.to_string()]), span: at };
+            let body = Expr { kind: ExprKind::Binary { op, lhs: Box::new(var("__fa")), rhs: Box::new(var("__fb")) }, span: at };
+            args[1] = Expr { kind: ExprKind::Lambda { params: vec!["__fa".into(), "__fb".into()], body: Box::new(body) }, span: at };
+            ExprKind::Prim { prim, args }
+        }
         _ => ExprKind::Prim { prim, args },
     };
     Expr { kind, span }
