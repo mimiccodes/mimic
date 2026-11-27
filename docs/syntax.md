@@ -348,8 +348,10 @@ fn name_of(id: i64) -> str {
 }
 ```
 
-* The `else` block runs on `None` / `Err`, and must end with `return`.
+* The `else` block runs on `None` / `Err`. It either leaves (`return`), or gives a value of the type inside, which is then used instead: `let port = parse_int(s) else { 8080 }`.
+* `e else { … }` is an expression, so it also works inside others: `if 1 < ≢ args { parse_int(args[1]) else { 1086 } } else { 1086 }`, `xs ¨ (s => parse_int(s) else { 0 })`. It binds loosest, so write `(parse_int(s) else { 0 }) + 1` to add to the result.
 * The unwrapped value keeps its static type. For example, `let n = parse_int(s) else { … }` gives an `i64`.
+* Errors: `else` after a value that is not an `Option` or `Result` (E0406), a block giving another type (E0401), a block giving nothing (E0504).
 
 ## Concurrency: implicit futures
 

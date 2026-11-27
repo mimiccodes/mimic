@@ -1374,6 +1374,30 @@ impl Walk<'_, '_> {
                                     }
                                 }
                             }
+                            // `e else { … }`: the value inside an Option or Result
+                            if fm.name == "prelude" && fm.package == "std" && matches!(p.fns[f].name.as_str(), "__has_value" | "__value_of") {
+                                match argt.first().copied() {
+                                    Some(Ty::Obj(t)) if matches!(p.types[obj_tid(t)].name.as_str(), "Option" | "Result") => {
+                                        if p.fns[f].name == "__value_of" {
+                                            let inner = obj_args(t).first().copied().unwrap_or(Ty::Dyn);
+                                            self.call_user(id(e), f, argt);
+                                            return if inner == Ty::Never { Ty::Dyn } else { inner };
+                                        }
+                                    }
+                                    Some(t) if p.fns[f].name == "__has_value" && !matches!(t, Ty::Dyn | Ty::Never) => {
+                                        let tn = match t {
+                                            Ty::Obj(o) => p.types[obj_tid(o)].name.clone(),
+                                            t => show(p, t),
+                                        };
+                                        self.err(
+                                            Diag::new(&C::LET_ELSE_TYPE, format!("`else` after a value needs an Option or Result, found `{tn}`"), e.span)
+                                                .note("`e else { … }` gives the value inside `Some` or `Ok`, else the block"),
+                                        );
+                                    }
+                                    Some(Ty::Never) if p.fns[f].name == "__value_of" => return Ty::Never,
+                                    _ => {}
+                                }
+                            }
                             let r = self.call_user(id(e), f, argt);
                             if let Some(t) = pushed {
                                 return t;
@@ -1789,6 +1813,20 @@ impl Walk<'_, '_> {
                 match els {
                     Some(x) => {
                         let mut u = self.expr(x);
+                        // `e else { … }` (written by the parser as this `if`):
+                        // the block gives the type of the value inside, or
+                        // leaves (`return`)
+                        if is_or_else(cond) && u == Ty::Unit && t != Ty::Unit {
+                            self.err(
+                                Diag::new(&C::ELSE_MUST_RETURN, "the `else` block gives nothing: give a value of the type inside, or end with `return`", x.span)
+                                    .note("it runs when the value is `None` or `Err`, so it stands in for the value inside"),
+                            );
+                        } else if is_or_else(cond) && !matches!(t, Ty::Dyn | Ty::Never) && !matches!(u, Ty::Dyn | Ty::Never) && t.join(u) != t {
+                            self.err(
+                                Diag::new(&C::TYPE_MISMATCH, format!("the `else` block gives `{}`, but the value inside is `{}`", show(self.inf.p, u), show(self.inf.p, t)), x.span)
+                                    .note("give a value of the same type, or leave with `return`"),
+                            );
+                        }
                         // a branch that is a number written in the program
                         // takes the other's f32 or i32: `if c { 0 } else { n }`
                         if let Some(lit) = then.tail.as_deref().filter(|l| is_literal(l))
@@ -2056,6 +2094,11 @@ fn tail_literal(e: &Expr) -> Option<&Expr> {
         ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_literal(l)),
         _ => is_literal(e).then_some(e),
     }
+}
+
+/// The test of an `if` the parser wrote for `e else { … }`.
+fn is_or_else(cond: &Expr) -> bool {
+    matches!(&cond.kind, ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "__has_value"))
 }
 
 fn is_empty_list(e: &Expr) -> bool {

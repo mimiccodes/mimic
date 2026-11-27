@@ -1,0 +1,6 @@
+// expect-error: E0406 `else` after a value needs an Option or Result, found `i64`
+module main
+fn main() {
+    let x = 5 else { 0 }
+    print(x)
+}

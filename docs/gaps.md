@@ -108,7 +108,7 @@ Reported from a real project (tensors as a flat `[f64]` plus their dimensions, a
 | Indexing with a list of indices, `xs[[3 0]]`, passes the checker and stops the program | `ids ¨ (i => xs[i])` | 0.4.5 (`⊇`, select; a list index refused at compile time until then) |
 | `math` had no `tanh`, `sinh`, `cosh`, `log1p`, `expm1`, `sigmoid` | ✅ added (libm calls that fuse into kernels; `sigmoid` without overflow) | 0.4.3 |
 | No direct `bool` → number conversion (one-hot vectors, masks) | `¨ (b => if b { 1.0 } else { 0.0 })` | 0.4.5 |
-| No fallback for an `Option`: `parse_int(s) ▷ or_else(300)` | ✅ `unwrap_or` for `Option`; for `Result`, a name still to choose | 0.4.3; 0.4.5 (`Result`) |
+| No fallback for an `Option`: `parse_int(s) ▷ or_else(300)` | ✅ `unwrap_or` for `Option`; for both, `parse_int(s) else { 300 }` | 0.4.3 |
 | `[u8]` from `fs::read_bytes` needs a map to be used as `[i64]` | `b ¨ (x => x * 1)` | 0.4.7 (bits, bytes and sized integers) |
 | A local cannot share a name with any function of its module (`let steps` next to `fn steps`: E0301) | another name | 0.4.5 |
 | Matrices are typed only at run time: a function cannot declare that it takes one | keep a flat list and its dimensions | 0.4.6 (shapes) |
@@ -134,6 +134,19 @@ Reported from a real project (tensors as a flat `[f64]` plus their dimensions, a
 | `k ↑ xs` and `k ↓ xs` on a list of records stopped the program with "take/drop count must be an integer scalar" | ✅ the count on either side, as for lists of numbers | 0.4.3 |
 | `_` was an ordinary name, bound once per function: `_ ← fs::remove(a)` then `_ ← fs::remove(b)` was E0302 | ✅ `_` binds nothing, any number of times | 0.4.3 |
 | A function's name where a record was meant (`if k == 0 { run } else { now }` in a function returning `R`) passed `mimic check` and stopped the program when it ran, under `mimic test` with only `index: got unit value ()` | ✅ E0401 at the name: a function where the declared result is a value, as a branch, a `match` arm or a `return` | 0.4.3 |
+
+## Found by a user's image program (0.4.3-preview.1)
+
+Reported while processing the pixels of a photograph (1086×1448 RGB): each one changed how the program had to be written.
+
+| Gap | Workaround now | Version |
+|---|---|---|
+| No image or PNG decoding: `compress` has no deflate (zlib), which PNG needs; `ui::image` shows an image but gives no pixels | decode outside Mimic (to raw RGB bytes) and read those | 0.4.7 (`compress::inflate`/`deflate`, and a PNG's pixels read with bit syntax); 0.7.0 (`gfx::` images) |
+| `¨` over a matrix visits its numbers, not its rows: `m ¨ (px => px[0])` passed `mimic check` and stopped the program with `cannot index a scalar` | `⍉` the `[count, 3]` matrix and work on each plane whole (`ch[0]`, `ch[1]`, `ch[2]`) | 0.4.4 (E0401 when checking: indexing a number, and that `¨` visits elements); 0.4.5 (rows through `⍤`, rank) |
+| A matrix row cannot be assigned in one write: `m[0] = [10 40 70]` passed `mimic check` and stopped the program (`needs one index per dimension`); no catenate along an axis or zip to interleave planes back into RGB | write each element, or one plane per file | 0.4.4 (an error when checking); 0.4.5 (`m[i] = row`, catenate along an axis, zip) |
+| `let … else` only as its own statement: `parse_int(x) else { 1086 }` inside an expression is E0201 | a helper function with the `let … else` in it | open: a change to the syntax, for the owner to decide |
+| `bytes::from` stops the program on a value outside 0 … 255 (it returns `[u8]`, not a `Result`), and `mimic check` accepts a literal list that cannot fit; arithmetic on `[u8]` gives `[i64]` | clamp before converting (`⌈ 0 ⌊ 255`) | 0.4.4 (`bytes::try_from` giving a `Result`, `bytes::clamped`, a literal out of range an error when checking; narrow integers in machine code, the results still `i64`) |
+| A file of a project whose module is not `main` cannot be run by itself: `mimic run src/probe.mim` is E0903 even with a `fn main` in it | a separate `module main` file | 0.4.4 (`mimic run` on a project's file runs that module's `main`) |
 
 ## Found by the held-out set
 

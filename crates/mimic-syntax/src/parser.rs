@@ -177,6 +177,23 @@ pub fn parse_file(src: &str) -> Result<File, Diag> {
 }
 
 /// Parse a single expression (used by tests and tooling).
+/// `value else { els }` as the nodes every pass already knows: the value
+/// bound once (named after where it is written), then the value inside it
+/// when it holds one (`Some`, `Ok`; the prelude's `__has_value` and
+/// `__value_of`, typed by the checker), else the block, which may give a
+/// value or leave with `return`.
+fn or_else(value: Expr, els: Block) -> Expr {
+    let span = Span { end: els.span.end, ..value.span };
+    let tmp = format!("__or{}", value.span.start);
+    let var = || Expr { kind: ExprKind::Path(vec![tmp.clone()]), span };
+    let call = |f: &str| Expr { kind: ExprKind::Call { callee: Box::new(Expr { kind: ExprKind::Path(vec![f.to_string()]), span }), args: vec![var()] }, span };
+    let then = Block { stmts: vec![], tail: Some(Box::new(call("__value_of"))), span };
+    let els_span = els.span;
+    let test = Expr { kind: ExprKind::If { cond: Box::new(call("__has_value")), then, els: Some(Box::new(Expr { kind: ExprKind::Block(els), span: els_span })) }, span };
+    let bind = Stmt::Let { name: tmp.clone(), mutable: false, ty: None, value, span };
+    Expr { kind: ExprKind::Block(Block { stmts: vec![bind], tail: Some(Box::new(test)), span }), span }
+}
+
 pub fn parse_expr(src: &str) -> Result<Expr, Diag> {
     let toks = lex(src)?;
     let mut p = Parser { toks, pos: 0, nl_ignore: 0, no_lambda: false };
@@ -815,13 +832,20 @@ impl Parser {
                     let s = self.span();
                     return Err(Diag::new(&C::BAD_LET, "expected `=` in let binding", s));
                 }
-                let value = self.expr()?;
+                let value = self.expr_no_else()?;
                 if self.at(&Tok::Else) {
                     self.next();
+                    let els = self.block()?;
+                    // a block that gives a value: the binding is the value
+                    // inside, or that (`let w = parse_int(s) else { 80 }`);
+                    // one that leaves: `let … else` as before
+                    if els.tail.is_some() {
+                        let value = or_else(value, els);
+                        return Ok(Stmt::Let { name, mutable, ty, value, span: start });
+                    }
                     if mutable {
                         return Err(Diag::new(&C::BAD_LET, "`let … else` bindings cannot be `mut`", start));
                     }
-                    let els = self.block()?;
                     return Ok(Stmt::LetElse { name, ty, value, els, span: start });
                 }
                 Ok(Stmt::Let { name, mutable, ty, value, span: start })
@@ -876,7 +900,20 @@ impl Parser {
 
     // ---- expressions --------------------------------------------------
 
+    /// An expression, and `e else { … }` after it: the value inside an
+    /// `Option` or `Result`, else what the block gives.
     pub(crate) fn expr(&mut self) -> PResult<Expr> {
+        let value = self.expr_no_else()?;
+        if !self.at(&Tok::Else) {
+            return Ok(value);
+        }
+        self.next();
+        let els = self.block()?;
+        Ok(or_else(value, els))
+    }
+
+    /// An expression, an `else` after it left to the caller.
+    fn expr_no_else(&mut self) -> PResult<Expr> {
         let mut lhs = self.binary(0)?;
         loop {
             // A pipeline may continue on the next line: `xs\n  ▷ ⌽`
