@@ -1,0 +1,7 @@
+// expect-panic: index 3 out of bounds for length 3
+module main
+fn pick(i: i64, k: i64) -> str { ["a" "b{k}" "c"][i] }
+fn main() {
+    print(pick(1, 5))
+    print(pick(3, 5))
+}
