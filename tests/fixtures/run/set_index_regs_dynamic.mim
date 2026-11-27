@@ -1,0 +1,22 @@
+module main
+
+// an element of a list kept in registers assigned with an index (or a
+// value) of a type the compiler does not know: put on the heap for the
+// runtime and back. Its slot holds the numbers, not a pointer: read as one,
+// its first number 0 was taken for `()` ("index: got unit value"). Found by
+// the nightly random programs (seed 20261127, program 136).
+
+fn ident(xs: [i64]) -> [i64] { xs }
+
+fn main() {
+    let mut m7 = ident([4 5])
+    m7[1] = 2
+    let n12 = m7[0]
+    let mut m13 = [0 0 0 0 0]
+    m13[n12] = 9
+    print(m13)
+    let mut f = [1.5 2.5 3.5]
+    f[m7[1] - 1] = 0.25
+    print(f)
+    print(m7)
+}
