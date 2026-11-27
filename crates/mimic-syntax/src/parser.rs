@@ -1354,6 +1354,25 @@ impl Parser {
             Tok::Str(s) => ExprKind::Str(s),
             Tok::True => ExprKind::Bool(true),
             Tok::False => ExprKind::Bool(false),
+            // `⍬`: an empty list of i64; `⍬[f64]`, `⍬[str]`, `⍬[Point]`: of
+            // that element type. Written as `{ let __z: [T] = []; __z }`,
+            // which every pass already types and compiles
+            Tok::Ident(name) if name == "⍬" => {
+                let el = if self.at(&Tok::LBracket) && self.adjacent() {
+                    self.next();
+                    let t = self.ty()?;
+                    self.expect(&Tok::RBracket)?;
+                    t
+                } else {
+                    Type::Named("i64".into(), span)
+                };
+                let span = span.to(self.prev_span());
+                let tmp = format!("__z{}", span.start);
+                let ty = Type::Array(Box::new(el), span);
+                let bind = Stmt::Let { name: tmp.clone(), mutable: false, ty: Some(ty), value: Expr { kind: ExprKind::Array(vec![]), span }, span };
+                let tail = Expr { kind: ExprKind::Path(vec![tmp]), span };
+                return Ok(Expr { kind: ExprKind::Block(Block { stmts: vec![bind], tail: Some(Box::new(tail)), span }), span });
+            }
             Tok::Ident(name) => {
                 if self.at(&Tok::FatArrow) && !self.no_lambda {
                     self.next();

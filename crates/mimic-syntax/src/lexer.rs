@@ -389,6 +389,8 @@ impl<'a> Lexer<'a> {
             '←' => Tok::Bind,
             '↩' => Tok::Reassign,
             '§' => Tok::Module,
+            // `⍬`, the empty list (`⍬[f64]`: of f64); the parser reads it
+            '⍬' => Tok::Ident("⍬".into()),
             'ƒ' => Tok::Fn,
             '⌈' | '⌊' => {
                 if self.peek() == Some('/') {

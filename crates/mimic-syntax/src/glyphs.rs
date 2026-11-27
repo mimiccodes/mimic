@@ -115,6 +115,7 @@ pub const SYNTAX_GLYPHS: &[SyntaxGlyph] = &[
     SyntaxGlyph { glyph: "¯", word: "-", digraph: Some("\\_"), doc: "high minus for negative literals: ¯3" },
     SyntaxGlyph { glyph: "⍝", word: "//", digraph: None, doc: "line comment" },
     SyntaxGlyph { glyph: "⋔", word: "arms", digraph: Some("\\y"), doc: "arms (a = …) { … arm(x) … arm(y) }: parallel divide and conquer" },
+    SyntaxGlyph { glyph: "⍬", word: "[] of i64", digraph: Some("\\z"), doc: "an empty list of i64; ⍬[f64], ⍬[str], ⍬[Point]: of that element type" },
 ];
 
 /// Expand a backslash digraph (`\i`) to its glyph.
