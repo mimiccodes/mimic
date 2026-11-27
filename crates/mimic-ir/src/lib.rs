@@ -88,7 +88,12 @@ pub fn worth(f: &Function) -> bool {
                 // a function the old path compiles gains nothing here, and
                 // the old path compiling it with the rest fuses across it,
                 // as `nbody`'s `main` showed)
-                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) | Op::GetAt(..) | Op::SetAt(..) => *work = true,
+                Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) => *work = true,
+                // (a short list in registers read or changed at an index:
+                // the old path does that in registers too; with nothing
+                // else left to it, the function is the IR's anyway. Counted
+                // as work, nbody's `main`, `put(vx, 0, …)` on its velocities,
+                // left the old path and its fusion: 10% slower on x86)
                 Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
                 _ => {}
             }
