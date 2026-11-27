@@ -1,0 +1,8 @@
+// expect-panic: index 4 out of bounds for length 4
+module main
+type M = { pc: i64, tape: [i64] }
+fn step(m: M) -> M { { m with pc: m.pc + 1, tape: put(m.tape, m.pc, 7) } }
+fn main() {
+    let m = M { pc: 0, tape: ⍳ 4 ¨ (_ => 0) } ▷ settle(s => step(s), s => s.pc == 9)
+    print(m.tape)
+}

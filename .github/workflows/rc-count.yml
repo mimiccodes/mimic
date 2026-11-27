@@ -1,7 +1,8 @@
 # How many reference-count operations does the benchmark corpus make?
 # Builds mimic and runs tools/rc-count.py (every benchmark on one core, its
 # output checked, retains, releases and values freed counted), on Linux.
-# 0.4.3's target: at most 468 million. Run after each merge into dev, or by hand.
+# 0.4.3's target: at most 468 million. Also the size of every benchmark's
+# executable (tools/sizes.py). Run after each merge into dev, or by hand.
 name: rc count
 
 on:
@@ -74,8 +75,25 @@ jobs:
             tail -n +2 rc.tsv | sort -t$'\t' -k5,5nr | awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Sizes
+        env:
+          BENCHES: ${{ inputs.benches }}
+        run: |
+          export PATH="$PWD/.llvm/bin:$PATH"
+          python3 tools/sizes.py --mimic target/release/mimic --out sizes.tsv $BENCHES
+          {
+            echo
+            echo "### Executable sizes ($(git rev-parse --short HEAD), linux-x86_64)"
+            echo
+            echo '| program | bytes |'
+            echo '|---|---:|'
+            tail -n +2 sizes.tsv | awk -F'\t' '{ printf "| %s | %s |\n", $1, $2 }'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
         with:
           name: rc-count
-          path: rc.tsv
+          path: |
+            rc.tsv
+            sizes.tsv
           retention-days: 14

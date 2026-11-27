@@ -431,6 +431,19 @@ impl<'ctx> Cg<'ctx, '_> {
                         _ => return Err("internal compiler error: IR part of a value not in registers".into()),
                     }
                 }
+                // a short list in registers at an index known only when
+                // running: checked against its length, chosen by selects
+                Op::GetAt(v, k) => {
+                    let a = get(vals, *v)?;
+                    let i = self.to_i64(get(vals, *k)?)?;
+                    self.index_fixed(a, i)?
+                }
+                Op::SetAt(v, k, x) => {
+                    let a = get(vals, *v)?;
+                    let i = self.to_i64(get(vals, *k)?)?;
+                    let x = get(vals, *x)?;
+                    self.set_fixed(a, i, x)?
+                }
                 Op::Set(v, k, x) => {
                     let base = get(vals, *v)?;
                     let parts = mimic_ir::parts(self.p, ty).ok_or("internal compiler error: IR value in registers")?;
