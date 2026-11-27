@@ -1,0 +1,48 @@
+module main
+
+// an `if` whose branch gives text held outside it, read again after the
+// `if` (`authority` = `after`, then `after` read): the `if` holds a
+// reference of its own, nothing is released twice. A copy of parse::url,
+// which the Mimic IR compiles whole once `let (a, b) = cut(…)` is covered.
+
+type Url = { scheme: str, user: str, password: str, host: str, port: i64, path: str, query: str, fragment: str }
+fn url(s: str) -> Url {
+    let (rest0, fragment) = cut(s, "#")
+    let (rest1, query) = cut(rest0, "?")
+    let colon = find_index(rest1, ":")
+    let has_scheme = colon > 0 and all(chars(slice(rest1, 0, colon)) ¨ (c => contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-.", c)))
+    let scheme = if has_scheme { lower(slice(rest1, 0, colon)) } else { "" }
+    let rest2 = if has_scheme { slice(rest1, colon + 1, ≢ rest1) } else { rest1 }
+    if not starts_with(rest2, "//") { Url { scheme: scheme, user: "", password: "", host: "", port: ¯1, path: rest2, query: query, fragment: fragment } } else {
+        let after = slice(rest2, 2, ≢ rest2)
+        let slash = find_index(after, "/")
+        let authority = if slash < 0 { after } else { slice(after, 0, slash) }
+        let path = if slash < 0 { "" } else { slice(after, slash, ≢ after) }
+        let at = last_index(authority, "@")
+        let userinfo = if at < 0 { "" } else { slice(authority, 0, at) }
+        let hostport = if at < 0 { authority } else { slice(authority, at + 1, ≢ authority) }
+        let (user, password) = cut(userinfo, ":")
+        let pcolon = last_index(hostport, ":")
+        let digits = pcolon >= 0 and pcolon + 1 < ≢ hostport and is_int(slice(hostport, pcolon + 1, ≢ hostport))
+        let named = if digits or pcolon == ≢ hostport - 1 { slice(hostport, 0, pcolon) } else { hostport }
+        // an IPv6 address comes in brackets
+        let host = lower(if starts_with(named, "[") and ends_with(named, "]") { slice(named, 1, ≢ named - 1) } else { named })
+        let port = if digits { to_int(slice(hostport, pcolon + 1, ≢ hostport)) } else { ¯1 }
+        Url { scheme: scheme, user: user, password: password, host: host, port: port, path: path, query: query, fragment: fragment }
+    }
+}
+fn cut(s: str, sep: str) -> (str, str) {
+    let at = find_index(s, sep)
+    if at < 0 { (s, "") } else { (slice(s, 0, at), slice(s, at + ≢ sep, ≢ s)) }
+}
+fn last_index(s: str, part: str) -> i64 {
+    let at = text::find_all(s, part)
+    if ≢ at == 0 { ¯1 } else { at[≢ at - 1] }
+}
+fn main() {
+    let urls = ["https://u:p@Example.com:8080/a/b?x=1&y=2#top" "http://host/path" "mailto:ada@example.com" "//cdn.net/lib.js" "file:///tmp/x.txt" "ftp://[::1]:21/" "http://h:/p" "relative/path?q#f"]
+    print(join(urls ¨ (s => {
+        let u = url(s)
+        join([u.scheme u.user u.password u.host string(u.port) u.path u.query u.fragment], "|")
+    }), "\n"))
+}

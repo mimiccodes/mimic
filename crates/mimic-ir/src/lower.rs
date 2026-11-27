@@ -404,6 +404,29 @@ impl Lower<'_> {
                 Stmt::Expr(e) => {
                     self.expr(r, e)?;
                 }
+                // `let (a, b) = f(…)` of a tuple holding values on the heap:
+                // the call gives its parts (no tuple made), each its own value
+                Stmt::LetTuple { names, value, .. } if let Some(es) = self.call_parts(value) => {
+                    let ExprKind::Call { .. } = &value.kind else { return None };
+                    let tt = *self.spec.exprs.get(&id(value))?;
+                    if names.len() > es.len() {
+                        return None;
+                    }
+                    let v = self.call(r, value, Ty::Parts(tt))?;
+                    // (every part taken, a name or not: one on the heap not
+                    // named is released at once)
+                    for (k, pt) in es.iter().enumerate() {
+                        let x = self.emit(r, *pt, Op::Part(v, k as u32), value.span);
+                        let n = names.get(k).map(String::as_str).unwrap_or("_");
+                        if n == "_" {
+                            continue;
+                        }
+                        if self.spec.tuple_lets.get(&(id(s), k)).and_then(|t| Ty::of(self.p, *t)) != Some(*pt) {
+                            return None;
+                        }
+                        self.env.push((n.to_string(), x, *pt));
+                    }
+                }
                 // `let (a, b) = t` of a tuple kept in registers: its parts
                 Stmt::LetTuple { names, value, .. } => {
                     let v = self.expr(r, value)?;
@@ -518,6 +541,53 @@ impl Lower<'_> {
         takes.resize(vals.len(), false);
         let moves = vec![false; vals.len()];
         Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals, takes, moves }, e.span))
+    }
+
+    /// One change of a list field, its values computed in `r`:
+    /// `concat(field, x ⥊ [n])` of a number is `n` copies of it appended
+    /// in place (no list made for them: `qoi`'s decoder, a run of pixels).
+    fn change(&mut self, r: &mut Region, op: &str, rest: &[Expr]) -> Option<crate::Change> {
+        if op == "concat"
+            && let ExprKind::Prim { prim: Prim::Reshape, args } = &rest[0].kind
+            && args.len() == 2
+            && let ExprKind::Array(dims) = &args[1].kind
+            && dims.len() == 1
+            && self.ty(&args[0]) == Some(Ty::I64)
+            && self.ty(&dims[0]) == Some(Ty::I64)
+        {
+            let x = self.expr(r, &args[0])?;
+            let n = self.expr(r, &dims[0])?;
+            return Some(crate::Change::Fill(x, n));
+        }
+        let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
+        Some(match op {
+            "put" => crate::Change::Put(vs[0], vs[1]),
+            "push" => crate::Change::Push(vs[0]),
+            _ => crate::Change::Concat(vs[0]),
+        })
+    }
+
+    /// The IR types of the parts of the tuple a call of a user function
+    /// gives, when it holds a value on the heap (one of numbers alone is
+    /// kept in registers): 2 to 4 numbers, truth values, lists and records.
+    fn call_parts(&self, e: &Expr) -> Option<Vec<Ty>> {
+        let ExprKind::Call { callee, .. } = &e.kind else { return None };
+        let ExprKind::Path(path) = &callee.kind else { return None };
+        if path.len() == 1 && self.env.iter().any(|(n, ..)| *n == path[0]) {
+            return None;
+        }
+        let Some(Resolved::Fn(f)) = self.p.lookup(self.module, path) else { return None };
+        if !matches!(self.p.fns[f].kind, FnKind::User(_)) {
+            return None;
+        }
+        let t = *self.spec.exprs.get(&id(e))?;
+        let mimic_check::types::Ty::Tup(tup) = t else { return None };
+        if Ty::of(self.p, t).is_some() {
+            return None;
+        }
+        let es = mimic_check::types::tuple_elems(tup).into_iter().map(|c| Ty::of(self.p, c)).collect::<Option<Vec<_>>>()?;
+        let ok = (2..=4).contains(&es.len()) && es.iter().all(|t| matches!(t, Ty::I64 | Ty::F64 | Ty::Bool | Ty::List(_) | Ty::Rec(_)));
+        ok.then_some(es)
     }
 
     /// The callee of `e`, when it is a call worth lowering in place: a user
@@ -1033,12 +1103,7 @@ impl Lower<'_> {
                     {
                         let mut cs = Vec::new();
                         for (op, rest) in chain {
-                            let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
-                            cs.push(match op {
-                                "put" => crate::Change::Put(vs[0], vs[1]),
-                                "push" => crate::Change::Push(vs[0]),
-                                _ => crate::Change::Concat(vs[0]),
-                            });
+                            cs.push(self.change(r, op, rest)?);
                         }
                         changes.push((k as u32, cs));
                         continue;
@@ -1077,12 +1142,7 @@ impl Lower<'_> {
                         if let Some(chain) = chain {
                             let mut cs = Vec::new();
                             for (op, rest) in chain {
-                                let vs = rest.iter().map(|x| self.expr(&mut g, x)).collect::<Option<Vec<_>>>()?;
-                                cs.push(match op {
-                                    "put" => crate::Change::Put(vs[0], vs[1]),
-                                    "push" => crate::Change::Push(vs[0]),
-                                    _ => crate::Change::Concat(vs[0]),
-                                });
+                                cs.push(self.change(&mut g, op, rest)?);
                             }
                             ch.push((k as u32, cs));
                         }
