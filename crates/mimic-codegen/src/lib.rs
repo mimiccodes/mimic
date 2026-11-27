@@ -3735,6 +3735,34 @@ impl<'ctx> Cg<'ctx, '_> {
     fn make_closure(&mut self, desc: PointerValue<'ctx>, env: &[V<'ctx>]) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let n = env.len();
+        // capturing nothing: one immortal value, made the first time (as a
+        // list of literals is). `run(b, p, x => alpha(x) or digit(x))` in
+        // a loop made and freed one at every call (`tokenize`)
+        if n == 0
+            && let Some(f) = self.cur_fn
+        {
+            let g = self.module.add_global(self.ptr, None, "fnval");
+            g.set_linkage(Linkage::Internal);
+            g.set_initializer(&self.ptr.const_null());
+            let slot = self.gaddr(g);
+            let cached = self.b.build_load(self.ptr, slot, "fnval").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&cached).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+            let cached = cached.into_pointer_value();
+            let pre = self.b.get_insert_block().unwrap();
+            let build_bb = self.ctx.append_basic_block(f, "fnval_build");
+            let done_bb = self.ctx.append_basic_block(f, "fnval_done");
+            let have = self.b.build_is_not_null(cached, "").s()?;
+            self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+            self.b.position_at_end(build_bb);
+            let built = self.call_rt_ptr("mim_closure", &[desc.into(), i64t.const_zero().into(), self.ptr.const_null().into()])?;
+            let V::P(published, _) = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])? else { unreachable!() };
+            let build_end = self.b.get_insert_block().unwrap();
+            self.b.build_unconditional_branch(done_bb).s()?;
+            self.b.position_at_end(done_bb);
+            let phi = self.b.build_phi(self.ptr, "fnval").s()?;
+            phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+            return Ok(V::P(phi.as_basic_value().into_pointer_value(), true));
+        }
         let arr = if n == 0 {
             self.ptr.const_null()
         } else {
