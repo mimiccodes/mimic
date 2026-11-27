@@ -5552,6 +5552,41 @@ impl<'ctx> Cg<'ctx, '_> {
         self.select_elem(arr, el, i)
     }
 
+    /// `put(xs, i, x)` on a list in registers: `i` checked against the known
+    /// length (as `index_fixed`), then each element `x` where its index is
+    /// `i`, else what it was (selects: no memory).
+    fn set_fixed(&mut self, a: V<'ctx>, i: IntValue<'ctx>, x: V<'ctx>) -> R<V<'ctx>> {
+        let V::A(arr, el) = a else { return Err("internal compiler error: not a list in registers".into()) };
+        let n = arr.get_type().len();
+        let i64t = self.ctx.i64_type();
+        let x: BasicValueEnum = match el {
+            El::F64 => self.to_f64(x)?.into(),
+            El::Bool => self.truth(x)?.into(),
+            _ => self.to_i64(x)?.into(),
+        };
+        if let Some(k) = i.get_zero_extended_constant().filter(|k| *k < n as u64) {
+            return Ok(V::A(self.b.build_insert_value(arr, x, k as u32, "").s()?.into_array_value(), el));
+        }
+        let ok = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(n as u64, false), "").s()?;
+        let f = self.cur_fn.unwrap();
+        let good = self.ctx.append_basic_block(f, "fx_ok");
+        let bad = self.ctx.append_basic_block(f, "fx_bad");
+        self.b.build_conditional_branch(ok, good, bad).s()?;
+        self.b.position_at_end(bad);
+        let bx = self.boxed(a)?;
+        self.call_rt("mim_index_fail", &[self.basic(bx).into(), i.into()])?;
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(good);
+        let mut out = arr;
+        for k in 0..n {
+            let is_k = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_int(k as u64, false), "").s()?;
+            let old = self.b.build_extract_value(arr, k, "").s()?;
+            let y = self.b.build_select(is_k, x, old, "").s()?;
+            out = self.b.build_insert_value(out, y, k, "").s()?.into_array_value();
+        }
+        Ok(V::A(out, el))
+    }
+
     /// Element `i` (in bounds) of a list in registers, chosen with compares
     /// and selects: no memory, and it folds to one register once `i` is
     /// known (after inlining and unrolling).
