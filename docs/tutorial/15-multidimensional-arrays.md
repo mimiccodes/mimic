@@ -56,7 +56,7 @@ fn main() {
 
 ## Indexing
 
-One index picks a row. One index per dimension picks an element:
+One index picks a row. One index per dimension picks an element. Assigning works the same way: `board[1, 1] = 5` sets one element, `board[2] = [1 2 3]` a whole row (a number fills it):
 
 ```mimic run
 module main
@@ -70,6 +70,7 @@ fn main() {
     let mut board = 0 ⥊ [3 3]
     board[1, 1] = 5
     board[0, 2] = 7
+    board[2] = [1 2 3]
     print(board)
 }
 ```
@@ -80,7 +81,7 @@ fn main() {
 11
 [[0 0 7]
  [0 5 0]
- [0 0 0]]
+ [1 2 3]]
 ```
 
 ## Whole-matrix operations
