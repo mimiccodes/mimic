@@ -1,0 +1,13 @@
+// expect-panic: index 5 out of bounds for length 5
+module main
+
+// an element write past the end of a list a loop only writes element by
+// element: stops the program, as any write out of range does
+
+fn main() {
+    let mut xs = 0 ⥊ [5]
+    for i in 0 ‥ 6 {
+        xs[i] = i
+    }
+    print(xs)
+}

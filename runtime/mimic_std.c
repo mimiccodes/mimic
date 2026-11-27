@@ -615,6 +615,24 @@ static __attribute__((noinline, cold)) mim_val *put_own_slow(mim_val *xs, mim_va
 }
 
 /* put(xs, i, v) on a list, xs owned */
+/* A `let mut` list a loop only reads and writes element by element, made
+ * held once before the loop (a copy when it is shared, as its first write
+ * would have made one): the list, and in *len its length when it is then a
+ * plain one-dimensional list of dtype dt (the loop's element writes need
+ * no check of its count or kind; they keep its length), else -1. */
+mim_val *mim_loop_list(mim_val *xs, int32_t dt, int64_t *len) {
+    *len = -1;
+    if (!xs || xs->rank != 1 || xs->dtype != dt || IS_HANDLES(xs)) return xs;
+    if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) != 1) {
+        mim_val *c = alloc(dt, 1, xs->len);
+        memcpy(c->data, xs->data, payload_bytes(dt, xs->len));
+        mim_release(xs);
+        xs = c;
+    }
+    *len = xs->len;
+    return xs;
+}
+
 mim_val *mim_std_put_own(mim_val *xs, mim_val *k, mim_val *v) {
     if (own_plain(xs) && v != xs && k && k->rank == 0 && (k->dtype == MIM_I64 || k->dtype == MIM_I32) && v && v->rank == 0 && v->dtype == xs->dtype) {
         int64_t i = geti(k, 0);
