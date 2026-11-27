@@ -3475,6 +3475,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let head = self.ctx.append_basic_block(fun, "evolve");
+        let count_flag = self.count_loop()?;
         let body_bb = self.ctx.append_basic_block(fun, "evolve_step");
         let done = self.ctx.append_basic_block(fun, "evolve_done");
         self.b.build_unconditional_branch(head).s()?;
@@ -3488,12 +3489,14 @@ impl<'ctx> Cg<'ctx, '_> {
         let cur = self.val_of(xp.as_basic_value(), st, true);
         let mut argv: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
         argv.extend(capv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let counted = self.count_step(count_flag)?;
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().ok_or("evolve: step returns nothing")?;
         let next = self.val_of(r, st, true);
         let next = self.as_ty(next, st, "evolve state")?;
         if !own_state {
             self.drop_tmp(cur)?;
         }
+        self.count_step_end(counted)?;
         let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
         let latch = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(head).s()?;
@@ -3554,6 +3557,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let head = self.ctx.append_basic_block(fun, "settle");
+        let count_flag = self.count_loop()?;
         let body_bb = self.ctx.append_basic_block(fun, "settle_step");
         let out_bb = self.ctx.append_basic_block(fun, "settle_done");
         self.b.build_unconditional_branch(head).s()?;
@@ -3569,12 +3573,14 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(body_bb);
         let mut sargs: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
         sargs.extend(sv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let counted = self.count_step(count_flag)?;
         let r = self.b.build_call(sf, &sargs, "").s()?.try_as_basic_value().basic().ok_or("settle: step gives nothing")?;
         let next = self.val_of(r, st, true);
         let next = self.as_ty(next, st, "settle state")?;
         if !own_state {
             self.drop_tmp(cur)?;
         }
+        self.count_step_end(counted)?;
         let latch = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(head).s()?;
         xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
@@ -7540,6 +7546,41 @@ fn pure_simple(e: &Expr) -> bool {
             _ => true,
         }),
         _ => false,
+    }
+}
+
+impl<'ctx> Cg<'ctx, '_> {
+    /// In a counting build (`MIMIC_COUNT_RC=1`): a loop's step begins
+    /// (`enter`) or ends, so the runtime counts the values made in steps.
+    /// Before a loop (counting builds): a flag, set, that its first step
+    /// clears.
+    pub(crate) fn count_loop(&mut self) -> R<Option<PointerValue<'ctx>>> {
+        if !counting_rc() {
+            return Ok(None);
+        }
+        let slot = self.entry_alloca(Ty::Bool, "first_step")?;
+        self.b.build_store(slot, self.ctx.bool_type().const_int(1, false)).s()?;
+        Ok(Some(slot))
+    }
+
+    /// A step begins (given the loop's flag): what [`Self::count_step_end`]
+    /// needs.
+    pub(crate) fn count_step(&mut self, flag: Option<PointerValue<'ctx>>) -> R<Option<IntValue<'ctx>>> {
+        let Some(slot) = flag else { return Ok(None) };
+        let i32t = self.ctx.i32_type();
+        let first = self.b.build_load(self.ctx.bool_type(), slot, "first").s()?.into_int_value();
+        self.b.build_store(slot, self.ctx.bool_type().const_zero()).s()?;
+        let first = self.b.build_int_z_extend(first, i32t, "").s()?;
+        let f = self.module.get_function("mim_step_enter").unwrap_or_else(|| self.module.add_function("mim_step_enter", i32t.fn_type(&[i32t.into()], false), Some(Linkage::External)));
+        Ok(Some(self.b.build_call(f, &[first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value()))
+    }
+
+    pub(crate) fn count_step_end(&mut self, old: Option<IntValue<'ctx>>) -> R<()> {
+        let Some(old) = old else { return Ok(()) };
+        let i32t = self.ctx.i32_type();
+        let f = self.module.get_function("mim_step_exit").unwrap_or_else(|| self.module.add_function("mim_step_exit", self.ctx.void_type().fn_type(&[i32t.into()], false), Some(Linkage::External)));
+        self.b.build_call(f, &[old.into()], "").s()?;
+        Ok(())
     }
 }
 
