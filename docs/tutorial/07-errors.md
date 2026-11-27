@@ -95,6 +95,29 @@ Err("bad second field: x")
 
 The unwrapped value keeps its type. In `sum_fields`, `a`, `b` and `c` are real `i64`s, so `a + b + c` is plain integer addition.
 
+## A fallback value: `e else { … }`
+
+When there is a sensible value to use instead, the `else` block can give it rather than leave. This works anywhere an expression does, not only in a `let`:
+
+```mimic run
+module main
+
+fn main() {
+    let width = parse_int("640") else { 800 }
+    let height = parse_int("tall") else { 600 }
+    print("{width}x{height}")
+    let fields = ["1" "x" "3"]
+    print(⍳ 3 ¨ (i => parse_int(fields[i]) else { 0 }) ▷ +/)
+}
+```
+
+```output
+640x600
+4
+```
+
+The block's value must have the type of the value inside (an `i64` here); the compiler says so if it does not (E0401), and a block that gives nothing is E0504. It works the same on `Result`: `read_config() else { defaults() }`.
+
 ## Comparing
 
 Options and Results compare like any other value:

@@ -273,10 +273,10 @@ declaration that set the expectation.";
 "`let (a, b) = t` needs `t` to be a tuple with exactly as many elements as
 names on the left.";
 
-    LET_ELSE_TYPE = "E0406" "let-else-type" "`let … else` on a value that is not Option or Result"
-"`let x = v else { … }` unwraps `Some(x)` or `Ok(x)` and runs the `else`
-block for `None` or `Err`. Other values cannot be unwrapped this way; use
-`match`.";
+    LET_ELSE_TYPE = "E0406" "let-else-type" "`let … else` or `e else { … }` on a value that is not Option or Result"
+"`let x = v else { … }` and `v else { … }` unwrap `Some(x)` or `Ok(x)` and
+run the `else` block for `None` or `Err`. Other values cannot be unwrapped
+this way; use `match`.";
 
     NO_OPERATOR = "E0407" "no-operator" "an operator applied to a type that does not support it"
 "Arithmetic and comparison work on numbers and arrays of numbers (elementwise).
@@ -325,10 +325,12 @@ The suggested fix inserts the missing arms with `…` placeholders.";
     MIXED_ARMS = "E0503" "mixed-arms" "arms of one `match` matching different union types"
 "All variant patterns in one `match` must belong to the same union type.";
 
-    ELSE_MUST_RETURN = "E0504" "else-must-return" "a `let … else` block that can fall through"
-"The `else` block runs when there is no value to bind, so it must leave the
+    ELSE_MUST_RETURN = "E0504" "else-must-return" "an `else` block that neither gives a value nor returns"
+"The `else` block runs when there is no value inside (`None`, `Err`), so it
+stands in for that value: it gives one of the same type, or leaves the
 function:
 
+    let port = parse_int(text) else { 8080 }
     let user = find(id) else { return Err(\"not found\") }";
 
     OR_BINDINGS = "E0505" "or-bindings" "alternatives of a `|` pattern binding different names"
