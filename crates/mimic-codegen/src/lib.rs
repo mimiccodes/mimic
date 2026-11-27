@@ -1345,6 +1345,21 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
+    /// Marks a load or store with the kind of memory it touches (TBAA): a
+    /// value's header ("header": count, kind, length) or a list's numbers
+    /// ("elem"), which never overlap. So a loop writing numbers keeps the
+    /// headers it reads in registers, while a call (a release, a free) still
+    /// stops any load from moving past it, which `invariant.load` did not.
+    /// Accesses not marked may touch either.
+    pub(crate) fn tbaa<T: inkwell::values::AsValueRef + Copy>(&self, v: T, kind: &str) -> R<()> {
+        let i = unsafe { inkwell::values::InstructionValue::new(v.as_value_ref()) };
+        let root = self.ctx.metadata_node(&[self.ctx.metadata_string("mimic memory").into()]);
+        let zero = self.ctx.i64_type().const_zero();
+        let ty = self.ctx.metadata_node(&[self.ctx.metadata_string(kind).into(), root.into(), zero.into()]);
+        let tag = self.ctx.metadata_node(&[ty.into(), ty.into(), zero.into()]);
+        i.set_metadata(tag, self.ctx.get_kind_id("tbaa")).map_err(|e| e.to_string())
+    }
+
     fn val_ty(&self) -> inkwell::types::StructType<'ctx> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
         // rc, dtype, rank, len, desc; the elements follow (mim_val in mimic_rt.c)
@@ -3339,7 +3354,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[self.ctx.i32_type().const_int(1, false)], "data").s()? };
                         let et: BasicTypeEnum = if ll.el == El::F64 { self.ctx.f64_type().into() } else { i64t.into() };
                         let at = unsafe { self.b.build_in_bounds_gep(et, data, &[iv], "").s()? };
-                        self.b.build_store(at, x).s()?;
+                        let st = self.b.build_store(at, x).s()?;
+                        self.tbaa(st, "elem")?;
                         self.b.build_unconditional_branch(done_bb).s()?;
                         self.b.position_at_end(slow_bb);
                         let cur = self.b.build_load(self.ptr, ll.slot, "").s()?;
@@ -6090,12 +6106,14 @@ impl<'ctx> Cg<'ctx, '_> {
         let field = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
             let v = cg.b.build_load(t, fp, "").s()?;
+            cg.tbaa(v, "header")?;
             Ok(v)
         };
         // dtype and rank sit side by side: one 64-bit load and compare checks
         // both (little-endian: dtype in the low half)
         let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
         let kind = self.b.build_load(i64t, kind_p, "").s()?;
+        self.tbaa(kind, "header")?;
         let kind = kind.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
         // a value's elements always follow its header (alloc in mimic_rt.c)
@@ -6135,32 +6153,44 @@ impl<'ctx> Cg<'ctx, '_> {
         let fv: V<'ctx> = match el {
             El::F64 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), data, &[i], "").s()? };
-                V::F(self.b.build_load(self.ctx.f64_type(), ep, "").s()?.into_float_value())
+                let x = self.b.build_load(self.ctx.f64_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::F(x.into_float_value())
             }
             El::Bool => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::B(self.b.build_int_compare(IntPredicate::NE, x, self.ctx.i8_type().const_zero(), "").s()?)
             }
             // a byte: 0 … 255 as an i64
             El::U8 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_z_extend(x, i64t, "").s()?)
             }
             El::F32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?.into_float_value();
+                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_float_value();
                 V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
             }
             El::I32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_s_extend(x, i64t, "").s()?)
             }
             _ => {
                 let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-                V::I(self.b.build_load(i64t, ep, "").s()?.into_int_value())
+                let x = self.b.build_load(i64t, ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::I(x.into_int_value())
             }
         };
         self.as_ty(fv, ty, "element")
