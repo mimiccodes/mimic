@@ -47,7 +47,7 @@ fn main() {
 6
 ```
 
-Elements of an array literal are separated by spaces, so a negative one is written with the high minus: `[3 ¯1 4]`. `[3 -1 4]` would mean `[(3 - 1) 4]`.
+Elements of an array literal are separated by spaces. A negative one is written as in C, `[3 -1 4]` (the `-` touching its number), or with the high minus, `[3 ¯1 4]`; `[3 - 1 4]` subtracts.
 
 A loop that carries state from one step to the next becomes `evolve` (n times) or `settle` (until a condition holds), and anything else a recursive function. Tail calls are jumps, as `-O2` would make them in C. `mimic man no-loops` has them all.
 

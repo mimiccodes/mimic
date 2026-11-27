@@ -1,0 +1,16 @@
+module main
+
+// in a list written out, `-` after a space and touching a digit is a
+// negative element; elsewhere it subtracts
+
+fn main() {
+    let a = 5
+    let xs = [10 20 30]
+    let n = 2
+    print([256 -1 255])
+    print([-1 2 -3.5])
+    print([a - 1 a-1 (a -1)])
+    print(xs[n -1])
+    print([1, -2, 3])
+    print(≢ [256 -1 255])
+}
