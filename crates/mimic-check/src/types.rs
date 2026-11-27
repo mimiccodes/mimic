@@ -921,8 +921,18 @@ impl Walk<'_, '_> {
         let mut diverged = false;
         for s in &b.stmts {
             match s {
-                Stmt::Let { name, ty, value, span, .. } => {
-                    let v = self.expr(value);
+                Stmt::Let { name, ty, value, span, mutable, .. } => {
+                    let mut v = self.expr(value);
+                    // `let z: [i64] = []` (what `⍬` and `⍬[f64]` are): the
+                    // empty list takes the declared list of numbers (no list
+                    // to check: it has no elements), so `z` is typed
+                    if is_empty_list(value)
+                        && let Some(a) = ty.as_ref().and_then(|t| ann_in(self.inf.p, self.module, t))
+                        && let Some(nt) = empty_branch_as(a)
+                    {
+                        self.out.exprs.insert(id(value), nt);
+                        v = nt;
+                    }
                     let mut t = match coerce_in(self.inf.p, self.module, ty.as_ref(), v) {
                         Ok(t) => t,
                         Err(m) => {
@@ -933,8 +943,12 @@ impl Walk<'_, '_> {
                         }
                     };
                     // mutable bindings: join with every value assigned so far
+                    // (an immutable one takes this walk's type: an earlier
+                    // walk, before a callee's result was known, gave `[?]`
+                    // for `if r > 0 { run_byte(r) } else { [] }`, and a join
+                    // kept it so in every later one)
                     let key = id(s);
-                    if let Some(prev) = self.out.lets.get(&key) {
+                    if *mutable && let Some(prev) = self.out.lets.get(&key) {
                         t = t.join(*prev);
                     }
                     self.out.lets.insert(key, t);
@@ -1805,6 +1819,15 @@ impl Walk<'_, '_> {
                     && let ExprKind::Int(k) = args[0].kind {
                         return Ty::Arr(El::I64, fixed_len(El::I64, k.max(0) as usize));
                     }
+                // x ⥊ [n] of a number: one dimension, n copies of it, a list
+                // of that number's type (`0 ⥊ [64]`, `prev ⥊ [k + 1]`; more
+                // dimensions stay dynamic, the runtime knows their shape)
+                if *prim == Prim::Reshape
+                    && matches!(a, Ty::I64 | Ty::F64)
+                    && matches!(&args[1].kind, ExprKind::Array(xs) if xs.len() == 1)
+                {
+                    return Ty::Arr(if a == Ty::F64 { El::F64 } else { El::I64 }, 0);
+                }
                 prim_ty(*prim, a, b)
             }
             // a lambda as a value: its parameters can be anything

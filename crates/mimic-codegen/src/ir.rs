@@ -10,7 +10,7 @@
 
 use crate::{Cg, OrStr, R, V};
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
-use mimic_check::types::Ty;
+use mimic_check::types::{El, Ty};
 use mimic_ir::{Function, Op, Region};
 
 /// Whether `MIMIC_IR` asks for the IR (read once).
@@ -86,17 +86,20 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) | mimic_ir::Ty::Parts(t) => t,
     }
 }
 
 /// One change of a list of i64, its numbers computed.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Ch<'ctx> {
     Put(IntValue<'ctx>, IntValue<'ctx>),
     Push(IntValue<'ctx>),
     /// appends a list of i64 (lent)
     Concat(PointerValue<'ctx>),
+    /// appends these numbers (a short list of i64 kept in registers: no
+    /// list made for it)
+    Append(Vec<IntValue<'ctx>>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -170,8 +173,33 @@ impl<'ctx> Cg<'ctx, '_> {
                             })
                         })
                         .collect::<R<Vec<_>>>()?;
-                    let r = self.call_user(*site, *callee, a)?;
-                    self.as_ty(r, ty, "value")?
+                    // a tuple holding values on the heap, taken apart at once:
+                    // the version giving its parts where there is one, else
+                    // the tuple's parts taken out of it (each owned)
+                    if let mimic_ir::Ty::Parts(tt) = i.ty {
+                        let Ty::Tup(tid) = tt else { return Err("internal compiler error: IR parts of a value not a tuple".into()) };
+                        self.want_parts_site = Some(*site);
+                        let r = self.call_user(*site, *callee, a);
+                        self.want_parts_site = None;
+                        let r = r?;
+                        let sv = match self.parts_result.take() {
+                            Some(sv) => sv,
+                            None => self.unpack_parts(r, &mimic_check::types::tuple_elems(tid))?,
+                        };
+                        V::R(sv, tt)
+                    } else {
+                        let r = self.call_user(*site, *callee, a)?;
+                        self.as_ty(r, ty, "value")?
+                    }
+                }
+                // a part of a call's parts: a value on the heap owned
+                Op::Part(v, k) => {
+                    let V::R(sv, tt) = get(vals, *v)? else { return Err("internal compiler error: IR part of a call that gave no parts".into()) };
+                    let Ty::Tup(tid) = tt else { return Err("internal compiler error: IR parts of a value not a tuple".into()) };
+                    let es = mimic_check::types::tuple_elems(tid);
+                    let x = self.b.build_extract_value(sv, *k, "").s()?;
+                    let part = self.val_of(x, es[*k as usize], true);
+                    self.as_ty(part, ty, "part of the result")?
                 }
                 Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
                 Op::Loop { init, var, count, done, step, moved } => {
@@ -356,6 +384,15 @@ impl<'ctx> Cg<'ctx, '_> {
                                 mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
                                 mimic_ir::Change::Concat(x) => {
                                     let v = get(vals, *x)?;
+                                    if let V::A(a, El::I64) = v {
+                                        let n = a.get_type().len();
+                                        let mut xs = Vec::new();
+                                        for k in 0..n {
+                                            xs.push(self.to_i64(self.elem_at(a, El::I64, k)?)?);
+                                        }
+                                        steps.push(Ch::Append(xs));
+                                        continue;
+                                    }
                                     let b = match v {
                                         V::P(..) => v,
                                         _ => {
@@ -573,9 +610,40 @@ impl<'ctx> Cg<'ctx, '_> {
                 let f = cg.module.get_function("mim_push_i64_own").unwrap_or_else(|| cg.module.add_function("mim_push_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
                 Ok(cg.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
             }),
+            Ch::Append(xs) => self.append_i64_inline(list, &xs, &mut |cg| {
+                let f = cg.module.get_function("mim_push_i64_own").unwrap_or_else(|| cg.module.add_function("mim_push_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                let mut l = list;
+                for x in &xs {
+                    l = cg.b.build_call(f, &[l.into(), (*x).into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                }
+                Ok(l)
+            }),
             Ch::Concat(ys) => {
+                // an empty list of one dimension (`flush` when no run ends:
+                // the one immortal `[]`): the list as it is, no call
+                let i32t = self.ctx.i32_type();
+                let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+                let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, ys, 2, "").s()?, "rank").s()?.into_int_value();
+                let n = self.b.build_load(i64t, self.b.build_struct_gep(hdr, ys, 3, "").s()?, "len").s()?.into_int_value();
+                let none = self.b.build_and(
+                    self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?,
+                    self.b.build_int_compare(inkwell::IntPredicate::EQ, n, i64t.const_zero(), "").s()?,
+                    "",
+                ).s()?;
+                let fun = self.cur_fn.ok_or("internal compiler error: concat outside a function")?;
+                let before = self.b.get_insert_block().ok_or("internal compiler error: no block")?;
+                let call = self.ctx.append_basic_block(fun, "concat_call");
+                let join = self.ctx.append_basic_block(fun, "concat_join");
+                self.b.build_conditional_branch(none, join, call).s()?;
+                self.b.position_at_end(call);
                 let f = self.module.get_function("mim_std_concat_own").unwrap_or_else(|| self.module.add_function("mim_std_concat_own", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(inkwell::module::Linkage::External)));
-                Ok(self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+                let r = self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let after = self.b.get_insert_block().ok_or("internal compiler error: no block")?;
+                self.b.build_unconditional_branch(join).s()?;
+                self.b.position_at_end(join);
+                let phi = self.b.build_phi(self.ptr, "concat").s()?;
+                phi.add_incoming(&[(&list, before), (&r, after)]);
+                Ok(phi.as_basic_value().into_pointer_value())
             }
         }
     }

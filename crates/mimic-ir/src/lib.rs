@@ -150,6 +150,10 @@ pub enum Ty {
     /// A record on the heap (a plain record type, not generic, not kept in
     /// registers): owned or borrowed as a list is.
     Rec(mimic_check::types::Ty),
+    /// The parts of a tuple (the checker's type) a call gives, no tuple
+    /// made: 2 to 4 numbers, truth values and values on the heap, each
+    /// taken once by an [`Op::Part`] right after the call, and nothing else.
+    Parts(mimic_check::types::Ty),
 }
 
 impl Ty {
@@ -167,6 +171,7 @@ impl Ty {
             Ty::Agg(t) => format!("regs {t}"),
             Ty::List(t) => format!("list {t}"),
             Ty::Rec(t) => format!("rec {t}"),
+            Ty::Parts(t) => format!("parts {t}"),
         }
     }
 
@@ -281,6 +286,9 @@ pub enum Op {
     SetAt(Val, Val, Val),
     /// The length of a list.
     Len(Val),
+    /// Part `k` of the parts a call gave ([`Ty::Parts`]): a value on the
+    /// heap is owned (the call handed it over).
+    Part(Val, u32),
     /// Element `i` of a list whose elements are of kind `el` (an index out
     /// of range stops the program).
     Index(Val, Val, mimic_check::types::El),
@@ -457,7 +465,7 @@ impl Op {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) | Op::Take(_) => vec![],
             Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) | Op::GetAt(a, b) => vec![*a, *b],
             Op::SetAt(a, b, c) => vec![*a, *b, *c],
-            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Part(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
             Op::Record { fields, .. } => fields.clone(),
             Op::With { base, fields, changes, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).chain(changes.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.vals()))).collect(),
             Op::Put { list, index, value, .. } => vec![*list, *index, *value],
@@ -496,7 +504,7 @@ impl Region {
 /// record): a call's, an `if`'s (both branches then yield owned values), a
 /// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. })
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. } | Op::Part(..))
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -551,6 +559,9 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             }
             Op::Get(v, k) => {
                 let _ = writeln!(out, "{v}.{k}: {}", i.ty.name());
+            }
+            Op::Part(v, k) => {
+                let _ = writeln!(out, "part {v}.{k}: {}", i.ty.name());
             }
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
@@ -812,6 +823,11 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Get(v, _) => {
                 if !matches!(ty(*v, types)?, Ty::Agg(_)) {
                     return Err(format!("{}: {v} has no parts", f.name));
+                }
+            }
+            Op::Part(v, _) => {
+                if !matches!(ty(*v, types)?, Ty::Parts(_)) {
+                    return Err(format!("{}: {v} is not the parts a call gave", f.name));
                 }
             }
             Op::GetAt(v, k) | Op::SetAt(v, k, _) => {
