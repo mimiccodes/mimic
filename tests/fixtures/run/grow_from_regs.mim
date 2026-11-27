@@ -1,0 +1,30 @@
+module main
+
+// a loop whose state starts as a short list in registers and grows on the
+// heap (sha256's message schedule): the start is put on the heap once, then
+// each step pushes in place
+
+fn grow(first: [i64]) -> [i64] {
+    first ▷ evolve(14, w => {
+        let j = ≢ w
+        push(w, w[j - 1] + w[j - 2])
+    })
+}
+
+fn upto(first: [f64], limit: f64) -> [f64] {
+    first ▷ settle(w => push(w, w[≢ w - 1] * 2.0), w => w[≢ w - 1] > limit)
+}
+
+fn main() {
+    let f = grow([0, 1])
+    print(f)
+    print(≢ f)
+    // the caller keeps its start: the loop changed its own copy
+    let start = [1, 1, 2]
+    let g = grow(start)
+    print(start)
+    print(g[≢ g - 1])
+    print(upto([0.5, 1.0], 100.0))
+    // once per element of a map
+    print(⍳ 4 ¨ (i => +/ grow([i, i + 1])))
+}
