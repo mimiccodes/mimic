@@ -373,6 +373,47 @@ pub fn cc(tc: &Toolchain, target: &Target) -> Command {
     }
 }
 
+/// The main thread's stack a macOS executable asks for: 512 MB, reserved
+/// and used as it grows, so deep recursion the net cannot take over (a
+/// function giving back a list) runs as far as on Windows and Linux.
+pub const MAC_STACK: u64 = 0x2000_0000;
+
+/// After linking with the embedded LLD (which does not implement
+/// `-stack_size`): `LC_MAIN`'s stack size set in the executable, which is
+/// then signed again (Apple's arm64 code must be; `codesign` is part of
+/// macOS). Not on other hosts, nor when the executable is not a plain
+/// 64-bit Mach-O one: it keeps the default 8 MB.
+pub fn mac_main_stack(tc: &Toolchain, exe: &Path) -> Result<(), String> {
+    let Toolchain::Embedded(Sysroot::Darwin { platform: "macos", .. }) = tc else { return Ok(()) };
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let mut b = std::fs::read(exe).map_err(|e| format!("cannot read {}: {e}", exe.display()))?;
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    if b.len() < 32 || u32_at(&b, 0) != 0xfeed_facf {
+        return Ok(());
+    }
+    let (ncmds, mut off) = (u32_at(&b, 16) as usize, 32usize);
+    for _ in 0..ncmds {
+        if off + 8 > b.len() {
+            return Ok(());
+        }
+        let (cmd, size) = (u32_at(&b, off), u32_at(&b, off + 4) as usize);
+        // LC_MAIN: cmd, cmdsize, entryoff (u64), stacksize (u64)
+        if cmd == 0x8000_0028 && size >= 24 && off + 24 <= b.len() {
+            b[off + 16..off + 24].copy_from_slice(&MAC_STACK.to_le_bytes());
+            std::fs::write(exe, &b).map_err(|e| format!("cannot write {}: {e}", exe.display()))?;
+            let out = Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(exe).output().map_err(|e| format!("cannot run codesign: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("signing {} failed: {}", exe.display(), String::from_utf8_lossy(&out.stderr)));
+            }
+            return Ok(());
+        }
+        off += size.max(8);
+    }
+    Ok(())
+}
+
 /// What to link into an executable.
 pub struct LinkJob<'a> {
     pub objects: &'a [PathBuf],
@@ -452,8 +493,10 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
         Toolchain::Embedded(Sysroot::Mingw(m)) => {
             let lib = m.lib();
             let mut c = Command::new(self_exe());
-            // an 8 MB main-thread stack, like Linux (Windows' default is 1 MB)
-            c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console", "--stack", "8388608"]).arg("--gc-sections");
+            // a 512 MB main-thread stack, reserved and committed as it grows
+            // (Windows' default is 1 MB): deep recursion the net cannot take
+            // over (a function giving back a list) runs on it
+            c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console", "--stack", "536870912"]).arg("--gc-sections");
             c.arg("-o").arg(job.output);
             c.arg(lib.join("crt2.o")).arg(lib.join("crtbegin.o")).args(job.objects);
             c.arg(format!("-L{}", lib.display()));
@@ -486,6 +529,10 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
                 // drop runtime code the program never reaches (and with it
                 // references to what only Mimic programs define)
                 c.arg("-Wl,--gc-sections").arg("-lm");
+            }
+            // a 512 MB main-thread stack on macOS (MAC_STACK)
+            if matches!(target.os.as_str(), "macosx" | "darwin") && target.env != "macabi" {
+                c.arg(format!("-Wl,-stack_size,{MAC_STACK:#x}"));
             }
             if job.debug {
                 c.arg("-g");
