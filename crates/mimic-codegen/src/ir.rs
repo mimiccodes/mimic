@@ -780,6 +780,7 @@ impl<'ctx> Cg<'ctx, '_> {
     fn ir_loop(&mut self, f: &Function, ty: Ty, init: V<'ctx>, var: mimic_ir::Val, count: Option<V<'ctx>>, done: Option<&Region>, step: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let x0 = self.as_ty(init, ty, "loop state")?;
+        let count_flag = self.count_loop()?;
         let n = match count {
             Some(c) => {
                 let n = self.to_i64(c)?;
@@ -822,8 +823,10 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_conditional_branch(stop, out, body).s()?;
         self.b.position_at_end(body);
         vals[var.0 as usize] = Some(cur);
+        let counted = self.count_step(count_flag)?;
         let next = self.ir_region(f, step, vals)?;
         let next = self.as_ty(next, ty, "loop state")?;
+        self.count_step_end(counted)?;
         let latch = self.b.get_insert_block().unwrap();
         if let Some(ip) = ip {
             let i = ip.as_basic_value().into_int_value();

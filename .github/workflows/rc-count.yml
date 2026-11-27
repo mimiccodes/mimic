@@ -1,7 +1,8 @@
 # How many reference-count operations does the benchmark corpus make?
 # Builds mimic and runs tools/rc-count.py (every benchmark on one core, its
 # output checked, retains, releases and values freed counted), on Linux.
-# 0.4.3's target: at most 468 million. Also the size of every benchmark's
+# 0.4.3's target: at most 468 million. Also the values made in loop steps
+# (evolve, settle) past each loop's first step: a steady state makes none. Also the size of every benchmark's
 # executable (tools/sizes.py). Run after each merge into dev, or by hand.
 name: rc count
 
@@ -14,7 +15,7 @@ on:
   # and on a change to this file, to try it (a workflow run by hand is
   # dispatchable only once it is on main)
   pull_request:
-    paths: [.github/workflows/rc-count.yml]
+    paths: [.github/workflows/rc-count.yml, tools/rc-count.py]
   # and after every merge into dev that changes the compiler or the
   # runtime: the count followed change by change
   push:
