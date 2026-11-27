@@ -497,6 +497,13 @@ pub fn link(tc: &Toolchain, target: &Target, job: &LinkJob) -> Command {
             // (Windows' default is 1 MB): deep recursion the net cannot take
             // over (a function giving back a list) runs on it
             c.arg("ld.lld").args(["-m", m.emulation()]).args(["--subsystem", "console", "--stack", "536870912"]).arg("--gc-sections");
+            // release: no debug sections (MinGW's libraries carry DWARF,
+            // 236 KB of a 372 KB hello world; Linux and macOS release
+            // binaries never had it). The symbols stay: `mimic profile`
+            // names the program's functions by them
+            if !job.debug {
+                c.arg("--strip-debug");
+            }
             c.arg("-o").arg(job.output);
             c.arg(lib.join("crt2.o")).arg(lib.join("crtbegin.o")).args(job.objects);
             c.arg(format!("-L{}", lib.display()));
