@@ -83,7 +83,7 @@ Glyphs and words mean the same thing and mix freely: `xs ▷ +/` is `xs |> sum`,
 | `type user = …` | E0204 | type and variant names start uppercase: `User` |
 | `a && b`, `a \|\| b`, `!a` | E0201 | `a and b`, `a or b`, `not a` (or `∧ ∨ ¬`) |
 | `print(a, b)` | E0701 | `print("{a} {b}")`: `print` takes one value |
-| `[3 -1 4]` meaning three numbers | no error, but it is `[2 4]` | `[3 ¯1 4]`: a negative element uses the high minus `¯` |
+| `[3 - 1 4]` meaning three numbers | no error, but it is `[2 4]` | `[3 -1 4]` (a `-` touching its number is a negative element) or `[3 ¯1 4]` |
 | `7 / 2` expecting `3` | no error, but it is `3.5` | `7 div 2` (floored: `¯7 div 2` is `-4`); `%` is the remainder |
 | `printf(…)`, `sqrt(…)` from C | E0303 | `c::printf(…)` in `unsafe { }`, or a `trusted extern "C"` block; `math::sqrt` exists already |
 | `≢ "héllo"` expecting 5 | no error, but it is `6` | `≢` counts bytes; `≢ chars(s)` counts characters |
