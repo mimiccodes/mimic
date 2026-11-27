@@ -731,7 +731,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
         let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
         let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
-        // (room 0: not known, the runtime asks the allocator)
+        // (room 0: a list in one of the runtime's pools, whose block holds
+        // the bytes of its length's class: 16, 64 or 256 (size_class in
+        // mimic_rt.c); past them, not known, and the runtime asks the
+        // allocator. A row grown by `push` to 45 numbers called the runtime
+        // for its first 32: levenshtein)
+        let old = self.b.build_int_mul(len, i64t.const_int(8, false), "").s()?;
+        let class = |cg: &Self, limit: u64, then: IntValue<'ctx>| -> R<IntValue<'ctx>> {
+            let within = cg.b.build_int_compare(inkwell::IntPredicate::ULE, old, i64t.const_int(limit, false), "").s()?;
+            Ok(cg.b.build_select(within, i64t.const_int(limit, false), then, "").s()?.into_int_value())
+        };
+        let pooled = class(self, 256, i64t.const_zero())?;
+        let pooled = class(self, 64, pooled)?;
+        let pooled = class(self, 16, pooled)?;
+        let known = self.b.build_int_compare(inkwell::IntPredicate::NE, room, i64t.const_zero(), "").s()?;
+        let room = self.b.build_select(known, room, pooled, "room").s()?.into_int_value();
         let fits = self.b.build_int_compare(inkwell::IntPredicate::ULE, need, room, "").s()?;
         let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, fits, "").s()?, "").s()?;
         let f = self.cur_fn.ok_or("internal compiler error: push outside a function")?;
