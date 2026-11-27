@@ -149,6 +149,7 @@ Reported while processing the pixels of a photograph (1086×1448 RGB): each one 
 | `[256 -1 255]` is a subtraction, `[255 255]`, with no error (a negative element needed `¯1`) | ✅ a `-` touching its number after a space is a negative element | 0.4.3 |
 | Executables are larger than they need be (about 600 KB for a real program, as reported; hello world 89 KB on macOS, 113 KB static on Linux, benchmarks 90–200 KB): generic runtime dispatch (`mim_prim1`, `reduce_range`, formatting) pulls in kernels a program never calls, the runtime is compiled `-O3` and 64-byte aligned throughout | none | measured on CI after every merge from 0.4.3 (`tools/sizes.py`); 0.4.9 (the runtime optimized with the program: only what it calls is kept) |
 | A file of a project whose module is not `main` cannot be run by itself: `mimic run src/probe.mim` is E0903 even with a `fn main` in it | a separate `module main` file | 0.4.4 (`mimic run` on a project's file runs that module's `main`) |
+| A `settle` whose step takes its tuple state apart (`let (i, acc) = s`) and builds the next in an `if` leaves the function `dynamic` (returned as such, compiled the generic way), even with the state typed (`(0, ⍬)`) | build the next state without taking it apart: `(s.0 + 1, push(s.1, x))` | 0.4.4 |
 
 ## Found by the held-out set
 

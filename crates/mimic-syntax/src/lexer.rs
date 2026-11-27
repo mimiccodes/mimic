@@ -418,6 +418,8 @@ impl<'a> Lexer<'a> {
             '←' => Tok::Bind,
             '↩' => Tok::Reassign,
             '§' => Tok::Module,
+            // `⍬`, the empty list (`⍬[f64]`: of f64); the parser reads it
+            '⍬' => Tok::Ident("⍬".into()),
             'ƒ' => Tok::Fn,
             // every keyword has a glyph (glyphs::SYNTAX_GLYPHS)
             '⇑' => Tok::Pub,
