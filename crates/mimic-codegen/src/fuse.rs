@@ -1905,13 +1905,10 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(v).into_pointer_value();
-        // a vector's header never changes while it is alive (as in index_fast)
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
+        // (plain loads: see index_fast)
         let load = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
             let v = cg.b.build_load(t, fp, "").s()?;
-            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
             Ok(v)
         };
         let dtype = load(self, 1, i32t.into())?.into_int_value();
