@@ -108,7 +108,7 @@ Reported from a real project (tensors as a flat `[f64]` plus their dimensions, a
 | Indexing with a list of indices, `xs[[3 0]]`, passes the checker and stops the program | `ids ¨ (i => xs[i])` | 0.4.5 (`⊇`, select; a list index refused at compile time until then) |
 | `math` had no `tanh`, `sinh`, `cosh`, `log1p`, `expm1`, `sigmoid` | ✅ added (libm calls that fuse into kernels; `sigmoid` without overflow) | 0.4.3 |
 | No direct `bool` → number conversion (one-hot vectors, masks) | `¨ (b => if b { 1.0 } else { 0.0 })` | 0.4.5 |
-| No fallback for an `Option`: `parse_int(s) ▷ or_else(300)` | ✅ `unwrap_or` for `Option`; for `Result`, a name still to choose | 0.4.3; 0.4.5 (`Result`) |
+| No fallback for an `Option`: `parse_int(s) ▷ or_else(300)` | ✅ `unwrap_or` for `Option`; for both, `parse_int(s) else { 300 }` | 0.4.3 |
 | `[u8]` from `fs::read_bytes` needs a map to be used as `[i64]` | `b ¨ (x => x * 1)` | 0.4.7 (bits, bytes and sized integers) |
 | A local cannot share a name with any function of its module (`let steps` next to `fn steps`: E0301) | another name | 0.4.5 |
 | Matrices are typed only at run time: a function cannot declare that it takes one | keep a flat list and its dimensions | 0.4.6 (shapes) |
