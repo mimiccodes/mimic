@@ -4244,6 +4244,8 @@ mim_val *mim_pat_at(mim_val *v, int64_t i) { return scalar_at(v, i); }
 /* The elements from `start` on (owned). */
 mim_val *mim_pat_rest(mim_val *v, int64_t start) { return slice(v, start, v->len - start); }
 
+void mim_set_cell(mim_val **slot, int64_t off, int64_t cell, mim_val *v); /* mimic_own.c */
+
 /* Copy-on-write element store: mutates in place when uniquely owned. */
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     if (*slot && (*slot)->dtype == MIM_MAP) {
@@ -4256,9 +4258,24 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         int n;
         int64_t cell;
         k = multi_offset(xs, i, &n, &cell);
-        if (n != xs->rank) mim_panic("indexed assignment needs one index per dimension: m[i, j] = v");
+        /* fewer indices than dimensions: a whole row (or cell) */
+        if (n != xs->rank) {
+            mim_set_cell(slot, k, cell, v);
+            return;
+        }
     } else {
-        if (xs && xs->rank >= 2) mim_panic("indexed assignment on a matrix needs one index per dimension: m[i, j] = v");
+        if (xs && xs->rank >= 2) { /* m[i] = row */
+            if (i->rank != 0 || IS_FLOAT(i->dtype) || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
+            int64_t d = dim_of(xs, 0), r = geti(i, 0);
+            if (r < 0 || r >= d) {
+                char buf[160];
+                snprintf(buf, sizeof buf, "index %lld out of bounds for dimension 0 of length %lld", (long long)r, (long long)d);
+                mim_panic(buf);
+            }
+            int64_t cell = d ? xs->len / d : 0;
+            mim_set_cell(slot, r * cell, cell, v);
+            return;
+        }
         k = check_index(xs, i);
     }
     need(v, "indexed assignment");

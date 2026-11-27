@@ -205,7 +205,8 @@ m ⊠ ⍉ m                    // matrix product
 m ↑ 1, ⌽ m                 // take / drop / reverse act on rows
 m ¨ f                      // keeps the shape
 let mut g = 0 ⥊ [3 3]
-g[1, 1] = 5                // one index per dimension
+g[1, 1] = 5                // one index per dimension: an element
+g[0] = [7 8 9]             // fewer: a whole row (a number fills it)
 ```
 
 How matrices behave:
