@@ -1,0 +1,8 @@
+https|u|p|example.com|8080|/a/b|x=1&y=2|top
+http|||host|-1|/path||
+mailto||||-1|ada@example.com||
+|||cdn.net|-1|/lib.js||
+file||||-1|/tmp/x.txt||
+ftp|||::1|21|/||
+http|||h|-1|/p||
+||||-1|relative/path|q|f
