@@ -695,12 +695,18 @@ impl Lower<'_> {
     }
 
     fn embed_here(&mut self, r: &mut Region, e: &Expr) -> Option<Val> {
+        let ty = self.ty(e)?;
+        self.embed_as(r, e, ty)
+    }
+
+    /// `e` kept whole for the old path, its value converted to `ty` (a
+    /// short list in registers put on the heap).
+    fn embed_as(&mut self, r: &mut Region, e: &Expr, ty: Ty) -> Option<Val> {
         // (inside an inlined body the code generator's types are the
         // caller's: the old path could not compile the callee's syntax)
         if self.inline_depth > 0 {
             return None;
         }
-        let ty = self.ty(e)?;
         // (a lambda on its own is a function value: not an IR type anyway)
         if matches!(e.kind, ExprKind::Lambda { .. }) {
             return None;
@@ -1189,10 +1195,16 @@ impl Lower<'_> {
                 let evolve = *prim == Prim::Evolve;
                 let (step, done) = if evolve { (&args[2], None) } else { (&args[1], Some(&args[2])) };
                 // (a state on the heap: owned by the loop, see own.rs)
-                if self.ty(&args[0])? != ty || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
+                let it = self.ty(&args[0])?;
+                // a start kept in registers, a short list, of a state that
+                // grows on the heap (`first ▷ evolve(48, w => push(w, …))`,
+                // sha256's schedule): the start put on the heap once
+                let grows = it != ty
+                    && matches!((it, ty), (Ty::Agg(a), Ty::List(mimic_check::types::Ty::Arr(el, _))) if crate::short_list(a).is_some_and(|(e, _)| e == el && e != mimic_check::types::El::Bool));
+                if (it != ty && !grows) || !self.lambda_is(step, ty, ty) || !done.is_none_or(|d| self.lambda_is(d, ty, Ty::Bool)) {
                     return None;
                 }
-                let init = self.expr(r, &args[0])?;
+                let init = if grows { self.embed_as(r, &args[0], ty)? } else { self.expr(r, &args[0])? };
                 let count = if evolve {
                     if self.ty(&args[1])? != Ty::I64 {
                         return None;
