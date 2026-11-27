@@ -120,6 +120,27 @@ fn main() {
 
 Run `mimic glyphs` to see the full table of glyphs, words and digraphs.
 
+## Keywords have glyphs too
+
+Every keyword has a glyph as well: `ƒ` for `fn`, `⍰` for `if`, `⋄` for `else`, `⏎` for `return`, `⊡` for `type`, `⊨` for `match`, `⇑` for `pub` and so on ([the full table](../syntax.md#keyword-glyphs)). Write whichever reads better; `mimic fmt` turns them all back into words.
+
+```mimic run
+§ main
+
+ƒ sign(n: i64) → i64 {
+    ⍰ n < 0 { ⏎ ¯1 }
+    ⍰ n == 0 { 0 } ⋄ { 1 }
+}
+
+ƒ main() {
+    print(⍳ 5 ¨ (i => sign(i - 2)))
+}
+```
+
+```output
+[-1 -1 0 1 1]
+```
+
 ## Indexing and updating
 
 ```mimic run

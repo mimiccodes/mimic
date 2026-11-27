@@ -419,6 +419,27 @@ impl<'a> Lexer<'a> {
             '↩' => Tok::Reassign,
             '§' => Tok::Module,
             'ƒ' => Tok::Fn,
+            // every keyword has a glyph (glyphs::SYNTAX_GLYPHS)
+            '⇑' => Tok::Pub,
+            '⇄' => Tok::Mut,
+            '⍰' => Tok::If,
+            '⋄' => Tok::Else,
+            '⏎' => Tok::Return,
+            '⇐' => Tok::Use,
+            '≔' => Tok::As,
+            '⌁' => Tok::Extern,
+            '☡' => Tok::Unsafe,
+            '✓' => Tok::Trusted,
+            '⊡' => Tok::Type,
+            '⊨' => Tok::Match,
+            '⊕' => Tok::With,
+            '●' => Tok::True,
+            '○' => Tok::False,
+            // words the parser reads in their place: a test block, a property
+            // test's inputs (`⊢ "…" ∀ x: i64 { … }`), a C header
+            '⊢' => Tok::Ident("test".into()),
+            '∀' => Tok::Ident("for".into()),
+            '⎘' => Tok::Ident("include".into()),
             '⌈' | '⌊' => {
                 if self.peek() == Some('/') {
                     self.bump();
@@ -705,6 +726,19 @@ mod tests {
         // space, inside parentheses in a list, outside lists
         for src in ["xs[n -1]", "[a - 1]", "[a-1]", "[(a -1)]", "f(a -1)", "a -1", "m[i][j -1]"] {
             assert!(toks(src).contains(&Tok::Minus), "{src}");
+        }
+    }
+
+    #[test]
+    fn every_keyword_has_a_glyph() {
+        // each keyword's glyph and digraph lex to the keyword itself
+        let keywords = ["module", "fn", "pub", "mut", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "with", "true", "false", "and", "or", "not", "div", "arms", "test", "for", "include"];
+        for w in keywords {
+            let g = crate::glyphs::SYNTAX_GLYPHS.iter().find(|g| g.word == w).unwrap_or_else(|| panic!("`{w}` has no glyph"));
+            assert_eq!(toks(g.glyph), toks(w), "{} for {w}", g.glyph);
+            if let Some(d) = g.digraph {
+                assert_eq!(toks(d), toks(w), "{d} for {w}");
+            }
         }
     }
 

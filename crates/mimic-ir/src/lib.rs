@@ -180,9 +180,10 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
-            // (text and lists of text too: the IR moves and releases them as
-            // any list; reading their elements is left to the old path)
-            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
+            // (text, lists of text and lists of lists too: the IR moves and
+            // releases them as any list; reading their elements is left to
+            // the old path)
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str | mimic_check::types::El::Rows(_), 0) => Ty::List(t),
             // (a plain record: not an instance of a generic one. A shaped
             // one, built from lists of known length, is the same record on
             // the heap: its declared type; a field read of known length is
