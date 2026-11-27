@@ -100,6 +100,8 @@ enum Ch<'ctx> {
     /// appends these numbers (a short list of i64 kept in registers: no
     /// list made for it)
     Append(Vec<IntValue<'ctx>>),
+    /// appends `n` copies of a number
+    Fill(IntValue<'ctx>, IntValue<'ctx>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -192,6 +194,11 @@ impl<'ctx> Cg<'ctx, '_> {
                         self.as_ty(r, ty, "value")?
                     }
                 }
+                // another reference to a list or record that lives on
+                Op::Share(v) => match get(vals, *v)? {
+                    V::P(p, _) => self.own(V::P(p, false))?,
+                    x => x,
+                },
                 // a part of a call's parts: a value on the heap owned
                 Op::Part(v, k) => {
                     let V::R(sv, tt) = get(vals, *v)? else { return Err("internal compiler error: IR part of a call that gave no parts".into()) };
@@ -382,6 +389,7 @@ impl<'ctx> Cg<'ctx, '_> {
                             steps.push(match c {
                                 mimic_ir::Change::Put(i, x) => Ch::Put(self.to_i64(get(vals, *i)?)?, self.to_i64(get(vals, *x)?)?),
                                 mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Fill(x, n) => Ch::Fill(self.to_i64(get(vals, *x)?)?, self.to_i64(get(vals, *n)?)?),
                                 mimic_ir::Change::Concat(x) => {
                                     let v = get(vals, *x)?;
                                     if let V::A(a, El::I64) = v {
@@ -618,6 +626,10 @@ impl<'ctx> Cg<'ctx, '_> {
                 }
                 Ok(l)
             }),
+            Ch::Fill(x, n) => {
+                let f = self.module.get_function("mim_fill_i64_own").unwrap_or_else(|| self.module.add_function("mim_fill_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), x.into(), n.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
             Ch::Concat(ys) => {
                 // an empty list of one dimension (`flush` when no run ends:
                 // the one immortal `[]`): the list as it is, no call

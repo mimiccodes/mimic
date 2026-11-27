@@ -89,6 +89,24 @@ fn region(r: &mut Region, next: &mut u32, given: &[Val], outer: &[Val]) {
                 let live: Vec<Val> = roots.iter().copied().filter(|v| !mine.contains(v)).collect();
                 region(then, next, &mine, &live);
                 region(els, next, &mine, &live);
+                // a branch giving a list or record held outside it, not
+                // handed down to it (still used after the `if`): a reference
+                // of the `if`'s own, else both would release the one
+                // (`authority` = `after` in `parse::url`, then `after` read)
+                if matches!(inst.ty, Ty::List(_) | Ty::Rec(_)) {
+                    for g in [then, els] {
+                        if let Some(v) = g.result
+                            && !mine.contains(&v)
+                            && !g.insts.iter().any(|i| i.dst == v)
+                        {
+                            let dst = Val(*next);
+                            *next += 1;
+                            let span = g.insts.last().map(|i| i.span).unwrap_or(inst.span);
+                            g.insts.push(Inst { dst, ty: inst.ty, op: Op::Share(v), span });
+                            g.result = Some(dst);
+                        }
+                    }
+                }
             }
             // a state on the heap: given to the step (which takes it on or
             // releases it), lent to `done`

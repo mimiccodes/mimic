@@ -543,6 +543,30 @@ impl Lower<'_> {
         Some(self.emit(r, ty, Op::Call { site: id(e), callee: f, args: vals, takes, moves }, e.span))
     }
 
+    /// One change of a list field, its values computed in `r`:
+    /// `concat(field, x ⥊ [n])` of a number is `n` copies of it appended
+    /// in place (no list made for them: `qoi`'s decoder, a run of pixels).
+    fn change(&mut self, r: &mut Region, op: &str, rest: &[Expr]) -> Option<crate::Change> {
+        if op == "concat"
+            && let ExprKind::Prim { prim: Prim::Reshape, args } = &rest[0].kind
+            && args.len() == 2
+            && let ExprKind::Array(dims) = &args[1].kind
+            && dims.len() == 1
+            && self.ty(&args[0]) == Some(Ty::I64)
+            && self.ty(&dims[0]) == Some(Ty::I64)
+        {
+            let x = self.expr(r, &args[0])?;
+            let n = self.expr(r, &dims[0])?;
+            return Some(crate::Change::Fill(x, n));
+        }
+        let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
+        Some(match op {
+            "put" => crate::Change::Put(vs[0], vs[1]),
+            "push" => crate::Change::Push(vs[0]),
+            _ => crate::Change::Concat(vs[0]),
+        })
+    }
+
     /// The IR types of the parts of the tuple a call of a user function
     /// gives, when it holds a value on the heap (one of numbers alone is
     /// kept in registers): 2 to 4 numbers, truth values, lists and records.
@@ -1079,12 +1103,7 @@ impl Lower<'_> {
                     {
                         let mut cs = Vec::new();
                         for (op, rest) in chain {
-                            let vs = rest.iter().map(|a| self.expr(r, a)).collect::<Option<Vec<_>>>()?;
-                            cs.push(match op {
-                                "put" => crate::Change::Put(vs[0], vs[1]),
-                                "push" => crate::Change::Push(vs[0]),
-                                _ => crate::Change::Concat(vs[0]),
-                            });
+                            cs.push(self.change(r, op, rest)?);
                         }
                         changes.push((k as u32, cs));
                         continue;
@@ -1123,12 +1142,7 @@ impl Lower<'_> {
                         if let Some(chain) = chain {
                             let mut cs = Vec::new();
                             for (op, rest) in chain {
-                                let vs = rest.iter().map(|x| self.expr(&mut g, x)).collect::<Option<Vec<_>>>()?;
-                                cs.push(match op {
-                                    "put" => crate::Change::Put(vs[0], vs[1]),
-                                    "push" => crate::Change::Push(vs[0]),
-                                    _ => crate::Change::Concat(vs[0]),
-                                });
+                                cs.push(self.change(&mut g, op, rest)?);
                             }
                             ch.push((k as u32, cs));
                         }

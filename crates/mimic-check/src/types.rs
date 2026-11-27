@@ -943,12 +943,14 @@ impl Walk<'_, '_> {
                         }
                     };
                     // mutable bindings: join with every value assigned so far
-                    // (an immutable one takes this walk's type: an earlier
-                    // walk, before a callee's result was known, gave `[?]`
-                    // for `if r > 0 { run_byte(r) } else { [] }`, and a join
-                    // kept it so in every later one)
+                    // (an immutable one whose earlier walk left it unknown
+                    // takes this walk's type: before a callee's result was
+                    // known, `if r > 0 { run_byte(r) } else { [] }` was `[?]`,
+                    // and a join kept it so in every later walk)
                     let key = id(s);
-                    if *mutable && let Some(prev) = self.out.lets.get(&key) {
+                    if let Some(prev) = self.out.lets.get(&key)
+                        && (*mutable || !matches!(prev, Ty::Dyn | Ty::Arr(El::Dyn, _)))
+                    {
                         t = t.join(*prev);
                     }
                     self.out.lets.insert(key, t);

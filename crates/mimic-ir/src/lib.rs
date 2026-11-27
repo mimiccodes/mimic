@@ -286,6 +286,10 @@ pub enum Op {
     SetAt(Val, Val, Val),
     /// The length of a list.
     Len(Val),
+    /// Another reference of its own to a list or record that lives on
+    /// (retained; owned): what an `if`'s branch gives when it gives a value
+    /// held outside it and still used after (placed by [`own`]).
+    Share(Val),
     /// Part `k` of the parts a call gave ([`Ty::Parts`]): a value on the
     /// heap is owned (the call handed it over).
     Part(Val, u32),
@@ -359,12 +363,15 @@ pub enum Change {
     Push(Val),
     /// `concat(field, ys)`: `ys` a list of i64, on the heap or in registers.
     Concat(Val),
+    /// `concat(field, x ⥊ [n])`: `n` copies of the number `x` (a negative
+    /// `n` stops the program, as `⥊` does).
+    Fill(Val, Val),
 }
 
 impl Change {
     fn vals(&self) -> Vec<Val> {
         match self {
-            Change::Put(i, x) => vec![*i, *x],
+            Change::Put(i, x) | Change::Fill(i, x) => vec![*i, *x],
             Change::Push(x) | Change::Concat(x) => vec![*x],
         }
     }
@@ -465,7 +472,7 @@ impl Op {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) | Op::Take(_) => vec![],
             Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) | Op::GetAt(a, b) => vec![*a, *b],
             Op::SetAt(a, b, c) => vec![*a, *b, *c],
-            Op::Un(_, a) | Op::Get(a, _) | Op::Part(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Part(a, _) | Op::Share(a) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
             Op::Record { fields, .. } => fields.clone(),
             Op::With { base, fields, changes, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).chain(changes.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.vals()))).collect(),
             Op::Put { list, index, value, .. } => vec![*list, *index, *value],
@@ -504,7 +511,7 @@ impl Region {
 /// record): a call's, an `if`'s (both branches then yield owned values), a
 /// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. } | Op::Part(..))
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. } | Op::Part(..) | Op::Share(_))
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -563,6 +570,9 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Part(v, k) => {
                 let _ = writeln!(out, "part {v}.{k}: {}", i.ty.name());
             }
+            Op::Share(v) => {
+                let _ = writeln!(out, "share {v}: {}", i.ty.name());
+            }
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
             }
@@ -597,6 +607,7 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                             Change::Put(i, x) => format!("put [{i}] = {x}"),
                             Change::Push(x) => format!("push {x}"),
                             Change::Concat(x) => format!("concat {x}"),
+                            Change::Fill(x, n) => format!("fill {x} × {n}"),
                         })
                         .collect();
                     a.push(format!(".{k} changed by {}", c.join(", ")));
@@ -828,6 +839,11 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Part(v, _) => {
                 if !matches!(ty(*v, types)?, Ty::Parts(_)) {
                     return Err(format!("{}: {v} is not the parts a call gave", f.name));
+                }
+            }
+            Op::Share(v) => {
+                if ty(*v, types)? != i.ty || !matches!(i.ty, Ty::List(_) | Ty::Rec(_)) {
+                    return Err(format!("{}: {v} shared is not a list or record of its type", f.name));
                 }
             }
             Op::GetAt(v, k) | Op::SetAt(v, k, _) => {
