@@ -222,6 +222,10 @@ pub extern \"mimic\" {
     fn is_float(s: str) -> bool
     fn to_float(s: str) -> f64
     fn push(xs: any, x: any) -> any
+    // `e else { … }` (the parser writes these): whether an Option or Result
+    // holds a value (Some, Ok), and that value
+    fn __has_value(o: any) -> bool
+    fn __value_of(o: any) -> any
     fn concat(xs: any, ys: any) -> any
     fn sort(xs: any) -> any
     fn has(m: any, key: any) -> bool

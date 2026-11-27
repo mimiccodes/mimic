@@ -1,0 +1,5 @@
+// expect-error: E0401 the `else` block gives `str`, but the value inside is `i64`
+module main
+fn main() {
+    print(parse_int("3") else { "none" })
+}

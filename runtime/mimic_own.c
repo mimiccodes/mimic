@@ -493,3 +493,8 @@ static mim_val *ascii1(unsigned char c) {
     if (__atomic_compare_exchange_n(&t[c], &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return n;
     return expected; /* another thread made it first (this one stays, immortal, unused) */
 }
+
+/* `e else { … }` (the parser writes calls to these): whether an Option or
+ * Result holds a value (Some, Ok), and that value (owned). */
+mim_val *mim_std___has_value(mim_val *o) { return mim_bool(mim_unwrap_ok(o)); }
+mim_val *mim_std___value_of(mim_val *o) { return mim_obj_get(o, 0); }
