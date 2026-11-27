@@ -818,8 +818,8 @@ impl Parser {
         // a `‥` outside brackets before the body's `{`
         let mut depth = 0i32;
         let mut at = None;
-        for k in self.pos..self.toks.len() {
-            match &self.toks[k].tok {
+        for (k, t) in self.toks.iter().enumerate().skip(self.pos) {
+            match &t.tok {
                 Tok::LParen | Tok::LBracket => depth += 1,
                 Tok::RParen | Tok::RBracket => depth -= 1,
                 Tok::LBrace if depth == 0 => break,
