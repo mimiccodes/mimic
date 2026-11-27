@@ -3244,6 +3244,23 @@ impl<'ctx> Cg<'ctx, '_> {
                         // `run(k - 1, bump(cells, i))` with `bump` inlined)
                         // (everywhere: a function that does this may be
                         // inlined into one that calls itself last)
+                        // (a list kept in registers, its index or value not
+                        // a number the compiler knows: put on the heap for
+                        // the runtime and back into registers after; its
+                        // slot holds the numbers, not a pointer, and read as
+                        // one its first number, 0, was taken for `()`: found
+                        // by the random programs, `m[n] = 9` with `n` of
+                        // unknown type)
+                        if fixed(t).is_some() {
+                            let cur = self.b.build_load(self.repr(t), slot, "").s()?;
+                            let b = self.boxed(self.val_of(cur, t, false))?;
+                            let out = self.call_rt_ptr("mim_set_index_v", &[self.basic(b).into(), self.basic(iv).into(), self.basic(v).into()])?;
+                            let back = self.as_ty(out, t, &format!("`{name}`"))?;
+                            self.b.build_store(slot, self.basic(back)).s()?;
+                            self.drop_tmp(iv)?;
+                            self.drop_tmp(v)?;
+                            return Ok(());
+                        }
                         let cur = self.b.build_load(self.ptr, slot, "").s()?;
                         let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(iv).into(), self.basic(v).into()])?;
                         self.b.build_store(slot, self.basic(out)).s()?;
