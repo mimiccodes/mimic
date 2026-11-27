@@ -79,7 +79,7 @@ fn isqrt(n: i64) -> i64
 | `while cond { … }` | `⟳ cond { … }` | a loop while `cond` holds |
 | `break` | `↯` | leaves the innermost loop (E0216 outside one, or inside a lambda) |
 
-A loop's body may reassign only its function's `let mut` variables; loops are sequential (parallel work is `¨` and the array primitives). `for` is a `while` over a hidden counter: the range's bounds, or the list and its length, are taken once, before the loop.
+A loop's body may reassign only its function's `let mut` variables; loops are sequential (parallel work is `¨` and the array primitives). `for` is a `while` over a hidden counter: the range's bounds, or the list and its length, are taken once, before the loop. Each bound is a whole expression: `for j in 1 ‥ n + 1` counts up to `n + 1` (as an expression, `1 ‥ n + 1` is `(1 ‥ n) + 1`, the range binding tighter; in a `for`, parentheses keep that meaning).
 
 Statements end at a newline or `;`. A block's last expression is its value. A pipeline may continue on the next line if that line starts with `▷`/`|>`.
 

@@ -810,6 +810,44 @@ impl Parser {
 
     // ---- blocks & statements ------------------------------------------
 
+    /// What a `for` goes over: `a ‥ b` with each bound a whole expression
+    /// (`for j in 1 ‥ n + 1` counts to `n + 1`, as it reads, where an
+    /// expression `1 ‥ n + 1` is `(1 ‥ n) + 1`, the range binding tighter),
+    /// or any expression giving a list.
+    fn for_iterable(&mut self) -> PResult<Expr> {
+        // a `‥` outside brackets before the body's `{`
+        let mut depth = 0i32;
+        let mut at = None;
+        for k in self.pos..self.toks.len() {
+            match &self.toks[k].tok {
+                Tok::LParen | Tok::LBracket => depth += 1,
+                Tok::RParen | Tok::RBracket => depth -= 1,
+                Tok::LBrace if depth == 0 => break,
+                Tok::Newline | Tok::Eof => break,
+                Tok::Prim(Prim::Range) if depth == 0 => {
+                    at = Some(k);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(k) = at else { return self.expr() };
+        let start = self.span();
+        // the left bound: up to the `‥` (read as the end of a statement)
+        let range_tok = std::mem::replace(&mut self.toks[k].tok, Tok::Semi);
+        let lo = self.expr();
+        self.toks[k].tok = range_tok;
+        let lo = lo?;
+        if self.pos != k {
+            let s = self.span();
+            return Err(Diag::new(&C::UNEXPECTED_TOKEN, "expected `‥` after the start of the range", s));
+        }
+        self.next();
+        let hi = self.expr()?;
+        let span = start.to(self.prev_span());
+        Ok(Expr { kind: ExprKind::Prim { prim: Prim::Range, args: vec![lo, hi] }, span })
+    }
+
     fn block(&mut self) -> PResult<Block> {
         let start = self.expect(&Tok::LBrace)?;
         // Newlines are significant inside blocks even if the block is inside parens.
@@ -935,7 +973,7 @@ impl Parser {
                 let (var, _) = self.decl_ident()?;
                 self.next(); // in
                 let saved = std::mem::replace(&mut self.nl_ignore, 0);
-                let iter = self.expr();
+                let iter = self.for_iterable();
                 self.nl_ignore = saved;
                 let iter = iter?;
                 let body = self.block()?;
