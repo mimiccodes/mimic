@@ -1770,6 +1770,7 @@ fn codegen_and_link(
             job.libs = p.manifest.ffi_link.clone();
         }
         run_tool(toolchain::link(&tc, target, &job), "linking")?;
+        toolchain::mac_main_stack(&tc, &exe)?;
         clock.mark("link");
         let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })

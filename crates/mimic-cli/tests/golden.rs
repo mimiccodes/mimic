@@ -402,6 +402,29 @@ fn manual() {
 }
 
 /// Examples in `//` comments (`// > expression`, then the value) run as tests.
+/// Recursion the net cannot take over (a function giving back a list and a
+/// number, called other than last) runs 1,000,000 deep: the main thread's
+/// stack is 512 MB on macOS (LC_MAIN), Windows (the linker's reservation)
+/// and Linux (the stack limit raised at start).
+#[test]
+fn deep_recursion_on_a_big_stack() {
+    let dir = std::env::temp_dir().join(format!("mimic-golden-deep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("deep.mim");
+    std::fs::write(
+        &f,
+        "module main\nfn count_down(n: i64, acc: [i64]) -> ([i64], i64) {\n    if n == 0 { (acc, 0) } else {\n        let (a, k) = count_down(n - 1, acc)\n        (a, k + 1)\n    }\n}\nfn main() {\n    let n = parse_int(os::args()[0]) else { 10 }\n    let (xs, k) = count_down(n, [7])\n    print(\"{k} {xs}\")\n}\n",
+    )
+    .unwrap();
+    let out = mimic().args(["build", "--release", "--emit-json"]).arg(&f).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    let exe = v["artifacts"][0]["path"].as_str().unwrap().to_string();
+    let run = Command::new(&exe).arg("1000000").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "1000000 [7]\n", "{}", String::from_utf8_lossy(&run.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn doc_tests() {
     let dir = std::env::temp_dir().join(format!("mimic-golden-doctest-{}", std::process::id()));

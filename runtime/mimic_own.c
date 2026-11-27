@@ -498,3 +498,21 @@ static mim_val *ascii1(unsigned char c) {
  * Result holds a value (Some, Ok), and that value (owned). */
 mim_val *mim_std___has_value(mim_val *o) { return mim_bool(mim_unwrap_ok(o)); }
 mim_val *mim_std___value_of(mim_val *o) { return mim_obj_get(o, 0); }
+
+/* Linux: the main thread's stack grows as it is used, up to the soft stack
+ * limit (8 MB by default). Raised to 512 MB (or the hard limit, if lower):
+ * deep recursion the net cannot take over (a function giving back a list)
+ * then runs as far as on macOS and Windows, whose executables ask for a
+ * 512 MB stack when linked. Elsewhere: nothing. */
+#if defined(__linux__) && !defined(__wasi__)
+#include <sys/resource.h>
+static void mim_grow_stack(void) {
+    struct rlimit r;
+    const rlim_t want = (rlim_t)512 << 20;
+    if (getrlimit(RLIMIT_STACK, &r) != 0 || r.rlim_cur == RLIM_INFINITY || r.rlim_cur >= want) return;
+    r.rlim_cur = (r.rlim_max == RLIM_INFINITY || r.rlim_max >= want) ? want : r.rlim_max;
+    setrlimit(RLIMIT_STACK, &r);
+}
+#else
+static void mim_grow_stack(void) {}
+#endif
