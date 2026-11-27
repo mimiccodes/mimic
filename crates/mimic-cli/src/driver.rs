@@ -154,22 +154,22 @@ pub fn prop_str(k: i64) -> str {
     join(⍳ random::int(0, k div 4 + 3) ¨ (i => letters[random::int(0, 8)]), \"\")
 }
 pub fn prop_list(k: i64, gen) { ⍳ random::int(0, k div 5 + 3) ¨ (i => gen(k)) }
-// (an empty list keeps its element type: `⍳ 0 ¨ f` would not know it)
+// (`⍬[T]`: an empty list that keeps its element type)
 pub fn prop_ints(k: i64) -> [i64] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [0] ↓ 1 } else { ⍳ n ¨ (i => prop_int(k)) }
+    if n == 0 { ⍬ } else { ⍳ n ¨ (i => prop_int(k)) }
 }
 pub fn prop_floats(k: i64) -> [f64] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [0.0] ↓ 1 } else { ⍳ n ¨ (i => prop_float(k)) }
+    if n == 0 { ⍬[f64] } else { ⍳ n ¨ (i => prop_float(k)) }
 }
 pub fn prop_bools(k: i64) -> [bool] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [true] ↓ 1 } else { ⍳ n ¨ (i => prop_bool(k)) }
+    if n == 0 { ⍬[bool] } else { ⍳ n ¨ (i => prop_bool(k)) }
 }
 pub fn prop_strs(k: i64) -> [str] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [\"\"] ↓ 1 } else { ⍳ n ¨ (i => prop_str(k)) }
+    if n == 0 { ⍬[str] } else { ⍳ n ¨ (i => prop_str(k)) }
 }
 // Smaller values, nearest the simplest first.
 pub fn prop_shrink_int(x: i64) -> [i64] {

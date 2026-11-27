@@ -6600,6 +6600,57 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             // an element of a list of records, strings or tuples: one bounds
             // check and a load (lent while the list is; else a reference)
+            // `["" "-a.{k}" "-b.{k}"][i]`: a list of strings written out,
+            // each pure, indexed at once: only element i is made (a switch),
+            // not the list and every string in it; any other index the
+            // general way (the list made, its error the same)
+            ExprKind::Index { base, index }
+                if matches!(&base.kind, ExprKind::Array(xs) if xs.len() >= 2 && xs.iter().all(pure_simple))
+                    && matches!(self.ty_of(base), Ty::Arr(El::Str, _))
+                    && self.ty_of(index) == Ty::I64 =>
+            {
+                let ExprKind::Array(xs) = &base.kind else { unreachable!() };
+                let i = self.expr(index)?;
+                let i = self.to_i64(i)?;
+                let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
+                let f = self.cur_fn.unwrap();
+                let i64t = self.ctx.i64_type();
+                let inside = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(xs.len() as u64, false), "").s()?;
+                let pick = self.ctx.append_basic_block(f, "pick");
+                let general = self.ctx.append_basic_block(f, "pick_general");
+                let merge = self.ctx.append_basic_block(f, "picked");
+                self.b.build_conditional_branch(inside, pick, general).s()?;
+                let arms: Vec<_> = (0..xs.len()).map(|k| self.ctx.append_basic_block(f, &format!("pick{k}"))).collect();
+                self.b.position_at_end(pick);
+                let cases: Vec<_> = arms.iter().enumerate().skip(1).map(|(k, bb)| (i64t.const_int(k as u64, false), *bb)).collect();
+                self.b.build_switch(i, arms[0], &cases).s()?;
+                let mut incoming = Vec::new();
+                for (x, bb) in xs.iter().zip(&arms) {
+                    self.b.position_at_end(*bb);
+                    let v = self.expr(x)?;
+                    let v = self.as_ty(v, rt, "element")?;
+                    let v = self.own(v)?;
+                    incoming.push((self.basic(v), self.b.get_insert_block().unwrap()));
+                    self.b.build_unconditional_branch(merge).s()?;
+                }
+                self.b.position_at_end(general);
+                let b = self.expr(base)?;
+                let b = self.boxed(b)?;
+                let ib = self.boxed(V::I(i))?;
+                let r = self.call_rt_ptr("mim_index", &[self.basic(b).into(), self.basic(ib).into()])?;
+                self.drop_tmp(b)?;
+                self.drop_tmp(ib)?;
+                let r = self.as_ty(r, rt, "element")?;
+                let r = self.own(r)?;
+                incoming.push((self.basic(r), self.b.get_insert_block().unwrap()));
+                self.b.build_unconditional_branch(merge).s()?;
+                self.b.position_at_end(merge);
+                let phi = self.b.build_phi(self.repr(rt), "picked").s()?;
+                for (v, bb) in &incoming {
+                    phi.add_incoming(&[(v, *bb)]);
+                }
+                Ok(self.val_of(phi.as_basic_value(), rt, true))
+            }
             ExprKind::Index { base, index }
                 if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
             {
@@ -7471,6 +7522,24 @@ impl<'ctx> Cg<'ctx, '_> {
                 Ok(self.val_of(phi.as_basic_value(), rt, true))
             }
         }
+    }
+}
+
+/// An expression with no effects and no calls, cheap to make where it is
+/// needed: a literal, a variable, a field of one, arithmetic of such, or
+/// text formatted from them (`"-alpha.{k}"`).
+fn pure_simple(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => true,
+        ExprKind::Path(p) => p.len() == 1,
+        ExprKind::Field { base, .. } => pure_simple(base),
+        ExprKind::Unary { expr, .. } => pure_simple(expr),
+        ExprKind::Binary { lhs, rhs, .. } => pure_simple(lhs) && pure_simple(rhs),
+        ExprKind::Interp(parts) => parts.iter().all(|p| match p {
+            InterpPart::Expr(x) => pure_simple(x),
+            _ => true,
+        }),
+        _ => false,
     }
 }
 
