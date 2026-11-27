@@ -177,7 +177,7 @@ pub struct Token {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
-    Lexer { src, pos: 0, line: 1, col: 1, out: Vec::new() }.run()
+    Lexer { src, pos: 0, line: 1, col: 1, out: Vec::new(), delims: Vec::new() }.run()
 }
 
 struct Lexer<'a> {
@@ -186,6 +186,9 @@ struct Lexer<'a> {
     line: u32,
     col: u32,
     out: Vec<Token>,
+    /// The brackets open here, innermost last: true for a list written out
+    /// (`[1 -1]`), false for an index, parentheses and braces
+    delims: Vec<bool>,
 }
 
 fn keyword(w: &str) -> Option<Tok> {
@@ -295,12 +298,38 @@ impl<'a> Lexer<'a> {
         let next = self.peek();
         let t = match c {
             '\n' => Tok::Newline,
-            '(' => Tok::LParen,
-            ')' => Tok::RParen,
-            '{' => Tok::LBrace,
-            '}' => Tok::RBrace,
-            '[' => Tok::LBracket,
-            ']' => Tok::RBracket,
+            '(' => {
+                self.delims.push(false);
+                Tok::LParen
+            }
+            '{' => {
+                self.delims.push(false);
+                Tok::LBrace
+            }
+            // a `[` right after a name, `)`, `]` or `}` indexes; any other
+            // starts a list written out
+            '[' => {
+                let index = self.out.last().is_some_and(|t| t.span.end == start.start && matches!(t.tok, Tok::Ident(_) | Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::Str(_)));
+                self.delims.push(!index);
+                Tok::LBracket
+            }
+            ')' | ']' | '}' => {
+                self.delims.pop();
+                match c {
+                    ')' => Tok::RParen,
+                    ']' => Tok::RBracket,
+                    _ => Tok::RBrace,
+                }
+            }
+            // in a list written out, `-` after a space (or `[` or `,`) and
+            // before a digit is a negative number: `[256 -1 255]` has three
+            // elements, as it reads (`a - 1` and `a-1` still subtract)
+            '-' if self.delims.last() == Some(&true)
+                && next.is_some_and(|d| d.is_ascii_digit())
+                && (self.src[..start.start].ends_with(char::is_whitespace) || self.out.last().is_some_and(|t| t.span.end == start.start && matches!(t.tok, Tok::LBracket | Tok::Comma))) =>
+            {
+                return self.number(start, true);
+            }
             ',' => Tok::Comma,
             ';' => Tok::Semi,
             ':' if next == Some(':') => {
@@ -664,6 +693,19 @@ mod tests {
 
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn negatives_in_lists() {
+        // a list written out: `-` after a space and before a digit is a sign
+        assert_eq!(toks("[256 -1 255]"), toks("[256 ¯1 255]"));
+        assert_eq!(toks("[-1 -2.5e-3]"), toks("[¯1 ¯2.5e-3]"));
+        assert_eq!(toks("[1, -2]"), toks("[1, ¯2]"));
+        // everywhere else it subtracts: an index, spaced both sides, no
+        // space, inside parentheses in a list, outside lists
+        for src in ["xs[n -1]", "[a - 1]", "[a-1]", "[(a -1)]", "f(a -1)", "a -1", "m[i][j -1]"] {
+            assert!(toks(src).contains(&Tok::Minus), "{src}");
+        }
     }
 
     #[test]
