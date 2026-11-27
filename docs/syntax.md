@@ -99,7 +99,7 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 
 **Trains read left to right.** `⍳ 10 ⌽ ↑ 3 +/` means "iota 10, reversed, take 3, sum", which is 24. A prefix primitive binds to the next operand only, so `⍳ 5 + 1` is `(⍳ 5) + 1`. After a pipeline stage, reading continues left to right: `xs ▷ +/ ÷ 2` is `(sum xs) ÷ 2`.
 
-**Literals.** Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
+**Literals.** `` `a` `` is a character's code, a number (97), as `char_code("a")` gives, with the escapes `` `\n` ``, `` `\t` ``, `` `\`` ``, `` `\x1b` `` and `` `\u{e9}` ``. Work on bytes compares and computes with it, `` c >= `a` and c <= `z` ``, with no one-letter string made. Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
 
 **Integer literals** can be written in hexadecimal `0xFF`, binary `0b1010` or octal `0o17`, with `_` separators anywhere: `1_000_000`, `0xFFFF_0000`. A hex/binary/octal literal may use all 64 bits, so `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 

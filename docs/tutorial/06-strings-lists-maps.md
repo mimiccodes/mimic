@@ -114,6 +114,29 @@ ff  0b11111111  000255  +255
 | `x` `o` `b` | Hex, octal, binary (`#` adds `0x`, `0o`, `0b`) |
 | `e` `%` | Exponent; percent |
 
+## Characters as numbers
+
+`` `a` `` is the code of the character `a`, the number 97 (`char_code("a")`). Working on the bytes of a text, compare and compute with characters this way: nothing is made for each one, where `char_of(c) == "a"` makes a one-letter string every time.
+
+```mimic run
+module main
+
+fn rot13(c: i64) -> i64 {
+    if c >= `a` and c <= `z` { (c - `a` + 13) % 26 + `a` } else { c }
+}
+
+fn main() {
+    let b = bytes::of_text("hello")
+    print(bytes::to_text(bytes::from(b ¨ rot13)) else { "?" })
+    print(b ¨ (c => c == `l`) ▷ +/)
+}
+```
+
+```output
+uryyb
+2
+```
+
 `format(x, spec)` does the same as a function. `parse_int("ff", 16)` reads numbers in other bases, `words(s)` splits on any whitespace, and `slice(s, from, to)` takes a part of a string.
 
 ## Parsing

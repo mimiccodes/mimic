@@ -398,6 +398,47 @@ impl<'a> Lexer<'a> {
                     Tok::Prim(if c == '⌈' { Prim::Max } else { Prim::Min })
                 }
             }
+            // `a`: a character's code, a number (97): text code compares and
+            // computes with it without making a one-letter string
+            '`' => {
+                let c = match self.bump() {
+                    None | Some('\n') | Some('`') => return Err(Diag::new(&C::BAD_NUMBER, "a character literal holds one character: `a`, `\\n`", start)),
+                    Some('\\') => match self.bump() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('0') => '\0',
+                        Some(e @ ('\\' | '`' | '\'' | '"')) => e,
+                        Some('x') => {
+                            let h: String = (0..2).filter_map(|_| self.bump()).collect();
+                            match u8::from_str_radix(&h, 16) {
+                                Ok(v) if h.len() == 2 => v as char,
+                                _ => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\x` takes two hex digits, as in `\\x1b`", start)),
+                            }
+                        }
+                        Some('u') if self.peek() == Some('{') => {
+                            self.bump();
+                            let mut h = String::new();
+                            while let Some(d) = self.bump() {
+                                if d == '}' {
+                                    break;
+                                }
+                                h.push(d);
+                            }
+                            match u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                                Some(c) => c,
+                                None => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\u{…}` takes a code point in hex, as in `\\u{e9}`", start)),
+                            }
+                        }
+                        _ => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "escapes in a character literal: \\n \\t \\r \\0 \\\\ \\` \\x1b \\u{e9}", start)),
+                    },
+                    Some(c) => c,
+                };
+                if self.bump() != Some('`') {
+                    return Err(Diag::new(&C::BAD_NUMBER, "a character literal holds one character and ends with `: `a`", start));
+                }
+                Tok::Int(c as i64)
+            }
             '"' => self.string(start)?,
             // 'raw text': no interpolation, no escapes (JSON, regexes, Windows paths)
             '\'' => {
@@ -664,6 +705,15 @@ mod tests {
 
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn character_literals() {
+        assert_eq!(toks("`a`"), vec![Tok::Int(97), Tok::Eof]);
+        assert_eq!(toks("`\\n` `\\`` `\\x1b` `é` `\\u{1F600}`"), vec![Tok::Int(10), Tok::Int(96), Tok::Int(27), Tok::Int(233), Tok::Int(0x1F600), Tok::Eof]);
+        for bad in ["``", "`ab`", "`a", "`\\q`"] {
+            assert!(lex(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
