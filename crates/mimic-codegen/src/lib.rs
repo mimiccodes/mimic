@@ -1035,8 +1035,7 @@ fn set_chain<'a>(name: &str, first: &'a Expr, value: &'a Expr) -> Option<(Vec<&'
     }
     let mut idxs = vec![first];
     let mut cur = value;
-    loop {
-        let ExprKind::Call { callee, args } = &cur.kind else { break };
+    while let ExprKind::Call { callee, args } = &cur.kind {
         if !matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "put") || args.len() != 3 || !place(&args[0], name, &idxs) {
             break;
         }
