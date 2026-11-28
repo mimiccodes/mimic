@@ -246,6 +246,40 @@ fn for_loop(var: String, iter: Expr, body: Block, span: Span) -> Stmt {
     Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: setup, tail: None, span }), span })
 }
 
+/// `x += v` is `x = x + v`; `xs[i] += v` is `xs[i] = xs[i] + v`, an index
+/// that is more than a name or a number computed once first: `{ let __k =
+/// i; xs[__k] = xs[__k] + v }`.
+fn compound_assign(target: Expr, op: BinOp, rhs: Expr, span: Span) -> PResult<Stmt> {
+    let bin = |a: Expr, b: Expr| Expr { kind: ExprKind::Binary { op, lhs: Box::new(a), rhs: Box::new(b) }, span };
+    match target.kind {
+        ExprKind::Path(p) if p.len() == 1 => {
+            let name = p.into_iter().next().unwrap();
+            let cur = Expr { kind: ExprKind::Path(vec![name.clone()]), span: target.span };
+            Ok(Stmt::Assign { name, index: None, value: bin(cur, rhs), span })
+        }
+        ExprKind::Index { base, index } => match base.kind {
+            ExprKind::Path(p) if p.len() == 1 => {
+                let name = p.into_iter().next().unwrap();
+                let simple = matches!(index.kind, ExprKind::Path(_) | ExprKind::Int(_));
+                let key = format!("__k{}", span.start);
+                let at = if simple { (*index).clone() } else { Expr { kind: ExprKind::Path(vec![key.clone()]), span: index.span } };
+                let cur = Expr {
+                    kind: ExprKind::Index { base: Box::new(Expr { kind: ExprKind::Path(vec![name.clone()]), span: base.span }), index: Box::new(at.clone()) },
+                    span: target.span,
+                };
+                let set = Stmt::Assign { name, index: Some(at), value: bin(cur, rhs), span };
+                if simple {
+                    return Ok(set);
+                }
+                let k = Stmt::Let { name: key, mutable: false, ty: None, value: *index, span };
+                Ok(Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: vec![k, set], tail: None, span }), span }))
+            }
+            _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "can only assign to `name[index]`", target.span)),
+        },
+        _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "invalid assignment target", target.span)),
+    }
+}
+
 pub fn parse_expr(src: &str) -> Result<Expr, Diag> {
     let toks = lex(src)?;
     let mut p = Parser { toks, pos: 0, nl_ignore: 0, no_lambda: false };
@@ -991,6 +1025,18 @@ impl Parser {
             }
             _ => {
                 let e = self.expr()?;
+                let compound = match &self.peek_tok().tok {
+                    Tok::AddAssign => Some(BinOp::Add),
+                    Tok::SubAssign => Some(BinOp::Sub),
+                    Tok::MulAssign => Some(BinOp::Mul),
+                    Tok::DivAssign => Some(BinOp::Div),
+                    _ => None,
+                };
+                if let Some(op) = compound {
+                    self.next();
+                    let rhs = self.expr()?;
+                    return compound_assign(e, op, rhs, start.to(self.prev_span()));
+                }
                 if self.at(&Tok::Assign) || self.at(&Tok::Reassign) {
                     self.next();
                     let value = self.expr()?;

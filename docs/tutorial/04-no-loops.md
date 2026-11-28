@@ -165,7 +165,7 @@ module main
 fn main() {
     let mut total = 0
     for i in 1 ‥ 11 {
-        total = total + i
+        total += i
     }
     print(total)
 
@@ -173,7 +173,7 @@ fn main() {
     let mut steps = 0
     while n > 1 {
         if n % 2 == 0 { n = n div 2 } else { n = 3 * n + 1 }
-        steps = steps + 1
+        steps += 1
     }
     print(steps)
 
@@ -197,6 +197,7 @@ fn main() {
 * `for i in a ‥ b` counts from `a` up to, not including, `b`; `for x in xs` takes each element of a list.
 * `while cond { … }` runs while `cond` holds; `break` leaves the innermost loop.
 * The glyphs are `∀` (`for`), `⟳` (`while`) and `↯` (`break`).
+* `total += i` is `total = total + i`; `-=`, `×=` (`*=`) and `÷=` (`/=`) work the same way, and on an element too: `counts[k] += 1`. The glyph spellings are `+↩ -↩ ×↩ ÷↩`.
 * A loop may change only its own function's `let mut` variables, and a lambda is a function of its own: a `break` inside one is an error (E0216).
 
 A loop is sequential. When the steps don't depend on each other, `¨` and the reductions above do the same work on every core.

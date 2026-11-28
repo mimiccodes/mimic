@@ -1,0 +1,36 @@
+module main
+
+fn pick(i: i64) -> i64 { i % 3 }
+
+pub fn main() {
+    let mut total = 0
+    for i in 1 ‥ 11 {
+        total += i
+    }
+    print(total)
+    let mut x = 100.0
+    x -= 2.5
+    x ×= 2.0
+    x ÷= 4.0
+    print(x)
+    let mut n = 7
+    n *= 3
+    n /= 2
+    print(n)
+    let mut counts = [0 0 0]
+    for i in 0 ‥ 10 {
+        counts[pick(i)] += 1
+        counts[0] -= 0
+    }
+    print(counts)
+    let mut words = "ab"
+    words += "cd"
+    print(words)
+    let mut g = 10
+    g +↩ 5
+    g -↩ 1
+    g ×↩ 2
+    g +\= 2
+    print(g)
+    print(n == 10)
+}

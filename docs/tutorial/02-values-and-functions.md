@@ -62,6 +62,8 @@ fn main() {
 
 Mimic has no shadowing: you cannot declare the same name twice in one function. To change a value, ask for it explicitly with `let mut`.
 
+`area += 1` is a shorter `area = area + 1`; `-=`, `×=` and `÷=` work the same way.
+
 ## Functions
 
 ```mimic run
