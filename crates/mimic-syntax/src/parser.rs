@@ -246,36 +246,91 @@ fn for_loop(var: String, iter: Expr, body: Block, span: Span) -> Stmt {
     Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: setup, tail: None, span }), span })
 }
 
-/// `x += v` is `x = x + v`; `xs[i] += v` is `xs[i] = xs[i] + v`, an index
-/// that is more than a name or a number computed once first: `{ let __k =
-/// i; xs[__k] = xs[__k] + v }`.
-fn compound_assign(target: Expr, op: BinOp, rhs: Expr, span: Span) -> PResult<Stmt> {
-    let bin = |a: Expr, b: Expr| Expr { kind: ExprKind::Binary { op, lhs: Box::new(a), rhs: Box::new(b) }, span };
-    match target.kind {
-        ExprKind::Path(p) if p.len() == 1 => {
-            let name = p.into_iter().next().unwrap();
-            let cur = Expr { kind: ExprKind::Path(vec![name.clone()]), span: target.span };
-            Ok(Stmt::Assign { name, index: None, value: bin(cur, rhs), span })
+/// An assignment to `x`, `xs[i]`, or a place inside them: `g[r][c] = v` is
+/// `g[r] = put(g[r], c, v)` and `s.pos.x = v` is `s = { s with pos: {
+/// s.pos with x: v } }`. With `op`, `+=` and the like: `t op= v` is `t = t op
+/// v`. An index other than a name or a number is computed once, first, in a
+/// hidden `let` (`__k<pos>`), when the place is read as well as written.
+fn assign(target: Expr, op: Option<BinOp>, value: Expr, span: Span) -> PResult<Stmt> {
+    let simple = |e: &Expr| matches!(&e.kind, ExprKind::Path(p) if p.len() == 1);
+    // `x = v` and `xs[i] = v`: the target read nowhere else
+    if op.is_none() {
+        if simple(&target) {
+            let ExprKind::Path(p) = target.kind else { unreachable!() };
+            return Ok(Stmt::Assign { name: p.into_iter().next().unwrap(), index: None, value, span });
         }
-        ExprKind::Index { base, index } => match base.kind {
-            ExprKind::Path(p) if p.len() == 1 => {
-                let name = p.into_iter().next().unwrap();
-                let simple = matches!(index.kind, ExprKind::Path(_) | ExprKind::Int(_));
-                let key = format!("__k{}", span.start);
-                let at = if simple { (*index).clone() } else { Expr { kind: ExprKind::Path(vec![key.clone()]), span: index.span } };
-                let cur = Expr {
-                    kind: ExprKind::Index { base: Box::new(Expr { kind: ExprKind::Path(vec![name.clone()]), span: base.span }), index: Box::new(at.clone()) },
-                    span: target.span,
-                };
-                let set = Stmt::Assign { name, index: Some(at), value: bin(cur, rhs), span };
-                if simple {
-                    return Ok(set);
-                }
-                let k = Stmt::Let { name: key, mutable: false, ty: None, value: *index, span };
-                Ok(Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: vec![k, set], tail: None, span }), span }))
+        if let ExprKind::Index { base, index } = &target.kind {
+            if simple(base) {
+                let ExprKind::Index { base, index } = target.kind else { unreachable!() };
+                let ExprKind::Path(p) = base.kind else { unreachable!() };
+                return Ok(Stmt::Assign { name: p.into_iter().next().unwrap(), index: Some(*index), value, span });
             }
-            _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "can only assign to `name[index]`", target.span)),
+            let _ = index;
+        }
+    }
+    let mut lets = Vec::new();
+    let target = hoist(target, &mut lets, span)?;
+    let value = match op {
+        Some(op) => Expr { kind: ExprKind::Binary { op, lhs: Box::new(target.clone()), rhs: Box::new(value) }, span },
+        None => value,
+    };
+    // the new value computed first, into a hidden `let` (unless a name or a
+    // number): the write then reads nothing but the place, so the list or
+    // record on the way is changed in place, not copied
+    let value = if matches!(value.kind, ExprKind::Path(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) {
+        value
+    } else {
+        let key = format!("__v{}", span.start);
+        let vsp = value.span;
+        lets.push(Stmt::Let { name: key.clone(), mutable: false, ty: None, value, span });
+        Expr { kind: ExprKind::Path(vec![key]), span: vsp }
+    };
+    let set = place(target, value, span)?;
+    if lets.is_empty() {
+        return Ok(set);
+    }
+    lets.push(set);
+    Ok(Stmt::Expr(Expr { kind: ExprKind::Block(Block { stmts: lets, tail: None, span }), span }))
+}
+
+/// The target with each index other than a name or a number bound first.
+fn hoist(e: Expr, lets: &mut Vec<Stmt>, span: Span) -> PResult<Expr> {
+    let sp = e.span;
+    match e.kind {
+        ExprKind::Path(ref p) if p.len() == 1 => Ok(e),
+        ExprKind::Index { base, index } => {
+            let base = hoist(*base, lets, span)?;
+            let index = if matches!(index.kind, ExprKind::Path(_) | ExprKind::Int(_)) {
+                *index
+            } else {
+                let key = format!("__k{}_{}", span.start, lets.len());
+                let isp = index.span;
+                lets.push(Stmt::Let { name: key.clone(), mutable: false, ty: None, value: *index, span });
+                Expr { kind: ExprKind::Path(vec![key]), span: isp }
+            };
+            Ok(Expr { kind: ExprKind::Index { base: Box::new(base), index: Box::new(index) }, span: sp })
+        }
+        ExprKind::Field { base, name } => Ok(Expr { kind: ExprKind::Field { base: Box::new(hoist(*base, lets, span)?), name }, span: sp }),
+        _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "can assign only to a `let mut` name, an element `xs[i]`, a field `r.f`, or a place inside them (`g[r][c]`, `s.pos.x`)", sp)),
+    }
+}
+
+/// `place = value`, rebuilt outward until the place is a name.
+fn place(target: Expr, value: Expr, span: Span) -> PResult<Stmt> {
+    match target.kind {
+        ExprKind::Path(p) => Ok(Stmt::Assign { name: p.into_iter().next().unwrap(), index: None, value, span }),
+        ExprKind::Index { base, index } => match base.kind {
+            ExprKind::Path(p) if p.len() == 1 => Ok(Stmt::Assign { name: p.into_iter().next().unwrap(), index: Some(*index), value, span }),
+            _ => {
+                let put = Expr { kind: ExprKind::Path(vec!["put".to_string()]), span };
+                let call = Expr { kind: ExprKind::Call { callee: Box::new(put), args: vec![(*base).clone(), *index, value] }, span };
+                place(*base, call, span)
+            }
         },
+        ExprKind::Field { base, name } => {
+            let with = Expr { kind: ExprKind::With { base: Box::new((*base).clone()), fields: vec![(name, value, span)] }, span };
+            place(*base, with, span)
+        }
         _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "invalid assignment target", target.span)),
     }
 }
@@ -1035,26 +1090,12 @@ impl Parser {
                 if let Some(op) = compound {
                     self.next();
                     let rhs = self.expr()?;
-                    return compound_assign(e, op, rhs, start.to(self.prev_span()));
+                    return assign(e, Some(op), rhs, start.to(self.prev_span()));
                 }
                 if self.at(&Tok::Assign) || self.at(&Tok::Reassign) {
                     self.next();
                     let value = self.expr()?;
-                    return match e.kind {
-                        ExprKind::Path(p) if p.len() == 1 => {
-                            Ok(Stmt::Assign { name: p.into_iter().next().unwrap(), index: None, value, span: start })
-                        }
-                        ExprKind::Index { base, index } => match base.kind {
-                            ExprKind::Path(p) if p.len() == 1 => Ok(Stmt::Assign {
-                                name: p.into_iter().next().unwrap(),
-                                index: Some(*index),
-                                value,
-                                span: start,
-                            }),
-                            _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "can only assign to `name[index]`", e.span)),
-                        },
-                        _ => Err(Diag::new(&C::BAD_ASSIGN_TARGET, "invalid assignment target", e.span)),
-                    };
+                    return assign(e, None, value, start);
                 }
                 Ok(Stmt::Expr(e))
             }

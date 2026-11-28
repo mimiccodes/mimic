@@ -380,6 +380,8 @@ fn compile_inner(p: &Program, settings: &Settings, obj: &Path, ir: Option<&Path>
         parts_result: None,
         loops: Vec::new(),
         loop_lists: Vec::new(),
+        take_var: None,
+        took_var: false,
         move_at: Default::default(),
         fj: Default::default(),
         fused_at: std::cell::Cell::new(None),
@@ -830,6 +832,12 @@ struct Cg<'ctx, 'p> {
     /// loop's start, their kind and length checked there, so an element
     /// write is a bounds check and a store
     loop_lists: Vec<(String, LoopList<'ctx>)>,
+    /// `s = { s with … }` on a record held on the heap: the variable whose
+    /// reference the `with` takes over (from its slot, not retained: inside
+    /// a loop nothing moves, and a retained record looks shared and is
+    /// copied, its lists with it); `took_var` once it has
+    take_var: Option<String>,
+    took_var: bool,
     /// The variable uses (expression ids) where a value moves (owned.rs).
     move_at: std::collections::HashSet<usize>,
     /// Fork-join state of the function being defined (see forkjoin.rs).
@@ -1007,6 +1015,40 @@ fn type_code(t: Ty) -> i32 {
 }
 
 /// A list type whose values are kept in registers: (element, length).
+/// `g[i0] = put(g[i0], i1, put(g[i0][i1], i2, … v))`, as the parser writes
+/// `g[i0][i1]…[in] = v`: the indices (two or more) and the value, or None.
+fn set_chain<'a>(name: &str, first: &'a Expr, value: &'a Expr) -> Option<(Vec<&'a Expr>, &'a Expr)> {
+    fn same(a: &Expr, b: &Expr) -> bool {
+        match (&a.kind, &b.kind) {
+            (ExprKind::Path(x), ExprKind::Path(y)) => x == y,
+            (ExprKind::Int(x), ExprKind::Int(y)) => x == y,
+            _ => false,
+        }
+    }
+    // `e` is `name[idxs[0]]…[idxs[last]]`
+    fn place(e: &Expr, name: &str, idxs: &[&Expr]) -> bool {
+        match (&e.kind, idxs.split_last()) {
+            (ExprKind::Path(p), None) => p.len() == 1 && p[0] == name,
+            (ExprKind::Index { base, index }, Some((last, rest))) => same(index, last) && place(base, name, rest),
+            _ => false,
+        }
+    }
+    let mut idxs = vec![first];
+    let mut cur = value;
+    loop {
+        let ExprKind::Call { callee, args } = &cur.kind else { break };
+        if !matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "put") || args.len() != 3 || !place(&args[0], name, &idxs) {
+            break;
+        }
+        if !matches!(args[1].kind, ExprKind::Path(_) | ExprKind::Int(_)) {
+            break;
+        }
+        idxs.push(&args[1]);
+        cur = &args[2];
+    }
+    (idxs.len() >= 2 && idxs.iter().all(|e| matches!(e.kind, ExprKind::Path(_) | ExprKind::Int(_)))).then_some((idxs, cur))
+}
+
 fn fixed(t: Ty) -> Option<(El, u32)> {
     match t {
         Ty::Arr(el @ (El::I64 | El::F64 | El::Bool), n) if n > 0 => Some((el, n as u32)),
@@ -1922,6 +1964,7 @@ impl<'ctx> Cg<'ctx, '_> {
             "mim_each_fn_memo" => ptr.fn_type(&[p, p, p], false),
             "mim_set_index" => void.fn_type(&[p, p, p], false),
             "mim_set_index_v" => ptr.fn_type(&[p, p, p], false),
+            "mim_set_in_v" => ptr.fn_type(&[p, i64t, p, p], false),
             "mim_shrink_own" => ptr.fn_type(&[p, i64t, i32t], false),
             "mim_truthy" | "mim_as_i64" => self.ctx.i64_type().fn_type(&[p], false),
             "mim_decides" => self.ctx.i64_type().fn_type(&[p, self.ctx.i64_type().into()], false),
@@ -3314,16 +3357,56 @@ impl<'ctx> Cg<'ctx, '_> {
                 };
                 match index {
                     None => {
-                        let v = self.expr(value)?;
+                        // `s = { s with … }`: the record taken from the slot
+                        // (its old value is the new one's, not released)
+                        let takes = matches!(&value.kind, ExprKind::With { base, .. } if matches!(&base.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == *name))
+                            && matches!(t, Ty::Obj(_))
+                            && self.flat(t).is_none();
+                        if takes {
+                            self.take_var = Some(name.clone());
+                            self.took_var = false;
+                        }
+                        let v = self.expr(value);
+                        self.take_var = None;
+                        let v = v?;
                         let v = self.as_ty(v, t, &format!("`{name}`"))?;
                         let v = self.own(v)?;
-                        if matches!(v, V::P(..)) {
+                        if std::mem::take(&mut self.took_var) {
+                            self.b.build_store(slot, self.basic(v)).s()?;
+                        } else if matches!(v, V::P(..)) {
                             let old = self.b.build_load(self.ptr, slot, "").s()?;
                             self.b.build_store(slot, self.basic(v)).s()?;
                             self.call_rt("mim_release", &[old.into()])?;
                         } else {
                             self.b.build_store(slot, self.basic(v)).s()?;
                         }
+                    }
+                    // `g[r][c] = v` (the parser's `g[r] = put(g[r], c, v)`):
+                    // one runtime call down the whole path, each level written
+                    // in place unless shared, so the row is never read out and
+                    // copied while the list still holds it
+                    Some(i) if fixed(t).is_none() && let Some((idxs, leaf)) = set_chain(name, i, value) => {
+                        let n = idxs.len();
+                        let arr_ty = self.ptr.array_type(n as u32);
+                        let arr = self.entry_alloca_ty(arr_ty.into(), "path")?;
+                        let mut tmps = Vec::with_capacity(n);
+                        for (k, e) in idxs.iter().enumerate() {
+                            let iv = self.expr(e)?;
+                            let iv = self.boxed(iv)?;
+                            let at = unsafe { self.b.build_in_bounds_gep(arr_ty, arr, &[self.ctx.i32_type().const_zero(), self.ctx.i32_type().const_int(k as u64, false)], "").s()? };
+                            self.b.build_store(at, self.basic(iv)).s()?;
+                            tmps.push(iv);
+                        }
+                        let v = self.expr(leaf)?;
+                        let v = self.boxed(v)?;
+                        let cur = self.b.build_load(self.ptr, slot, "").s()?;
+                        let nv = self.ctx.i64_type().const_int(n as u64, false);
+                        let out = self.call_rt_ptr("mim_set_in_v", &[cur.into(), nv.into(), arr.into(), self.basic(v).into()])?;
+                        self.b.build_store(slot, self.basic(out)).s()?;
+                        for iv in tmps {
+                            self.drop_tmp(iv)?;
+                        }
+                        self.drop_tmp(v)?;
                     }
                     // a list the loop around only reads and writes element by
                     // element (loop_lists): its kind and count checked at the
@@ -7502,8 +7585,17 @@ impl<'ctx> Cg<'ctx, '_> {
                         }
                     }
                 }
-                let b = self.expr(base)?;
-                let cur = self.own(self.boxed(b)?)?;
+                let cur = match &base.kind {
+                    ExprKind::Path(p) if p.len() == 1 && self.take_var.as_deref() == Some(p[0].as_str()) => {
+                        let slot = self.lookup(&p[0]).ok_or("unknown variable")?.slot;
+                        self.took_var = true;
+                        V::P(self.b.build_load(self.ptr, slot, "taken").s()?.into_pointer_value(), true)
+                    }
+                    _ => {
+                        let b = self.expr(base)?;
+                        self.own(self.boxed(b)?)?
+                    }
+                };
                 // the only reference (the common case after a move): used as
                 // it is, no call; else the runtime copies it
                 let V::P(p0, _) = cur else { unreachable!() };

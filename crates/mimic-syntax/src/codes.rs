@@ -130,7 +130,7 @@ To change a parameter, bind a copy: `let mut y = x`.";
 `let (a, b) = tuple`, or `let name = option else { return … }`.
 `let … else` unwraps a value and cannot be `mut`.";
 
-    BAD_ASSIGN_TARGET = "E0208" "invalid-assignment-target" "assigning to something that is not a variable or `name[index]`"
+    BAD_ASSIGN_TARGET = "E0208" "invalid-assignment-target" "assigning to something that is not a variable or a place inside one (`xs[i]`, `g[r][c]`, `s.pos.x`)"
 "Only `let mut` variables and their elements can be assigned:
 
     xs[2] = 7        // ok if `xs` is `let mut`
