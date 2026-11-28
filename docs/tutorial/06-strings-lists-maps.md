@@ -343,6 +343,27 @@ true
 ["alan": 1912]
 ```
 
+A map's type names its keys and values: `[str: i64]` maps text to integers. The compiler works it out from a literal, or you can write it, and then a lookup is a plain number and a key or value of another type is an error before the program runs:
+
+```mimic run
+module main
+
+fn total(stock: [str: i64]) -> i64 { +/ values(stock) }
+
+fn main() {
+    let mut stock: [str: i64] = ["nut": 3, "bolt": 5]
+    stock["nut"] += 10
+    stock["washer"] = 2
+    print(total(stock))
+    print(stock["bolt"] * 2)
+}
+```
+
+```output
+20
+10
+```
+
 How maps behave:
 * **Order.** Maps keep their keys in insertion order.
 * **Lookups.** Indexing `m[k]` with a missing key stops the program. Use `get` when a key may be absent.

@@ -460,7 +460,7 @@ The annotation types are:
 * arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`, and the compact `[f32]`, `[i32]`, `[u8]`;
 * records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
 * tuples: `(i64, str)`;
-* maps: `[str: i64]`;
+* maps: `[str: i64]`, a map's key and value types, also worked out from a literal (`["ada": 1815]` is `[str: i64]`). A lookup has the value's type, `keys`/`values` give typed lists, and a key or value of another type is refused when checking (E0401); an integer value next to floats is promoted, as in a list;
 * types from other modules by path: `http::Response`, `time::DateTime`;
 * function types: `fn(i64) -> i64`.
 

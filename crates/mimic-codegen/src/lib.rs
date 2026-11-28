@@ -1062,6 +1062,7 @@ fn ty_suffix(tys: &[Ty]) -> String {
             Ty::F64 => "f".to_string(),
             Ty::Bool => "b".to_string(),
             Ty::Dyn => "d".to_string(),
+            Ty::Map(id) => format!("m{id}"),
             // a list of known length: its own specialisation
             Ty::Arr(e, n) if *n > 0 => format!("{}x{n}", Ty::Arr(*e, 0)).replace(['[', ']'], "_"),
             other => format!("{other}").replace(['[', ']', '(', ')', '?'], "_"),
@@ -2413,7 +2414,7 @@ impl<'ctx> Cg<'ctx, '_> {
             // a list (or a value of unknown type) taken over: it moves on at
             // its last use in each branch (into the `push` that grows it in
             // place, into the call that takes it)
-            if c && !m && matches!(t, Ty::Arr(_, 0) | Ty::Dyn) {
+            if c && !m && matches!(t, Ty::Arr(_, 0) | Ty::Dyn | Ty::Map(_)) {
                 let at = owned::last_use_sites(&prm.name, &decl.body);
                 if !at.is_empty() {
                     self.move_at.extend(at);
@@ -3854,7 +3855,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// gives back x's type (a known one).
     fn state_type(&self, x: &Expr, step: &Expr) -> Option<Ty> {
         let t = self.ty_of(x);
-        if matches!(t, Ty::Dyn | Ty::Never | Ty::Unit) {
+        if matches!(t, Ty::Dyn | Ty::Map(_) | Ty::Never | Ty::Unit) {
             return None;
         }
         let (pts, rt) = self.cur_spec.as_ref()?.lambdas.get(&id(step)).cloned()?;
