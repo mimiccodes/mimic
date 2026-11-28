@@ -568,31 +568,47 @@ impl<'ctx> Cg<'ctx, '_> {
                     // 4-byte numbers, widened for the computation
                     El::F32 => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), base, &[i], "").s()? };
-                        let x = self.b.build_load(self.ctx.f32_type(), p, "").s()?.into_float_value();
+                        let x = self.b.build_load(self.ctx.f32_type(), p, "").s()?;
+                        self.tbaa(x, "elem")?;
+                        let x = x.into_float_value();
                         V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
                     }
                     El::I32 => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), base, &[i], "").s()? };
-                        let x = self.b.build_load(self.ctx.i32_type(), p, "").s()?.into_int_value();
+                        let x = self.b.build_load(self.ctx.i32_type(), p, "").s()?;
+                        self.tbaa(x, "elem")?;
+                        let x = x.into_int_value();
                         V::I(self.b.build_int_s_extend(x, self.ctx.i64_type(), "").s()?)
                     }
                     El::F64 => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
-                        V::F(self.b.build_load(self.ctx.f64_type(), p, "").s()?.into_float_value())
+                        {
+                        let x = self.b.build_load(self.ctx.f64_type(), p, "").s()?;
+                        self.tbaa(x, "elem")?;
+                        V::F(x.into_float_value())
+                    }
                     }
                     El::U8 => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
-                        let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?.into_int_value();
+                        let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?;
+                        self.tbaa(b, "elem")?;
+                        let b = b.into_int_value();
                         V::I(self.b.build_int_z_extend(b, self.ctx.i64_type(), "").s()?)
                     }
                     El::Bool => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
-                        let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?.into_int_value();
+                        let b = self.b.build_load(self.ctx.i8_type(), p, "").s()?;
+                        self.tbaa(b, "elem")?;
+                        let b = b.into_int_value();
                         V::B(self.b.build_int_compare(IntPredicate::NE, b, self.ctx.i8_type().const_zero(), "").s()?)
                     }
                     _ => {
                         let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i64_type(), base, &[i], "").s()? };
-                        V::I(self.b.build_load(self.ctx.i64_type(), p, "").s()?.into_int_value())
+                        {
+                        let x = self.b.build_load(self.ctx.i64_type(), p, "").s()?;
+                        self.tbaa(x, "elem")?;
+                        V::I(x.into_int_value())
+                    }
                     }
                 }
             }
@@ -934,7 +950,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         (i64t.into(), unsafe { cg.b.build_in_bounds_gep(i64t, out, &[i], "").s()? })
                     };
                     let _ = t;
-                    cg.b.build_store(p, next).s()?;
+                    let st = cg.b.build_store(p, next).s()?;
+                    cg.tbaa(st, "elem")?;
                     next
                 }
             };
@@ -1455,22 +1472,26 @@ impl<'ctx> Cg<'ctx, '_> {
         match el {
             El::F64 => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), base, &[i], "").s()? };
-                self.b.build_store(p, self.to_f64(v)?).s()?;
+                let st = self.b.build_store(p, self.to_f64(v)?).s()?;
+                self.tbaa(st, "elem")?;
             }
             El::F32 => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), base, &[i], "").s()? };
                 let d = self.to_f64(v)?;
-                self.b.build_store(p, self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?).s()?;
+                let st = self.b.build_store(p, self.b.build_float_trunc(d, self.ctx.f32_type(), "").s()?).s()?;
+                self.tbaa(st, "elem")?;
             }
             El::I32 => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), base, &[i], "").s()? };
                 let n = self.to_i64(v)?;
-                self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i32_type(), "").s()?).s()?;
+                let st = self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i32_type(), "").s()?).s()?;
+                self.tbaa(st, "elem")?;
             }
             El::Bool => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
                 let t = self.truth(v)?;
-                self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+                let st = self.b.build_store(p, self.b.build_int_z_extend(t, self.ctx.i8_type(), "").s()?).s()?;
+                self.tbaa(st, "elem")?;
             }
             // a byte (bytes::from): 0 … 255, else the program stops
             El::U8 => {
@@ -1485,18 +1506,21 @@ impl<'ctx> Cg<'ctx, '_> {
                 self.b.build_unreachable().s()?;
                 self.b.position_at_end(ok);
                 let p = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), base, &[i], "").s()? };
-                self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i8_type(), "").s()?).s()?;
+                let st = self.b.build_store(p, self.b.build_int_truncate(n, self.ctx.i8_type(), "").s()?).s()?;
+                self.tbaa(st, "elem")?;
             }
             // a record or a string: the list takes a reference of its own
             El::Obj(_) | El::Str => {
                 let p = unsafe { self.b.build_in_bounds_gep(self.ptr, base, &[i], "").s()? };
                 let b = self.boxed(v)?;
                 let b = self.own(b)?;
-                self.b.build_store(p, self.basic(b)).s()?;
+                let st = self.b.build_store(p, self.basic(b)).s()?;
+                self.tbaa(st, "elem")?;
             }
             _ => {
                 let p = unsafe { self.b.build_in_bounds_gep(i64t, base, &[i], "").s()? };
-                self.b.build_store(p, self.to_i64(v)?).s()?;
+                let st = self.b.build_store(p, self.to_i64(v)?).s()?;
+                self.tbaa(st, "elem")?;
             }
         }
         Ok(())
@@ -1905,13 +1929,11 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(v).into_pointer_value();
-        // a vector's header never changes while it is alive (as in index_fast)
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
+        // (plain loads: see index_fast)
         let load = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
             let v = cg.b.build_load(t, fp, "").s()?;
-            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+            cg.tbaa(v, "header")?;
             Ok(v)
         };
         let dtype = load(self, 1, i32t.into())?.into_int_value();

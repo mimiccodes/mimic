@@ -349,7 +349,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let x = self.load_raw(fp, el)?;
                         self.as_ty(x, ty, "field")?
                     } else {
-                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?;
+                        self.tbaa(x, "slot")?;
+                        let x = x.into_pointer_value();
                         let v = if let (V::P(_, true), false) = (base, *borrow) {
                             self.call_rt("mim_retain", &[x.into()])?;
                             V::P(x, true)
@@ -679,9 +681,15 @@ impl<'ctx> Cg<'ctx, '_> {
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
         inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
-        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
-        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
-        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?.into_int_value();
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?;
+        self.tbaa(dtype, "header")?;
+        let dtype = dtype.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?;
+        self.tbaa(rank, "header")?;
+        let rank = rank.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?;
+        self.tbaa(len, "header")?;
+        let len = len.into_int_value();
         let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
         let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
         let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
@@ -695,7 +703,8 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(here);
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
         let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-        self.b.build_store(at, x).s()?;
+        let st = self.b.build_store(at, x).s()?;
+        self.tbaa(st, "elem")?;
         let here_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(slow_bb);
@@ -720,10 +729,16 @@ impl<'ctx> Cg<'ctx, '_> {
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
         inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
-        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
-        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?;
+        self.tbaa(dtype, "header")?;
+        let dtype = dtype.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?;
+        self.tbaa(rank, "header")?;
+        let rank = rank.into_int_value();
         let lenp = self.b.build_struct_gep(hdr, list, 3, "").s()?;
-        let len = self.b.build_load(i64t, lenp, "len").s()?.into_int_value();
+        let len = self.b.build_load(i64t, lenp, "len").s()?;
+        self.tbaa(len, "header")?;
+        let len = len.into_int_value();
         let room = self.b.build_load(self.ptr, self.b.build_struct_gep(hdr, list, 4, "").s()?, "room").s()?.into_pointer_value();
         let room = self.b.build_ptr_to_int(room, i64t, "").s()?;
         let n = self.b.build_int_add(len, i64t.const_int(xs.len() as u64, false), "").s()?;
@@ -758,9 +773,11 @@ impl<'ctx> Cg<'ctx, '_> {
         for (k, x) in xs.iter().enumerate() {
             let at = self.b.build_int_add(len, i64t.const_int(k as u64, false), "").s()?;
             let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[at], "").s()? };
-            self.b.build_store(at, *x).s()?;
+            let st = self.b.build_store(at, *x).s()?;
+            self.tbaa(st, "elem")?;
         }
-        self.b.build_store(lenp, n).s()?;
+        let st = self.b.build_store(lenp, n).s()?;
+        self.tbaa(st, "header")?;
         let here_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(slow_bb);

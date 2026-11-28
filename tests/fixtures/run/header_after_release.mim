@@ -1,0 +1,16 @@
+module main
+
+// a list's length read for `≢` before the list is released: the read was
+// marked as one whose memory never changes, so it could move past the
+// release, onto the next list made in the same memory (`n5` printed the
+// length of `[6 3 9]`). Found by the random programs (seed 20261201,
+// program 1; 20261202, program 298).
+
+fn main() {
+    let n5 = (≢ (push([0 4 3 2 0], 8) + 7))
+    let n6 = (+/ [6 3 9]) % 1000
+    print(n5)
+    let n7 = (≢ (push([1 2], 3) + 1))
+    let n8 = (+/ [9 9 9 9 9 9 9]) % 1000
+    print(n7)
+}

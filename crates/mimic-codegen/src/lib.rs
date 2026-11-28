@@ -1345,6 +1345,21 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
+    /// Marks a load or store with the kind of memory it touches (TBAA): a
+    /// value's header ("header": count, kind, length) or a list's numbers
+    /// ("elem"), or a record's fields ("slot"), which never overlap. So a loop writing numbers keeps the
+    /// headers it reads in registers, while a call (a release, a free) still
+    /// stops any load from moving past it, which `invariant.load` did not.
+    /// Accesses not marked may touch either.
+    pub(crate) fn tbaa<T: inkwell::values::AsValueRef + Copy>(&self, v: T, kind: &str) -> R<()> {
+        let i = unsafe { inkwell::values::InstructionValue::new(v.as_value_ref()) };
+        let root = self.ctx.metadata_node(&[self.ctx.metadata_string("mimic memory").into()]);
+        let zero = self.ctx.i64_type().const_zero();
+        let ty = self.ctx.metadata_node(&[self.ctx.metadata_string(kind).into(), root.into(), zero.into()]);
+        let tag = self.ctx.metadata_node(&[ty.into(), ty.into(), zero.into()]);
+        i.set_metadata(tag, self.ctx.get_kind_id("tbaa")).map_err(|e| e.to_string())
+    }
+
     fn val_ty(&self) -> inkwell::types::StructType<'ctx> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
         // rc, dtype, rank, len, desc; the elements follow (mim_val in mimic_rt.c)
@@ -1767,11 +1782,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let i = self.p.types[types::obj_tid(t)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
         let bp = self.basic(b).into_pointer_value();
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), bp, &[i32t.const_int(1, false)], "fields").s()? };
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
         let fv = self.b.build_load(self.ptr, fp, "").s()?;
-        inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+        self.tbaa(fv, "slot")?;
         // a shaped list field is a heap vector like any other: same facts
         self.assume_live(fv, if fixed(ty).is_some() { Ty::Arr(El::F64, 0) } else { ty })?;
         Ok(fv.into_pointer_value())
@@ -3342,7 +3355,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[self.ctx.i32_type().const_int(1, false)], "data").s()? };
                         let et: BasicTypeEnum = if ll.el == El::F64 { self.ctx.f64_type().into() } else { i64t.into() };
                         let at = unsafe { self.b.build_in_bounds_gep(et, data, &[iv], "").s()? };
-                        self.b.build_store(at, x).s()?;
+                        let st = self.b.build_store(at, x).s()?;
+                        self.tbaa(st, "elem")?;
                         self.b.build_unconditional_branch(done_bb).s()?;
                         self.b.position_at_end(slow_bb);
                         let cur = self.b.build_load(self.ptr, ll.slot, "").s()?;
@@ -4695,13 +4709,12 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A raw number field, read.
     fn load_raw(&self, fp: PointerValue<'ctx>, el: El) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
+        let x = self.b.build_load(if el == El::F64 { BasicTypeEnum::from(self.ctx.f64_type()) } else { BasicTypeEnum::from(i64t) }, fp, "").s()?;
+        self.tbaa(x, "slot")?;
         Ok(match el {
-            El::F64 => V::F(self.b.build_load(self.ctx.f64_type(), fp, "").s()?.into_float_value()),
-            El::Bool => {
-                let x = self.b.build_load(i64t, fp, "").s()?.into_int_value();
-                V::B(self.b.build_int_compare(IntPredicate::NE, x, i64t.const_zero(), "").s()?)
-            }
-            _ => V::I(self.b.build_load(i64t, fp, "").s()?.into_int_value()),
+            El::F64 => V::F(x.into_float_value()),
+            El::Bool => V::B(self.b.build_int_compare(IntPredicate::NE, x.into_int_value(), i64t.const_zero(), "").s()?),
+            _ => V::I(x.into_int_value()),
         })
     }
 
@@ -5704,8 +5717,6 @@ impl<'ctx> Cg<'ctx, '_> {
                 assume(p, self.live_bytes(t))?;
                 let td = &self.p.types[types::obj_tid(id)];
                 let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return Ok(()) };
-                let invariant = self.ctx.get_kind_id("invariant.load");
-                let empty = self.ctx.metadata_node(&[]);
                 let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
                 for (i, (_, ft, _)) in fs.iter().enumerate() {
                     let fty = types::ann_in(self.p, td.module, ft).unwrap_or(Ty::Dyn);
@@ -5714,7 +5725,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
                     let fv = self.b.build_load(self.ptr, fp, "field").s()?;
-                    inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                    self.tbaa(fv, "slot")?;
                     self.assume_live(fv, fty)?;
                     assume(fv.into_pointer_value(), self.live_bytes(fty))?;
                 }
@@ -6089,21 +6100,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(arr).into_pointer_value();
-        // an array's header never changes while it is alive (a changed array
-        // is a new one): its loads may be hoisted and shared
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
+        // (the header's loads are plain: a list's length changes when it
+        // grows in place, and a list's memory is used again once it is
+        // freed; marked invariant, a length read was moved past the release
+        // of its list, onto the next list made there)
         let field = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
             let v = cg.b.build_load(t, fp, "").s()?;
-            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+            cg.tbaa(v, "header")?;
             Ok(v)
         };
         // dtype and rank sit side by side: one 64-bit load and compare checks
         // both (little-endian: dtype in the low half)
         let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
         let kind = self.b.build_load(i64t, kind_p, "").s()?;
-        inkwell::values::BasicValue::as_instruction_value(&kind).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+        self.tbaa(kind, "header")?;
         let kind = kind.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
         // a value's elements always follow its header (alloc in mimic_rt.c)
@@ -6143,32 +6154,44 @@ impl<'ctx> Cg<'ctx, '_> {
         let fv: V<'ctx> = match el {
             El::F64 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), data, &[i], "").s()? };
-                V::F(self.b.build_load(self.ctx.f64_type(), ep, "").s()?.into_float_value())
+                let x = self.b.build_load(self.ctx.f64_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::F(x.into_float_value())
             }
             El::Bool => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::B(self.b.build_int_compare(IntPredicate::NE, x, self.ctx.i8_type().const_zero(), "").s()?)
             }
             // a byte: 0 … 255 as an i64
             El::U8 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_z_extend(x, i64t, "").s()?)
             }
             El::F32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?.into_float_value();
+                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_float_value();
                 V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
             }
             El::I32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_s_extend(x, i64t, "").s()?)
             }
             _ => {
                 let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-                V::I(self.b.build_load(i64t, ep, "").s()?.into_int_value())
+                let x = self.b.build_load(i64t, ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::I(x.into_int_value())
             }
         };
         self.as_ty(fv, ty, "element")
