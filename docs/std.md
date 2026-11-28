@@ -364,6 +364,8 @@ The calendar is the proleptic Gregorian one, correct for any year, before 1970 i
 | `random::seed(n)` | Make the sequence repeatable (per thread) |
 | `random::choice(xs)` | `Option`: one element at random, `None` for no elements |
 | `random::shuffle(xs)` | The elements in a random order |
+| `random::at(seed, i)` | The `i`-th number from `seed`, in `[0, 2^63)`: no state, the same on every run and every core, so `⍳ n ¨ (i => random::at(seed, i))` makes `n` numbers in parallel (SplitMix64 on a counter) |
+| `random::at_float(seed, i)` | `random::at` as a float in `[0, 1)` |
 
 The generator is xoshiro256**, seeded from the operating system's entropy. Each thread has its own. Drawing a number changes the generator's state, so random draws run in order and never in parallel. It is not for cryptography.
 
