@@ -950,7 +950,8 @@ impl<'ctx> Cg<'ctx, '_> {
                         (i64t.into(), unsafe { cg.b.build_in_bounds_gep(i64t, out, &[i], "").s()? })
                     };
                     let _ = t;
-                    cg.b.build_store(p, next).s()?;
+                    let st = cg.b.build_store(p, next).s()?;
+                    cg.tbaa(st, "elem")?;
                     next
                 }
             };

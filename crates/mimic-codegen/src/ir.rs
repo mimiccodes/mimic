@@ -349,7 +349,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let x = self.load_raw(fp, el)?;
                         self.as_ty(x, ty, "field")?
                     } else {
-                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?;
+                        self.tbaa(x, "slot")?;
+                        let x = x.into_pointer_value();
                         let v = if let (V::P(_, true), false) = (base, *borrow) {
                             self.call_rt("mim_retain", &[x.into()])?;
                             V::P(x, true)
