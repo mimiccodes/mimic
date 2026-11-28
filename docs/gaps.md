@@ -151,6 +151,14 @@ Reported while processing the pixels of a photograph (1086×1448 RGB): each one 
 | A file of a project whose module is not `main` cannot be run by itself: `mimic run src/probe.mim` is E0903 even with a `fn main` in it | a separate `module main` file | 0.4.4 (`mimic run` on a project's file runs that module's `main`) |
 | A `settle` whose step takes its tuple state apart (`let (i, acc) = s`) and builds the next in an `if` leaves the function `dynamic` (returned as such, compiled the generic way), even with the state typed (`(0, ⍬)`) | build the next state without taking it apart: `(s.0 + 1, push(s.1, x))` | 0.4.4 |
 
+## Found by the nightly random programs
+
+Valid programs written at random and run five ways (release and debug, with the Mimic IR and without, one thread and all cores); a disagreement is a bug.
+
+| Gap | Workaround now | Version |
+|---|---|---|
+| Speed given back for two correctness fixes (0.4.3): list headers and record fields read as memory that never changes (`invariant.load`) let LLVM move a read past the release of its value, or past an in-place change, and give a wrong answer; the reads are plain now, told apart from the numbers a loop writes (TBAA). `lcs` is 20% slower on Windows on one core, `regex` 5–6% on Windows and macOS (accepted by the owner) | none | 0.4.4 (a value marked unchanging only over the code where it is alive and not changed: `llvm.invariant.start`/`end`, or scoped alias information, per loop) |
+
 ## Found by the held-out set
 
 The held-out set (`bench/heldout/`) is 40 programs written plainly from the tutorial alone, never used for tuning (BENCHMARK.md has its numbers). Its first measurement (2026-11-24, 0.4.3-dev): 15 of the 40 run in Mimic, all with the right output, at 8.5–10× C on one core (geometric mean); 25 fail. Each slow spot here gets a corpus program of its own to tune on; the held-out programs are never changed for speed.
