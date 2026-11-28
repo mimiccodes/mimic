@@ -1,0 +1,16 @@
+module main
+
+// a list read again inside a later argument of the call that takes it:
+// `put(acc, 0, if … { acc[0] } else { +/ acc })` holds the list while the
+// value is computed, so a read in the value is not its last use (it was:
+// the list was released there and `put` wrote into freed memory). Found by
+// the random programs (seed 20261130, program 7; 20261202, program 45).
+
+fn f(k: i64, acc: [i64]) -> [i64] {
+    if k <= 0 { acc } else { f(k - 1, if ≢ acc > 0 { put(acc, 0, if k <= 2 { acc[0] } else { +/ acc }) } else { push(acc, 0) }) }
+}
+
+fn main() {
+    print(f(6, [5]))
+    print(f(4, [1 2 3]))
+}

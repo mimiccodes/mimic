@@ -1,0 +1,7 @@
+// expect-panic: indexed assignment of a row: the row has 3 elements, the list given 2
+module main
+fn main() {
+    let mut m = 0 reshape [2 3]
+    m[1] = [1 2]
+    print(m)
+}

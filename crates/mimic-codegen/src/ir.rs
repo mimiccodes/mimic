@@ -10,7 +10,7 @@
 
 use crate::{Cg, OrStr, R, V};
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
-use mimic_check::types::Ty;
+use mimic_check::types::{El, Ty};
 use mimic_ir::{Function, Op, Region};
 
 /// Whether `MIMIC_IR` asks for the IR (read once).
@@ -86,17 +86,22 @@ pub(crate) fn checker_ty(t: mimic_ir::Ty) -> Ty {
         mimic_ir::Ty::I64 => Ty::I64,
         mimic_ir::Ty::F64 => Ty::F64,
         mimic_ir::Ty::Bool => Ty::Bool,
-        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) => t,
+        mimic_ir::Ty::Agg(t) | mimic_ir::Ty::List(t) | mimic_ir::Ty::Rec(t) | mimic_ir::Ty::Parts(t) => t,
     }
 }
 
 /// One change of a list of i64, its numbers computed.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Ch<'ctx> {
     Put(IntValue<'ctx>, IntValue<'ctx>),
     Push(IntValue<'ctx>),
     /// appends a list of i64 (lent)
     Concat(PointerValue<'ctx>),
+    /// appends these numbers (a short list of i64 kept in registers: no
+    /// list made for it)
+    Append(Vec<IntValue<'ctx>>),
+    /// appends `n` copies of a number
+    Fill(IntValue<'ctx>, IntValue<'ctx>),
 }
 
 impl<'ctx> Cg<'ctx, '_> {
@@ -170,8 +175,38 @@ impl<'ctx> Cg<'ctx, '_> {
                             })
                         })
                         .collect::<R<Vec<_>>>()?;
-                    let r = self.call_user(*site, *callee, a)?;
-                    self.as_ty(r, ty, "value")?
+                    // a tuple holding values on the heap, taken apart at once:
+                    // the version giving its parts where there is one, else
+                    // the tuple's parts taken out of it (each owned)
+                    if let mimic_ir::Ty::Parts(tt) = i.ty {
+                        let Ty::Tup(tid) = tt else { return Err("internal compiler error: IR parts of a value not a tuple".into()) };
+                        self.want_parts_site = Some(*site);
+                        let r = self.call_user(*site, *callee, a);
+                        self.want_parts_site = None;
+                        let r = r?;
+                        let sv = match self.parts_result.take() {
+                            Some(sv) => sv,
+                            None => self.unpack_parts(r, &mimic_check::types::tuple_elems(tid))?,
+                        };
+                        V::R(sv, tt)
+                    } else {
+                        let r = self.call_user(*site, *callee, a)?;
+                        self.as_ty(r, ty, "value")?
+                    }
+                }
+                // another reference to a list or record that lives on
+                Op::Share(v) => match get(vals, *v)? {
+                    V::P(p, _) => self.own(V::P(p, false))?,
+                    x => x,
+                },
+                // a part of a call's parts: a value on the heap owned
+                Op::Part(v, k) => {
+                    let V::R(sv, tt) = get(vals, *v)? else { return Err("internal compiler error: IR part of a call that gave no parts".into()) };
+                    let Ty::Tup(tid) = tt else { return Err("internal compiler error: IR parts of a value not a tuple".into()) };
+                    let es = mimic_check::types::tuple_elems(tid);
+                    let x = self.b.build_extract_value(sv, *k, "").s()?;
+                    let part = self.val_of(x, es[*k as usize], true);
+                    self.as_ty(part, ty, "part of the result")?
                 }
                 Op::If { cond, then, els } => self.ir_if(f, ty, get(vals, *cond)?, then, els, vals)?,
                 Op::Loop { init, var, count, done, step, moved } => {
@@ -314,7 +349,9 @@ impl<'ctx> Cg<'ctx, '_> {
                         let x = self.load_raw(fp, el)?;
                         self.as_ty(x, ty, "field")?
                     } else {
-                        let x = self.b.build_load(self.ptr, fp, "field").s()?.into_pointer_value();
+                        let x = self.b.build_load(self.ptr, fp, "field").s()?;
+                        self.tbaa(x, "slot")?;
+                        let x = x.into_pointer_value();
                         let v = if let (V::P(_, true), false) = (base, *borrow) {
                             self.call_rt("mim_retain", &[x.into()])?;
                             V::P(x, true)
@@ -354,8 +391,18 @@ impl<'ctx> Cg<'ctx, '_> {
                             steps.push(match c {
                                 mimic_ir::Change::Put(i, x) => Ch::Put(self.to_i64(get(vals, *i)?)?, self.to_i64(get(vals, *x)?)?),
                                 mimic_ir::Change::Push(x) => Ch::Push(self.to_i64(get(vals, *x)?)?),
+                                mimic_ir::Change::Fill(x, n) => Ch::Fill(self.to_i64(get(vals, *x)?)?, self.to_i64(get(vals, *n)?)?),
                                 mimic_ir::Change::Concat(x) => {
                                     let v = get(vals, *x)?;
+                                    if let V::A(a, El::I64) = v {
+                                        let n = a.get_type().len();
+                                        let mut xs = Vec::new();
+                                        for k in 0..n {
+                                            xs.push(self.to_i64(self.elem_at(a, El::I64, k)?)?);
+                                        }
+                                        steps.push(Ch::Append(xs));
+                                        continue;
+                                    }
                                     let b = match v {
                                         V::P(..) => v,
                                         _ => {
@@ -430,6 +477,19 @@ impl<'ctx> Cg<'ctx, '_> {
                         }
                         _ => return Err("internal compiler error: IR part of a value not in registers".into()),
                     }
+                }
+                // a short list in registers at an index known only when
+                // running: checked against its length, chosen by selects
+                Op::GetAt(v, k) => {
+                    let a = get(vals, *v)?;
+                    let i = self.to_i64(get(vals, *k)?)?;
+                    self.index_fixed(a, i)?
+                }
+                Op::SetAt(v, k, x) => {
+                    let a = get(vals, *v)?;
+                    let i = self.to_i64(get(vals, *k)?)?;
+                    let x = get(vals, *x)?;
+                    self.set_fixed(a, i, x)?
                 }
                 Op::Set(v, k, x) => {
                     let base = get(vals, *v)?;
@@ -560,9 +620,44 @@ impl<'ctx> Cg<'ctx, '_> {
                 let f = cg.module.get_function("mim_push_i64_own").unwrap_or_else(|| cg.module.add_function("mim_push_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
                 Ok(cg.b.build_call(f, &[list.into(), x.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
             }),
+            Ch::Append(xs) => self.append_i64_inline(list, &xs, &mut |cg| {
+                let f = cg.module.get_function("mim_push_i64_own").unwrap_or_else(|| cg.module.add_function("mim_push_i64_own", cg.ptr.fn_type(&[cg.ptr.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                let mut l = list;
+                for x in &xs {
+                    l = cg.b.build_call(f, &[l.into(), (*x).into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                }
+                Ok(l)
+            }),
+            Ch::Fill(x, n) => {
+                let f = self.module.get_function("mim_fill_i64_own").unwrap_or_else(|| self.module.add_function("mim_fill_i64_own", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), i64t.into()], false), Some(inkwell::module::Linkage::External)));
+                Ok(self.b.build_call(f, &[list.into(), x.into(), n.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+            }
             Ch::Concat(ys) => {
+                // an empty list of one dimension (`flush` when no run ends:
+                // the one immortal `[]`): the list as it is, no call
+                let i32t = self.ctx.i32_type();
+                let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
+                let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, ys, 2, "").s()?, "rank").s()?.into_int_value();
+                let n = self.b.build_load(i64t, self.b.build_struct_gep(hdr, ys, 3, "").s()?, "len").s()?.into_int_value();
+                let none = self.b.build_and(
+                    self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?,
+                    self.b.build_int_compare(inkwell::IntPredicate::EQ, n, i64t.const_zero(), "").s()?,
+                    "",
+                ).s()?;
+                let fun = self.cur_fn.ok_or("internal compiler error: concat outside a function")?;
+                let before = self.b.get_insert_block().ok_or("internal compiler error: no block")?;
+                let call = self.ctx.append_basic_block(fun, "concat_call");
+                let join = self.ctx.append_basic_block(fun, "concat_join");
+                self.b.build_conditional_branch(none, join, call).s()?;
+                self.b.position_at_end(call);
                 let f = self.module.get_function("mim_std_concat_own").unwrap_or_else(|| self.module.add_function("mim_std_concat_own", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into()], false), Some(inkwell::module::Linkage::External)));
-                Ok(self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value())
+                let r = self.b.build_call(f, &[list.into(), ys.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let after = self.b.get_insert_block().ok_or("internal compiler error: no block")?;
+                self.b.build_unconditional_branch(join).s()?;
+                self.b.position_at_end(join);
+                let phi = self.b.build_phi(self.ptr, "concat").s()?;
+                phi.add_incoming(&[(&list, before), (&r, after)]);
+                Ok(phi.as_basic_value().into_pointer_value())
             }
         }
     }
@@ -586,9 +681,15 @@ impl<'ctx> Cg<'ctx, '_> {
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
         inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
-        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
-        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
-        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?.into_int_value();
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?;
+        self.tbaa(dtype, "header")?;
+        let dtype = dtype.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?;
+        self.tbaa(rank, "header")?;
+        let rank = rank.into_int_value();
+        let len = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 3, "").s()?, "len").s()?;
+        self.tbaa(len, "header")?;
+        let len = len.into_int_value();
         let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
         let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
         let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
@@ -602,7 +703,8 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(here);
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), list, &[i32t.const_int(1, false)], "data").s()? };
         let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-        self.b.build_store(at, x).s()?;
+        let st = self.b.build_store(at, x).s()?;
+        self.tbaa(st, "elem")?;
         let here_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(slow_bb);
@@ -627,10 +729,16 @@ impl<'ctx> Cg<'ctx, '_> {
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let rc = self.b.build_load(i64t, self.b.build_struct_gep(hdr, list, 0, "").s()?, "rc").s()?;
         inkwell::values::BasicValue::as_instruction_value(&rc).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
-        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?.into_int_value();
-        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?.into_int_value();
+        let dtype = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 1, "").s()?, "dtype").s()?;
+        self.tbaa(dtype, "header")?;
+        let dtype = dtype.into_int_value();
+        let rank = self.b.build_load(i32t, self.b.build_struct_gep(hdr, list, 2, "").s()?, "rank").s()?;
+        self.tbaa(rank, "header")?;
+        let rank = rank.into_int_value();
         let lenp = self.b.build_struct_gep(hdr, list, 3, "").s()?;
-        let len = self.b.build_load(i64t, lenp, "len").s()?.into_int_value();
+        let len = self.b.build_load(i64t, lenp, "len").s()?;
+        self.tbaa(len, "header")?;
+        let len = len.into_int_value();
         let room = self.b.build_load(self.ptr, self.b.build_struct_gep(hdr, list, 4, "").s()?, "room").s()?.into_pointer_value();
         let room = self.b.build_ptr_to_int(room, i64t, "").s()?;
         let n = self.b.build_int_add(len, i64t.const_int(xs.len() as u64, false), "").s()?;
@@ -638,7 +746,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let once = self.b.build_int_compare(inkwell::IntPredicate::EQ, rc.into_int_value(), i64t.const_int(1, false), "").s()?;
         let ints = self.b.build_int_compare(inkwell::IntPredicate::EQ, dtype, i32t.const_zero(), "").s()?;
         let flat = self.b.build_int_compare(inkwell::IntPredicate::EQ, rank, i32t.const_int(1, false), "").s()?;
-        // (room 0: not known, the runtime asks the allocator)
+        // (room 0: a list in one of the runtime's pools, whose block holds
+        // the bytes of its length's class: 16, 64 or 256 (size_class in
+        // mimic_rt.c); past them, not known, and the runtime asks the
+        // allocator. A row grown by `push` to 45 numbers called the runtime
+        // for its first 32: levenshtein)
+        let old = self.b.build_int_mul(len, i64t.const_int(8, false), "").s()?;
+        let class = |cg: &Self, limit: u64, then: IntValue<'ctx>| -> R<IntValue<'ctx>> {
+            let within = cg.b.build_int_compare(inkwell::IntPredicate::ULE, old, i64t.const_int(limit, false), "").s()?;
+            Ok(cg.b.build_select(within, i64t.const_int(limit, false), then, "").s()?.into_int_value())
+        };
+        let pooled = class(self, 256, i64t.const_zero())?;
+        let pooled = class(self, 64, pooled)?;
+        let pooled = class(self, 16, pooled)?;
+        let known = self.b.build_int_compare(inkwell::IntPredicate::NE, room, i64t.const_zero(), "").s()?;
+        let room = self.b.build_select(known, room, pooled, "room").s()?.into_int_value();
         let fits = self.b.build_int_compare(inkwell::IntPredicate::ULE, need, room, "").s()?;
         let ok = self.b.build_and(self.b.build_and(once, ints, "").s()?, self.b.build_and(flat, fits, "").s()?, "").s()?;
         let f = self.cur_fn.ok_or("internal compiler error: push outside a function")?;
@@ -651,9 +773,11 @@ impl<'ctx> Cg<'ctx, '_> {
         for (k, x) in xs.iter().enumerate() {
             let at = self.b.build_int_add(len, i64t.const_int(k as u64, false), "").s()?;
             let at = unsafe { self.b.build_in_bounds_gep(i64t, data, &[at], "").s()? };
-            self.b.build_store(at, *x).s()?;
+            let st = self.b.build_store(at, *x).s()?;
+            self.tbaa(st, "elem")?;
         }
-        self.b.build_store(lenp, n).s()?;
+        let st = self.b.build_store(lenp, n).s()?;
+        self.tbaa(st, "header")?;
         let here_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).s()?;
         self.b.position_at_end(slow_bb);
@@ -673,6 +797,7 @@ impl<'ctx> Cg<'ctx, '_> {
     fn ir_loop(&mut self, f: &Function, ty: Ty, init: V<'ctx>, var: mimic_ir::Val, count: Option<V<'ctx>>, done: Option<&Region>, step: &Region, vals: &mut Vec<Option<V<'ctx>>>) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let x0 = self.as_ty(init, ty, "loop state")?;
+        let count_flag = self.count_loop()?;
         let n = match count {
             Some(c) => {
                 let n = self.to_i64(c)?;
@@ -715,8 +840,10 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_conditional_branch(stop, out, body).s()?;
         self.b.position_at_end(body);
         vals[var.0 as usize] = Some(cur);
+        let counted = self.count_step(count_flag)?;
         let next = self.ir_region(f, step, vals)?;
         let next = self.as_ty(next, ty, "loop state")?;
+        self.count_step_end(counted)?;
         let latch = self.b.get_insert_block().unwrap();
         if let Some(ip) = ip {
             let i = ip.as_basic_value().into_int_value();

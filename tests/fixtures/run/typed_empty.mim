@@ -1,0 +1,25 @@
+module main
+
+// `⍬`: an empty list of i64; `⍬[T]`: of T. Typed, so what grows from it
+// is compiled for that type (a bare `[]` has no element type)
+
+type P = { x: i64, y: i64 }
+
+fn evens(xs: [i64]) -> [i64] {
+    let (_, out) = (0, ⍬) ▷ settle(s => {
+        let (i, acc) = s
+        if xs[i] % 2 == 0 { (i + 1, push(acc, xs[i])) } else { (i + 1, acc) }
+    }, s => s.0 == ≢ xs)
+    out
+}
+
+fn main() {
+    print("{≢ ⍬} {≢ ⍬[f64]} {≢ ⍬[str]} {≢ ⍬[P]}")
+    print(push(⍬, 3))
+    print(push(⍬[f64], 2.5))
+    print(push(⍬[str], "x"))
+    print(push(⍬[P], P { x: 1, y: 2 })[0].y)
+    print(evens([3, 4, 8, 1, 6]))
+    print(evens(⍬))
+    print(\z ▷ +/)
+}

@@ -1,0 +1,30 @@
+module main
+
+// `e else { … }` as an expression: the value inside an Option or Result,
+// else the block (a value, or `return`); `let x = e else { v }` too
+
+fn width(args: [str]) -> i64 {
+    if 1 < ≢ args { parse_int(args[1]) else { 1086 } } else { 1086 }
+}
+
+fn first_even(xs: [i64]) -> i64 {
+    let k = find_even(xs, 0) else { return ¯1 }
+    k * 10
+}
+
+fn find_even(xs: [i64], i: i64) -> Option[i64] {
+    if i == ≢ xs { None } else if xs[i] % 2 == 0 { Some(xs[i]) } else { find_even(xs, i + 1) }
+}
+
+fn main() {
+    print(width(["prog", "640"]))
+    print(width(["prog", "x"]))
+    print(width(["prog"]))
+    let h = parse_int("12") else { 0 }
+    let name = find_even([1, 3], 0) else { 7 }
+    print("{h} {name} {first_even([1, 4])} {first_even([1, 3])}")
+    print((find_even([5, 8], 0) else { 0 }) + 1)
+    let r: Result[str, str] = Err("bad")
+    print(r else { "fallback" })
+    print(⍳ 4 ¨ (i => find_even([i * 3], 0) else { ¯1 }))
+}

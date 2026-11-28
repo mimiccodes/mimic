@@ -921,8 +921,18 @@ impl Walk<'_, '_> {
         let mut diverged = false;
         for s in &b.stmts {
             match s {
-                Stmt::Let { name, ty, value, span, .. } => {
-                    let v = self.expr(value);
+                Stmt::Let { name, ty, value, span, mutable, .. } => {
+                    let mut v = self.expr(value);
+                    // `let z: [i64] = []` (what `⍬` and `⍬[f64]` are): the
+                    // empty list takes the declared list of numbers (no list
+                    // to check: it has no elements), so `z` is typed
+                    if is_empty_list(value)
+                        && let Some(a) = ty.as_ref().and_then(|t| ann_in(self.inf.p, self.module, t))
+                        && let Some(nt) = empty_branch_as(a)
+                    {
+                        self.out.exprs.insert(id(value), nt);
+                        v = nt;
+                    }
                     let mut t = match coerce_in(self.inf.p, self.module, ty.as_ref(), v) {
                         Ok(t) => t,
                         Err(m) => {
@@ -933,8 +943,14 @@ impl Walk<'_, '_> {
                         }
                     };
                     // mutable bindings: join with every value assigned so far
+                    // (an immutable one whose earlier walk left it unknown
+                    // takes this walk's type: before a callee's result was
+                    // known, `if r > 0 { run_byte(r) } else { [] }` was `[?]`,
+                    // and a join kept it so in every later walk)
                     let key = id(s);
-                    if let Some(prev) = self.out.lets.get(&key) {
+                    if let Some(prev) = self.out.lets.get(&key)
+                        && (*mutable || !matches!(prev, Ty::Dyn | Ty::Arr(El::Dyn, _)))
+                    {
                         t = t.join(*prev);
                     }
                     self.out.lets.insert(key, t);
@@ -1374,6 +1390,30 @@ impl Walk<'_, '_> {
                                     }
                                 }
                             }
+                            // `e else { … }`: the value inside an Option or Result
+                            if fm.name == "prelude" && fm.package == "std" && matches!(p.fns[f].name.as_str(), "__has_value" | "__value_of") {
+                                match argt.first().copied() {
+                                    Some(Ty::Obj(t)) if matches!(p.types[obj_tid(t)].name.as_str(), "Option" | "Result") => {
+                                        if p.fns[f].name == "__value_of" {
+                                            let inner = obj_args(t).first().copied().unwrap_or(Ty::Dyn);
+                                            self.call_user(id(e), f, argt);
+                                            return if inner == Ty::Never { Ty::Dyn } else { inner };
+                                        }
+                                    }
+                                    Some(t) if p.fns[f].name == "__has_value" && !matches!(t, Ty::Dyn | Ty::Never) => {
+                                        let tn = match t {
+                                            Ty::Obj(o) => p.types[obj_tid(o)].name.clone(),
+                                            t => show(p, t),
+                                        };
+                                        self.err(
+                                            Diag::new(&C::LET_ELSE_TYPE, format!("`else` after a value needs an Option or Result, found `{tn}`"), e.span)
+                                                .note("`e else { … }` gives the value inside `Some` or `Ok`, else the block"),
+                                        );
+                                    }
+                                    Some(Ty::Never) if p.fns[f].name == "__value_of" => return Ty::Never,
+                                    _ => {}
+                                }
+                            }
                             let r = self.call_user(id(e), f, argt);
                             if let Some(t) = pushed {
                                 return t;
@@ -1720,6 +1760,12 @@ impl Walk<'_, '_> {
                         });
                         return Ty::Dyn;
                     }
+                    // a start that is `[]`, or a tuple with `[]` parts
+                    // (`(0, [], marks)`): those lists take the type the step
+                    // gives them, a list of i64 or of f64, when the step then
+                    // gives back the state it was given (else the state was
+                    // dynamic, and so was every function using it)
+                    let a = self.empty_lists_from_step(&args[0], a, step);
                     let r = self.lambda(step, vec![a]);
                     // the same record, its list fields' known lengths aside
                     // (a start built from `[x]` knows one): the record type
@@ -1775,6 +1821,15 @@ impl Walk<'_, '_> {
                     && let ExprKind::Int(k) = args[0].kind {
                         return Ty::Arr(El::I64, fixed_len(El::I64, k.max(0) as usize));
                     }
+                // x ⥊ [n] of a number: one dimension, n copies of it, a list
+                // of that number's type (`0 ⥊ [64]`, `prev ⥊ [k + 1]`; more
+                // dimensions stay dynamic, the runtime knows their shape)
+                if *prim == Prim::Reshape
+                    && matches!(a, Ty::I64 | Ty::F64)
+                    && matches!(&args[1].kind, ExprKind::Array(xs) if xs.len() == 1)
+                {
+                    return Ty::Arr(if a == Ty::F64 { El::F64 } else { El::I64 }, 0);
+                }
                 prim_ty(*prim, a, b)
             }
             // a lambda as a value: its parameters can be anything
@@ -1789,6 +1844,20 @@ impl Walk<'_, '_> {
                 match els {
                     Some(x) => {
                         let mut u = self.expr(x);
+                        // `e else { … }` (written by the parser as this `if`):
+                        // the block gives the type of the value inside, or
+                        // leaves (`return`)
+                        if is_or_else(cond) && u == Ty::Unit && t != Ty::Unit {
+                            self.err(
+                                Diag::new(&C::ELSE_MUST_RETURN, "the `else` block gives nothing: give a value of the type inside, or end with `return`", x.span)
+                                    .note("it runs when the value is `None` or `Err`, so it stands in for the value inside"),
+                            );
+                        } else if is_or_else(cond) && !matches!(t, Ty::Dyn | Ty::Never) && !matches!(u, Ty::Dyn | Ty::Never) && t.join(u) != t {
+                            self.err(
+                                Diag::new(&C::TYPE_MISMATCH, format!("the `else` block gives `{}`, but the value inside is `{}`", show(self.inf.p, u), show(self.inf.p, t)), x.span)
+                                    .note("give a value of the same type, or leave with `return`"),
+                            );
+                        }
                         // a branch that is a number written in the program
                         // takes the other's f32 or i32: `if c { 0 } else { n }`
                         if let Some(lit) = then.tail.as_deref().filter(|l| is_literal(l))
@@ -1830,6 +1899,54 @@ impl Walk<'_, '_> {
 }
 
 impl Walk<'_, '_> {
+    /// A loop's start `init` (typed `a`) that is `[]`, or a tuple literal
+    /// with `[]` parts: retyped with those lists of i64, or else of f64,
+    /// when the step (one parameter) gives back that state (list lengths
+    /// aside); else `a` as it was.
+    fn empty_lists_from_step(&mut self, init: &Expr, a: Ty, step: &Expr) -> Ty {
+        let empties: Vec<&Expr> = match (&init.kind, a) {
+            (_, Ty::Arr(El::Dyn, _)) if is_empty_list(init) => vec![init],
+            (ExprKind::Tuple(xs), Ty::Tup(t)) => {
+                let ts = tuple_elems(t);
+                xs.iter().zip(&ts).filter(|(x, t)| is_empty_list(x) && matches!(t, Ty::Arr(El::Dyn, _))).map(|(x, _)| x).collect()
+            }
+            _ => vec![],
+        };
+        if empties.is_empty() {
+            return a;
+        }
+        let with = |el: El| match a {
+            Ty::Tup(t) => {
+                let ts = tuple_elems(t);
+                let ExprKind::Tuple(xs) = &init.kind else { unreachable!() };
+                let parts: Vec<Ty> = xs.iter().zip(&ts).map(|(x, t)| if is_empty_list(x) && matches!(t, Ty::Arr(El::Dyn, _)) { Ty::Arr(el, 0) } else { *t }).collect();
+                Ty::Tup(tuple_id(&parts))
+            }
+            _ => Ty::Arr(el, 0),
+        };
+        for el in [El::I64, El::F64] {
+            let try_a = with(el);
+            let r = self.lambda(step, vec![try_a]);
+            // the step's lists may differ in their known lengths: the state
+            // is the join, if the step gives that back too
+            let j = try_a.join(r);
+            let typed = |t: &Ty| !matches!(t, Ty::Dyn | Ty::Never | Ty::Arr(El::Dyn, _));
+            let all_typed = match j {
+                Ty::Tup(t) => tuple_elems(t).iter().all(typed),
+                t => typed(&t),
+            };
+            if r == Ty::Never || !all_typed || self.lambda(step, vec![j]) != j {
+                continue;
+            }
+            for x in &empties {
+                self.out.exprs.insert(id(x), Ty::Arr(el, 0));
+            }
+            self.out.exprs.insert(id(init), j);
+            return j;
+        }
+        a
+    }
+
     /// The type of `base.name`.
     fn field_ty(&mut self, base: Ty, name: &str, span: mimic_syntax::Span) -> Ty {
         let p = self.inf.p;
@@ -2056,6 +2173,11 @@ fn tail_literal(e: &Expr) -> Option<&Expr> {
         ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref().filter(|l| is_literal(l)),
         _ => is_literal(e).then_some(e),
     }
+}
+
+/// The test of an `if` the parser wrote for `e else { … }`.
+fn is_or_else(cond: &Expr) -> bool {
+    matches!(&cond.kind, ExprKind::Call { callee, .. } if matches!(&callee.kind, ExprKind::Path(p) if p.len() == 1 && p[0] == "__has_value"))
 }
 
 fn is_empty_list(e: &Expr) -> bool {

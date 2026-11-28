@@ -1,0 +1,100 @@
+# How many reference-count operations does the benchmark corpus make?
+# Builds mimic and runs tools/rc-count.py (every benchmark on one core, its
+# output checked, retains, releases and values freed counted), on Linux.
+# 0.4.3's target: at most 468 million. Also the values made in loop steps
+# (evolve, settle) past each loop's first step: a steady state makes none. Also the size of every benchmark's
+# executable (tools/sizes.py). Run after each merge into dev, or by hand.
+name: rc count
+
+on:
+  workflow_dispatch:
+    inputs:
+      benches:
+        description: benchmarks (bench/ names; empty for all)
+        default: ""
+  # and on a change to this file, to try it (a workflow run by hand is
+  # dispatchable only once it is on main)
+  pull_request:
+    paths: [.github/workflows/rc-count.yml, tools/rc-count.py]
+  # and after every merge into dev that changes the compiler or the
+  # runtime: the count followed change by change
+  push:
+    branches: [dev]
+    paths: [crates/**, runtime/**, bench/**, .github/workflows/rc-count.yml]
+
+concurrency:
+  group: rc-count-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: 23.1.4
+  TAG: deps-llvm-23.1.4
+  CARGO_TERM_COLOR: always
+
+jobs:
+  count:
+    name: rc count (linux-x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustc --version
+
+      - name: LLVM (from the llvm workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deps="$HOME/.mimic/deps"
+          mkdir -p "$deps"
+          gh release download "$TAG" -p "llvm-$LLVM_VERSION-linux-x86_64.tar.xz" -D "$deps"
+          tar -xJf "$deps/llvm-$LLVM_VERSION-linux-x86_64.tar.xz" -C "$deps"
+          rm "$deps/llvm-$LLVM_VERSION-linux-x86_64.tar.xz"
+          ln -sfn "$deps/llvm-$LLVM_VERSION" .llvm
+
+      - name: Other dependencies (tools/deps.sh)
+        run: LLVM_PREFIX="$HOME/.mimic/deps/llvm-$LLVM_VERSION" MIMIC_DEPS="$HOME/.mimic/deps" tools/deps.sh
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Count
+        env:
+          BENCHES: ${{ inputs.benches }}
+        run: |
+          export PATH="$PWD/.llvm/bin:$PATH"
+          python3 tools/rc-count.py --mimic target/release/mimic --out rc.tsv $BENCHES
+          {
+            echo "### Reference-count operations ($(git rev-parse --short HEAD))"
+            echo
+            echo '| benchmark | retains | releases | freed | operations |'
+            echo '|---|---:|---:|---:|---:|'
+            tail -n +2 rc.tsv | sort -t$'\t' -k5,5nr | awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sizes
+        env:
+          BENCHES: ${{ inputs.benches }}
+        run: |
+          export PATH="$PWD/.llvm/bin:$PATH"
+          python3 tools/sizes.py --mimic target/release/mimic --out sizes.tsv $BENCHES
+          {
+            echo
+            echo "### Executable sizes ($(git rev-parse --short HEAD), linux-x86_64)"
+            echo
+            echo '| program | bytes |'
+            echo '|---|---:|'
+            tail -n +2 sizes.tsv | awk -F'\t' '{ printf "| %s | %s |\n", $1, $2 }'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rc-count
+          path: |
+            rc.tsv
+            sizes.tsv
+          retention-days: 14

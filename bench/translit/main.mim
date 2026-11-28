@@ -1,0 +1,26 @@
+module main
+
+// translit: 8,000,000 generated characters mapped one by one and joined:
+// letters by ROT13, digits doubled, a space to "_", a dot dropped. Prints
+// the result's length and a checksum of its bytes (each weighted by its
+// position % 251 + 1). Text worked on character by character, as the
+// held-out `caesar` does: `chars(t) ¨ f ▷ join("")`.
+
+fn map(c: str) -> str {
+    let k = char_code(c)
+    if k >= 97 and k <= 122 { char_of(97 + (k - 97 + 13) % 26) }
+    else if k >= 65 and k <= 90 { char_of(65 + (k - 65 + 13) % 26) }
+    else if k >= 48 and k <= 57 { c + c }
+    else if c == " " { "_" }
+    else { "" }
+}
+
+fn main() {
+    let alphabet = chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .")
+    let n = 8000000
+    let text = ⍳ n ¨ (k => alphabet[(k * k * 7 + k * 13) % 64]) ▷ join("")
+    let out = chars(text) ¨ (c => map(c)) ▷ join("")
+    let b = bytes::of_text(out)
+    print(≢ b)
+    print(b * ((⍳ (≢ b)) % 251 + 1) ▷ +/)
+}

@@ -154,22 +154,22 @@ pub fn prop_str(k: i64) -> str {
     join(⍳ random::int(0, k div 4 + 3) ¨ (i => letters[random::int(0, 8)]), \"\")
 }
 pub fn prop_list(k: i64, gen) { ⍳ random::int(0, k div 5 + 3) ¨ (i => gen(k)) }
-// (an empty list keeps its element type: `⍳ 0 ¨ f` would not know it)
+// (`⍬[T]`: an empty list that keeps its element type)
 pub fn prop_ints(k: i64) -> [i64] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [0] ↓ 1 } else { ⍳ n ¨ (i => prop_int(k)) }
+    if n == 0 { ⍬ } else { ⍳ n ¨ (i => prop_int(k)) }
 }
 pub fn prop_floats(k: i64) -> [f64] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [0.0] ↓ 1 } else { ⍳ n ¨ (i => prop_float(k)) }
+    if n == 0 { ⍬[f64] } else { ⍳ n ¨ (i => prop_float(k)) }
 }
 pub fn prop_bools(k: i64) -> [bool] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [true] ↓ 1 } else { ⍳ n ¨ (i => prop_bool(k)) }
+    if n == 0 { ⍬[bool] } else { ⍳ n ¨ (i => prop_bool(k)) }
 }
 pub fn prop_strs(k: i64) -> [str] {
     let n = random::int(0, k div 5 + 3)
-    if n == 0 { [\"\"] ↓ 1 } else { ⍳ n ¨ (i => prop_str(k)) }
+    if n == 0 { ⍬[str] } else { ⍳ n ¨ (i => prop_str(k)) }
 }
 // Smaller values, nearest the simplest first.
 pub fn prop_shrink_int(x: i64) -> [i64] {
@@ -222,6 +222,10 @@ pub extern \"mimic\" {
     fn is_float(s: str) -> bool
     fn to_float(s: str) -> f64
     fn push(xs: any, x: any) -> any
+    // `e else { … }` (the parser writes these): whether an Option or Result
+    // holds a value (Some, Ok), and that value
+    fn __has_value(o: any) -> bool
+    fn __value_of(o: any) -> any
     fn concat(xs: any, ys: any) -> any
     fn sort(xs: any) -> any
     fn has(m: any, key: any) -> bool
@@ -1766,6 +1770,7 @@ fn codegen_and_link(
             job.libs = p.manifest.ffi_link.clone();
         }
         run_tool(toolchain::link(&tc, target, &job), "linking")?;
+        toolchain::mac_main_stack(&tc, &exe)?;
         clock.mark("link");
         let _ = mimic_toolchain::jobs::write_atomic(&stamp, key.as_bytes());
         Ok(Artifact { path: exe, kind: ArtifactKind::Executable, note: None })

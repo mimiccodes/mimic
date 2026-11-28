@@ -117,6 +117,67 @@ mim_val *mim_std_lines(mim_val *s) {
     return r;
 }
 
+static mim_val *grow_owned(mim_val *xs, int64_t n);
+
+/* join(chars(s) ¨ f, sep) in one pass (the compiled loop, codegen's
+ * chars_map_join): no list of one-letter strings made, none joined. */
+
+/* the character at byte i of s (a shared one-letter string for ASCII; the
+ * caller releases it) and, in *next, the byte the next one starts at.
+ * (s is text: the compiler checked its type) */
+mim_val *mim_char_at_byte(mim_val *s, int64_t i, int64_t *next) {
+    const unsigned char *a = (const unsigned char *)s->data;
+    unsigned char c = a[i];
+    if (c < 0x80) {
+        *next = i + 1;
+        return ascii1(c);
+    }
+    int64_t n = s->len, len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    if (i + len > n) len = n - i;
+    *next = i + len;
+    return mim_str((const char *)a + i, len);
+}
+
+/* the room a text held once has for payload bytes, in place (0: ask
+ * grow_owned): its pool block's, or what growing it recorded */
+static inline size_t text_room(const mim_val *v) {
+    if (v->desc) return (size_t)(uintptr_t)v->desc;
+    size_t used = payload_bytes(MIM_CHAR, v->len);
+    int c = size_class(used);
+    return c < SIZE_CLASSES ? class_bytes[c] : 0;
+}
+
+static inline void copy_short(char *to, const char *from, int64_t m) {
+    if (m <= 8)
+        for (int64_t j = 0; j < m; j++) to[j] = from[j];
+    else
+        memcpy(to, from, (size_t)m);
+}
+
+/* the text acc (owned, held once, made by the loop) with sep (unless
+ * first) and part (lent) appended, in place. (Both text: the compiler
+ * checked their types) */
+mim_val *mim_text_join_add(mim_val *acc, mim_val *part, mim_val *sep, int32_t first) {
+    int64_t n = acc->len, k = first ? 0 : sep->len, m = part->len;
+    int64_t total = n + k + m;
+    if (payload_bytes(MIM_CHAR, total) <= text_room(acc)) {
+        acc->len = total;
+        acc->data[total] = 0;
+    } else {
+        acc = grow_owned(acc, total);
+    }
+    copy_short((char *)acc->data + n, (const char *)sep->data, k);
+    copy_short((char *)acc->data + n + k, (const char *)part->data, m);
+    return acc;
+}
+
+/* releases the values of xs[0..n) (empty ones skipped): the texts a pure
+ * function gave the ASCII characters, at the end of the loop */
+void mim_release_all_of(mim_val **xs, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (xs[i]) mim_release(xs[i]);
+}
+
 mim_val *mim_std_join(mim_val *xs, mim_val *sep) {
     const char *d = str_arg(sep, "join");
     need(xs, "join");

@@ -493,3 +493,68 @@ static mim_val *ascii1(unsigned char c) {
     if (__atomic_compare_exchange_n(&t[c], &expected, n, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return n;
     return expected; /* another thread made it first (this one stays, immortal, unused) */
 }
+
+/* `e else { … }` (the parser writes calls to these): whether an Option or
+ * Result holds a value (Some, Ok), and that value (owned). */
+mim_val *mim_std___has_value(mim_val *o) { return mim_bool(mim_unwrap_ok(o)); }
+mim_val *mim_std___value_of(mim_val *o) { return mim_obj_get(o, 0); }
+
+/* `m[i] = row` (and `m[i, j] = …` with fewer indices than dimensions): the
+ * `cell` elements from `off` replaced by those of a list that long, or all
+ * set to a number; copy-on-write as for one element, a byte matrix keeping
+ * bytes (0 … 255). */
+void mim_set_cell(mim_val **slot, int64_t off, int64_t cell, mim_val *v) {
+    mim_val *xs = *slot;
+    need(v, "indexed assignment");
+    if (IS_HANDLES(xs) || IS_HANDLES(v)) mim_panic("indexed assignment of a row: a matrix of numbers takes a list of numbers");
+    int whole = v->rank != 0;
+    if (whole && (v->rank != 1 || v->len != cell)) {
+        char buf[200];
+        if (v->rank == 1)
+            snprintf(buf, sizeof buf, "indexed assignment of a row: the row has %lld elements, the list given %lld", (long long)cell, (long long)v->len);
+        else
+            snprintf(buf, sizeof buf, "indexed assignment of a row: the row has %lld elements; give a list that long, or one number", (long long)cell);
+        mim_panic(buf);
+    }
+    int newdt = xs->dtype;
+    if (IS_FLOAT(v->dtype) && !IS_FLOAT(xs->dtype) && xs->dtype != MIM_U8) newdt = MIM_F64;
+    if (xs->dtype == MIM_U8 && IS_FLOAT(v->dtype)) mim_panic("indexed assignment: a byte is an integer from 0 to 255");
+    if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
+        mim_val *c = alloc_like(newdt, xs);
+        for (int64_t j = 0; j < xs->len; j++) {
+            if (IS_FLOAT(newdt)) setf(c, j, getf(xs, j));
+            else seti(c, j, geti(xs, j));
+        }
+        mim_release(xs);
+        *slot = xs = c;
+    }
+    for (int64_t j = 0; j < cell; j++) {
+        int64_t from = whole ? j : 0;
+        if (xs->dtype == MIM_U8) {
+            int64_t b = geti(v, from);
+            if (b < 0 || b > 255) mim_panic("indexed assignment: a byte is an integer from 0 to 255");
+            ((uint8_t *)xs->data)[off + j] = (uint8_t)b;
+        } else if (IS_FLOAT(xs->dtype)) {
+            setf(xs, off + j, getf(v, from));
+        } else {
+            seti(xs, off + j, geti(v, from));
+        }
+    }
+}
+/* Linux: the main thread's stack grows as it is used, up to the soft stack
+ * limit (8 MB by default). Raised to 512 MB (or the hard limit, if lower):
+ * deep recursion the net cannot take over (a function giving back a list)
+ * then runs as far as on macOS and Windows, whose executables ask for a
+ * 512 MB stack when linked. Elsewhere: nothing. */
+#if defined(__linux__) && !defined(__wasi__)
+#include <sys/resource.h>
+static void mim_grow_stack(void) {
+    struct rlimit r;
+    const rlim_t want = (rlim_t)512 << 20;
+    if (getrlimit(RLIMIT_STACK, &r) != 0 || r.rlim_cur == RLIM_INFINITY || r.rlim_cur >= want) return;
+    r.rlim_cur = (r.rlim_max == RLIM_INFINITY || r.rlim_max >= want) ? want : r.rlim_max;
+    setrlimit(RLIMIT_STACK, &r);
+}
+#else
+static void mim_grow_stack(void) {}
+#endif

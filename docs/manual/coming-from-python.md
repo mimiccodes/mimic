@@ -22,6 +22,7 @@ Mimic reads a lot like Python with arrays built in, NumPy style: arithmetic work
 | `f"{x:.2f}"` | `"{x:.2}"` |
 | `None` | `None`, inside an `Option` |
 | `raise` / `try` | return `Err(…)` / `match` or `let … else` |
+| `int(s) if s.isdigit() else 0` | `parse_int(s) else { 0 }` |
 | `class Point:` | `type Point = { x: f64, y: f64 }` |
 | `def f(x, size=16):` | `fn f(x, size: i64 = 16)` |
 

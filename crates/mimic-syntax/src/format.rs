@@ -35,7 +35,28 @@ const SYNTAX: &[(&str, &str)] = &[
     ("∨", "or"),
     ("¬", "not"),
     ("⋔", "arms"),
+    ("⇑", "pub"),
+    ("⇄", "mut"),
+    ("⍰", "if"),
+    ("⋄", "else"),
+    ("⏎", "return"),
+    ("⇐", "use"),
+    ("≔", "as"),
+    ("⌁", "extern"),
+    ("☡", "unsafe"),
+    ("✓", "trusted"),
+    ("⊡", "type"),
+    ("⊨", "match"),
+    ("⊕", "with"),
+    ("●", "true"),
+    ("○", "false"),
+    ("⊢", "test"),
+    ("∀", "for"),
+    ("⎘", "include"),
 ];
+
+/// Glyphs of keywords: `mimic fmt --glyphs` leaves their words as they are.
+const KEYWORD_GLYPHS: &[&str] = &["§", "ƒ", "⇑", "⇄", "⍰", "⋄", "⏎", "⇐", "≔", "⌁", "☡", "✓", "⊡", "⊨", "⊕", "●", "○", "⊢", "∀", "⎘"];
 
 /// The text a token is written as in the chosen form, if it changes.
 fn respell(t: &Token, glyphs: bool) -> Option<&'static str> {
@@ -45,9 +66,10 @@ fn respell(t: &Token, glyphs: bool) -> Option<&'static str> {
         return (t.text != want).then_some(want);
     }
     if glyphs {
-        // (declarations keep their words: `module`, `fn`; glyphs are for
-        // primitives and operators)
-        let (g, _) = SYNTAX.iter().find(|(g, w)| *w == t.text && !matches!(*g, "§" | "ƒ"))?;
+        // (keywords keep their words: `module`, `fn`, `if`, `match`…;
+        // glyphs are for primitives and operators. Back to words, every
+        // glyph is written as its word.)
+        let (g, _) = SYNTAX.iter().find(|(g, w)| *w == t.text && !KEYWORD_GLYPHS.contains(g))?;
         // `*` and `/` are words in other places too (`*/`): only operators
         let op = !matches!(t.tok, Tok::Ident(_));
         return op.then_some(g);

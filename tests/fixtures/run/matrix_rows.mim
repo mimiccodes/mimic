@@ -1,0 +1,23 @@
+module main
+
+// a matrix's row read as a list and assigned in one write; a number fills
+// the row; a shared matrix is copied first, a byte matrix keeps bytes
+
+fn main() {
+    let mut m = 0 reshape [3 3]
+    let before = m
+    m[0] = [10 40 70]
+    m[2] = 5
+    print(m)
+    print(m[0])
+    print(before[0])
+    let mut f = 0.0 reshape [2 2]
+    f[1] = [1.5 2.5]
+    print(f)
+    let mut px = bytes::from([1 2 3 4 5 6]) reshape [2 3]
+    px[1] = [200 100 0]
+    print(px[1])
+    let mut cube = 0 reshape [2 2 2]
+    cube[1, 0] = [7 8]
+    print(cube[1])
+}

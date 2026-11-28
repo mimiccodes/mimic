@@ -89,6 +89,11 @@ pub fn worth(f: &Function) -> bool {
                 // the old path compiling it with the rest fuses across it,
                 // as `nbody`'s `main` showed)
                 Op::Take(_) | Op::With { .. } | Op::Put { .. } | Op::Push { .. } | Op::Record { .. } | Op::Field { .. } | Op::Map(_) | Op::Reduce(..) | Op::Index(..) => *work = true,
+                // (a short list in registers read or changed at an index:
+                // the old path does that in registers too; with nothing
+                // else left to it, the function is the IR's anyway. Counted
+                // as work, nbody's `main`, `put(vx, 0, …)` on its velocities,
+                // left the old path and its fusion: 10% slower on x86)
                 Op::Call { moves, .. } if moves.iter().any(|m| *m) => *work = true,
                 _ => {}
             }
@@ -145,9 +150,18 @@ pub enum Ty {
     /// A record on the heap (a plain record type, not generic, not kept in
     /// registers): owned or borrowed as a list is.
     Rec(mimic_check::types::Ty),
+    /// The parts of a tuple (the checker's type) a call gives, no tuple
+    /// made: 2 to 4 numbers, truth values and values on the heap, each
+    /// taken once by an [`Op::Part`] right after the call, and nothing else.
+    Parts(mimic_check::types::Ty),
 }
 
 impl Ty {
+    /// The number type of an element kind (i64 or f64; anything else i64).
+    pub fn of_el_ir(el: mimic_check::types::El) -> Ty {
+        if el == mimic_check::types::El::F64 { Ty::F64 } else { Ty::I64 }
+    }
+
     pub fn name(self) -> String {
         match self {
             Ty::Unit => "unit".into(),
@@ -157,6 +171,7 @@ impl Ty {
             Ty::Agg(t) => format!("regs {t}"),
             Ty::List(t) => format!("list {t}"),
             Ty::Rec(t) => format!("rec {t}"),
+            Ty::Parts(t) => format!("parts {t}"),
         }
     }
 
@@ -170,9 +185,10 @@ impl Ty {
             C::F64 => Ty::F64,
             C::Bool => Ty::Bool,
             _ if parts(p, t).is_some() => Ty::Agg(t),
-            // (text and lists of text too: the IR moves and releases them as
-            // any list; reading their elements is left to the old path)
-            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str, 0) => Ty::List(t),
+            // (text, lists of text and lists of lists too: the IR moves and
+            // releases them as any list; reading their elements is left to
+            // the old path)
+            C::Arr(mimic_check::types::El::I64 | mimic_check::types::El::F64 | mimic_check::types::El::U8 | mimic_check::types::El::Char | mimic_check::types::El::Str | mimic_check::types::El::Rows(_), 0) => Ty::List(t),
             // (a plain record: not an instance of a generic one. A shaped
             // one, built from lists of known length, is the same record on
             // the heap: its declared type; a field read of known length is
@@ -262,8 +278,21 @@ pub enum Op {
     Get(Val, u32),
     /// The value with part `k` replaced (`{ r with f: x }`).
     Set(Val, u32, Val),
+    /// Element `i` of a short list kept in registers (an index out of range
+    /// stops the program, as for a list on the heap).
+    GetAt(Val, Val),
+    /// A short list kept in registers with element `i` replaced (`put`;
+    /// checked as `GetAt`).
+    SetAt(Val, Val, Val),
     /// The length of a list.
     Len(Val),
+    /// Another reference of its own to a list or record that lives on
+    /// (retained; owned): what an `if`'s branch gives when it gives a value
+    /// held outside it and still used after (placed by [`own`]).
+    Share(Val),
+    /// Part `k` of the parts a call gave ([`Ty::Parts`]): a value on the
+    /// heap is owned (the call handed it over).
+    Part(Val, u32),
     /// Element `i` of a list whose elements are of kind `el` (an index out
     /// of range stops the program).
     Index(Val, Val, mimic_check::types::El),
@@ -334,12 +363,15 @@ pub enum Change {
     Push(Val),
     /// `concat(field, ys)`: `ys` a list of i64, on the heap or in registers.
     Concat(Val),
+    /// `concat(field, x ⥊ [n])`: `n` copies of the number `x` (a negative
+    /// `n` stops the program, as `⥊` does).
+    Fill(Val, Val),
 }
 
 impl Change {
     fn vals(&self) -> Vec<Val> {
         match self {
-            Change::Put(i, x) => vec![*i, *x],
+            Change::Put(i, x) | Change::Fill(i, x) => vec![*i, *x],
             Change::Push(x) | Change::Concat(x) => vec![*x],
         }
     }
@@ -438,8 +470,9 @@ impl Op {
     pub fn operands(&self) -> Vec<Val> {
         match self {
             Op::Int(_) | Op::Float(_) | Op::Bool(_) | Op::Unit | Op::Param(_) | Op::Take(_) => vec![],
-            Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) => vec![*a, *b],
-            Op::Un(_, a) | Op::Get(a, _) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
+            Op::Bin(_, a, b) | Op::Index(a, b, _) | Op::Set(a, _, b) | Op::GetAt(a, b) => vec![*a, *b],
+            Op::SetAt(a, b, c) => vec![*a, *b, *c],
+            Op::Un(_, a) | Op::Get(a, _) | Op::Part(a, _) | Op::Share(a) | Op::Len(a) | Op::Drop(a) | Op::Field { base: a, .. } => vec![*a],
             Op::Record { fields, .. } => fields.clone(),
             Op::With { base, fields, changes, .. } => std::iter::once(*base).chain(fields.iter().map(|f| f.1)).chain(changes.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.vals()))).collect(),
             Op::Put { list, index, value, .. } => vec![*list, *index, *value],
@@ -478,7 +511,7 @@ impl Region {
 /// record): a call's, an `if`'s (both branches then yield owned values), a
 /// record made or changed, a parameter taken over, …
 pub fn owns(i: &Inst) -> bool {
-    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. })
+    matches!(i.ty, Ty::List(_) | Ty::Rec(_)) && matches!(i.op, Op::Call { .. } | Op::If { .. } | Op::Embed { .. } | Op::Map(_) | Op::Record { .. } | Op::Field { borrow: false, .. } | Op::With { .. } | Op::Take(_) | Op::Put { .. } | Op::Push { .. } | Op::Loop { .. } | Op::Part(..) | Op::Share(_))
 }
 
 // ---- printing ---------------------------------------------------------------
@@ -534,6 +567,12 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             Op::Get(v, k) => {
                 let _ = writeln!(out, "{v}.{k}: {}", i.ty.name());
             }
+            Op::Part(v, k) => {
+                let _ = writeln!(out, "part {v}.{k}: {}", i.ty.name());
+            }
+            Op::Share(v) => {
+                let _ = writeln!(out, "share {v}: {}", i.ty.name());
+            }
             Op::Len(v) => {
                 let _ = writeln!(out, "len {v}: {}", i.ty.name());
             }
@@ -568,6 +607,7 @@ fn region(out: &mut String, r: &Region, depth: usize) {
                             Change::Put(i, x) => format!("put [{i}] = {x}"),
                             Change::Push(x) => format!("push {x}"),
                             Change::Concat(x) => format!("concat {x}"),
+                            Change::Fill(x, n) => format!("fill {x} × {n}"),
                         })
                         .collect();
                     a.push(format!(".{k} changed by {}", c.join(", ")));
@@ -584,6 +624,12 @@ fn region(out: &mut String, r: &Region, depth: usize) {
             }
             Op::Set(v, k, x) => {
                 let _ = writeln!(out, "{v} with .{k} = {x}: {}", i.ty.name());
+            }
+            Op::GetAt(v, k) => {
+                let _ = writeln!(out, "{v}[{k}]: {}", i.ty.name());
+            }
+            Op::SetAt(v, k, x) => {
+                let _ = writeln!(out, "{v} with [{k}] = {x}: {}", i.ty.name());
             }
             Op::Loop { init, var, count, done, step, .. } => {
                 match count {
@@ -788,6 +834,21 @@ fn verify_region(f: &Function, r: &Region, types: &mut Vec<Option<Ty>>, scope: &
             Op::Get(v, _) => {
                 if !matches!(ty(*v, types)?, Ty::Agg(_)) {
                     return Err(format!("{}: {v} has no parts", f.name));
+                }
+            }
+            Op::Part(v, _) => {
+                if !matches!(ty(*v, types)?, Ty::Parts(_)) {
+                    return Err(format!("{}: {v} is not the parts a call gave", f.name));
+                }
+            }
+            Op::Share(v) => {
+                if ty(*v, types)? != i.ty || !matches!(i.ty, Ty::List(_) | Ty::Rec(_)) {
+                    return Err(format!("{}: {v} shared is not a list or record of its type", f.name));
+                }
+            }
+            Op::GetAt(v, k) | Op::SetAt(v, k, _) => {
+                if !matches!(ty(*v, types)?, Ty::Agg(t) if short_list(t).is_some()) || ty(*k, types)? != Ty::I64 {
+                    return Err(format!("{}: {v}[{k}] is not a short list indexed by an i64", f.name));
                 }
             }
             Op::Set(v, _, x) => {

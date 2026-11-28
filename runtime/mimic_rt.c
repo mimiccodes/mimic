@@ -1337,8 +1337,32 @@ static void refill(heap_state *h, int c) {
     h->free_len[c] += (int)nb;
 }
 
+/* MIMIC_COUNT_RC=1 builds also count the values made while a loop's step
+ * runs (evolve, settle; the compiled code marks each step): a loop in its
+ * steady state should make none. Other builds: nothing. */
+#ifdef MIM_COUNT_RC
+static int64_t g_loop_steps, g_step_made;
+/* (inside a step; inside a loop's first step, whose copy of a start still
+ * shared elsewhere is not the steady state: not counted) */
+static __thread int32_t t_in_step, t_first;
+int32_t mim_step_enter(int32_t first) {
+    __atomic_fetch_add(&g_loop_steps, 1, __ATOMIC_RELAXED);
+    int32_t old = t_first;
+    t_first = first;
+    t_in_step++;
+    return old;
+}
+void mim_step_exit(int32_t old) {
+    t_in_step--;
+    t_first = old;
+}
+#endif
+
 static mim_val *alloc(int dtype, int rank, int64_t len) {
     size_t bytes = payload_bytes(dtype, len);
+#ifdef MIM_COUNT_RC
+    if (t_in_step && !t_first) __atomic_fetch_add(&g_step_made, 1, __ATOMIC_RELAXED);
+#endif
     heap_state *h = &t_heap;
     int c = size_class(bytes);
     mim_val *v;
@@ -1386,6 +1410,8 @@ void mim_rc_inline_free(void) {
 static void rc_report(void) {
     fprintf(stderr, "mimic: reference counts: %lld retains, %lld releases, %lld values freed\n", (long long)__atomic_load_n(&g_rc_retains, __ATOMIC_RELAXED),
             (long long)__atomic_load_n(&g_rc_releases, __ATOMIC_RELAXED), (long long)__atomic_load_n(&g_rc_frees, __ATOMIC_RELAXED));
+    fprintf(stderr, "mimic: loop steps: %lld steps, %lld values made in them (past each loop's first step)\n", (long long)__atomic_load_n(&g_loop_steps, __ATOMIC_RELAXED),
+            (long long)__atomic_load_n(&g_step_made, __ATOMIC_RELAXED));
 }
 #else
 #define RC_COUNT(c) ((void)0)
@@ -1620,10 +1646,12 @@ static void raise_open_files(void) {
 #endif
 
 static void mim_crash_handlers(void); /* (mimic_own.c) */
+static void mim_grow_stack(void);     /* (mimic_own.c) */
 
 void mim_rt_init(int32_t argc, char **argv) {
     __atomic_store_n(&g_rt_state, 2, __ATOMIC_RELEASE);
     mim_crash_handlers();
+    mim_grow_stack();
 #ifdef MIM_COUNT_RC
     atexit(rc_report);
 #endif
@@ -4244,6 +4272,8 @@ mim_val *mim_pat_at(mim_val *v, int64_t i) { return scalar_at(v, i); }
 /* The elements from `start` on (owned). */
 mim_val *mim_pat_rest(mim_val *v, int64_t start) { return slice(v, start, v->len - start); }
 
+void mim_set_cell(mim_val **slot, int64_t off, int64_t cell, mim_val *v); /* mimic_own.c */
+
 /* Copy-on-write element store: mutates in place when uniquely owned. */
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     if (*slot && (*slot)->dtype == MIM_MAP) {
@@ -4256,9 +4286,24 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         int n;
         int64_t cell;
         k = multi_offset(xs, i, &n, &cell);
-        if (n != xs->rank) mim_panic("indexed assignment needs one index per dimension: m[i, j] = v");
+        /* fewer indices than dimensions: a whole row (or cell) */
+        if (n != xs->rank) {
+            mim_set_cell(slot, k, cell, v);
+            return;
+        }
     } else {
-        if (xs && xs->rank >= 2) mim_panic("indexed assignment on a matrix needs one index per dimension: m[i, j] = v");
+        if (xs && xs->rank >= 2) { /* m[i] = row */
+            if (i->rank != 0 || IS_FLOAT(i->dtype) || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
+            int64_t d = dim_of(xs, 0), r = geti(i, 0);
+            if (r < 0 || r >= d) {
+                char buf[160];
+                snprintf(buf, sizeof buf, "index %lld out of bounds for dimension 0 of length %lld", (long long)r, (long long)d);
+                mim_panic(buf);
+            }
+            int64_t cell = d ? xs->len / d : 0;
+            mim_set_cell(slot, r * cell, cell, v);
+            return;
+        }
         k = check_index(xs, i);
     }
     need(v, "indexed assignment");

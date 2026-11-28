@@ -99,7 +99,7 @@ Statements end at a newline or `;`. A block's last expression is its value. A pi
 
 **Trains read left to right.** `⍳ 10 ⌽ ↑ 3 +/` means "iota 10, reversed, take 3, sum", which is 24. A prefix primitive binds to the next operand only, so `⍳ 5 + 1` is `(⍳ 5) + 1`. After a pipeline stage, reading continues left to right: `xs ▷ +/ ÷ 2` is `(sum xs) ÷ 2`.
 
-**Literals.** Inside `[ ]`, elements are separated by spaces or commas. Use `¯3` or commas for negative elements, because `[1 -2]` parses as `[1 - 2]`.
+**Literals.** `⍬` (digraph `\z`) is an empty list of `i64`, and `⍬[f64]`, `⍬[str]`, `⍬[Point]` an empty list of that element type. A bare `[]` has no element type of its own and takes one from where it is used; where nothing gives it one (a loop's first state, a list grown from it), it is a list of unknown type, read the slow, generic way, so write `⍬` or `⍬[T]` there. `` `a` `` is a character's code, a number (97), as `char_code("a")` gives, with the escapes `` `\n` ``, `` `\t` ``, `` `\`` ``, `` `\x1b` `` and `` `\u{e9}` ``. Work on bytes compares and computes with it, `` c >= `a` and c <= `z` ``, with no one-letter string made. Inside `[ ]`, elements are separated by spaces or commas. A `-` with a space before it and a digit right after starts a negative element, so `[256 -1 255]` is three numbers; `[a - 1]` and `[a-1]` subtract, as does `xs[n -1]` (an index, not a list) and anything in parentheses inside the list. `¯3` is a negative number everywhere.
 
 **Integer literals** can be written in hexadecimal `0xFF`, binary `0b1010` or octal `0o17`, with `_` separators anywhere: `1_000_000`, `0xFFFF_0000`. A hex/binary/octal literal may use all 64 bits, so `0xFFFF_FFFF_FFFF_FFFF` is `-1`.
 
@@ -205,7 +205,8 @@ m ⊠ ⍉ m                    // matrix product
 m ↑ 1, ⌽ m                 // take / drop / reverse act on rows
 m ¨ f                      // keeps the shape
 let mut g = 0 ⥊ [3 3]
-g[1, 1] = 5                // one index per dimension
+g[1, 1] = 5                // one index per dimension: an element
+g[0] = [7 8 9]             // fewer: a whole row (a number fills it)
 ```
 
 How matrices behave:
@@ -229,14 +230,39 @@ How matrices behave:
 
 ## Keyword glyphs
 
-| Glyph | Word | Glyph | Word |
-|---|---|---|---|
-| `§` | `module` | `▷` | `\|>` |
-| `ƒ` | `fn` | `→` | `->` |
-| `←` | `let … =` | `⇒` | `=>` |
-| `↩` | `=` (reassign) | `⍝` | `//` comment |
+Every keyword has a glyph, and every glyph a digraph (`\U` types `⇑`). Words and glyphs mix freely; `mimic fmt` writes them all as words, and `mimic glyphs` lists them.
 
-`pub`, `mut`, `if`, `else`, `use`, `extern`, `unsafe` and `return` only have word forms for now. Their glyphs are still to be designed.
+| Glyph | Word | Digraph | Glyph | Word | Digraph |
+|---|---|---|---|---|---|
+| `§` | `module` | `\S` | `⊡` | `type` | `\Y` |
+| `ƒ` | `fn` | `\f` | `⊨` | `match` | `\K` |
+| `⇑` | `pub` | `\U` | `⊕` | `with` | `\w` |
+| `⇄` | `mut` | `\D` | `⇐` | `use` | `\I` |
+| `←` | `let … =` | `\<` | `≔` | `as` | `\A` |
+| `↩` | `=` (reassign) | `\=` | `⌁` | `extern` | `\E` |
+| `⍰` | `if` | `\?` | `☡` | `unsafe` | `\W` |
+| `⋄` | `else` | `\:` | `✓` | `trusted` | `\V` |
+| `⏎` | `return` | `\L` | `⎘` | `include` | `\C` |
+| `●` | `true` | `\1` | `⊢` | `test` | `\H` |
+| `○` | `false` | `\0` | `∀` | `for` (property tests) | `\F` |
+| `▷` | `\|>` | `\>` | `→` | `->` | |
+| `⇒` | `=>` | | `⍝` | `//` comment | |
+
+```mimic
+⊡ Shape = Circle(f64) | Rect(f64, f64)
+
+⇑ ƒ area(s: Shape) → f64 {
+    ⊨ s {
+        Circle(r) ⇒ 3.14159 × r × r,
+        Rect(w, h) ⇒ w × h,
+    }
+}
+
+ƒ clamp(x: i64) → i64 {
+    ⍰ x < 0 { ⏎ 0 }
+    ⍰ x > 255 { 255 } ⋄ { x }
+}
+```
 
 ## Records, unions and `match`
 
@@ -348,8 +374,10 @@ fn name_of(id: i64) -> str {
 }
 ```
 
-* The `else` block runs on `None` / `Err`, and must end with `return`.
+* The `else` block runs on `None` / `Err`. It either leaves (`return`), or gives a value of the type inside, which is then used instead: `let port = parse_int(s) else { 8080 }`.
+* `e else { … }` is an expression, so it also works inside others: `if 1 < ≢ args { parse_int(args[1]) else { 1086 } } else { 1086 }`, `xs ¨ (s => parse_int(s) else { 0 })`. It binds loosest, so write `(parse_int(s) else { 0 }) + 1` to add to the result.
 * The unwrapped value keeps its static type. For example, `let n = parse_int(s) else { … }` gives an `i64`.
+* Errors: `else` after a value that is not an `Option` or `Result` (E0406), a block giving another type (E0401), a block giving nothing (E0504).
 
 ## Concurrency: implicit futures
 

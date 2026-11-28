@@ -753,14 +753,19 @@ pub(crate) fn last_use_sites(name: &str, body: &Block) -> Vec<usize> {
         span.insert(id(x), (n, n + len, seq));
         n += 1;
     });
+    // (for every other use, not only the nearest: in
+    // `put(xs, 0, if c { xs[0] } else { +/ xs })` the `if` holds the two
+    // reads in order, but `put` holds the first argument and the value,
+    // and has the list in hand when the value is computed: moving `xs` at
+    // a read in the value released the list `put` then wrote into)
     let ordered = |site: usize| {
         let Some(&(at, _, _)) = span.get(&site) else { return false };
-        // the smallest expression holding the site and another use
-        let holder = span
-            .values()
-            .filter(|(a, b, _)| *a <= at && at < *b && order.uses.iter().any(|(u, _)| *u != site && span.get(u).is_some_and(|&(p, _, _)| *a <= p && p < *b)))
-            .min_by_key(|(a, b, _)| b - a);
-        holder.is_none_or(|&(_, _, seq)| seq)
+        order.uses.iter().filter(|(u, _)| *u != site).all(|(u, _)| {
+            let Some(&(p, _, _)) = span.get(u) else { return true };
+            // the smallest expression holding the site and this use
+            let holder = span.values().filter(|(a, b, _)| *a <= at && at < *b && *a <= p && p < *b).min_by_key(|(a, b, _)| b - a);
+            holder.is_none_or(|&(_, _, seq)| seq)
+        })
     };
     order.uses.iter().map(|(i, _)| *i).filter(|i| order.last_but(*i, |_, _| false) && ordered(*i)).collect()
 }

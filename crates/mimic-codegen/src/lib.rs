@@ -1220,6 +1220,21 @@ impl<'ctx> Cg<'ctx, '_> {
     }
 
     /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
+    /// Marks a load or store with the kind of memory it touches (TBAA): a
+    /// value's header ("header": count, kind, length) or a list's numbers
+    /// ("elem"), or a record's fields ("slot"), which never overlap. So a loop writing numbers keeps the
+    /// headers it reads in registers, while a call (a release, a free) still
+    /// stops any load from moving past it, which `invariant.load` did not.
+    /// Accesses not marked may touch either.
+    pub(crate) fn tbaa<T: inkwell::values::AsValueRef + Copy>(&self, v: T, kind: &str) -> R<()> {
+        let i = unsafe { inkwell::values::InstructionValue::new(v.as_value_ref()) };
+        let root = self.ctx.metadata_node(&[self.ctx.metadata_string("mimic memory").into()]);
+        let zero = self.ctx.i64_type().const_zero();
+        let ty = self.ctx.metadata_node(&[self.ctx.metadata_string(kind).into(), root.into(), zero.into()]);
+        let tag = self.ctx.metadata_node(&[ty.into(), ty.into(), zero.into()]);
+        i.set_metadata(tag, self.ctx.get_kind_id("tbaa")).map_err(|e| e.to_string())
+    }
+
     fn val_ty(&self) -> inkwell::types::StructType<'ctx> {
         let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
         // rc, dtype, rank, len, desc; the elements follow (mim_val in mimic_rt.c)
@@ -1642,11 +1657,9 @@ impl<'ctx> Cg<'ctx, '_> {
         let i = self.p.types[types::obj_tid(t)].field_index(name).ok_or_else(|| format!("no field {name}"))?;
         let bp = self.basic(b).into_pointer_value();
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), bp, &[i32t.const_int(1, false)], "fields").s()? };
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
         let fv = self.b.build_load(self.ptr, fp, "").s()?;
-        inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+        self.tbaa(fv, "slot")?;
         // a shaped list field is a heap vector like any other: same facts
         self.assume_live(fv, if fixed(ty).is_some() { Ty::Arr(El::F64, 0) } else { ty })?;
         Ok(fv.into_pointer_value())
@@ -3244,6 +3257,23 @@ impl<'ctx> Cg<'ctx, '_> {
                         // `run(k - 1, bump(cells, i))` with `bump` inlined)
                         // (everywhere: a function that does this may be
                         // inlined into one that calls itself last)
+                        // (a list kept in registers, its index or value not
+                        // a number the compiler knows: put on the heap for
+                        // the runtime and back into registers after; its
+                        // slot holds the numbers, not a pointer, and read as
+                        // one its first number, 0, was taken for `()`: found
+                        // by the random programs, `m[n] = 9` with `n` of
+                        // unknown type)
+                        if fixed(t).is_some() {
+                            let cur = self.b.build_load(self.repr(t), slot, "").s()?;
+                            let b = self.boxed(self.val_of(cur, t, false))?;
+                            let out = self.call_rt_ptr("mim_set_index_v", &[self.basic(b).into(), self.basic(iv).into(), self.basic(v).into()])?;
+                            let back = self.as_ty(out, t, &format!("`{name}`"))?;
+                            self.b.build_store(slot, self.basic(back)).s()?;
+                            self.drop_tmp(iv)?;
+                            self.drop_tmp(v)?;
+                            return Ok(());
+                        }
                         let cur = self.b.build_load(self.ptr, slot, "").s()?;
                         let out = self.call_rt_ptr("mim_set_index_v", &[cur.into(), self.basic(iv).into(), self.basic(v).into()])?;
                         self.b.build_store(slot, self.basic(out)).s()?;
@@ -3475,6 +3505,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let head = self.ctx.append_basic_block(fun, "evolve");
+        let count_flag = self.count_loop()?;
         let body_bb = self.ctx.append_basic_block(fun, "evolve_step");
         let done = self.ctx.append_basic_block(fun, "evolve_done");
         self.b.build_unconditional_branch(head).s()?;
@@ -3488,12 +3519,14 @@ impl<'ctx> Cg<'ctx, '_> {
         let cur = self.val_of(xp.as_basic_value(), st, true);
         let mut argv: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
         argv.extend(capv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let counted = self.count_step(count_flag)?;
         let r = self.b.build_call(f, &argv, "").s()?.try_as_basic_value().basic().ok_or("evolve: step returns nothing")?;
         let next = self.val_of(r, st, true);
         let next = self.as_ty(next, st, "evolve state")?;
         if !own_state {
             self.drop_tmp(cur)?;
         }
+        self.count_step_end(counted)?;
         let i1 = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
         let latch = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(head).s()?;
@@ -3554,6 +3587,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let fun = self.cur_fn.unwrap();
         let pre = self.b.get_insert_block().unwrap();
         let head = self.ctx.append_basic_block(fun, "settle");
+        let count_flag = self.count_loop()?;
         let body_bb = self.ctx.append_basic_block(fun, "settle_step");
         let out_bb = self.ctx.append_basic_block(fun, "settle_done");
         self.b.build_unconditional_branch(head).s()?;
@@ -3569,12 +3603,14 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.position_at_end(body_bb);
         let mut sargs: Vec<BasicMetadataValueEnum> = vec![self.basic(cur).into()];
         sargs.extend(sv.iter().map(|v| BasicMetadataValueEnum::from(self.basic(*v))));
+        let counted = self.count_step(count_flag)?;
         let r = self.b.build_call(sf, &sargs, "").s()?.try_as_basic_value().basic().ok_or("settle: step gives nothing")?;
         let next = self.val_of(r, st, true);
         let next = self.as_ty(next, st, "settle state")?;
         if !own_state {
             self.drop_tmp(cur)?;
         }
+        self.count_step_end(counted)?;
         let latch = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(head).s()?;
         xp.add_incoming(&[(&self.basic(x0), pre), (&self.basic(next), latch)]);
@@ -3735,6 +3771,34 @@ impl<'ctx> Cg<'ctx, '_> {
     fn make_closure(&mut self, desc: PointerValue<'ctx>, env: &[V<'ctx>]) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
         let n = env.len();
+        // capturing nothing: one immortal value, made the first time (as a
+        // list of literals is). `run(b, p, x => alpha(x) or digit(x))` in
+        // a loop made and freed one at every call (`tokenize`)
+        if n == 0
+            && let Some(f) = self.cur_fn
+        {
+            let g = self.module.add_global(self.ptr, None, "fnval");
+            g.set_linkage(Linkage::Internal);
+            g.set_initializer(&self.ptr.const_null());
+            let slot = self.gaddr(g);
+            let cached = self.b.build_load(self.ptr, slot, "fnval").s()?;
+            inkwell::values::BasicValue::as_instruction_value(&cached).unwrap().set_atomic_ordering(inkwell::AtomicOrdering::Acquire).map_err(|e| e.to_string())?;
+            let cached = cached.into_pointer_value();
+            let pre = self.b.get_insert_block().unwrap();
+            let build_bb = self.ctx.append_basic_block(f, "fnval_build");
+            let done_bb = self.ctx.append_basic_block(f, "fnval_done");
+            let have = self.b.build_is_not_null(cached, "").s()?;
+            self.b.build_conditional_branch(have, done_bb, build_bb).s()?;
+            self.b.position_at_end(build_bb);
+            let built = self.call_rt_ptr("mim_closure", &[desc.into(), i64t.const_zero().into(), self.ptr.const_null().into()])?;
+            let V::P(published, _) = self.call_rt_ptr("mim_lit_list", &[slot.into(), self.basic(built).into()])? else { unreachable!() };
+            let build_end = self.b.get_insert_block().unwrap();
+            self.b.build_unconditional_branch(done_bb).s()?;
+            self.b.position_at_end(done_bb);
+            let phi = self.b.build_phi(self.ptr, "fnval").s()?;
+            phi.add_incoming(&[(&cached, pre), (&published, build_end)]);
+            return Ok(V::P(phi.as_basic_value().into_pointer_value(), true));
+        }
         let arr = if n == 0 {
             self.ptr.const_null()
         } else {
@@ -4416,13 +4480,12 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A raw number field, read.
     fn load_raw(&self, fp: PointerValue<'ctx>, el: El) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
+        let x = self.b.build_load(if el == El::F64 { BasicTypeEnum::from(self.ctx.f64_type()) } else { BasicTypeEnum::from(i64t) }, fp, "").s()?;
+        self.tbaa(x, "slot")?;
         Ok(match el {
-            El::F64 => V::F(self.b.build_load(self.ctx.f64_type(), fp, "").s()?.into_float_value()),
-            El::Bool => {
-                let x = self.b.build_load(i64t, fp, "").s()?.into_int_value();
-                V::B(self.b.build_int_compare(IntPredicate::NE, x, i64t.const_zero(), "").s()?)
-            }
-            _ => V::I(self.b.build_load(i64t, fp, "").s()?.into_int_value()),
+            El::F64 => V::F(x.into_float_value()),
+            El::Bool => V::B(self.b.build_int_compare(IntPredicate::NE, x.into_int_value(), i64t.const_zero(), "").s()?),
+            _ => V::I(x.into_int_value()),
         })
     }
 
@@ -5425,8 +5488,6 @@ impl<'ctx> Cg<'ctx, '_> {
                 assume(p, self.live_bytes(t))?;
                 let td = &self.p.types[types::obj_tid(id)];
                 let mimic_syntax::ast::TypeKind::Record(fs) = &td.decl.kind else { return Ok(()) };
-                let invariant = self.ctx.get_kind_id("invariant.load");
-                let empty = self.ctx.metadata_node(&[]);
                 let fields = unsafe { self.b.build_in_bounds_gep(self.val_ty(), p, &[i32t.const_int(1, false)], "fields").s()? };
                 for (i, (_, ft, _)) in fs.iter().enumerate() {
                     let fty = types::ann_in(self.p, td.module, ft).unwrap_or(Ty::Dyn);
@@ -5435,7 +5496,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
                     let fv = self.b.build_load(self.ptr, fp, "field").s()?;
-                    inkwell::values::BasicValue::as_instruction_value(&fv).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+                    self.tbaa(fv, "slot")?;
                     self.assume_live(fv, fty)?;
                     assume(fv.into_pointer_value(), self.live_bytes(fty))?;
                 }
@@ -5550,6 +5611,41 @@ impl<'ctx> Cg<'ctx, '_> {
         self.b.build_unreachable().s()?;
         self.b.position_at_end(good);
         self.select_elem(arr, el, i)
+    }
+
+    /// `put(xs, i, x)` on a list in registers: `i` checked against the known
+    /// length (as `index_fixed`), then each element `x` where its index is
+    /// `i`, else what it was (selects: no memory).
+    fn set_fixed(&mut self, a: V<'ctx>, i: IntValue<'ctx>, x: V<'ctx>) -> R<V<'ctx>> {
+        let V::A(arr, el) = a else { return Err("internal compiler error: not a list in registers".into()) };
+        let n = arr.get_type().len();
+        let i64t = self.ctx.i64_type();
+        let x: BasicValueEnum = match el {
+            El::F64 => self.to_f64(x)?.into(),
+            El::Bool => self.truth(x)?.into(),
+            _ => self.to_i64(x)?.into(),
+        };
+        if let Some(k) = i.get_zero_extended_constant().filter(|k| *k < n as u64) {
+            return Ok(V::A(self.b.build_insert_value(arr, x, k as u32, "").s()?.into_array_value(), el));
+        }
+        let ok = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(n as u64, false), "").s()?;
+        let f = self.cur_fn.unwrap();
+        let good = self.ctx.append_basic_block(f, "fx_ok");
+        let bad = self.ctx.append_basic_block(f, "fx_bad");
+        self.b.build_conditional_branch(ok, good, bad).s()?;
+        self.b.position_at_end(bad);
+        let bx = self.boxed(a)?;
+        self.call_rt("mim_index_fail", &[self.basic(bx).into(), i.into()])?;
+        self.b.build_unreachable().s()?;
+        self.b.position_at_end(good);
+        let mut out = arr;
+        for k in 0..n {
+            let is_k = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_int(k as u64, false), "").s()?;
+            let old = self.b.build_extract_value(arr, k, "").s()?;
+            let y = self.b.build_select(is_k, x, old, "").s()?;
+            out = self.b.build_insert_value(out, y, k, "").s()?.into_array_value();
+        }
+        Ok(V::A(out, el))
     }
 
     /// Element `i` (in bounds) of a list in registers, chosen with compares
@@ -5775,21 +5871,21 @@ impl<'ctx> Cg<'ctx, '_> {
         let i32t = self.ctx.i32_type();
         let hdr = self.ctx.struct_type(&[i64t.into(), i32t.into(), i32t.into(), i64t.into(), self.ptr.into()], false);
         let p = self.basic(arr).into_pointer_value();
-        // an array's header never changes while it is alive (a changed array
-        // is a new one): its loads may be hoisted and shared
-        let invariant = self.ctx.get_kind_id("invariant.load");
-        let empty = self.ctx.metadata_node(&[]);
+        // (the header's loads are plain: a list's length changes when it
+        // grows in place, and a list's memory is used again once it is
+        // freed; marked invariant, a length read was moved past the release
+        // of its list, onto the next list made there)
         let field = |cg: &Self, k: u32, t: BasicTypeEnum<'ctx>| -> R<BasicValueEnum<'ctx>> {
             let fp = cg.b.build_struct_gep(hdr, p, k, "").s()?;
             let v = cg.b.build_load(t, fp, "").s()?;
-            inkwell::values::BasicValue::as_instruction_value(&v).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+            cg.tbaa(v, "header")?;
             Ok(v)
         };
         // dtype and rank sit side by side: one 64-bit load and compare checks
         // both (little-endian: dtype in the low half)
         let kind_p = self.b.build_struct_gep(hdr, p, 1, "").s()?;
         let kind = self.b.build_load(i64t, kind_p, "").s()?;
-        inkwell::values::BasicValue::as_instruction_value(&kind).unwrap().set_metadata(empty, invariant).map_err(|e| e.to_string())?;
+        self.tbaa(kind, "header")?;
         let kind = kind.into_int_value();
         let len = field(self, 3, i64t.into())?.into_int_value();
         // a value's elements always follow its header (alloc in mimic_rt.c)
@@ -5829,32 +5925,44 @@ impl<'ctx> Cg<'ctx, '_> {
         let fv: V<'ctx> = match el {
             El::F64 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f64_type(), data, &[i], "").s()? };
-                V::F(self.b.build_load(self.ctx.f64_type(), ep, "").s()?.into_float_value())
+                let x = self.b.build_load(self.ctx.f64_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::F(x.into_float_value())
             }
             El::Bool => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::B(self.b.build_int_compare(IntPredicate::NE, x, self.ctx.i8_type().const_zero(), "").s()?)
             }
             // a byte: 0 … 255 as an i64
             El::U8 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i8_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_z_extend(x, i64t, "").s()?)
             }
             El::F32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.f32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?.into_float_value();
+                let x = self.b.build_load(self.ctx.f32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_float_value();
                 V::F(self.b.build_float_ext(x, self.ctx.f64_type(), "").s()?)
             }
             El::I32 => {
                 let ep = unsafe { self.b.build_in_bounds_gep(self.ctx.i32_type(), data, &[i], "").s()? };
-                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?.into_int_value();
+                let x = self.b.build_load(self.ctx.i32_type(), ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                let x = x.into_int_value();
                 V::I(self.b.build_int_s_extend(x, i64t, "").s()?)
             }
             _ => {
                 let ep = unsafe { self.b.build_in_bounds_gep(i64t, data, &[i], "").s()? };
-                V::I(self.b.build_load(i64t, ep, "").s()?.into_int_value())
+                let x = self.b.build_load(i64t, ep, "").s()?;
+                self.tbaa(x, "elem")?;
+                V::I(x.into_int_value())
             }
         };
         self.as_ty(fv, ty, "element")
@@ -6201,6 +6309,16 @@ impl<'ctx> Cg<'ctx, '_> {
                     return self.construct(t, Some(v), vals);
                 }
                 let fid = self.resolve_fn(path)?;
+                // join(chars(t) ¨ (c => …), sep): one pass over t's bytes
+                if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
+                    && decl.intrinsic
+                    && decl.name == "join"
+                    && self.p.mods[self.p.fns[fid].module].name == "prelude"
+                    && args.len() == 2
+                    && let Some(v) = self.chars_map_join(&args[0], &args[1])?
+                {
+                    return self.as_ty(v, ty, "result of `join`");
+                }
                 // char_of of a number: the runtime's with it as it is (a
                 // boxed number made and checked per character otherwise)
                 if let FnKind::Extern { decl, .. } = &self.p.fns[fid].kind
@@ -6565,6 +6683,57 @@ impl<'ctx> Cg<'ctx, '_> {
             }
             // an element of a list of records, strings or tuples: one bounds
             // check and a load (lent while the list is; else a reference)
+            // `["" "-a.{k}" "-b.{k}"][i]`: a list of strings written out,
+            // each pure, indexed at once: only element i is made (a switch),
+            // not the list and every string in it; any other index the
+            // general way (the list made, its error the same)
+            ExprKind::Index { base, index }
+                if matches!(&base.kind, ExprKind::Array(xs) if xs.len() >= 2 && xs.iter().all(pure_simple))
+                    && matches!(self.ty_of(base), Ty::Arr(El::Str, _))
+                    && self.ty_of(index) == Ty::I64 =>
+            {
+                let ExprKind::Array(xs) = &base.kind else { unreachable!() };
+                let i = self.expr(index)?;
+                let i = self.to_i64(i)?;
+                let rt = if ty == Ty::Never { Ty::Dyn } else { ty };
+                let f = self.cur_fn.unwrap();
+                let i64t = self.ctx.i64_type();
+                let inside = self.b.build_int_compare(IntPredicate::ULT, i, i64t.const_int(xs.len() as u64, false), "").s()?;
+                let pick = self.ctx.append_basic_block(f, "pick");
+                let general = self.ctx.append_basic_block(f, "pick_general");
+                let merge = self.ctx.append_basic_block(f, "picked");
+                self.b.build_conditional_branch(inside, pick, general).s()?;
+                let arms: Vec<_> = (0..xs.len()).map(|k| self.ctx.append_basic_block(f, &format!("pick{k}"))).collect();
+                self.b.position_at_end(pick);
+                let cases: Vec<_> = arms.iter().enumerate().skip(1).map(|(k, bb)| (i64t.const_int(k as u64, false), *bb)).collect();
+                self.b.build_switch(i, arms[0], &cases).s()?;
+                let mut incoming = Vec::new();
+                for (x, bb) in xs.iter().zip(&arms) {
+                    self.b.position_at_end(*bb);
+                    let v = self.expr(x)?;
+                    let v = self.as_ty(v, rt, "element")?;
+                    let v = self.own(v)?;
+                    incoming.push((self.basic(v), self.b.get_insert_block().unwrap()));
+                    self.b.build_unconditional_branch(merge).s()?;
+                }
+                self.b.position_at_end(general);
+                let b = self.expr(base)?;
+                let b = self.boxed(b)?;
+                let ib = self.boxed(V::I(i))?;
+                let r = self.call_rt_ptr("mim_index", &[self.basic(b).into(), self.basic(ib).into()])?;
+                self.drop_tmp(b)?;
+                self.drop_tmp(ib)?;
+                let r = self.as_ty(r, rt, "element")?;
+                let r = self.own(r)?;
+                incoming.push((self.basic(r), self.b.get_insert_block().unwrap()));
+                self.b.build_unconditional_branch(merge).s()?;
+                self.b.position_at_end(merge);
+                let phi = self.b.build_phi(self.repr(rt), "picked").s()?;
+                for (v, bb) in &incoming {
+                    phi.add_incoming(&[(v, *bb)]);
+                }
+                Ok(self.val_of(phi.as_basic_value(), rt, true))
+            }
             ExprKind::Index { base, index }
                 if matches!(self.ty_of(base), Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _)) && self.ty_of(index) == Ty::I64 && self.heap_ok() =>
             {
@@ -7436,6 +7605,216 @@ impl<'ctx> Cg<'ctx, '_> {
                 Ok(self.val_of(phi.as_basic_value(), rt, true))
             }
         }
+    }
+}
+
+/// An expression with no effects and no calls, cheap to make where it is
+/// needed: a literal, a variable, a field of one, arithmetic of such, or
+/// text formatted from them (`"-alpha.{k}"`).
+fn pure_simple(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => true,
+        ExprKind::Path(p) => p.len() == 1,
+        ExprKind::Field { base, .. } => pure_simple(base),
+        ExprKind::Unary { expr, .. } => pure_simple(expr),
+        ExprKind::Binary { lhs, rhs, .. } => pure_simple(lhs) && pure_simple(rhs),
+        ExprKind::Interp(parts) => parts.iter().all(|p| match p {
+            InterpPart::Expr(x) => pure_simple(x),
+            _ => true,
+        }),
+        _ => false,
+    }
+}
+
+impl<'ctx> Cg<'ctx, '_> {
+    /// In a counting build (`MIMIC_COUNT_RC=1`): a loop's step begins
+    /// (`enter`) or ends, so the runtime counts the values made in steps.
+    /// Before a loop (counting builds): a flag, set, that its first step
+    /// clears.
+    pub(crate) fn count_loop(&mut self) -> R<Option<PointerValue<'ctx>>> {
+        if !counting_rc() {
+            return Ok(None);
+        }
+        let slot = self.entry_alloca(Ty::Bool, "first_step")?;
+        self.b.build_store(slot, self.ctx.bool_type().const_int(1, false)).s()?;
+        Ok(Some(slot))
+    }
+
+    /// A step begins (given the loop's flag): what [`Self::count_step_end`]
+    /// needs.
+    pub(crate) fn count_step(&mut self, flag: Option<PointerValue<'ctx>>) -> R<Option<IntValue<'ctx>>> {
+        let Some(slot) = flag else { return Ok(None) };
+        let i32t = self.ctx.i32_type();
+        let first = self.b.build_load(self.ctx.bool_type(), slot, "first").s()?.into_int_value();
+        self.b.build_store(slot, self.ctx.bool_type().const_zero()).s()?;
+        let first = self.b.build_int_z_extend(first, i32t, "").s()?;
+        let f = self.module.get_function("mim_step_enter").unwrap_or_else(|| self.module.add_function("mim_step_enter", i32t.fn_type(&[i32t.into()], false), Some(Linkage::External)));
+        Ok(Some(self.b.build_call(f, &[first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_int_value()))
+    }
+
+    pub(crate) fn count_step_end(&mut self, old: Option<IntValue<'ctx>>) -> R<()> {
+        let Some(old) = old else { return Ok(()) };
+        let i32t = self.ctx.i32_type();
+        let f = self.module.get_function("mim_step_exit").unwrap_or_else(|| self.module.add_function("mim_step_exit", self.ctx.void_type().fn_type(&[i32t.into()], false), Some(Linkage::External)));
+        self.b.build_call(f, &[old.into()], "").s()?;
+        Ok(())
+    }
+
+    /// `join(chars(t) ¨ (c => …), sep)` with a function giving text: one
+    /// pass over t's bytes, each character (a shared one-letter string for
+    /// ASCII) given to the function and its text appended at once; no list
+    /// of characters made, none of results joined (text worked on character
+    /// by character: 10 million of each in the held-out `caesar`). Anything
+    /// else: `None`, the usual way.
+    fn chars_map_join(&mut self, xs: &Expr, sep: &Expr) -> R<Option<V<'ctx>>> {
+        let text = Ty::Arr(El::Char, 0);
+        let ExprKind::Prim { prim: Prim::Each, args } = &xs.kind else { return Ok(None) };
+        if args.len() != 2 || self.ty_of(sep) != text || self.ty_of(xs) != Ty::Arr(El::Str, 0) {
+            return Ok(None);
+        }
+        let Some(fun) = self.cur_fn else { return Ok(None) };
+        let ExprKind::Lambda { params, body } = &args[1].kind else { return Ok(None) };
+        let ExprKind::Call { callee, args: cargs } = &args[0].kind else { return Ok(None) };
+        let ExprKind::Path(cp) = &callee.kind else { return Ok(None) };
+        if params.len() != 1 || cargs.len() != 1 || self.ty_of(&cargs[0]) != text {
+            return Ok(None);
+        }
+        let Some(Resolved::Fn(cf)) = self.p.lookup(self.cur_mod, cp) else { return Ok(None) };
+        let FnKind::Extern { decl, .. } = &self.p.fns[cf].kind else { return Ok(None) };
+        if !(decl.intrinsic && decl.name == "chars" && self.p.mods[self.p.fns[cf].module].name == "prelude") {
+            return Ok(None);
+        }
+        let caps = self.captures(params, body);
+        let (f, pts, rt) = self.lambda_fn_with(&args[1], &caps)?;
+        if pts.first() != Some(&text) || rt != text {
+            return Ok(None);
+        }
+        let t = self.expr(&cargs[0])?;
+        let t = self.boxed(t)?;
+        let s = self.expr(sep)?;
+        let s = self.boxed(s)?;
+        let mut capv: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
+        for (name, _) in &caps {
+            let l = self.lookup(name).ok_or("internal compiler error: captured variable")?;
+            let (slot, lt) = (l.slot, l.ty);
+            capv.push(self.b.build_load(self.repr(lt), slot, name).s()?.into());
+        }
+        let (i64t, i32t) = (self.ctx.i64_type(), self.ctx.i32_type());
+        let decl = |cg: &Self, name: &str, ft: inkwell::types::FunctionType<'ctx>| cg.module.get_function(name).unwrap_or_else(|| cg.module.add_function(name, ft, Some(Linkage::External)));
+        let at = decl(self, "mim_char_at_byte", self.ptr.fn_type(&[self.ptr.into(), i64t.into(), self.ptr.into()], false));
+        let add = decl(self, "mim_text_join_add", self.ptr.fn_type(&[self.ptr.into(), self.ptr.into(), self.ptr.into(), i32t.into()], false));
+        let mk = decl(self, "mim_str", self.ptr.fn_type(&[self.ptr.into(), i64t.into()], false));
+        let tp = self.basic(t).into_pointer_value();
+        let n = self.b.build_load(i64t, self.b.build_struct_gep(self.val_ty(), tp, 3, "").s()?, "len").s()?.into_int_value();
+        let empty = self.global_cstr("");
+        let acc0 = self.b.build_call(mk, &[empty.into(), i64t.const_zero().into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let next = self.entry_alloca_ty(i64t.into(), "next_char")?;
+        // (a pure function: the texts it gives the ASCII characters, asked
+        // once each; 10 million calls in `caesar` become a few dozen)
+        let table = if self.purity.operand_is_pure(self.p, self.cur_mod, self.cur_fid, &args[1]) {
+            let tt = self.ptr.array_type(128);
+            let tab = self.entry_alloca_ty(tt.into(), "char_texts")?;
+            self.b.build_store(tab, tt.const_zero()).s()?;
+            Some(tab)
+        } else {
+            None
+        };
+        let pre = self.b.get_insert_block().unwrap();
+        let head = self.ctx.append_basic_block(fun, "chars_join");
+        let body_bb = self.ctx.append_basic_block(fun, "chars_join_step");
+        let done = self.ctx.append_basic_block(fun, "chars_join_done");
+        self.b.build_unconditional_branch(head).s()?;
+        self.b.position_at_end(head);
+        let ip = self.b.build_phi(i64t, "i").s()?;
+        let accp = self.b.build_phi(self.ptr, "acc").s()?;
+        let i = ip.as_basic_value().into_int_value();
+        let acc = accp.as_basic_value().into_pointer_value();
+        let more = self.b.build_int_compare(IntPredicate::SLT, i, n, "").s()?;
+        self.b.build_conditional_branch(more, body_bb, done).s()?;
+        self.b.position_at_end(body_bb);
+        let first = self.b.build_int_compare(IntPredicate::EQ, i, i64t.const_zero(), "").s()?;
+        let first = self.b.build_int_z_extend(first, i32t, "").s()?;
+        let (acc1, latch) = match table {
+            // a pure function: its text for each ASCII character asked once,
+            // kept in the table; others (and any character, else) as below
+            Some(tab) => {
+                let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), tp, &[i32t.const_int(1, false)], "data").s()? };
+                let bp = unsafe { self.b.build_in_bounds_gep(self.ctx.i8_type(), data, &[i], "").s()? };
+                let byte = self.b.build_load(self.ctx.i8_type(), bp, "byte").s()?.into_int_value();
+                let ascii = self.b.build_int_compare(IntPredicate::SGE, byte, self.ctx.i8_type().const_zero(), "").s()?;
+                let ascii_bb = self.ctx.append_basic_block(fun, "chars_join_ascii");
+                let ask_bb = self.ctx.append_basic_block(fun, "chars_join_ask");
+                let have_bb = self.ctx.append_basic_block(fun, "chars_join_have");
+                let other_bb = self.ctx.append_basic_block(fun, "chars_join_other");
+                let join_bb = self.ctx.append_basic_block(fun, "chars_join_next");
+                self.b.build_conditional_branch(ascii, ascii_bb, other_bb).s()?;
+                self.b.position_at_end(ascii_bb);
+                let k = self.b.build_int_z_extend(byte, i64t, "").s()?;
+                let ep = unsafe { self.b.build_in_bounds_gep(self.ptr, tab, &[k], "").s()? };
+                let known = self.b.build_load(self.ptr, ep, "known").s()?.into_pointer_value();
+                let is_known = self.b.build_is_not_null(known, "").s()?;
+                self.b.build_conditional_branch(is_known, have_bb, ask_bb).s()?;
+                self.b.position_at_end(ask_bb);
+                let c = self.b.build_call(at, &[tp.into(), i.into(), next.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let mut fargs: Vec<BasicMetadataValueEnum<'ctx>> = vec![c.into()];
+                fargs.extend(capv.iter().copied());
+                let r = self.b.build_call(f, &fargs, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: a character's function gave nothing")?.into_pointer_value();
+                self.release(c)?;
+                self.b.build_store(ep, r).s()?;
+                let ask_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(have_bb).s()?;
+                self.b.position_at_end(have_bb);
+                let piece = self.b.build_phi(self.ptr, "piece").s()?;
+                piece.add_incoming(&[(&known, ascii_bb), (&r, ask_end)]);
+                let a1 = self.b.build_call(add, &[acc.into(), piece.as_basic_value().into(), self.basic(s).into(), first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+                let i_ascii = self.b.build_int_add(i, i64t.const_int(1, false), "").s()?;
+                let have_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(join_bb).s()?;
+                self.b.position_at_end(other_bb);
+                let (a2, i2) = self.chars_join_call(at, add, f, &capv, tp, i, next, acc, self.basic(s).into_pointer_value(), first)?;
+                let other_end = self.b.get_insert_block().unwrap();
+                self.b.build_unconditional_branch(join_bb).s()?;
+                self.b.position_at_end(join_bb);
+                let ap = self.b.build_phi(self.ptr, "acc").s()?;
+                ap.add_incoming(&[(&a1, have_end), (&a2, other_end)]);
+                let inp = self.b.build_phi(i64t, "i").s()?;
+                inp.add_incoming(&[(&i_ascii, have_end), (&i2, other_end)]);
+                let i1 = inp.as_basic_value().into_int_value();
+                (ap.as_basic_value().into_pointer_value(), (i1, self.b.get_insert_block().unwrap()))
+            }
+            None => {
+                let (a1, i1) = self.chars_join_call(at, add, f, &capv, tp, i, next, acc, self.basic(s).into_pointer_value(), first)?;
+                (a1, (i1, self.b.get_insert_block().unwrap()))
+            }
+        };
+        let (i1, latch) = latch;
+        self.b.build_unconditional_branch(head).s()?;
+        ip.add_incoming(&[(&i64t.const_zero(), pre), (&i1, latch)]);
+        accp.add_incoming(&[(&acc0, pre), (&acc1, latch)]);
+        self.b.position_at_end(done);
+        if let Some(tab) = table {
+            let rel = decl(self, "mim_release_all_of", self.ctx.void_type().fn_type(&[self.ptr.into(), i64t.into()], false));
+            self.b.build_call(rel, &[tab.into(), i64t.const_int(128, false).into()], "").s()?;
+        }
+        self.drop_tmp(t)?;
+        self.drop_tmp(s)?;
+        Ok(Some(V::P(acc, true)))
+    }
+
+    /// One character the general way: made (or shared), given to the
+    /// function, its text appended, both released; the text and where the
+    /// next character starts.
+    #[allow(clippy::too_many_arguments)]
+    fn chars_join_call(&mut self, at: FunctionValue<'ctx>, add: FunctionValue<'ctx>, f: FunctionValue<'ctx>, capv: &[BasicMetadataValueEnum<'ctx>], tp: PointerValue<'ctx>, i: IntValue<'ctx>, next: PointerValue<'ctx>, acc: PointerValue<'ctx>, sep: PointerValue<'ctx>, first: IntValue<'ctx>) -> R<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        let c = self.b.build_call(at, &[tp.into(), i.into(), next.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        let mut fargs: Vec<BasicMetadataValueEnum<'ctx>> = vec![c.into()];
+        fargs.extend(capv.iter().copied());
+        let r = self.b.build_call(f, &fargs, "").s()?.try_as_basic_value().basic().ok_or("internal compiler error: a character's function gave nothing")?.into_pointer_value();
+        let a1 = self.b.build_call(add, &[acc.into(), r.into(), sep.into(), first.into()], "").s()?.try_as_basic_value().basic().unwrap().into_pointer_value();
+        self.release(r)?;
+        self.release(c)?;
+        let i1 = self.b.build_load(self.ctx.i64_type(), next, "").s()?.into_int_value();
+        Ok((a1, i1))
     }
 }
 

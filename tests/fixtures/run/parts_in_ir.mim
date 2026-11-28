@@ -1,0 +1,48 @@
+module main
+
+// a tuple holding a list taken apart at once (`let (bytes, op) = f(…)`):
+// the call gives its parts, no tuple made; a part not named is released.
+// A record's list grown by a short list kept in registers, by an empty
+// list (`⍬`, `[]`), and by `x ⥊ [n]`, in a loop over the record.
+
+type St = { i: i64, run: i64, out: [i64], ops: [i64] }
+
+fn chunk(p: i64, n: i64) -> ([i64], i64) {
+    if p % 3 == 0 { ([255, p, n], 5) } else if p % 3 == 1 { ([p], 2) } else { (⍳ n ¨ (i => i + p), 7) }
+}
+
+fn measure(p: i64) -> i64 {
+    let (b, op) = chunk(p, 4)
+    ≢ b * 100 + op + +/ b
+}
+
+fn only_op(p: i64) -> i64 {
+    let (_, op) = chunk(p, 3)
+    op
+}
+
+fn run_byte(run: i64) -> [i64] { [192 | run - 1] }
+
+fn step(s: St) -> St {
+    let flush = if s.run > 0 { run_byte(s.run) } else { ⍬ }
+    if s.i % 4 == 3 {
+        { s with i: s.i + 1, run: s.run + 1, out: concat(s.out, s.i ⥊ [2]) }
+    } else if s.i % 4 == 2 {
+        let (bytes, op) = chunk(s.i, 2)
+        { s with i: s.i + 1, run: 0, out: concat(s.out, concat(flush, bytes)), ops: put(s.ops, op, s.ops[op] + 1) }
+    } else {
+        let tail = if s.i % 2 == 0 { [s.i, s.i * 10] } else { [] }
+        { s with i: s.i + 1, out: concat(s.out, tail), ops: put(s.ops, 0, s.ops[0] + 1) }
+    }
+}
+
+fn main() {
+    print(⍳ 6 ¨ (p => measure(p)))
+    print(⍳ 6 ¨ (p => only_op(p)))
+    let end = St { i: 0, run: 0, out: ⍬, ops: 0 ⥊ [8] } ▷ evolve(12, s => step(s))
+    print(end.out)
+    print(end.ops)
+    let halves = 0.5 ⥊ [3]
+    print(halves)
+    print(+/ halves)
+}

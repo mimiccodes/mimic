@@ -177,7 +177,7 @@ pub struct Token {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
-    Lexer { src, pos: 0, line: 1, col: 1, out: Vec::new() }.run()
+    Lexer { src, pos: 0, line: 1, col: 1, out: Vec::new(), delims: Vec::new() }.run()
 }
 
 struct Lexer<'a> {
@@ -186,6 +186,9 @@ struct Lexer<'a> {
     line: u32,
     col: u32,
     out: Vec<Token>,
+    /// The brackets open here, innermost last: true for a list written out
+    /// (`[1 -1]`), false for an index, parentheses and braces
+    delims: Vec<bool>,
 }
 
 fn keyword(w: &str) -> Option<Tok> {
@@ -295,12 +298,38 @@ impl<'a> Lexer<'a> {
         let next = self.peek();
         let t = match c {
             '\n' => Tok::Newline,
-            '(' => Tok::LParen,
-            ')' => Tok::RParen,
-            '{' => Tok::LBrace,
-            '}' => Tok::RBrace,
-            '[' => Tok::LBracket,
-            ']' => Tok::RBracket,
+            '(' => {
+                self.delims.push(false);
+                Tok::LParen
+            }
+            '{' => {
+                self.delims.push(false);
+                Tok::LBrace
+            }
+            // a `[` right after a name, `)`, `]` or `}` indexes; any other
+            // starts a list written out
+            '[' => {
+                let index = self.out.last().is_some_and(|t| t.span.end == start.start && matches!(t.tok, Tok::Ident(_) | Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::Str(_)));
+                self.delims.push(!index);
+                Tok::LBracket
+            }
+            ')' | ']' | '}' => {
+                self.delims.pop();
+                match c {
+                    ')' => Tok::RParen,
+                    ']' => Tok::RBracket,
+                    _ => Tok::RBrace,
+                }
+            }
+            // in a list written out, `-` after a space (or `[` or `,`) and
+            // before a digit is a negative number: `[256 -1 255]` has three
+            // elements, as it reads (`a - 1` and `a-1` still subtract)
+            '-' if self.delims.last() == Some(&true)
+                && next.is_some_and(|d| d.is_ascii_digit())
+                && (self.src[..start.start].ends_with(char::is_whitespace) || self.out.last().is_some_and(|t| t.span.end == start.start && matches!(t.tok, Tok::LBracket | Tok::Comma))) =>
+            {
+                return self.number(start, true);
+            }
             ',' => Tok::Comma,
             ';' => Tok::Semi,
             ':' if next == Some(':') => {
@@ -389,7 +418,30 @@ impl<'a> Lexer<'a> {
             '←' => Tok::Bind,
             '↩' => Tok::Reassign,
             '§' => Tok::Module,
+            // `⍬`, the empty list (`⍬[f64]`: of f64); the parser reads it
+            '⍬' => Tok::Ident("⍬".into()),
             'ƒ' => Tok::Fn,
+            // every keyword has a glyph (glyphs::SYNTAX_GLYPHS)
+            '⇑' => Tok::Pub,
+            '⇄' => Tok::Mut,
+            '⍰' => Tok::If,
+            '⋄' => Tok::Else,
+            '⏎' => Tok::Return,
+            '⇐' => Tok::Use,
+            '≔' => Tok::As,
+            '⌁' => Tok::Extern,
+            '☡' => Tok::Unsafe,
+            '✓' => Tok::Trusted,
+            '⊡' => Tok::Type,
+            '⊨' => Tok::Match,
+            '⊕' => Tok::With,
+            '●' => Tok::True,
+            '○' => Tok::False,
+            // words the parser reads in their place: a test block, a property
+            // test's inputs (`⊢ "…" ∀ x: i64 { … }`), a C header
+            '⊢' => Tok::Ident("test".into()),
+            '∀' => Tok::Ident("for".into()),
+            '⎘' => Tok::Ident("include".into()),
             '⌈' | '⌊' => {
                 if self.peek() == Some('/') {
                     self.bump();
@@ -397,6 +449,47 @@ impl<'a> Lexer<'a> {
                 } else {
                     Tok::Prim(if c == '⌈' { Prim::Max } else { Prim::Min })
                 }
+            }
+            // `a`: a character's code, a number (97): text code compares and
+            // computes with it without making a one-letter string
+            '`' => {
+                let c = match self.bump() {
+                    None | Some('\n') | Some('`') => return Err(Diag::new(&C::BAD_NUMBER, "a character literal holds one character: `a`, `\\n`", start)),
+                    Some('\\') => match self.bump() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('0') => '\0',
+                        Some(e @ ('\\' | '`' | '\'' | '"')) => e,
+                        Some('x') => {
+                            let h: String = (0..2).filter_map(|_| self.bump()).collect();
+                            match u8::from_str_radix(&h, 16) {
+                                Ok(v) if h.len() == 2 => v as char,
+                                _ => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\x` takes two hex digits, as in `\\x1b`", start)),
+                            }
+                        }
+                        Some('u') if self.peek() == Some('{') => {
+                            self.bump();
+                            let mut h = String::new();
+                            while let Some(d) = self.bump() {
+                                if d == '}' {
+                                    break;
+                                }
+                                h.push(d);
+                            }
+                            match u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                                Some(c) => c,
+                                None => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "`\\u{…}` takes a code point in hex, as in `\\u{e9}`", start)),
+                            }
+                        }
+                        _ => return Err(Diag::new(&C::UNKNOWN_ESCAPE, "escapes in a character literal: \\n \\t \\r \\0 \\\\ \\` \\x1b \\u{e9}", start)),
+                    },
+                    Some(c) => c,
+                };
+                if self.bump() != Some('`') {
+                    return Err(Diag::new(&C::BAD_NUMBER, "a character literal holds one character and ends with `: `a`", start));
+                }
+                Tok::Int(c as i64)
             }
             '"' => self.string(start)?,
             // 'raw text': no interpolation, no escapes (JSON, regexes, Windows paths)
@@ -664,6 +757,41 @@ mod tests {
 
     fn toks(s: &str) -> Vec<Tok> {
         lex(s).unwrap().into_iter().map(|t| t.tok).collect()
+    }
+
+    #[test]
+    fn character_literals() {
+        assert_eq!(toks("`a`"), vec![Tok::Int(97), Tok::Eof]);
+        assert_eq!(toks("`\\n` `\\`` `\\x1b` `é` `\\u{1F600}`"), vec![Tok::Int(10), Tok::Int(96), Tok::Int(27), Tok::Int(233), Tok::Int(0x1F600), Tok::Eof]);
+        for bad in ["``", "`ab`", "`a", "`\\q`"] {
+            assert!(lex(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn negatives_in_lists() {
+        // a list written out: `-` after a space and before a digit is a sign
+        assert_eq!(toks("[256 -1 255]"), toks("[256 ¯1 255]"));
+        assert_eq!(toks("[-1 -2.5e-3]"), toks("[¯1 ¯2.5e-3]"));
+        assert_eq!(toks("[1, -2]"), toks("[1, ¯2]"));
+        // everywhere else it subtracts: an index, spaced both sides, no
+        // space, inside parentheses in a list, outside lists
+        for src in ["xs[n -1]", "[a - 1]", "[a-1]", "[(a -1)]", "f(a -1)", "a -1", "m[i][j -1]"] {
+            assert!(toks(src).contains(&Tok::Minus), "{src}");
+        }
+    }
+
+    #[test]
+    fn every_keyword_has_a_glyph() {
+        // each keyword's glyph and digraph lex to the keyword itself
+        let keywords = ["module", "fn", "pub", "mut", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "with", "true", "false", "and", "or", "not", "div", "arms", "test", "for", "include"];
+        for w in keywords {
+            let g = crate::glyphs::SYNTAX_GLYPHS.iter().find(|g| g.word == w).unwrap_or_else(|| panic!("`{w}` has no glyph"));
+            assert_eq!(toks(g.glyph), toks(w), "{} for {w}", g.glyph);
+            if let Some(d) = g.digraph {
+                assert_eq!(toks(d), toks(w), "{d} for {w}");
+            }
+        }
     }
 
     #[test]
