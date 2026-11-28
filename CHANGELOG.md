@@ -14,6 +14,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Changed
 
+- **A shared list of numbers written by index is copied in one pass**: `put` or `xs[i] = v` on a list held elsewhere copied it element by element; it is one copy of the bytes now (`huffman`, whose decoding table of 512K numbers is written from a loop's tuple state: 0.18 s → 0.12 s on an M3 Pro).
 - **A list a loop only reads and writes element by element is checked once, at the loop's start**: a `let mut` list of numbers that a `for` or `while` body uses only as `xs[i]`, `xs[i] = v` and `≢ xs` is made held once there (copied if shared, as its first write would have) and its kind and length checked; each element write in the loop is then a bounds check and a store, with no atomic read of its count. `levenshtein` written with loops 14% faster.
 
 ## 0.4.3 — 2026-11-28
