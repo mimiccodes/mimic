@@ -4340,7 +4340,12 @@ static void set_flat(mim_val **slot, int64_t k, mim_val *v) {
     }
     int newdt = xs->dtype;
     if (IS_FLOAT(v->dtype) && !IS_FLOAT(xs->dtype)) newdt = MIM_F64;
-    if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1 || newdt != xs->dtype) {
+    if (newdt == xs->dtype && __atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
+        /* shared, same kind of number: one copy of the bytes */
+        mim_val *c = copy_whole(xs);
+        mim_release(xs);
+        *slot = xs = c;
+    } else if (newdt != xs->dtype) {
         mim_val *c = alloc_like(newdt, xs);
         for (int64_t j = 0; j < xs->len; j++) {
             if (IS_FLOAT(newdt)) setf(c, j, getf(xs, j));
