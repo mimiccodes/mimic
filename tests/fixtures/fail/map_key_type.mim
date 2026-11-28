@@ -1,0 +1,10 @@
+// expect-error: E0401 a key of `ages`: expected str, found i64
+module main
+
+// a map's keys are of one type: `[str: i64]` takes text keys
+
+fn main() {
+    let mut ages: [str: i64] = ["ada": 36]
+    ages[7] = 40
+    print(ages)
+}

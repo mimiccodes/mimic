@@ -34,6 +34,25 @@ pub fn tuple_elems(id: u32) -> Vec<Ty> {
     TUPLES.lock().unwrap()[id as usize].clone()
 }
 
+/// The map type of keys `k` and values `v`.
+pub fn map_ty(k: Ty, v: Ty) -> Ty {
+    Ty::Map(tuple_id(&[k, v]))
+}
+
+/// A list of `t` (a list of anything for a type not known yet).
+fn list_of(t: Ty) -> Ty {
+    match t {
+        Ty::Never | Ty::Dyn => Ty::Arr(El::Dyn, 0),
+        t => Ty::Arr(t.el(), 0),
+    }
+}
+
+/// A map type's key and value types.
+pub fn map_kv(id: u32) -> (Ty, Ty) {
+    let t = tuple_elems(id);
+    (t[0], t[1])
+}
+
 /// The row types of lists of lists (`[[i64]]`: rows `[i64]`), interned as
 /// tuples are, so `El::Rows` stays a small copyable id.
 static ROWS: Mutex<Vec<Ty>> = Mutex::new(Vec::new());
@@ -299,6 +318,9 @@ pub enum Ty {
     Obj(u32),
     /// A tuple (interned element types, see [`tuple_elems`]).
     Tup(u32),
+    /// A map with its key and value types (`[str: i64]`; the two interned
+    /// as a tuple, see [`map_kv`]). Held as a pointer, as `Dyn` is.
+    Map(u32),
     /// Unknown statically: a boxed runtime value.
     Dyn,
     /// 32-bit float and integer scalars (for now boxed: their arithmetic is
@@ -367,6 +389,10 @@ impl Ty {
                 let j: Vec<Ty> = x.iter().zip(&y).map(|(p, q)| p.join(*q)).collect();
                 obj_shaped(obj_tid(a), &j, &lens)
             }
+            (Ty::Map(a), Ty::Map(b)) => {
+                let ((k1, v1), (k2, v2)) = (map_kv(a), map_kv(b));
+                map_ty(k1.join(k2), v1.join(v2))
+            }
             (Ty::Tup(a), Ty::Tup(b)) => {
                 let (x, y) = (tuple_elems(a), tuple_elems(b));
                 if x.len() != y.len() {
@@ -412,6 +438,10 @@ impl std::fmt::Display for Ty {
             Ty::Tup(id) => {
                 let e: Vec<String> = tuple_elems(*id).iter().map(|t| t.to_string()).collect();
                 write!(f, "({})", e.join(", "))
+            }
+            Ty::Map(id) => {
+                let (k, v) = map_kv(*id);
+                write!(f, "[{k}: {v}]")
             }
             Ty::Dyn => write!(f, "dynamic"),
         }
@@ -552,7 +582,8 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             _ => return None,
         },
         Type::Ptr(..) | Type::App(..) | Type::Tuple(..) => return None,
-        Type::Fn(..) | Type::Map(..) => Ty::Dyn, // function values and maps are handles
+        Type::Fn(..) => Ty::Dyn, // function values are handles
+        Type::Map(..) => return None, // maps: typed by ann_env
     })
 }
 
@@ -593,7 +624,7 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
             let el = ann_env(p, module, inner, env)?.el();
             Some(Ty::Arr(el, fixed_len(el, *n as usize)))
         }
-        Type::Map(..) => Some(Ty::Dyn),
+        Type::Map(k, v, _) => Some(map_ty(ann_env(p, module, k, env).unwrap_or(Ty::Dyn), ann_env(p, module, v, env).unwrap_or(Ty::Dyn))),
         Type::Tuple(ts, _) => {
             let elems: Vec<Ty> = ts.iter().map(|t| ann_env(p, module, t, env).unwrap_or(Ty::Dyn)).collect();
             Some(Ty::Tup(tuple_id(&elems)))
@@ -639,6 +670,21 @@ pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: 
 pub fn coerce_to(p: &Program, a: Ty, got: Ty) -> Result<Ty, String> {
     match a {
         Ty::Dyn => Ok(Ty::Dyn),
+        // a map: its keys and values each as the annotation says
+        Ty::Map(ia) => match got {
+            Ty::Never | Ty::Dyn => Ok(a),
+            Ty::Map(ig) => {
+                let ((ka, va), (kg, vg)) = (map_kv(ia), map_kv(ig));
+                let k = if kg == Ty::Never { Ok(ka) } else { coerce_to(p, ka, kg) };
+                let v = if vg == Ty::Never { Ok(va) } else { coerce_to(p, va, vg) };
+                match (k, v) {
+                    (Ok(_), Ok(_)) => Ok(a),
+                    (Err(m), _) => Err(format!("{}: its keys: {m}", show(p, a))),
+                    (_, Err(m)) => Err(format!("{}: its values: {m}", show(p, a))),
+                }
+            }
+            g => Err(format!("expected {}, found {}", show(p, a), show(p, g))),
+        },
         Ty::Obj(_) | Ty::Tup(_) | Ty::Arr(El::Obj(_) | El::Str | El::Tup(_) | El::Rows(_), _) => match got {
             Ty::Never | Ty::Dyn => Ok(a),
             Ty::Arr(El::Dyn, _) if matches!(a, Ty::Arr(_, _)) => Ok(a),
@@ -666,6 +712,10 @@ pub fn show(p: &Program, t: Ty) -> String {
         Ty::Arr(El::Rows(r), _) => format!("[{}]", show(p, rows_of(r))),
         Ty::Arr(El::Str, _) => "[str]".into(),
         Ty::Tup(id) => format!("({})", tuple_elems(id).iter().map(|t| show(p, *t)).collect::<Vec<_>>().join(", ")),
+        Ty::Map(id) => {
+            let (k, v) = map_kv(id);
+            format!("[{}: {}]", show(p, k), show(p, v))
+        }
         other => other.to_string(),
     }
 }
@@ -932,6 +982,13 @@ struct Walk<'a, 'p> {
 }
 
 impl Walk<'_, '_> {
+    /// Whether a value of type `got` can stand where `want` is expected, or
+    /// the other way round (an i64 key or value next to f64 ones is promoted
+    /// as in a list); unknown types always can.
+    fn compatible_with(&self, want: Ty, got: Ty) -> bool {
+        matches!(want, Ty::Dyn | Ty::Never) || matches!(got, Ty::Dyn | Ty::Never) || coerce_to(self.inf.p, want, got).is_ok() || coerce_to(self.inf.p, got, want).is_ok()
+    }
+
     fn err(&mut self, d: Diag) {
         if self.inf.report {
             self.inf.errors.push(FileDiag { file: self.file, diag: d });
@@ -982,14 +1039,27 @@ impl Walk<'_, '_> {
                     self.out.lets.insert(key, t);
                     self.scopes.last_mut().unwrap().insert(name.clone(), (key, t));
                 }
-                Stmt::Assign { name, index, value, .. } => {
+                Stmt::Assign { name, index, value, span } => {
                     let v = self.expr(value);
-                    if let Some(i) = index {
-                        self.expr(i);
-                    }
+                    let it = index.as_ref().map(|i| self.expr(i));
                     if let Some((key, cur)) = self.lookup(name) {
                         let nt = match index {
                             None => cur.join(v),
+                            // `m[k] = v` on a typed map: the key and the value
+                            // of its types (or one they become)
+                            Some(i) if let Ty::Map(id) = cur => {
+                                let (mk, mv) = map_kv(id);
+                                let kt = it.unwrap_or(Ty::Dyn);
+                                if !self.compatible_with(mk, kt) {
+                                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("a key of `{name}`: expected {}, found {}", show(self.inf.p, mk), show(self.inf.p, kt)), i.span));
+                                    cur
+                                } else if !self.compatible_with(mv, v) {
+                                    self.err(Diag::new(&C::TYPE_MISMATCH, format!("a value of `{name}`: expected {}, found {}", show(self.inf.p, mv), show(self.inf.p, v)), *span));
+                                    cur
+                                } else {
+                                    map_ty(mk.join(kt), mv.join(v))
+                                }
+                            }
                             // element store: an f64 into an int array promotes it
                             Some(_) => match (cur, v) {
                                 (Ty::Arr(e, _), s) if Ty::of_el(e) == s || s == Ty::Never => cur,
@@ -1189,6 +1259,15 @@ impl Walk<'_, '_> {
                             return *a;
                         }
                         ("sort", [a @ Ty::Arr(El::I64 | El::F64, _)]) => return *a,
+                        // a typed map: its keys, its values, itself back
+                        ("keys", [Ty::Map(id)]) => return list_of(map_kv(*id).0),
+                        ("values", [Ty::Map(id)]) => return list_of(map_kv(*id).1),
+                        ("has", [Ty::Map(_), _]) => return Ty::Bool,
+                        ("put", [Ty::Map(id), k, v]) => {
+                            let (mk, mv) = map_kv(*id);
+                            return map_ty(mk.join(*k), mv.join(*v));
+                        }
+                        ("remove", [m @ Ty::Map(_), _]) => return *m,
                         _ => {}
                     }
                 }
@@ -1349,12 +1428,14 @@ impl Walk<'_, '_> {
             },
             ExprKind::OpRef(_) => Ty::Dyn,
             ExprKind::Arms { .. } => Ty::Dyn, // lifted after parsing
+            // `["ada": 1815]`: a map of the keys' and values' types
             ExprKind::Map(kvs) => {
+                let (mut kt, mut vt) = (Ty::Never, Ty::Never);
                 for (k, v) in kvs {
-                    self.expr(k);
-                    self.expr(v);
+                    kt = kt.join(self.expr(k));
+                    vt = vt.join(self.expr(v));
                 }
-                Ty::Dyn
+                if kvs.is_empty() { Ty::Dyn } else { map_ty(kt, vt) }
             }
             ExprKind::Call { callee, args } => {
                 let mut argt: Vec<Ty> = args.iter().map(|a| self.expr(a)).collect();
@@ -1498,12 +1579,22 @@ impl Walk<'_, '_> {
             }
             ExprKind::Index { base, index } => {
                 let b = self.expr(base);
-                self.expr(index);
+                let kt = self.expr(index);
                 if matches!(index.kind, ExprKind::Tuple(_)) {
                     return if b == Ty::Never { Ty::Never } else { Ty::Dyn }; // m[i, j]
                 }
+                if let Ty::Map(id) = b {
+                    let (mk, _) = map_kv(id);
+                    if !self.compatible_with(mk, kt) {
+                        self.err(Diag::new(&C::TYPE_MISMATCH, format!("a key of this map: expected {}, found {}", show(self.inf.p, mk), show(self.inf.p, kt)), index.span));
+                    }
+                }
                 match b {
                     Ty::Arr(el, _) => Ty::of_el(el),
+                    Ty::Map(id) => match map_kv(id).1 {
+                        Ty::Never => Ty::Dyn,
+                        v => v,
+                    },
                     Ty::Never => Ty::Never,
                     _ => Ty::Dyn,
                 }

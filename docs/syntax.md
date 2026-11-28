@@ -461,7 +461,7 @@ The annotation types are:
 * sized lists: `[f64 × 3]`, `[i64 × 9]` (also `[i64 * 9]`): a list with its length in its type. A list of up to 16 numbers lives in registers; a written-out list of another length, or a constant index outside it, is refused when checking (E0217); a list of unknown length is checked where it is bound, and integers become floats in `[f64 × n]`;
 * records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
 * tuples: `(i64, str)`;
-* maps: `[str: i64]`;
+* maps: `[str: i64]`, a map's key and value types, also worked out from a literal (`["ada": 1815]` is `[str: i64]`). A lookup has the value's type, `keys`/`values` give typed lists, and a key or value of another type is refused when checking (E0401); an integer value next to floats is promoted, as in a list;
 * types from other modules by path: `http::Response`, `time::DateTime`;
 * function types: `fn(i64) -> i64`.
 
