@@ -1,0 +1,55 @@
+module main
+
+type P = { x: i64, y: i64 }
+type S = { name: str, pos: P, hits: [i64] }
+
+fn col(i: i64) -> i64 { i % 3 }
+
+pub fn main() {
+    let mut g = ⍳ 3 ¨ (_ => [0 0 0])
+    g[1][2] = 5
+    g[0][col(4)] = 7
+    g[2][0] += 9
+    for r in 0 ‥ 3 {
+        g[r][r] += 1
+    }
+    print(g)
+    let before = g
+    g[0][0] = 100
+    print(before[0][0])
+    print(g[0][0])
+    let mut s = S { name: "a", pos: P { x: 1, y: 2 }, hits: [0 0 0 0] }
+    s.pos.x = 10
+    s.pos.y -= 5
+    s.name = "b"
+    s.hits[2] = 3
+    for i in 0 ‥ 8 {
+        s.hits[i % 4] += i
+    }
+    print(s.pos.x)
+    print(s.pos.y)
+    print(s.name)
+    print(s.hits)
+    let mut cube = ⍳ 2 ¨ (_ => ⍳ 2 ¨ (_ => [0.0 0.0]))
+    cube[1][0][1] = 2.5
+    cube[1][0][1] ×= 2.0
+    print(cube)
+    // a record held twice: the copy keeps its values
+    let kept = s
+    s.hits[0] = 99
+    s.pos.x += 1
+    print(kept.hits[0])
+    print(kept.pos.x)
+    print(s.hits[0])
+    print(s.pos.x)
+    let mut log = []
+    for k in 0 ‥ 3 {
+        log = push(log, s)
+        s.hits[1] += 100
+        s.pos.y = k
+    }
+    print(log ¨ (r => r.hits[1]))
+    print(log ¨ (r => r.pos.y))
+    print(s.hits[1])
+    print(s.pos.y)
+}

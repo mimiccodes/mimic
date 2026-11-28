@@ -4275,6 +4275,8 @@ mim_val *mim_pat_rest(mim_val *v, int64_t start) { return slice(v, start, v->len
 void mim_set_cell(mim_val **slot, int64_t off, int64_t cell, mim_val *v); /* mimic_own.c */
 
 /* Copy-on-write element store: mutates in place when uniquely owned. */
+static void set_flat(mim_val **slot, int64_t k, mim_val *v);
+
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     if (*slot && (*slot)->dtype == MIM_MAP) {
         map_set(slot, i, v);
@@ -4306,6 +4308,12 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
         }
         k = check_index(xs, i);
     }
+    set_flat(slot, k, v);
+}
+
+/* xs[k] = v for a flat position already checked (copy-on-write) */
+static void set_flat(mim_val **slot, int64_t k, mim_val *v) {
+    mim_val *xs = *slot;
     need(v, "indexed assignment");
     if (xs->dtype == MIM_BOXED) { /* a list of handles: replace one (copy-on-write) */
         if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
@@ -4343,6 +4351,64 @@ void mim_set_index(mim_val **slot, mim_val *i, mim_val *v) {
     }
     if (IS_FLOAT(xs->dtype)) setf(xs, k, getf(v, 0));
     else seti(xs, k, geti(v, 0));
+}
+
+/* xs[i0][i1]…[i(n-1)] = v on a variable's value (`g[r][c] = v`): the value
+ * owned in, the value out. Each level is copied only where it is shared and
+ * written in place otherwise: a list of lists has its element taken out,
+ * changed and put back (so the row is not shared with the list while it
+ * changes); an array of n or more dimensions has the element (or the cell)
+ * written at its offset. */
+mim_val *mim_set_in_v(mim_val *xs, int64_t n, mim_val **idx, mim_val *v) {
+    MEMCHECK(xs, "write");
+    if (n == 1) {
+        mim_val *slot = xs;
+        mim_set_index(&slot, idx[0], v);
+        return slot;
+    }
+    need(xs, "indexed assignment");
+    if (xs->dtype == MIM_BOXED && xs->rank == 1) {
+        int64_t k = check_index(xs, idx[0]);
+        if (__atomic_load_n(&xs->rc, __ATOMIC_ACQUIRE) > 1) {
+            mim_val *c = copy_whole(xs);
+            mim_release(xs);
+            xs = c;
+        }
+        mim_val **h = (mim_val **)xs->data;
+        /* the list's reference to the element passes to the inner write and
+         * comes back as its result */
+        h[k] = mim_set_in_v(h[k], n - 1, idx + 1, v);
+        return xs;
+    }
+    if (xs->rank >= n && !IS_HANDLES(xs) && xs->dtype != MIM_MAP) {
+        int64_t off = 0;
+        for (int64_t j = 0; j < n; j++) {
+            mim_val *i = idx[j];
+            need(i, "index");
+            if (i->rank != 0 || IS_FLOAT(i->dtype) || IS_HANDLES(i)) mim_panic("index must be an integer scalar");
+            int64_t d = dim_of(xs, (int)j), r = geti(i, 0);
+            if (r < 0 || r >= d) {
+                char buf[160];
+                snprintf(buf, sizeof buf, "index %lld out of bounds for dimension %lld of length %lld", (long long)r, (long long)j, (long long)d);
+                mim_panic(buf);
+            }
+            off = off * d + r;
+        }
+        int64_t cell = 1;
+        for (int j = (int)n; j < xs->rank; j++) cell *= dim_of(xs, j);
+        mim_val *slot = xs;
+        if (n == xs->rank) set_flat(&slot, off, v);
+        else mim_set_cell(&slot, off * cell, cell, v);
+        return slot;
+    }
+    /* anything else (a map, a list of mixed values): the element read, written
+     * and stored back, copy-on-write */
+    mim_val *inner = mim_index(xs, idx[0]);
+    inner = mim_set_in_v(inner, n - 1, idx + 1, v);
+    mim_val *slot = xs;
+    mim_set_index(&slot, idx[0], inner);
+    mim_release(inner);
+    return slot;
 }
 
 int64_t mim_par_grain(void) { return g_grain; }

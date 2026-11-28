@@ -61,6 +61,35 @@ Home
 [false false]
 ```
 
+On a `let mut` variable, the same change can be written as an assignment to the place itself, `+=` and the like included. The list or record on the way is changed in place when nothing else holds it, and copied once otherwise:
+
+```mimic run
+module main
+
+type Todo = { text: str, done: bool }
+type List = { title: str, todos: [Todo], counts: [i64] }
+
+fn main() {
+    let mut l = List { title: "home", todos: [Todo { text: "milk", done: false }, Todo { text: "bike", done: false }], counts: [0 0] }
+    let before = l
+    l.todos[1].done = true
+    l.counts[1] += 5
+    let mut grid = [[0 0] [0 0]]
+    grid[1][0] = 7
+    print(l.todos ¨ (t => t.done))
+    print(l.counts)
+    print(before.counts)                  // still the old values
+    print(grid)
+}
+```
+
+```output
+[false true]
+[0 5]
+[0 0]
+[[0 0] [7 0]]
+```
+
 A field always holds what its type says. A field declared `[f64]` stores floats even when you write a list of integers, so reading it is fast and never needs a check. The same goes for a variant's payload (see below):
 
 ```mimic run
