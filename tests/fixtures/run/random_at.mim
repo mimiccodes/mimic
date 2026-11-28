@@ -1,0 +1,16 @@
+module main
+
+pub fn main() {
+    print(random::at(42, 0))
+    print(random::at(42, 1))
+    print(random::at(7, 0))
+    let xs = ⍳ 100000 ¨ (i => random::at(42, i))
+    let ys = ⍳ 100000 ¨ (i => random::at(42, i))
+    print(xs == ys ▷ all)
+    print(xs[5] == random::at(42, 5))
+    print(xs ¨ (x => x >= 0) ▷ all)
+    let fs = ⍳ 100000 ¨ (i => random::at_float(1, i))
+    print(fs ¨ (f => f >= 0.0 and f < 1.0) ▷ all)
+    print(math::round(+/ fs ÷ 100000.0 × 100.0))
+    print((⍳ 1000 ¨ (i => random::at(3, i) % 6) ▷ unique ▷ sort))
+}

@@ -562,6 +562,19 @@ pub module random {
 
     // The elements in a random order.
     pub fn shuffle(xs) { permutation(≢ xs) ¨ (i => xs[i]) }
+
+    // The `i`-th number from `seed`, the same on every core and every run,
+    // with no state: `⍳ n ¨ (i => random::at(seed, i))` makes `n` numbers
+    // in parallel. A number in `[0, 2^63)` (SplitMix64 on a counter).
+    pub fn at(seed: i64, i: i64) -> i64 {
+        let z0 = seed × ¯3335678366873096957 + (i + 1) × ¯7046029254386353131
+        let z1 = (z0 ^ (z0 >>> 30)) × ¯4658895280553007687
+        let z2 = (z1 ^ (z1 >>> 27)) × ¯7723592293110705685
+        (z2 ^ (z2 >>> 31)) >>> 1
+    }
+
+    // `at` as a float in `[0, 1)`.
+    pub fn at_float(seed: i64, i: i64) -> f64 { (at(seed, i) >>> 10) × 0.00000000000000011102230246251565 }
 }
 
 // JSON text ↔ values: `json::encode(user)`, `json::decode[User](text)`,
