@@ -1,0 +1,9 @@
+// expect-error: E0217 `p` is a list of 3, but this list has 2
+module main
+
+// a sized list's type says how many elements it holds
+
+fn main() {
+    let p: [f64 × 3] = [1 2]
+    print(p)
+}

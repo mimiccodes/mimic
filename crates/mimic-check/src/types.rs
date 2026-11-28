@@ -224,7 +224,7 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
                 }
             }
         }
-        Type::Array(inner, _) => {
+        Type::Array(inner, _) | Type::Sized(inner, _, _) => {
             if let Ty::Arr(el, _) = got
                 && el != El::Dyn
             {
@@ -569,6 +569,10 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             _ => return None,
         },
         Type::Array(inner, _) if matches!(&**inner, Type::Named(n, _) if n == "u8") => Ty::Arr(El::U8, 0),
+        Type::Sized(inner, n, s) => match ann_ty(&Type::Array(inner.clone(), *s))? {
+            Ty::Arr(el, _) => Ty::Arr(el, fixed_len(el, *n as usize)),
+            t => t,
+        },
         Type::Array(inner, _) => match ann_ty(inner)? {
             Ty::I64 => Ty::Arr(El::I64, 0),
             Ty::F64 => Ty::Arr(El::F64, 0),
@@ -616,6 +620,10 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
             _ => None,
         },
         Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el(), 0)),
+        Type::Sized(inner, n, _) => {
+            let el = ann_env(p, module, inner, env)?.el();
+            Some(Ty::Arr(el, fixed_len(el, *n as usize)))
+        }
         Type::Map(k, v, _) => Some(map_ty(ann_env(p, module, k, env).unwrap_or(Ty::Dyn), ann_env(p, module, v, env).unwrap_or(Ty::Dyn))),
         Type::Tuple(ts, _) => {
             let elems: Vec<Ty> = ts.iter().map(|t| ann_env(p, module, t, env).unwrap_or(Ty::Dyn)).collect();
@@ -634,6 +642,24 @@ pub fn coerce_in(p: &Program, module: ModId, ann: Option<&Type>, got: Ty) -> Res
 /// [`coerce_in`] with type parameters bound by `env`.
 pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: &[(String, Ty)]) -> Result<Ty, String> {
     let Some(t) = ann else { return Ok(got) };
+    // a sized list declared (`[f64 × 3]`): a list of another known length is
+    // refused; any other list becomes one of that length (its length
+    // checked, and integers made floats, where it is bound). (Only where it
+    // is written: a length the compiler worked out, as a record's built
+    // from a literal, stays a fact about that value, not a rule.)
+    if let Type::Sized(..) = t
+        && let Some(a @ Ty::Arr(el, n)) = ann_env(p, module, t, env)
+        && n > 0
+    {
+        if let Ty::Arr(_, m) = got
+            && m > 0
+            && m != n
+        {
+            return Err(format!("expected a list of {n}, found a list of {m}"));
+        }
+        coerce_ty(Ty::Arr(el, 0), got)?;
+        return Ok(a);
+    }
     match ann_env(p, module, t, env) {
         Some(a) => coerce_to(p, a, got),
         None => coerce(ann, got),

@@ -1,0 +1,10 @@
+// expect-panic: `let q`: expected a list of 3 integers
+module main
+
+// a list whose length is known only when running is checked where it is bound
+
+fn main() {
+    let n = parse_int("4") else { 0 }
+    let q: [i64 × 3] = ⍳ n
+    print(q)
+}

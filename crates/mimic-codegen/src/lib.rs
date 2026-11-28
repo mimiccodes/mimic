@@ -3052,7 +3052,7 @@ impl<'ctx> Cg<'ctx, '_> {
                 "isize" | "usize" => self.size.into(),
                 _ => self.ctx.i64_type().into(),
             },
-            Type::Ptr(..) | Type::Array(..) | Type::Fn(..) | Type::App(..) | Type::Map(..) | Type::Tuple(..) => self.ptr.into(),
+            Type::Ptr(..) | Type::Array(..) | Type::Sized(..) | Type::Fn(..) | Type::App(..) | Type::Map(..) | Type::Tuple(..) => self.ptr.into(),
         }
     }
 

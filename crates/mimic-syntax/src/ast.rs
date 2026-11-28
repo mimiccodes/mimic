@@ -154,6 +154,8 @@ pub enum Type {
     /// `Option[i64]`, `Pair[str, f64]`: a generic type with arguments
     App(String, Vec<Type>, Span),
     Array(Box<Type>, Span),
+    /// `[i64 × 9]`: a list with its length in its type
+    Sized(Box<Type>, u64, Span),
     /// `[str: i64]`: a map from keys to values
     Map(Box<Type>, Box<Type>, Span),
     /// `(i64, str)`: a tuple
@@ -166,7 +168,7 @@ pub enum Type {
 impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Type::Named(_, s) | Type::App(_, _, s) | Type::Array(_, s) | Type::Map(_, _, s) | Type::Tuple(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
+            Type::Named(_, s) | Type::App(_, _, s) | Type::Array(_, s) | Type::Sized(_, _, s) | Type::Map(_, _, s) | Type::Tuple(_, s) | Type::Ptr(_, s) | Type::Fn(_, _, s) => *s,
         }
     }
 }
@@ -180,6 +182,7 @@ impl std::fmt::Display for Type {
                 write!(f, "{n}[{}]", a.join(", "))
             }
             Type::Array(t, _) => write!(f, "[{t}]"),
+            Type::Sized(t, n, _) => write!(f, "[{t} × {n}]"),
             Type::Map(k, v, _) => write!(f, "[{k}: {v}]"),
             Type::Tuple(ts, _) => {
                 let a: Vec<String> = ts.iter().map(|t| t.to_string()).collect();

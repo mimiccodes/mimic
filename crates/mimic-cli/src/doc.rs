@@ -86,6 +86,7 @@ pub fn show_type(t: &Type) -> String {
         Type::Named(n, _) => n.clone(),
         Type::App(n, args, _) => format!("{n}[{}]", args.iter().map(show_type).collect::<Vec<_>>().join(", ")),
         Type::Array(t, _) => format!("[{}]", show_type(t)),
+        Type::Sized(t, n, _) => format!("[{} × {n}]", show_type(t)),
         Type::Map(k, v, _) => format!("[{}: {}]", show_type(k), show_type(v)),
         Type::Tuple(ts, _) => format!("({})", ts.iter().map(show_type).collect::<Vec<_>>().join(", ")),
         Type::Ptr(t, _) => format!("ptr[{}]", show_type(t)),

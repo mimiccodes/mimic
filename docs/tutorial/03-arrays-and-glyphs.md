@@ -211,6 +211,25 @@ fn main() {
 
 Here `step` works on six numbers in registers and the four steps allocate nothing. As soon as such a value meets code that takes a list of any length (printing it, storing it in a longer list, passing it to C), it becomes an ordinary list once, at that point.
 
+To make the length part of the contract, write it in the type: `[f64 × 3]` is three floats, `[i64 × 9]` nine integers. A written-out list of another length, or an index the compiler can see is outside (`p[3]`), is an error when checking. A list whose length is known only when the program runs is checked where it is passed or bound:
+
+```mimic run
+module main
+
+fn norm2(p: [f64 × 3]) -> f64 { +/ (p × p) }
+
+fn main() {
+    let p: [f64 × 3] = [1 2 2]     // integers become floats
+    print(p)
+    print(norm2(p))
+}
+```
+
+```output
+[1.0 2.0 2.0]
+9.0
+```
+
 Arrays with more than one dimension are covered in the [arrays in depth](15-multidimensional-arrays.md) chapter.
 
 Next: [loops and loop words](04-no-loops.md).

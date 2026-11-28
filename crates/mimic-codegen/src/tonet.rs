@@ -211,7 +211,7 @@ fn mentions_32(t: &Type) -> bool {
     match t {
         Type::Named(n, _) => n == "f32" || n == "i32",
         Type::App(_, ts, _) | Type::Tuple(ts, _) => ts.iter().any(mentions_32),
-        Type::Array(t, _) | Type::Ptr(t, _) => mentions_32(t),
+        Type::Array(t, _) | Type::Sized(t, _, _) | Type::Ptr(t, _) => mentions_32(t),
         Type::Map(a, b, _) => mentions_32(a) || mentions_32(b),
         Type::Fn(ps, r, _) => ps.iter().any(mentions_32) || r.as_deref().is_some_and(mentions_32),
     }

@@ -157,6 +157,7 @@ Valid programs written at random and run five ways (release and debug, with the 
 
 | Gap | Workaround now | Version |
 |---|---|---|
+| A sized list longer than 16 (`[i64 × 81]`) is checked when written out and for constant indices (E0217), but a list of unknown length bound to one is not checked when running, and it lives on the heap | lists of up to 16 (`[i64 × 9]` rows) | 0.4.4 (the length carried for any size, the list on the stack) |
 | Speed given back for two correctness fixes (0.4.3): list headers and record fields read as memory that never changes (`invariant.load`) let LLVM move a read past the release of its value, or past an in-place change, and give a wrong answer; the reads are plain now, told apart from the numbers a loop writes (TBAA). `lcs` is up to 20% slower (Windows and Linux runners), `regex` 5–6% on one core (Windows and macOS) (accepted by the owner) | none | 0.4.4 (a value marked unchanging only over the code where it is alive and not changed: `llvm.invariant.start`/`end`, or scoped alias information, per loop) |
 
 ## Found by the held-out set
