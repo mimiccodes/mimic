@@ -6,6 +6,7 @@ Every user-visible change, by version. The plan for the versions ahead is in [do
 
 ### Added
 
+- **Assignment into nested lists and records**: `g[r][c] = v`, `s.pos.x = v`, `l.todos[1].done = true`, and `+=` and the like on them, on a `let mut` variable. Each level is changed in place when nothing else holds it and copied once otherwise: 4 million writes into a 2000×2000 grid take 0.7 s (a row copied each time before: 63 s), and a record's list field changed in a loop is no longer copied per step.
 - **`random::at(seed, i)`** and **`random::at_float(seed, i)`**: the `i`-th random number from a seed, with no state, so a program makes its input on every core (`⍳ n ¨ (i => random::at(seed, i))`: 50 million numbers in 0.16 s on a 12-core Mac) and gets the same numbers on every run.
 - **Loops: `for`, `while` and `break`** (`∀`, `⟳`, `↯`; digraphs `\F`, `\O`, `\B`): `for i in a ‥ b { … }` over a range, `for x in xs { … }` over a list's elements, `while cond { … }`, and `break` to leave the innermost loop (E0216 outside one, or inside a lambda). A loop changes its function's `let mut` variables, one step after another; parallel work stays with `¨` and the array primitives. `settle`, `evolve` and recursion are unchanged. Tutorial chapter 4 and the syntax reference describe them; the editors' grammars know them.
 - **Compound assignment** `+=`, `-=`, `×=` and `÷=` (ASCII `*=` `/=`; glyphs `+↩` `-↩` `×↩` `÷↩`) on a `let mut` name or a list element: `total += i`, `counts[k] += 1`. An index other than a name or a number is computed once.

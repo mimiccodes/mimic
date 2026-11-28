@@ -87,6 +87,7 @@ void mim_byte_fail(int64_t v, int64_t i) __attribute__((noreturn));
 void mim_sort_i64_small(int64_t *a, int64_t n);
 void mim_sort_f64_small(double *a, int64_t n);
 void mim_set_index(mim_val **slot, mim_val *i, mim_val *v);
+mim_val *mim_set_in_v(mim_val *xs, int64_t n, mim_val **idx, mim_val *v);
 int64_t mim_truthy(mim_val *v);
 void mim_check_type(mim_val *v, int32_t ty, const char *what);
 
