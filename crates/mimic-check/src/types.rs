@@ -611,6 +611,24 @@ pub fn coerce_in(p: &Program, module: ModId, ann: Option<&Type>, got: Ty) -> Res
 /// [`coerce_in`] with type parameters bound by `env`.
 pub fn coerce_env(p: &Program, module: ModId, ann: Option<&Type>, got: Ty, env: &[(String, Ty)]) -> Result<Ty, String> {
     let Some(t) = ann else { return Ok(got) };
+    // a sized list declared (`[f64 × 3]`): a list of another known length is
+    // refused; any other list becomes one of that length (its length
+    // checked, and integers made floats, where it is bound). (Only where it
+    // is written: a length the compiler worked out, as a record's built
+    // from a literal, stays a fact about that value, not a rule.)
+    if let Type::Sized(..) = t
+        && let Some(a @ Ty::Arr(el, n)) = ann_env(p, module, t, env)
+        && n > 0
+    {
+        if let Ty::Arr(_, m) = got
+            && m > 0
+            && m != n
+        {
+            return Err(format!("expected a list of {n}, found a list of {m}"));
+        }
+        coerce_ty(Ty::Arr(el, 0), got)?;
+        return Ok(a);
+    }
     match ann_env(p, module, t, env) {
         Some(a) => coerce_to(p, a, got),
         None => coerce(ann, got),
@@ -689,20 +707,6 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
     );
     if !ok {
         return Err(format!("expected {a}, found {got}"));
-    }
-    // a sized list (`[f64 × 3]`): a list of another known length is refused;
-    // any other list becomes one of that length (its length checked, and
-    // integers made floats, where it is bound)
-    if let Ty::Arr(_, n) = a
-        && n > 0
-    {
-        if let Ty::Arr(_, m) = got
-            && m > 0
-            && m != n
-        {
-            return Err(format!("expected a list of {n}, found a list of {m}"));
-        }
-        return Ok(a);
     }
     Ok(match (a, got) {
         // lists of f32 or i32 (and from them): converted to the annotation
