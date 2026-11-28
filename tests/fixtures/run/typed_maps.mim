@@ -1,0 +1,33 @@
+module main
+
+// maps with their key and value types: `[str: i64]`, declared or inferred
+// from a literal; lookups typed, keys and values checked
+
+type Inv = { name: str, stock: [str: i64] }
+
+fn total(m: [str: i64]) -> i64 { +/ values(m) }
+
+pub fn main() {
+    let born = ["ada": 1815, "alan": 1912]
+    print(born["alan"] + 1)
+    print(get(born, "linus"))
+    print(has(born, "ada"))
+    print(keys(born))
+    let mut m = born
+    m["grace"] = 1906
+    m["ada"] += 1
+    print(≢ m)
+    print(≢ born)
+    print(total(m))
+    print(put(born, "linus", 1969) ▷ keys)
+    print(remove(born, "ada"))
+    let mut counts: [str: i64] = ["a": 0]
+    for w in ["a" "b" "a" "c" "a"] {
+        counts[w] = (get(counts, w) else { 0 }) + 1
+    }
+    print(counts)
+    let inv = Inv { name: "shop", stock: ["nut": 3, "bolt": 5] }
+    print(total(inv.stock))
+    let prices: [str: f64] = ["tea": 2, "cake": 3.5]
+    print(prices["tea"] × 2.0)
+}

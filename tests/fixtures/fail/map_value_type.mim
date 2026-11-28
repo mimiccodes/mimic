@@ -1,0 +1,7 @@
+// expect-error: E0401 `let stock`: [str: i64]: its values: expected i64, found str
+module main
+
+fn main() {
+    let stock: [str: i64] = ["nut": "three"]
+    print(stock)
+}
