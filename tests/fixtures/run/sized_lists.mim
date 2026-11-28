@@ -1,0 +1,31 @@
+module main
+
+// lists with their length in the type: `[f64 × 3]`, `[i64 × 9]`
+
+type Body = { mass: f64, pos: [f64 × 3] }
+
+fn norm2(p: [f64 × 3]) -> f64 { +/ (p × p) }
+
+fn row_sum(r: [i64 × 9]) -> i64 { +/ r }
+
+fn flip(m: [bool × 4]) -> [bool × 4] { m ¨ (b => not b) }
+
+pub fn main() {
+    let p: [f64 × 3] = [1 2 2]          // integers become floats
+    print(p)
+    print(norm2(p))
+    let mut r: [i64 × 9] = ⍳ 9
+    r[4] = 100
+    for i in 0 ‥ 9 {
+        r[i] += 1
+    }
+    print(r)
+    print(row_sum(r))
+    let b = Body { mass: 2.0, pos: [0 3 4] }
+    print(b.pos)
+    print(norm2(b.pos))
+    print(norm2(⍳ 3 ¨ (i => i × 2)))   // its length checked here
+    print(flip([true false false true]))
+    let k: [f64 × 9] = ⍳ 9 ¨ (i => 1.0 ÷ 9.0)
+    print(math::round(+/ k × 100.0))
+}

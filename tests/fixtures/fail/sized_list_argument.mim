@@ -1,0 +1,8 @@
+// expect-error: E0401 argument `p` of `sum3`: expected a list of 3, found a list of 4
+module main
+
+fn sum3(p: [i64 × 3]) -> i64 { +/ p }
+
+fn main() {
+    print(sum3([1 2 3 4]))
+}

@@ -457,6 +457,7 @@ The annotation types are:
 * numbers: `i64`, `f64`, `i32`, `f32`, `bool` (and C's `i8`, `i16`, `u8 … u64`, `isize`, `usize`, which are `i64` in Mimic code);
 * `str`;
 * arrays: `[i64]`, `[f64]`, `[bool]`, `[str]`, `[Point]`, and the compact `[f32]`, `[i32]`, `[u8]`;
+* sized lists: `[f64 × 3]`, `[i64 × 9]` (also `[i64 * 9]`): a list with its length in its type. A list of up to 16 numbers lives in registers; a written-out list of another length, or a constant index outside it, is refused when checking (E0217); a list of unknown length is checked where it is bound, and integers become floats in `[f64 × n]`;
 * records and unions by name, and generic ones with type arguments: `Option[i64]`, `Pair[str, f64]`, `[Tree[str]]`;
 * tuples: `(i64, str)`;
 * maps: `[str: i64]`;

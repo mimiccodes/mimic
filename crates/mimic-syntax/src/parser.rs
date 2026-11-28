@@ -781,6 +781,19 @@ impl Parser {
                 self.expect(&Tok::RBracket)?;
                 return Ok(Type::Map(Box::new(inner), Box::new(v), s));
             }
+            // `[i64 × 9]` (`[i64 * 9]`): the length in the type
+            if self.eat(&Tok::Star) {
+                let at = self.span();
+                let Tok::Int(n) = self.peek_tok().tok.clone() else {
+                    return Err(Diag::new(&C::BAD_SIZED_LIST, "a sized list's length is a whole number: `[i64 × 9]`", at));
+                };
+                if n < 1 {
+                    return Err(Diag::new(&C::BAD_SIZED_LIST, "a sized list holds at least one element", at));
+                }
+                self.next();
+                self.expect(&Tok::RBracket)?;
+                return Ok(Type::Sized(Box::new(inner), n as u64, s.to(self.prev_span())));
+            }
             self.expect(&Tok::RBracket)?;
             return Ok(Type::Array(Box::new(inner), s));
         }
@@ -1395,7 +1408,7 @@ impl Parser {
             Type::Named(n, _) | Type::App(n, _, _) => {
                 n.split("::").last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase())) || BUILTIN.contains(&n.as_str())
             }
-            Type::Array(..) | Type::Map(..) | Type::Tuple(..) => true,
+            Type::Array(..) | Type::Sized(..) | Type::Map(..) | Type::Tuple(..) => true,
             _ => false,
         };
         let attempt = (|| {

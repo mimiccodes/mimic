@@ -1,0 +1,10 @@
+// expect-error: E0217 index 3 is outside `p`, a list of 3 (indices 0 to 2)
+module main
+
+// a constant index outside a sized list is refused when checking
+
+fn z(p: [f64 × 3]) -> f64 { p[3] }
+
+fn main() {
+    print(z([1 2 3]))
+}

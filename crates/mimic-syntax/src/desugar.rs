@@ -852,7 +852,7 @@ fn prop_kind(t: &Type) -> Option<(&'static str, &'static str)> {
             "str" => Some(("prop_str(k)", "prop_shrink_str")),
             _ => None,
         },
-        Type::Array(el, _) => match &**el {
+        Type::Array(el, _) | Type::Sized(el, _, _) => match &**el {
             Type::Named(n, _) => match n.as_str() {
                 "i64" => Some(("prop_ints(k)", "prop_shrink_list_int")),
                 "f64" => Some(("prop_floats(k)", "prop_shrink_list_float")),

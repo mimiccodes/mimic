@@ -954,7 +954,7 @@ impl RefWalk<'_> {
                 }
                 args.iter().for_each(|a| self.ty(a));
             }
-            Type::Array(t, _) | Type::Ptr(t, _) => self.ty(t),
+            Type::Array(t, _) | Type::Sized(t, _, _) | Type::Ptr(t, _) => self.ty(t),
             Type::Map(k, v, _) => {
                 self.ty(k);
                 self.ty(v);

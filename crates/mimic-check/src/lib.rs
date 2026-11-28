@@ -841,6 +841,7 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
                     scopes: Vec::new(),
                     lambda_floor: 0,
                     loops: 0,
+                    sized: HashMap::new(),
                     unsafe_depth: 0,
                     type_params: d.type_params.clone(),
                     diags: &mut diags,
@@ -871,6 +872,7 @@ pub fn check(p: &Program, opts: &Options) -> Vec<FileDiag> {
             scopes: Vec::new(),
             lambda_floor: 0,
             loops: 0,
+            sized: HashMap::new(),
             unsafe_depth: 0,
             type_params: td.decl.params.clone(),
             diags: &mut diags,
@@ -903,7 +905,7 @@ fn check_ctype(t: &Type, is_ret: bool) -> Result<(), Diag> {
             }
             check_ctype(inner, false)
         }
-        Type::Array(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
+        Type::Array(_, s) | Type::Sized(_, _, s) => Err(Diag::new(&C::NOT_C_TYPE, "arrays cross the FFI boundary as `ptr[T]`", *s)),
         Type::App(n, _, s) => Err(Diag::new(&C::NOT_C_TYPE, format!("`{n}[…]` is not a C type; use one of {}", C_TYPES.join(", ")), *s)),
         Type::Map(_, _, s) => Err(Diag::new(&C::NOT_C_TYPE, "maps cannot cross the FFI boundary", *s)),
         Type::Tuple(_, s) => Err(Diag::new(&C::NOT_C_TYPE, "tuples cannot cross the FFI boundary; use a record (a C struct)", *s)),
@@ -922,7 +924,7 @@ pub fn type_code(t: &Type) -> Result<i32, Diag> {
             "str" | "cstr" => 5,
             other => return Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{other}`"), *s)),
         },
-        Type::Array(inner, s) => match &**inner {
+        Type::Array(inner, s) | Type::Sized(inner, _, s) => match &**inner {
             Type::Named(n, _) if n == "u8" => 10, // TY_BYTES
             Type::Named(n, _) if matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "u16" | "u32" | "u64" | "isize" | "usize" | "cptr") => 6,
             Type::Named(n, _) if matches!(n.as_str(), "f32" | "f64") => 7,
@@ -952,6 +954,9 @@ struct Checker<'a> {
     lambda_floor: usize,
     /// loops (`while`, `for`) around the statement, in this function
     loops: usize,
+    /// the function's names declared with a sized list type (`[f64 × 3]`)
+    /// and their lengths: a constant index outside one is refused (E0217)
+    sized: HashMap<String, u64>,
     unsafe_depth: usize,
     /// type parameters in scope (`fn first[T]`, `type Pair[A, B]`)
     type_params: Vec<String>,
@@ -1023,7 +1028,7 @@ impl Checker<'_> {
                     Err(Diag::new(&C::UNKNOWN_TYPE, format!("unknown type `{n}`"), *s).did_you_mean(n, *s, names.iter().map(String::as_str)))
                 }
             },
-            Type::Array(inner, _) => self.ann_result(inner),
+            Type::Array(inner, _) | Type::Sized(inner, _, _) => self.ann_result(inner),
             Type::Map(k, v, _) => self.ann_result(k).and_then(|_| self.ann_result(v)),
             Type::Tuple(ts, _) => ts.iter().try_for_each(|t| self.ann_result(t)),
             Type::Ptr(_, s) => Err(Diag::new(&C::PTR_OUTSIDE_EXTERN, "`ptr[T]` is only allowed in `extern` declarations", *s)),
@@ -1170,6 +1175,9 @@ impl Checker<'_> {
                     .note("literals, operators on literals, arrays of them, and unit variants"));
             }
             self.declare(&prm.name, false, prm.span);
+            if let Some(Type::Sized(_, n, _)) = &prm.ty {
+                self.sized.insert(prm.name.clone(), *n);
+            }
         }
         if let Some(t) = &d.ret {
             self.check_ann(t);
@@ -1190,6 +1198,17 @@ impl Checker<'_> {
                         && let Err(e) = self.ann_result(t) {
                             self.err(e);
                         }
+                    if let Some(Type::Sized(_, n, ts)) = ty {
+                        if let ExprKind::Array(xs) = &value.kind
+                            && xs.len() as u64 != *n
+                        {
+                            self.err(
+                                Diag::new(&C::BAD_SIZED_LIST, format!("`{name}` is a list of {n}, but this list has {}", xs.len()), value.span)
+                                    .label(*ts, format!("{n} elements")),
+                            );
+                        }
+                        self.sized.insert(name.clone(), *n);
+                    }
                     self.declare(name, *mutable, *span);
                 }
                 Stmt::Assign { name, index, value, span } => {
@@ -1425,6 +1444,25 @@ impl Checker<'_> {
             ExprKind::Index { base, index } => {
                 self.expr(base);
                 self.expr(index);
+                // a constant index outside a sized list
+                if let ExprKind::Path(p) = &base.kind
+                    && p.len() == 1
+                    && let Some(&n) = self.sized.get(&p[0])
+                {
+                    let k = match &index.kind {
+                        ExprKind::Int(k) => Some(*k),
+                        ExprKind::Unary { op: UnOp::Neg, expr } => match expr.kind {
+                            ExprKind::Int(k) => Some(-k),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(k) = k
+                        && (k < 0 || k as u64 >= n)
+                    {
+                        self.err(Diag::new(&C::BAD_SIZED_LIST, format!("index {k} is outside `{}`, a list of {n} (indices 0 to {})", p[0], n - 1), index.span));
+                    }
+                }
             }
             ExprKind::Unary { expr, .. } => self.expr(expr),
             ExprKind::Binary { lhs, rhs, .. } => {

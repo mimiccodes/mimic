@@ -205,7 +205,7 @@ pub fn unify(p: &Program, module: ModId, t: &Type, got: Ty, params: &[String], e
                 }
             }
         }
-        Type::Array(inner, _) => {
+        Type::Array(inner, _) | Type::Sized(inner, _, _) => {
             if let Ty::Arr(el, _) = got
                 && el != El::Dyn
             {
@@ -539,6 +539,10 @@ fn ann_ty(t: &Type) -> Option<Ty> {
             _ => return None,
         },
         Type::Array(inner, _) if matches!(&**inner, Type::Named(n, _) if n == "u8") => Ty::Arr(El::U8, 0),
+        Type::Sized(inner, n, s) => match ann_ty(&Type::Array(inner.clone(), *s))? {
+            Ty::Arr(el, _) => Ty::Arr(el, fixed_len(el, *n as usize)),
+            t => t,
+        },
         Type::Array(inner, _) => match ann_ty(inner)? {
             Ty::I64 => Ty::Arr(El::I64, 0),
             Ty::F64 => Ty::Arr(El::F64, 0),
@@ -585,6 +589,10 @@ pub fn ann_env(p: &Program, module: ModId, t: &Type, env: &[(String, Ty)]) -> Op
             _ => None,
         },
         Type::Array(inner, _) => Some(Ty::Arr(ann_env(p, module, inner, env)?.el(), 0)),
+        Type::Sized(inner, n, _) => {
+            let el = ann_env(p, module, inner, env)?.el();
+            Some(Ty::Arr(el, fixed_len(el, *n as usize)))
+        }
         Type::Map(..) => Some(Ty::Dyn),
         Type::Tuple(ts, _) => {
             let elems: Vec<Ty> = ts.iter().map(|t| ann_env(p, module, t, env).unwrap_or(Ty::Dyn)).collect();
@@ -681,6 +689,20 @@ fn coerce_ty(a: Ty, got: Ty) -> Result<Ty, String> {
     );
     if !ok {
         return Err(format!("expected {a}, found {got}"));
+    }
+    // a sized list (`[f64 × 3]`): a list of another known length is refused;
+    // any other list becomes one of that length (its length checked, and
+    // integers made floats, where it is bound)
+    if let Ty::Arr(_, n) = a
+        && n > 0
+    {
+        if let Ty::Arr(_, m) = got
+            && m > 0
+            && m != n
+        {
+            return Err(format!("expected a list of {n}, found a list of {m}"));
+        }
+        return Ok(a);
     }
     Ok(match (a, got) {
         // lists of f32 or i32 (and from them): converted to the annotation

@@ -190,6 +190,13 @@ even when the lambda sits in a loop), there is nothing to leave: use
 `return` to leave a function, or `settle` with a `done` test to stop a loop
 written as a step.";
 
+    BAD_SIZED_LIST = "E0217" "sized-list" "a sized list `[T × n]` with a wrong length"
+"A sized list's type says how many elements it holds: `[i64 × 9]` is nine
+integers, `[f64 × 3]` three floats. The length is a whole number of at least
+one. A list written out with another count, or an index the compiler can see
+is outside it (`p[3]` on `[f64 × 3]`), is refused when checking; a list whose
+length is known only when running is checked when it is bound.";
+
     // ---- E03xx names and modules ---------------------------------------------
     DUPLICATE_DEFINITION = "E0301" "duplicate-definition" "two items with the same name in one module"
 "Within one module, functions, types, variants, sub-modules and `use` imports
