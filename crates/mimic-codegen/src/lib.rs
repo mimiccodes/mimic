@@ -1222,7 +1222,7 @@ impl<'ctx> Cg<'ctx, '_> {
     /// LLVM types shared with the runtime: `mim_val` and `heap_state`.
     /// Marks a load or store with the kind of memory it touches (TBAA): a
     /// value's header ("header": count, kind, length) or a list's numbers
-    /// ("elem"), which never overlap. So a loop writing numbers keeps the
+    /// ("elem"), or a record's fields ("slot"), which never overlap. So a loop writing numbers keeps the
     /// headers it reads in registers, while a call (a release, a free) still
     /// stops any load from moving past it, which `invariant.load` did not.
     /// Accesses not marked may touch either.
@@ -1659,6 +1659,7 @@ impl<'ctx> Cg<'ctx, '_> {
         let data = unsafe { self.b.build_in_bounds_gep(self.val_ty(), bp, &[i32t.const_int(1, false)], "fields").s()? };
         let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, data, &[i64t.const_int(i as u64, false)], "").s()? };
         let fv = self.b.build_load(self.ptr, fp, "").s()?;
+        self.tbaa(fv, "slot")?;
         // a shaped list field is a heap vector like any other: same facts
         self.assume_live(fv, if fixed(ty).is_some() { Ty::Arr(El::F64, 0) } else { ty })?;
         Ok(fv.into_pointer_value())
@@ -4479,13 +4480,12 @@ impl<'ctx> Cg<'ctx, '_> {
     /// A raw number field, read.
     fn load_raw(&self, fp: PointerValue<'ctx>, el: El) -> R<V<'ctx>> {
         let i64t = self.ctx.i64_type();
+        let x = self.b.build_load(if el == El::F64 { BasicTypeEnum::from(self.ctx.f64_type()) } else { BasicTypeEnum::from(i64t) }, fp, "").s()?;
+        self.tbaa(x, "slot")?;
         Ok(match el {
-            El::F64 => V::F(self.b.build_load(self.ctx.f64_type(), fp, "").s()?.into_float_value()),
-            El::Bool => {
-                let x = self.b.build_load(i64t, fp, "").s()?.into_int_value();
-                V::B(self.b.build_int_compare(IntPredicate::NE, x, i64t.const_zero(), "").s()?)
-            }
-            _ => V::I(self.b.build_load(i64t, fp, "").s()?.into_int_value()),
+            El::F64 => V::F(x.into_float_value()),
+            El::Bool => V::B(self.b.build_int_compare(IntPredicate::NE, x.into_int_value(), i64t.const_zero(), "").s()?),
+            _ => V::I(x.into_int_value()),
         })
     }
 
@@ -5496,6 +5496,7 @@ impl<'ctx> Cg<'ctx, '_> {
                     }
                     let fp = unsafe { self.b.build_in_bounds_gep(self.ptr, fields, &[i64t.const_int(i as u64, false)], "").s()? };
                     let fv = self.b.build_load(self.ptr, fp, "field").s()?;
+                    self.tbaa(fv, "slot")?;
                     self.assume_live(fv, fty)?;
                     assume(fv.into_pointer_value(), self.live_bytes(fty))?;
                 }
