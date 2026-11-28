@@ -100,6 +100,7 @@ pub const SYNTAX_GLYPHS: &[SyntaxGlyph] = &[
     SyntaxGlyph { glyph: "ƒ", word: "fn", digraph: Some("\\f"), doc: "function declaration" },
     SyntaxGlyph { glyph: "←", word: "let … =", digraph: Some("\\<"), doc: "x ← 5  ≡  let x = 5" },
     SyntaxGlyph { glyph: "↩", word: "=", digraph: Some("\\="), doc: "x ↩ x + 1  (reassign a mut binding)" },
+    SyntaxGlyph { glyph: "+↩", word: "+=", digraph: Some("+\\="), doc: "x +↩ 1  (x ↩ x + 1; also -↩ ×↩ ÷↩, -= *= /=)" },
     SyntaxGlyph { glyph: "▷", word: "|>", digraph: Some("\\>"), doc: "left-to-right pipeline" },
     SyntaxGlyph { glyph: "→", word: "->", digraph: None, doc: "return type" },
     SyntaxGlyph { glyph: "⇒", word: "=>", digraph: None, doc: "lambda arrow" },

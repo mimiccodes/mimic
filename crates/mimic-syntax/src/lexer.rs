@@ -58,6 +58,12 @@ pub enum Tok {
     FatArrow,
     Assign,   // =
     Reassign, // ↩
+    /// `+=` `-=` `×=` `÷=` (`*=` and `/=` are the ASCII spellings, `+↩`
+    /// `-↩` `×↩` `÷↩` the glyph ones)
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
     Bind,     // ←
     Semi,
     Newline,
@@ -138,6 +144,10 @@ fn tok_text(t: &Tok) -> &'static str {
         Tok::FatArrow => "=>",
         Tok::Assign => "=",
         Tok::Reassign => "↩",
+        Tok::AddAssign => "+=",
+        Tok::SubAssign => "-=",
+        Tok::MulAssign => "×=",
+        Tok::DivAssign => "÷=",
         Tok::Bind => "←",
         Tok::Semi => ";",
         Tok::Pipe => "▷",
@@ -227,6 +237,20 @@ impl<'a> Lexer<'a> {
     fn peek2(&self) -> Option<char> {
         self.src[self.pos..].chars().nth(1)
     }
+    /// After `+` `-` `×` `÷`: `=` (not `==`), `↩` or its digraph `\=`,
+    /// making `+=` and the like.
+    fn assign_follows(&self) -> bool {
+        let rest = &self.src[self.pos..];
+        (rest.starts_with('=') && !rest.starts_with("==")) || rest.starts_with('↩') || rest.starts_with("\\=")
+    }
+
+    fn eat_assign(&mut self) {
+        if self.src[self.pos..].starts_with('\\') {
+            self.bump();
+        }
+        self.bump();
+    }
+
     fn bump(&mut self) -> Option<char> {
         let c = self.peek()?;
         self.pos += c.len_utf8();
@@ -341,15 +365,32 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::Prim(Prim::Sum)
             }
+            // `x += 1`: `+=` (and `-=` `×=` `÷=`), never before a second `=`
+            '+' if self.assign_follows() => {
+                self.eat_assign();
+                Tok::AddAssign
+            }
             '+' => Tok::Plus,
             '-' if next == Some('>') => {
                 self.bump();
                 Tok::Arrow
             }
+            '-' if self.assign_follows() => {
+                self.eat_assign();
+                Tok::SubAssign
+            }
             '-' => Tok::Minus,
             '*' | '×' if next == Some('/') => {
                 self.bump();
                 Tok::Prim(Prim::Product)
+            }
+            '*' | '×' if self.assign_follows() => {
+                self.eat_assign();
+                Tok::MulAssign
+            }
+            '/' | '÷' if self.assign_follows() => {
+                self.eat_assign();
+                Tok::DivAssign
             }
             '*' | '×' => Tok::Star,
             '/' | '÷' => Tok::Slash,
@@ -787,6 +828,11 @@ mod tests {
     #[test]
     fn every_keyword_has_a_glyph() {
         // each keyword's glyph and digraph lex to the keyword itself
+        for (g, w) in [("x +↩ 1", "x += 1"), ("x -↩ 1", "x -= 1"), ("x ×↩ 2", "x *= 2"), ("x ÷↩ 2", "x /= 2"), ("x +\\= 1", "x += 1")] {
+            assert_eq!(toks(g), toks(w), "{g}");
+        }
+        assert!(toks("a += b").contains(&Tok::AddAssign));
+        assert!(!toks("a + == b").contains(&Tok::AddAssign));
         let keywords = ["module", "fn", "pub", "mut", "if", "else", "return", "use", "as", "extern", "unsafe", "trusted", "type", "match", "with", "true", "false", "and", "or", "not", "div", "arms", "test", "for", "include", "while", "break"];
         for w in keywords {
             let g = crate::glyphs::SYNTAX_GLYPHS.iter().find(|g| g.word == w).unwrap_or_else(|| panic!("`{w}` has no glyph"));

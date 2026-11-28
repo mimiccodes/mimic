@@ -74,6 +74,7 @@ fn isqrt(n: i64) -> i64
 | `let mut x = e` | `mut x ← e` | mutable binding |
 | `x = e` | `x ↩ e` | reassign (`mut` only) |
 | `xs[i] = v` | `xs[i] ↩ v` | copy-on-write element store |
+| `x += e` | `x +↩ e` | `x = x + e`; also `-=` `×=` `÷=` (`-↩` `×↩` `÷↩`, ASCII `*=` `/=`), on a `mut` name or `xs[i]` (the index computed once) |
 | `return e` | | early return |
 | `for x in a ‥ b { … }`, `for x in xs { … }` | `∀ x in … { … }` | a loop over a range (`b` left out) or a list's elements |
 | `while cond { … }` | `⟳ cond { … }` | a loop while `cond` holds |
